@@ -51,7 +51,7 @@ contract V4Utils is Swapper, IERC721Receiver {
     struct Instructions {
         // what action to perform on provided Uniswap v4 position
         WhatToDo whatToDo;
-        // target token for swaps (if this is address(0) no swaps are executed)
+        // target token for swaps (address(0) for native ETH)
         address targetToken;
         // for removing liquidity slippage
         uint256 amountRemoveMin0;
@@ -757,7 +757,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         address recipientNFT,
         bytes memory returnData
     ) private returns (uint256 tokenId) {
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
+        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), deadline);
         
         // Get the newly minted token ID
         tokenId = positionManager.nextTokenId() - 1;
@@ -824,7 +824,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         );
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
         
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), params.deadline);
+        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), params.deadline);
 
         // Calculate consumption and return leftovers
         {
@@ -898,7 +898,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             total1 = params.amount1;
         }
 
-        if (total0 != 0) {
+        if (total0 != 0 && address(params.token0) != address(0)) {
             SafeERC20.forceApprove(params.token0, address(permit2), type(uint256).max);
             permit2.approve(
                 address(params.token0),
@@ -907,7 +907,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                 uint48(block.timestamp)
             );
         }
-        if (total1 != 0) {
+        if (total1 != 0 && address(params.token1) != address(0)) {
             SafeERC20.forceApprove(params.token1, address(permit2), type(uint256).max);
             permit2.approve(
                 address(params.token1),
@@ -990,8 +990,5 @@ contract V4Utils is Swapper, IERC721Receiver {
 
     // needed for WETH unwrapping
     receive() external payable {
-        if (msg.sender != address(weth)) {
-            revert NotWETH();
-        }
     }
 }
