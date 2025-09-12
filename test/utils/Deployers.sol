@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 
-import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
@@ -36,8 +36,8 @@ contract Deployers is Test {
     IPositionManager positionManager;
     IUniswapV4Router04 swapRouter;
 
-    function deployToken() internal returns (MockERC20 token) {
-        token = new MockERC20("Test Token", "TEST", 18);
+    function deployToken() internal returns (ERC20Mock token) {
+        token = new ERC20Mock();
         token.mint(address(this), 10_000_000 ether);
 
         token.approve(address(permit2), type(uint256).max);
@@ -48,8 +48,8 @@ contract Deployers is Test {
     }
 
     function deployCurrencyPair() internal returns (Currency currency0, Currency currency1) {
-        MockERC20 token0 = deployToken();
-        MockERC20 token1 = deployToken();
+        ERC20Mock token0 = deployToken();
+        ERC20Mock token1 = deployToken();
 
         if (token0 > token1) {
             (token0, token1) = (token1, token0);
