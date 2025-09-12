@@ -84,8 +84,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         address recipient;
         // recipient of newly minted nft (the incoming NFT will ALWAYS be returned to from)
         address recipientNFT;
-        // if tokenIn or tokenOut is WETH - unwrap
-        bool unwrap;
         // data sent with returned token to IERC721Receiver (optional)
         bytes returnData;
         // data sent with minted token to IERC721Receiver (optional)
@@ -101,7 +99,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 minAmountOut;
         address recipient; // recipient of tokenOut and leftover tokenIn (if any leftover)
         bytes swapData;
-        bool unwrap; // if tokenIn or tokenOut is WETH - unwrap
         bytes permitData; // if permit2 signatures are used - set this
     }
 
@@ -254,8 +251,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         ""
                     ),
                     IERC20(token0),
-                    IERC20(token1),
-                    instructions.unwrap
+                    IERC20(token1)
                 );
             } else if (instructions.targetToken == token1) {
                 (liquidity, amount0, amount1) = _swapAndIncrease(
@@ -277,8 +273,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         ""
                     ),
                     IERC20(token0),
-                    IERC20(token1),
-                    instructions.unwrap
+                    IERC20(token1)
                 );
             } else {
                 // no swap is done here
@@ -301,8 +296,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         ""
                     ),
                     IERC20(token0),
-                    IERC20(token1),
-                    instructions.unwrap
+                    IERC20(token1)
                 );
             }
             emit CompoundFees(tokenId, liquidity, amount0, amount1);
@@ -331,8 +325,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
                         ""
-                    ),
-                    instructions.unwrap
+                    )
                 );
             } else if (instructions.targetToken == token1) {
                 (newTokenId,,,) = _swapAndMint(
@@ -358,8 +351,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
                         ""
-                    ),
-                    instructions.unwrap
+                    )
                 );
             } else {
                 // no swap is done here
@@ -386,8 +378,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
                         ""
-                    ),
-                    instructions.unwrap
+                    )
                 );
             }
             emit ChangeRange(tokenId, newTokenId);
@@ -404,7 +395,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     )
                 );
                 if (amountInDelta < amount0) {
-                    _transferToken(instructions.recipient, IERC20(token0), amount0 - amountInDelta, instructions.unwrap);
+                    _transferToken(instructions.recipient, IERC20(token0), amount0 - amountInDelta);
                 }
                 targetAmount += amountOutDelta;
             } else {
@@ -421,7 +412,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     )
                 );
                 if (amountInDelta < amount1) {
-                    _transferToken(instructions.recipient, IERC20(token1), amount1 - amountInDelta, instructions.unwrap);
+                    _transferToken(instructions.recipient, IERC20(token1), amount1 - amountInDelta);
                 }
                 targetAmount += amountOutDelta;
             } else {
@@ -431,8 +422,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             // send complete target amount
             if (targetAmount != 0 && instructions.targetToken != address(0)) {
                 _transferToken(
-                    instructions.recipient, IERC20(instructions.targetToken), targetAmount, instructions.unwrap
-                );
+                    instructions.recipient, IERC20(instructions.targetToken), targetAmount);
             }
 
             emit WithdrawAndCollectAndSwap(tokenId, instructions.targetToken, targetAmount);
@@ -497,13 +487,13 @@ contract V4Utils is Swapper, IERC721Receiver {
 
         // send swapped amount of tokenOut
         if (amountOut != 0) {
-            _transferToken(params.recipient, params.tokenOut, amountOut, params.unwrap);
+            _transferToken(params.recipient, params.tokenOut, amountOut);
         }
 
         // if not all was swapped - return leftovers of tokenIn
         uint256 leftOver = params.amountIn - amountInDelta;
         if (leftOver != 0) {
-            _transferToken(params.recipient, params.tokenIn, leftOver, params.unwrap);
+            _transferToken(params.recipient, params.tokenIn, leftOver);
         }
     }
 
@@ -546,7 +536,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             );
         }
 
-        (tokenId, liquidity, amount0, amount1) = _swapAndMint(params, msg.value != 0);
+        (tokenId, liquidity, amount0, amount1) = _swapAndMint(params);
     }
 
     /// @notice Does 1 or 2 swaps from swapSourceToken to token0 and token1 and adds as much as possible liquidity to any existing position (no need to be position owner). Sends any leftover tokens to recipient.
@@ -590,7 +580,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             );
         }
 
-        (liquidity, amount0, amount1) = _swapAndIncrease(params, IERC20(token0), IERC20(token1), msg.value != 0);
+        (liquidity, amount0, amount1) = _swapAndIncrease(params, IERC20(token0), IERC20(token1));
     }
 
     // Internal helper functions
@@ -602,24 +592,18 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amount1,
         uint256 amountOther
     ) internal {
-        (uint256 needed0, uint256 needed1, uint256 neededOther) =
-            _prepareAdd(token0, token1, otherToken, amount0, amount1, amountOther);
-
-        if (needed0 != 0) {
-            SafeERC20.safeTransferFrom(token0, msg.sender, address(this), needed0);
+        if (amount0 != 0 && address(token0) != address(0)) {
+            SafeERC20.safeTransferFrom(token0, msg.sender, address(this), amount0);
         }
-        if (needed1 != 0) {
-            SafeERC20.safeTransferFrom(token1, msg.sender, address(this), needed1);
+        if (amount1 != 0 && address(token1) != address(0)) {
+            SafeERC20.safeTransferFrom(token1, msg.sender, address(this), amount1);
         }
-        if (neededOther != 0) {
-            SafeERC20.safeTransferFrom(otherToken, msg.sender, address(this), neededOther);
+        if (amountOther != 0 && address(otherToken) != address(0)) {
+            SafeERC20.safeTransferFrom(otherToken, msg.sender, address(this), amountOther);
         }
     }
 
     struct PrepareAddPermit2State {
-        uint256 needed0;
-        uint256 needed1;
-        uint256 neededOther;
         uint256 i;
         uint256 balanceBefore0;
         uint256 balanceBefore1;
@@ -638,106 +622,50 @@ contract V4Utils is Swapper, IERC721Receiver {
     ) internal {
         PrepareAddPermit2State memory state;
 
-        (state.needed0, state.needed1, state.neededOther) =
-            _prepareAdd(token0, token1, otherToken, amount0, amount1, amountOther);
-
         ISignatureTransfer.SignatureTransferDetails[] memory transferDetails =
             new ISignatureTransfer.SignatureTransferDetails[](permit.permitted.length);
 
         // permitted tokens must be in this same order
-        if (state.needed0 != 0) {
+        if (amount0 != 0 && address(token0) != address(0)) {
             state.balanceBefore0 = token0.balanceOf(address(this));
-            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), state.needed0);
+            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amount0);
         }
-        if (state.needed1 != 0) {
+        if (amount1 != 0 && address(token1) != address(0)) {
             state.balanceBefore1 = token1.balanceOf(address(this));
-            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), state.needed1);
+            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amount1);
         }
-        if (state.neededOther != 0) {
+        if (amountOther != 0 && address(otherToken) != address(0)) {
             state.balanceBeforeOther = otherToken.balanceOf(address(this));
-            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), state.neededOther);
+            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amountOther);
         }
 
         // execute batch transfer
         permit2.permitTransferFrom(permit, transferDetails, msg.sender, signature);
 
         // check if recieved correct amount of tokens
-        if (state.needed0 != 0) {
-            if (token0.balanceOf(address(this)) - state.balanceBefore0 != state.needed0) {
+        if (amount0 != 0 && address(token0) != address(0)) {
+            if (token0.balanceOf(address(this)) - state.balanceBefore0 != amount0) {
                 revert TransferError(); // reverts for fee-on-transfer tokens
             }
         }
-        if (state.needed1 != 0) {
-            if (token1.balanceOf(address(this)) - state.balanceBefore1 != state.needed1) {
+        if (amount1 != 0 && address(token1) != address(0)) {
+            if (token1.balanceOf(address(this)) - state.balanceBefore1 != amount1) {
                 revert TransferError(); // reverts for fee-on-transfer tokens
             }
         }
-        if (state.neededOther != 0) {
-            if (otherToken.balanceOf(address(this)) - state.balanceBeforeOther != state.neededOther) {
+        if (amountOther != 0 && address(otherToken) != address(0)) {
+            if (otherToken.balanceOf(address(this)) - state.balanceBeforeOther != amountOther) {
                 revert TransferError(); // reverts for fee-on-transfer tokens
             }
-        }
-    }
-
-    // checks if required amounts are provided and are exact - wraps any provided ETH as WETH
-    // if less or more provided reverts
-    function _prepareAdd(
-        IERC20 token0,
-        IERC20 token1,
-        IERC20 otherToken,
-        uint256 amount0,
-        uint256 amount1,
-        uint256 amountOther
-    ) internal returns (uint256 needed0, uint256 needed1, uint256 neededOther) {
-        uint256 amountAdded0;
-        uint256 amountAdded1;
-        uint256 amountAddedOther;
-
-        // wrap ether sent
-        if (msg.value != 0) {
-            weth.deposit{value: msg.value}();
-
-            if (address(weth) == address(token0)) {
-                amountAdded0 = msg.value;
-                if (amountAdded0 > amount0) {
-                    revert TooMuchEtherSent();
-                }
-            } else if (address(weth) == address(token1)) {
-                amountAdded1 = msg.value;
-                if (amountAdded1 > amount1) {
-                    revert TooMuchEtherSent();
-                }
-            } else if (address(weth) == address(otherToken)) {
-                amountAddedOther = msg.value;
-                if (amountAddedOther > amountOther) {
-                    revert TooMuchEtherSent();
-                }
-            } else {
-                revert NoEtherToken();
-            }
-        }
-
-        // calculate missing token amounts
-        if (amount0 > amountAdded0) {
-            needed0 = amount0 - amountAdded0;
-        }
-        if (amount1 > amountAdded1) {
-            needed1 = amount1 - amountAdded1;
-        }
-        if (
-            amountOther > amountAddedOther && address(otherToken) != address(0) && token0 != otherToken
-                && token1 != otherToken
-        ) {
-            neededOther = amountOther - amountAddedOther;
         }
     }
 
     // swap and mint logic
-    function _swapAndMint(SwapAndMintParams memory params, bool unwrap)
+    function _swapAndMint(SwapAndMintParams memory params)
         internal
         returns (uint256 tokenId, uint128 liquidity, uint256 added0, uint256 added1)
     {
-        (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(params, unwrap);
+        (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(params);
 
         // V4 uses different approach - need to create PoolKey and use modifyLiquidities
         PoolKey memory poolKey = PoolKey({
@@ -785,10 +713,10 @@ contract V4Utils is Swapper, IERC721Receiver {
 
             // Return leftover tokens
             if (finalBalance0 != 0) {
-                _transferToken(params.recipient, params.token0, finalBalance0, unwrap);
+                _transferToken(params.recipient, params.token0, finalBalance0);
             }
             if (finalBalance1 != 0) {
-                _transferToken(params.recipient, params.token1, finalBalance1, unwrap);
+                _transferToken(params.recipient, params.token1, finalBalance1);
             }
         }
     }
@@ -839,7 +767,7 @@ contract V4Utils is Swapper, IERC721Receiver {
     }
 
     // swap and increase logic
-    function _swapAndIncrease(SwapAndIncreaseLiquidityParams memory params, IERC20 token0, IERC20 token1, bool unwrap)
+    function _swapAndIncrease(SwapAndIncreaseLiquidityParams memory params, IERC20 token0, IERC20 token1)
         internal
         returns (uint128 liquidity, uint256 added0, uint256 added1)
     {
@@ -866,8 +794,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                 params.amountAddMin1,
                 "",
                 params.permitData
-            ),
-            unwrap
+            )
         );
 
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
@@ -911,16 +838,16 @@ contract V4Utils is Swapper, IERC721Receiver {
 
             // Return leftover tokens
             if (finalBalance0 != 0) {
-                _transferToken(params.recipient, token0, finalBalance0, unwrap);
+                _transferToken(params.recipient, token0, finalBalance0);
             }
             if (finalBalance1 != 0) {
-                _transferToken(params.recipient, token1, finalBalance1, unwrap);
+                _transferToken(params.recipient, token1, finalBalance1);
             }
         }
     }
 
     // swaps available tokens and prepares max amounts to be added to positionManager
-    function _swapAndPrepareAmounts(SwapAndMintParams memory params, bool unwrap)
+    function _swapAndPrepareAmounts(SwapAndMintParams memory params)
         internal
         returns (uint256 total0, uint256 total1)
     {
@@ -964,7 +891,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             uint256 leftOver = params.amountIn0 + params.amountIn1 - amountInDelta0 - amountInDelta1;
 
             if (leftOver != 0) {
-                _transferToken(params.recipient, params.swapSourceToken, leftOver, unwrap);
+                _transferToken(params.recipient, params.swapSourceToken, leftOver);
             }
         } else {
             total0 = params.amount0;
@@ -999,25 +926,23 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 total0,
         uint256 total1,
         uint256 added0,
-        uint256 added1,
-        bool unwrap
+        uint256 added1
     ) internal {
         uint256 left0 = total0 - added0;
         uint256 left1 = total1 - added1;
 
         // return leftovers
         if (left0 != 0) {
-            _transferToken(to, token0, left0, unwrap);
+            _transferToken(to, token0, left0);
         }
         if (left1 != 0) {
-            _transferToken(to, token1, left1, unwrap);
+            _transferToken(to, token1, left1);
         }
     }
 
-    // transfers token (or unwraps WETH and sends ETH)
-    function _transferToken(address to, IERC20 token, uint256 amount, bool unwrap) internal {
-        if (unwrap && address(weth) == address(token)) {
-            weth.withdraw(amount);
+    // transfers token or ETH
+    function _transferToken(address to, IERC20 token, uint256 amount) internal {
+        if (address(0) == address(token)) {
             (bool sent,) = to.call{value: amount}("");
             if (!sent) {
                 revert EtherSendFailed();

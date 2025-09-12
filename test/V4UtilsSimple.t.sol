@@ -164,7 +164,6 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             minAmountOut: 0, // No slippage protection for this test
             recipient: user1,
             swapData: "", // Empty swap data - would need real swap data in production
-            unwrap: false,
             permitData: ""
         });
         
