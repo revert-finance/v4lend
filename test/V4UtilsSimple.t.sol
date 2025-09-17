@@ -158,8 +158,8 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
         
         // Prepare swap parameters
         V4Utils.SwapParamsV4 memory swapParams = V4Utils.SwapParamsV4({
-            tokenIn: IERC20(address(token0)),
-            tokenOut: IERC20(address(token1)),
+            tokenIn: Currency.wrap(address(token0)),
+            tokenOut: Currency.wrap(address(token1)),
             amountIn: 1000 ether,
             minAmountOut: 0, // No slippage protection for this test
             recipient: user1,
@@ -234,8 +234,8 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
         
         // Prepare swap and mint parameters
         V4Utils.SwapAndMintParams memory params = V4Utils.SwapAndMintParams({
-            token0: IERC20(address(token0)),
-            token1: IERC20(address(token1)),
+            token0: Currency.wrap(address(token0)),
+            token1: Currency.wrap(address(token1)),
             fee: FEE,
             tickLower: TICK_LOWER,
             tickUpper: TICK_UPPER,
@@ -244,7 +244,7 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             recipient: user1,
             recipientNFT: user1,
             deadline: block.timestamp,
-            swapSourceToken: IERC20(address(0)), // No swap
+            swapSourceToken: Currency.wrap(address(0)), // No swap
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: "",
