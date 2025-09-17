@@ -3,9 +3,9 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import "@uniswap/v4-core/src/types/Currency.sol";
 import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
-import "./lib/IWETH9.sol";
 import "./lib/IUniversalRouter.sol";
 import "./Constants.sol";
 
@@ -13,8 +13,6 @@ import "./Constants.sol";
 abstract contract Swapper is Constants {
     event Swap(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
 
-    /// @notice Wrapped native token address
-    IWETH9 public immutable weth;
 
     /// @notice Uniswap v4 position manager
     IPositionManager public immutable positionManager;
@@ -30,12 +28,10 @@ abstract contract Swapper is Constants {
     /// @param _universalRouter Uniswap Universal Router
     /// @param _zeroxAllowanceHolder 0x Protocol AllowanceHolder contract
     constructor(
-        IWETH9 _weth,
         IPositionManager _positionManager,
         address _universalRouter,
         address _zeroxAllowanceHolder
     ) {
-        weth = _weth;
         positionManager = _positionManager;
         universalRouter = _universalRouter;
         zeroxAllowanceHolder = _zeroxAllowanceHolder;
@@ -50,8 +46,8 @@ abstract contract Swapper is Constants {
     }
 
     struct RouterSwapParams {
-        IERC20 tokenIn;
-        IERC20 tokenOut;
+        Currency tokenIn;
+        Currency tokenOut;
         uint256 amountIn;
         uint256 amountOutMin;
         bytes swapData;
@@ -64,7 +60,7 @@ abstract contract Swapper is Constants {
         internal
         returns (uint256 amountInDelta, uint256 amountOutDelta)
     {
-        if (params.amountIn != 0 && params.swapData.length != 0 && address(params.tokenOut) != address(0) && address(params.tokenIn) != address(0)) {
+        if (params.amountIn != 0 && params.swapData.length != 0) {
             uint256 balanceInBefore = params.tokenIn.balanceOf(address(this));
             uint256 balanceOutBefore = params.tokenOut.balanceOf(address(this));
 
@@ -81,16 +77,22 @@ abstract contract Swapper is Constants {
                 // Handle Universal Router case
                 (address target, bytes memory routerData) = abi.decode(params.swapData, (address, bytes));
                 UniversalRouterData memory data = abi.decode(routerData, (UniversalRouterData));
-                SafeERC20.safeTransfer(params.tokenIn, universalRouter, params.amountIn);
-                IUniversalRouter(universalRouter).execute(data.commands, data.inputs, data.deadline);
+                if (!params.tokenIn.isAddressZero()) {
+                    params.tokenIn.transfer(universalRouter, params.amountIn);
+                }
+                IUniversalRouter(universalRouter).execute{value: params.tokenIn.isAddressZero() ? params.amountIn : 0}(data.commands, data.inputs, data.deadline);
             } else {
-                // For 0x v2, use raw data
-                SafeERC20.safeIncreaseAllowance(params.tokenIn, zeroxAllowanceHolder, params.amountIn);
-                (bool success,) = zeroxAllowanceHolder.call(params.swapData);
+                IERC20 tokenIn = IERC20(Currency.unwrap(params.tokenIn));
+                if (!params.tokenIn.isAddressZero()) {
+                    SafeERC20.safeIncreaseAllowance(tokenIn, zeroxAllowanceHolder, params.amountIn);
+                }
+                (bool success,) = zeroxAllowanceHolder.call{value: params.tokenIn.isAddressZero() ? params.amountIn : 0}(params.swapData);
                 if (!success) {
                     revert SwapFailed();
                 }
-                SafeERC20.forceApprove(params.tokenIn, zeroxAllowanceHolder, 0);
+                if (!params.tokenIn.isAddressZero()) {
+                    SafeERC20.forceApprove(tokenIn, zeroxAllowanceHolder, 0);
+                }
             }
 
             amountInDelta = balanceInBefore - params.tokenIn.balanceOf(address(this));
@@ -100,7 +102,7 @@ abstract contract Swapper is Constants {
                 revert SlippageError();
             }
 
-            emit Swap(address(params.tokenIn), address(params.tokenOut), amountInDelta, amountOutDelta);
+            emit Swap(Currency.unwrap(params.tokenIn), Currency.unwrap(params.tokenOut), amountInDelta, amountOutDelta);
         }
     }
 }

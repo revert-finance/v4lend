@@ -13,7 +13,6 @@ import "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import "@uniswap/v4-core/src/types/Currency.sol";
 import "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -115,7 +114,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         address recipient; // recipient of leftover tokens
         address recipientNFT; // recipient of nft
         uint256 deadline;
-        // source token for swaps (maybe either address(0), token0, token1 or another token)
+        // source token for swaps (maybe either address(0) for native ETH, token0, token1 or another token)
         // if swapSourceToken is another token than token0 or token1 -> amountIn0 + amountIn1 of swapSourceToken are expected to be available
         IERC20 swapSourceToken;
         // if swapSourceToken needs to be swapped to token0 - set values
@@ -163,17 +162,15 @@ contract V4Utils is Swapper, IERC721Receiver {
 
     /// @notice Constructor
     /// @param _positionManager Uniswap v4 position manager
-    /// @param _weth Wrapped native token address
     /// @param _universalRouter Uniswap Universal Router (for v3/v2 swaps)
     /// @param _zeroxAllowanceHolder 0x Protocol AllowanceHolder contract
     /// @param _permit2 Permit2 contract
     constructor(
         IPositionManager _positionManager,
-        IWETH9 _weth,
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2
-    ) Swapper(_weth, _positionManager, _universalRouter, _zeroxAllowanceHolder) {
+    ) Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) {
         permit2 = _permit2;
     }
 
@@ -387,8 +384,8 @@ contract V4Utils is Swapper, IERC721Receiver {
             if (token0 != instructions.targetToken) {
                 (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                     Swapper.RouterSwapParams(
-                        IERC20(token0),
-                        IERC20(instructions.targetToken),
+                        Currency.wrap(address(token0)),
+                        Currency.wrap(address(instructions.targetToken)),
                         amount0,
                         instructions.amountOut0Min,
                         instructions.swapData0
@@ -404,8 +401,8 @@ contract V4Utils is Swapper, IERC721Receiver {
             if (token1 != instructions.targetToken) {
                 (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                     Swapper.RouterSwapParams(
-                        IERC20(token1),
-                        IERC20(instructions.targetToken),
+                        Currency.wrap(address(token1)),
+                        Currency.wrap(instructions.targetToken),
                         amount1,
                         instructions.amountOut1Min,
                         instructions.swapData1
@@ -481,7 +478,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amountInDelta;
         (amountInDelta, amountOut) = _routerSwap(
             Swapper.RouterSwapParams(
-                params.tokenIn, params.tokenOut, params.amountIn, params.minAmountOut, params.swapData
+                Currency.wrap(address(params.tokenIn)), Currency.wrap(address(params.tokenOut)), params.amountIn, params.minAmountOut, params.swapData
             )
         );
 
@@ -676,10 +673,25 @@ contract V4Utils is Swapper, IERC721Receiver {
             hooks: IHooks(address(0)) // No hooks for now
         });
 
+        
         // For V4, we need to use modifyLiquidities with encoded actions
-        // Include both MINT_POSITION and SETTLE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory params_array = new bytes[](2);
+        // Include MINT_POSITION, SETTLE_PAIR, and optionally SWEEP for native ETH
+        bytes memory actions;
+        bytes[] memory params_array;
+        
+        if ((address(params.token0) == address(0)) || (address(params.token1) == address(0))) {
+            // Include SWEEP action for native ETH
+            actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
+            params_array = new bytes[](3);
+            
+            // SWEEP parameters: sweep native ETH to this contract
+            params_array[2] = abi.encode(Currency.wrap(address(0)), address(this));
+        } else {
+            // Standard actions for ERC20 tokens only
+            actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+            params_array = new bytes[](2);
+        }
+        
         params_array[0] = abi.encode(
             poolKey, 
             params.tickLower, 
@@ -797,13 +809,27 @@ contract V4Utils is Swapper, IERC721Receiver {
             )
         );
 
-        // V4 uses different approach - need to use modifyLiquidities with encoded actions
-        // Include both INCREASE_LIQUIDITY and SETTLE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory params_array = new bytes[](2);
-        
         // Get position info to determine currencies for TAKE_PAIR
         (PoolKey memory poolKey, PositionInfo info) = positionManager.getPoolAndPositionInfo(params.tokenId);
+
+        // V4 uses different approach - need to use modifyLiquidities with encoded actions
+        // Include INCREASE_LIQUIDITY, SETTLE_PAIR, and optionally SWEEP for native ETH
+        bytes memory actions;
+        bytes[] memory params_array;
+        
+        // If native ETH is involved
+        if (Currency.unwrap(poolKey.currency0) == address(0) || Currency.unwrap(poolKey.currency1) == address(0)) {
+            // Include SWEEP action for native ETH
+            actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
+            params_array = new bytes[](3);
+            
+            // SWEEP parameters: sweep native ETH to this contract
+            params_array[2] = abi.encode(Currency.wrap(address(0)), address(this));
+        } else {
+            // Standard actions for ERC20 tokens only
+            actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
+            params_array = new bytes[](2);
+        }
 
         // Calculate liquidity from amounts
         // For simplicity, use the minimum of the two amounts as liquidity
@@ -857,7 +883,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             }
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                 Swapper.RouterSwapParams(
-                    params.token0, params.token1, params.amountIn1, params.amountOut1Min, params.swapData1
+                    Currency.wrap(address(params.token0)), Currency.wrap(address(params.token1)), params.amountIn1, params.amountOut1Min, params.swapData1
                 )
             );
             total0 = params.amount0 - amountInDelta;
@@ -868,20 +894,20 @@ contract V4Utils is Swapper, IERC721Receiver {
             }
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                 Swapper.RouterSwapParams(
-                    params.token1, params.token0, params.amountIn0, params.amountOut0Min, params.swapData0
+                    Currency.wrap(address(params.token1)), Currency.wrap(address(params.token0)), params.amountIn0, params.amountOut0Min, params.swapData0
                 )
             );
             total1 = params.amount1 - amountInDelta;
             total0 = params.amount0 + amountOutDelta;
-        } else if (address(params.swapSourceToken) != address(0)) {
+        } else {
             (uint256 amountInDelta0, uint256 amountOutDelta0) = _routerSwap(
                 Swapper.RouterSwapParams(
-                    params.swapSourceToken, params.token0, params.amountIn0, params.amountOut0Min, params.swapData0
+                    Currency.wrap(address(params.swapSourceToken)), Currency.wrap(address(params.token0)), params.amountIn0, params.amountOut0Min, params.swapData0
                 )
             );
             (uint256 amountInDelta1, uint256 amountOutDelta1) = _routerSwap(
                 Swapper.RouterSwapParams(
-                    params.swapSourceToken, params.token1, params.amountIn1, params.amountOut1Min, params.swapData1
+                    Currency.wrap(address(params.swapSourceToken)), Currency.wrap(address(params.token1)), params.amountIn1, params.amountOut1Min, params.swapData1
                 )
             );
             total0 = params.amount0 + amountOutDelta0;
@@ -893,11 +919,9 @@ contract V4Utils is Swapper, IERC721Receiver {
             if (leftOver != 0) {
                 _transferToken(params.recipient, params.swapSourceToken, leftOver);
             }
-        } else {
-            total0 = params.amount0;
-            total1 = params.amount1;
         }
 
+        // approve tokens for positionManager
         if (total0 != 0 && address(params.token0) != address(0)) {
             SafeERC20.forceApprove(params.token0, address(permit2), type(uint256).max);
             permit2.approve(
@@ -976,19 +1000,14 @@ contract V4Utils is Swapper, IERC721Receiver {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
         
-        uint256 balanceBefore0 = poolKey.currency0.balanceOf(address(this));
-        uint256 balanceBefore1 = poolKey.currency1.balanceOf(address(this));
-
         positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
         
-        uint256 balanceAfter0 = poolKey.currency0.balanceOf(address(this));
-        uint256 balanceAfter1 = poolKey.currency1.balanceOf(address(this));
-
-        amount0 = balanceAfter0 - balanceBefore0;
-        amount1 = balanceAfter1 - balanceBefore1;
+        // use all balance of tokens on contract
+        amount0 = poolKey.currency0.balanceOf(address(this));
+        amount1 = poolKey.currency1.balanceOf(address(this));
     }
 
-    // needed for WETH unwrapping
+    // recieves ETH from swaps, decreasing liquidity
     receive() external payable {
     }
 }

@@ -74,7 +74,6 @@ contract V4UtilsExecuteTest is V4UtilsTestBase {
         // Deploy V4Utils with the real deployed contracts
         v4Utils = new V4Utils(
             positionManager,
-            realWeth,
             address(swapRouter),
             address(0), // zeroxAllowanceHolder - not used in this test
             permit2

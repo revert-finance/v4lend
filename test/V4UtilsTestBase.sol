@@ -72,7 +72,6 @@ abstract contract V4UtilsTestBase is Test {
         // Deploy V4Utils
         v4Utils = new V4Utils(
             positionManager,
-            IWETH9(address(weth)),
             address(swapRouter),
             address(0), // zeroxAllowanceHolder - not used in this test
             permit2
