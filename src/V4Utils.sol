@@ -625,15 +625,15 @@ contract V4Utils is Swapper, IERC721Receiver {
 
         // permitted tokens must be in this same order
         if (amount0 != 0 && !token0.isAddressZero()) {
-            state.balanceBefore0 = IERC20(Currency.unwrap(token0)).balanceOf(address(this));
+            state.balanceBefore0 = token0.balanceOfSelf();
             transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amount0);
         }
         if (amount1 != 0 && !token1.isAddressZero()) {
-            state.balanceBefore1 = IERC20(Currency.unwrap(token1)).balanceOf(address(this));
+            state.balanceBefore1 = token1.balanceOfSelf();
             transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amount1);
         }
         if (amountOther != 0 && !otherToken.isAddressZero()) {
-            state.balanceBeforeOther = IERC20(Currency.unwrap(otherToken)).balanceOf(address(this));
+            state.balanceBeforeOther = otherToken.balanceOfSelf();
             transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amountOther);
         }
 
@@ -642,17 +642,17 @@ contract V4Utils is Swapper, IERC721Receiver {
 
         // check if recieved correct amount of tokens
         if (amount0 != 0 && !token0.isAddressZero()) {
-            if (IERC20(Currency.unwrap(token0)).balanceOf(address(this)) - state.balanceBefore0 != amount0) {
+            if (token0.balanceOfSelf() - state.balanceBefore0 != amount0) {
                 revert TransferError(); // reverts for fee-on-transfer tokens
             }
         }
         if (amount1 != 0 && !token1.isAddressZero()) {
-            if (IERC20(Currency.unwrap(token1)).balanceOf(address(this)) - state.balanceBefore1 != amount1) {
+            if (token1.balanceOfSelf() - state.balanceBefore1 != amount1) {
                 revert TransferError(); // reverts for fee-on-transfer tokens
             }
         }
         if (amountOther != 0 && !otherToken.isAddressZero()) {
-            if (IERC20(Currency.unwrap(otherToken)).balanceOf(address(this)) - state.balanceBeforeOther != amountOther) {
+            if (otherToken.balanceOfSelf() - state.balanceBeforeOther != amountOther) {
                 revert TransferError(); // reverts for fee-on-transfer tokens
             }
         }
@@ -716,8 +716,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         
         // Calculate consumption and return leftovers
         {
-            uint256 finalBalance0 = poolKey.currency0.balanceOf(address(this));
-            uint256 finalBalance1 = poolKey.currency1.balanceOf(address(this));
+            uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
+            uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
             
             added0 = total0 - finalBalance0;
             added1 = total1 - finalBalance1;
@@ -855,8 +855,8 @@ contract V4Utils is Swapper, IERC721Receiver {
 
         // Calculate consumption and return leftovers
         {
-            uint256 finalBalance0 = poolKey.currency0.balanceOf(address(this));
-            uint256 finalBalance1 = poolKey.currency1.balanceOf(address(this));
+            uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
+            uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
             
             added0 = total0 - finalBalance0;
             added1 = total1 - finalBalance1;
@@ -973,7 +973,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                 revert EtherSendFailed();
             }
         } else {
-            SafeERC20.safeTransfer(IERC20(Currency.unwrap(token)), to, amount);
+            token.transfer(to, amount);
         }
     }
 
@@ -1004,8 +1004,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
         
         // use all balance of tokens on contract
-        amount0 = poolKey.currency0.balanceOf(address(this));
-        amount1 = poolKey.currency1.balanceOf(address(this));
+        amount0 = poolKey.currency0.balanceOfSelf();
+        amount1 = poolKey.currency1.balanceOfSelf();
     }
 
     // recieves ETH from swaps, decreasing liquidity

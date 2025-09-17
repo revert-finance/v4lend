@@ -61,8 +61,8 @@ abstract contract Swapper is Constants {
         returns (uint256 amountInDelta, uint256 amountOutDelta)
     {
         if (params.amountIn != 0 && params.swapData.length != 0) {
-            uint256 balanceInBefore = params.tokenIn.balanceOf(address(this));
-            uint256 balanceOutBefore = params.tokenOut.balanceOf(address(this));
+            uint256 balanceInBefore = params.tokenIn.balanceOfSelf();
+            uint256 balanceOutBefore = params.tokenOut.balanceOfSelf();
 
             // Check if this is Universal Router data by looking at first 32 bytes
             bool isUniversalRouter;
@@ -95,8 +95,8 @@ abstract contract Swapper is Constants {
                 }
             }
 
-            amountInDelta = balanceInBefore - params.tokenIn.balanceOf(address(this));
-            amountOutDelta = params.tokenOut.balanceOf(address(this)) - balanceOutBefore;
+            amountInDelta = balanceInBefore - params.tokenIn.balanceOfSelf();
+            amountOutDelta = params.tokenOut.balanceOfSelf() - balanceOutBefore;
 
             if (amountOutDelta < params.amountOutMin) {
                 revert SlippageError();
