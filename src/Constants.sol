@@ -59,6 +59,7 @@ abstract contract Constants {
     error NoEtherToken();
     error EtherSendFailed();
     error NotWETH();
+    error IncorrectNativeBalance();
 
     error NotEnoughReward();
     error SameRange();

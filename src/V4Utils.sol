@@ -550,10 +550,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
         
-        // Get addresses for comparison
-        address token0 = Currency.unwrap(poolKey.currency0);
-        address token1 = Currency.unwrap(poolKey.currency1);
-
         if (params.permitData.length != 0) {
             (ISignatureTransfer.PermitBatchTransferFrom memory pbtf, bytes memory signature) =
                 abi.decode(params.permitData, (ISignatureTransfer.PermitBatchTransferFrom, bytes));
@@ -590,14 +586,23 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amount1,
         uint256 amountOther
     ) internal {
-        if (amount0 != 0 && !token0.isAddressZero()) {
-            SafeERC20.safeTransferFrom(IERC20(Currency.unwrap(token0)), msg.sender, address(this), amount0);
-        }
-        if (amount1 != 0 && !token1.isAddressZero()) {
-            SafeERC20.safeTransferFrom(IERC20(Currency.unwrap(token1)), msg.sender, address(this), amount1);
-        }
-        if (amountOther != 0 && !otherToken.isAddressZero()) {
-            SafeERC20.safeTransferFrom(IERC20(Currency.unwrap(otherToken)), msg.sender, address(this), amountOther);
+        // Process each token
+        _prepareAddApprovedToken(token0, amount0);
+        _prepareAddApprovedToken(token1, amount1);
+        _prepareAddApprovedToken(otherToken, amountOther);
+    }
+
+    function _prepareAddApprovedToken(Currency token, uint256 amount) internal {
+        if (amount == 0) return;
+        
+        if (token.isAddressZero()) {
+            // Check native ETH balance
+            if (address(this).balance != amount) {
+                revert IncorrectNativeBalance();
+            }
+        } else {
+            // Transfer ERC20 token
+            SafeERC20.safeTransferFrom(IERC20(Currency.unwrap(token)), msg.sender, address(this), amount);
         }
     }
 
