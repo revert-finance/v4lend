@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
+
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -666,6 +667,7 @@ contract V4Utils is Swapper, IERC721Receiver {
     {
         (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(params);
 
+
         // V4 uses different approach - need to create PoolKey and use modifyLiquidities
         PoolKey memory poolKey = PoolKey({
             currency0: params.token0,
@@ -674,7 +676,6 @@ contract V4Utils is Swapper, IERC721Receiver {
             tickSpacing: 60, // Default tick spacing for V4
             hooks: IHooks(address(0)) // No hooks for now
         });
-
         
         // For V4, we need to use modifyLiquidities with encoded actions
         // Include MINT_POSITION, SETTLE_PAIR, and optionally SWEEP for native ETH
@@ -694,11 +695,19 @@ contract V4Utils is Swapper, IERC721Receiver {
             params_array = new bytes[](2);
         }
         
+        liquidity = _calculateLiquidity(
+            params.tickLower,
+            params.tickUpper,
+            poolKey,
+            total0,
+            total1
+        );
+
         params_array[0] = abi.encode(
             poolKey, 
             params.tickLower, 
             params.tickUpper, 
-            total0, // liquidity
+            liquidity, // liquidity
             total0, // amount0Max
             total1, // amount1Max
             address(this), // recipient
@@ -720,17 +729,18 @@ contract V4Utils is Swapper, IERC721Receiver {
             uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
             uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
             
-            added0 = total0 - finalBalance0;
-            added1 = total1 - finalBalance1;
+            // Calculate amounts actually added (prevent underflow if balance bigger)
+            added0 = total0 >= finalBalance0 ? total0 - finalBalance0 : 0;
+            added1 = total1 >= finalBalance1 ? total1 - finalBalance1 : 0;
 
             emit SwapAndMint(tokenId, liquidity, added0, added1);
 
             // Return leftover tokens
             if (finalBalance0 != 0) {
-                _transferToken(params.recipient, params.token0, finalBalance0);
+                params.token0.transfer(params.recipient, finalBalance0);
             }
             if (finalBalance1 != 0) {
-                _transferToken(params.recipient, params.token1, finalBalance1);
+                params.token1.transfer(params.recipient, finalBalance1);
             }
         }
     }
@@ -859,8 +869,18 @@ contract V4Utils is Swapper, IERC721Receiver {
             uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
             uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
             
-            added0 = total0 - finalBalance0;
-            added1 = total1 - finalBalance1;
+            // Calculate amounts actually added (prevent underflow)
+            if (finalBalance0 <= total0) {
+                added0 = total0 - finalBalance0;
+            } else {
+                added0 = 0; // More tokens returned than expected
+            }
+            
+            if (finalBalance1 <= total1) {
+                added1 = total1 - finalBalance1;
+            } else {
+                added1 = 0; // More tokens returned than expected
+            }
 
             emit SwapAndIncreaseLiquidity(params.tokenId, liquidity, added0, added1);
 
