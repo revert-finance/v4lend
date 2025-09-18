@@ -387,7 +387,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     Swapper.RouterSwapParams(
                         poolKey.currency0,
                         Currency.wrap(instructions.targetToken),
-                        amount0,
+                        instructions.amountIn0,
                         instructions.amountOut0Min,
                         instructions.swapData0
                     )
@@ -404,7 +404,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     Swapper.RouterSwapParams(
                         poolKey.currency1,
                         Currency.wrap(instructions.targetToken),
-                        amount1,
+                        instructions.amountIn1,
                         instructions.amountOut1Min,
                         instructions.swapData1
                     )
@@ -418,9 +418,8 @@ contract V4Utils is Swapper, IERC721Receiver {
             }
 
             // send complete target amount
-            if (targetAmount != 0 && instructions.targetToken != address(0)) {
-                _transferToken(
-                    instructions.recipient, Currency.wrap(instructions.targetToken), targetAmount);
+            if (targetAmount != 0) {
+                Currency.wrap(instructions.targetToken).transfer(instructions.recipient, targetAmount);
             }
 
             emit WithdrawAndCollectAndSwap(tokenId, instructions.targetToken, targetAmount);
