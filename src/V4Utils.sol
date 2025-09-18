@@ -66,9 +66,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         // if token1 needs to be swapped to targetToken - set values
         uint256 amountOut1Min;
         bytes swapData1; // encoded data from 0x api call (address,bytes) - allowanceTarget,data
-        // LEGACY - collect fee amount for COMPOUND_FEES / CHANGE_RANGE / WITHDRAW_AND_COLLECT_AND_SWAP (if uint256(128).max - ALL)
-        uint128 feeAmount0; // legacy field - not used anymore - always all fees are collected
-        uint128 feeAmount1; // legacy field - not used anymore - always all fees are collected
         // for creating new positions with CHANGE_RANGE
         uint24 fee;
         int24 tickLower;

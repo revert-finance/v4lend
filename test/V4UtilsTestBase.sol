@@ -247,8 +247,6 @@ abstract contract V4UtilsTestBase is Test {
             amountIn1: 0,
             amountOut1Min: 0,
             swapData1: "",
-            feeAmount0: 0, // Legacy - not used
-            feeAmount1: 0, // Legacy - not used
             fee: FEE,
             tickLower: TICK_LOWER,
             tickUpper: TICK_UPPER,
@@ -263,7 +261,7 @@ abstract contract V4UtilsTestBase is Test {
         });
     }
     
-    function _executeInstructions(uint256 tokenId, V4Utils.Instructions memory instructions, address owner) internal {
+    function _executeInstructions(uint256 tokenId, V4Utils.Instructions memory instructions, address owner) internal virtual {
         vm.prank(owner);
         IERC721(address(positionManager)).safeTransferFrom(
             owner, 
