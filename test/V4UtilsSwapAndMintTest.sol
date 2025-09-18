@@ -118,6 +118,10 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             vm.prank(params.recipient);
             IERC20(Currency.unwrap(params.token1)).approve(address(v4Utils), type(uint256).max);
         }
+        if (Currency.unwrap(params.swapSourceToken) != address(0)) {
+            vm.prank(params.recipient);
+            IERC20(Currency.unwrap(params.swapSourceToken)).approve(address(v4Utils), type(uint256).max);
+        }
 
         // Create swap and mint parameters
         V4Utils.SwapAndMintParams memory swapAndMintParams = V4Utils.SwapAndMintParams({
@@ -300,10 +304,39 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             recipient: nft2Owner,
             recipientNFT: nft2Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)), // No swap
+            swapSourceToken: Currency.wrap(address(0)),
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: hex"",
+            amountIn1: 1000000000000000,
+            amountOut1Min: 4590503,
+            swapData1: _getETHToUSDCSwapData(),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            returnData: hex"",
+            permitData: hex"",
+            testName: "ETH/USDC - No Swap"
+        });
+        
+        _executeSwapAndMint(params);
+    }
+
+    function testSwapAndMint_ETH_USDC_Swap_2() public {
+        SwapAndMintTestParams memory params = SwapAndMintTestParams({
+            token0: Currency.wrap(address(0)), // ETH
+            token1: Currency.wrap(address(usdc)),
+            fee: 3000, // 0.3% fee
+            tickLower: -1200, // Tick range aligned with tick spacing 60
+            tickUpper: 1200,
+            amount0: 10000000000000000, // 0.01 ETH (user has ~0.028 ETH)
+            amount1: 100000000, // 100 USDC (smaller amount)
+            recipient: nft2Owner,
+            recipientNFT: nft2Owner,
+            deadline: block.timestamp,
+            swapSourceToken: Currency.wrap(address(usdc)),
+            amountIn0: 6874987,
+            amountOut0Min: 1357024286962374,
+            swapData0: _getUSDCtoETHSwapData(),
             amountIn1: 0,
             amountOut1Min: 0,
             swapData1: hex"",
