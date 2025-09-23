@@ -139,8 +139,8 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
             swapTarget: address(0), // Swap to ETH
             swapData0: _getUSDCtoETHSwapData(),
             swapData1: hex"",
-            amountIn0: 6874987,
-            amountOut0Min: 1357024286962374,
+            amountIn0: 6274987,
+            amountOut0Min: 756050291375000,
             amountIn1: 14158266761780632,
             amountOut1Min: 14158266761780632,
             amountAddMin0: 0,
@@ -170,17 +170,17 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
         _executeWithdrawAndCollectAndSwap(params);
     }
 
-    function testExecuteWithdrawAndCollectAndSwapFromETH() public {
+    function testExecuteWithdrawAndCollectAndSwapToWETH() public {
         WithdrawAndCollectAndSwapTestParams memory params = WithdrawAndCollectAndSwapTestParams({
             tokenId: nft2TokenId,
             owner: nft2Owner,
             swapTarget: address(realWeth), // Swap to WETH
             swapData0: hex"",
-            swapData1: _getUSDCtoWETHSwapData(),
+            swapData1: _get273073USDCtoWETHSwapData(),
             amountIn0: 63079250674003,
             amountOut0Min: 63079250674003,
-            amountIn1: 873073,
-            amountOut1Min: 188428045653858,
+            amountIn1: 273073,
+            amountOut1Min: 32877460445000,
             amountAddMin0: 0,
             amountAddMin1: 0,
             testName: "NFT2 - Withdraw and Collect and Swap from ETH"

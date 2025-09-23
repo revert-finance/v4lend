@@ -309,19 +309,19 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountOut0Min: 0,
             swapData0: hex"",
             amountIn1: 1000000000000000,
-            amountOut1Min: 4590503,
+            amountOut1Min: 4128717,
             swapData1: _getETHToUSDCSwapData(),
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
             permitData: hex"",
-            testName: "ETH/USDC - No Swap"
+            testName: "ETH/USDC - Swap ETH to USDC"
         });
         
         _executeSwapAndMint(params);
     }
 
-    function testSwapAndMint_ETH_USDC_Swap_2() public {
+    function testSwapAndMint_USDC_ETH_Swap() public {
         SwapAndMintTestParams memory params = SwapAndMintTestParams({
             token0: Currency.wrap(address(0)), // ETH
             token1: Currency.wrap(address(usdc)),
@@ -334,8 +334,8 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             recipientNFT: nft2Owner,
             deadline: block.timestamp,
             swapSourceToken: Currency.wrap(address(usdc)),
-            amountIn0: 6874987,
-            amountOut0Min: 1357024286962374,
+            amountIn0: 6274987,
+            amountOut0Min: 756050291375000,
             swapData0: _getUSDCtoETHSwapData(),
             amountIn1: 0,
             amountOut1Min: 0,
@@ -344,7 +344,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin1: 0,
             returnData: hex"",
             permitData: hex"",
-            testName: "ETH/USDC - No Swap"
+            testName: "ETH/USDC - Swap USDC to ETH"
         });
         
         _executeSwapAndMint(params);

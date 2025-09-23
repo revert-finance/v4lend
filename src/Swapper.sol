@@ -12,6 +12,9 @@ import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import "./lib/IUniversalRouter.sol";
 import "./Constants.sol";
 
+import {console} from "forge-std/console.sol";
+
+
 // base functionality to do swaps with different routing protocols
 abstract contract Swapper is Constants {
     event Swap(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
@@ -97,6 +100,9 @@ abstract contract Swapper is Constants {
                     if (!params.tokenIn.isAddressZero()) {
                         SafeERC20.safeIncreaseAllowance(tokenIn, zeroxAllowanceHolder, params.amountIn);
                     }
+
+                    console.log(Currency.unwrap(params.tokenIn), params.amountIn);
+
                     (bool success,) = zeroxAllowanceHolder.call{value: params.tokenIn.isAddressZero() ? params.amountIn : 0}(params.swapData);
                     if (!success) {
                         revert SwapFailed();

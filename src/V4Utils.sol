@@ -24,6 +24,7 @@ import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import "@uniswap/v4-core/src/types/PoolId.sol";
 import "./Swapper.sol";
 
+
 /// @title V4Utils v1.0
 /// @notice Utility functions for Uniswap V4 positions
 /// It does not hold any ERC20 or NFTs.
@@ -220,6 +221,9 @@ contract V4Utils is Swapper, IERC721Receiver {
             instructions.amountRemoveMin0,
             instructions.amountRemoveMin1
         );
+
+        console.log("amount0", amount0);
+        console.log("amount1", amount1);
 
         // check if enough tokens are available for swaps
         if (amount0 < instructions.amountIn0 || amount1 < instructions.amountIn1) {
@@ -586,7 +590,9 @@ contract V4Utils is Swapper, IERC721Receiver {
         // Process each token
         _prepareAddApprovedToken(token0, amount0);
         _prepareAddApprovedToken(token1, amount1);
-        _prepareAddApprovedToken(otherToken, amountOther);
+        if (Currency.unwrap(otherToken) != Currency.unwrap(token0) && Currency.unwrap(otherToken) != Currency.unwrap(token1)) {
+            _prepareAddApprovedToken(otherToken, amountOther);
+        }
     }
 
     function _prepareAddApprovedToken(Currency token, uint256 amount) internal {

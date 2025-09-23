@@ -80,10 +80,11 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
             positionManager, address(swapRouter), address(0x0000000000001fF3684f28c67538d4D072C22734), permit2
         );
 
-        vm.etch(address(0x1234567890123456789012345678901234567890), address(v4Utils).code);
-        vm.copyStorage(address(v4Utils), address(0x1234567890123456789012345678901234567890));
-        vm.deal(address(0x1234567890123456789012345678901234567890), 0);
-        v4Utils = V4Utils(payable(address(0x1234567890123456789012345678901234567890)));
+        address hardCodedV4UtilsAddress = 0x3434567890123123789012345678901234567890;
+
+        vm.etch(hardCodedV4UtilsAddress, address(v4Utils).code);
+        vm.copyStorage(address(v4Utils), hardCodedV4UtilsAddress);
+        v4Utils = V4Utils(payable(hardCodedV4UtilsAddress));
 
         console.log("V4Utils deployed at:", address(v4Utils));
         

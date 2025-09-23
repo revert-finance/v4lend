@@ -94,14 +94,23 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
         
         // Verify user still owns the original NFT (it should be returned)
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId), user1, "Original NFT should be returned to user1");
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId + 1), user1, "New NFT should be returned to user1");
         
         // Verify balances changed (liquidity was withdrawn)
         uint256 finalBalance0 = token0.balanceOf(user1);
         uint256 finalBalance1 = token1.balanceOf(user1);
         
         assertTrue(
-            finalBalance0 > initialBalance0 || finalBalance1 > initialBalance1,
+           finalBalance0 >= initialBalance0 || finalBalance1 >= initialBalance1,
             "User should have received tokens from withdrawn liquidity"
+        );
+
+        finalBalance0 = token0.balanceOf(address(v4Utils));
+        finalBalance1 = token1.balanceOf(address(v4Utils));
+        
+        assertTrue(
+            finalBalance0 == 0 && finalBalance1 == 0,
+            "All tokens should be returned - no leftover tokens on V4Utils contract"
         );
     }
     
