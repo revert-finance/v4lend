@@ -577,8 +577,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         }
 
         // if native token special handling - see _decreaseLiquidity()
-        params.amount0 = poolKey.currency0.isAddressZero() ? fees0 : params.amount0 + fees0;
-        params.amount1 = poolKey.currency1.isAddressZero() ? fees1 : params.amount1 + fees1;
+        params.amount0 = params.amount0 + fees0;
+        params.amount1 = params.amount1 + fees1;
 
         (liquidity, amount0, amount1) = _swapAndIncrease(params, poolKey.currency0, poolKey.currency1);
     }
@@ -1001,6 +1001,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 token0Min,
         uint256 token1Min
     ) internal returns (uint256 amount0, uint256 amount1) {
+
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
@@ -1017,11 +1018,15 @@ contract V4Utils is Swapper, IERC721Receiver {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
         
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
-        
-        // use all balance of tokens on contract
+        // check balance before decreasing liquidity
         amount0 = poolKey.currency0.balanceOfSelf();
         amount1 = poolKey.currency1.balanceOfSelf();
+
+        positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
+        
+        // calculate delta
+        amount0 = poolKey.currency0.balanceOfSelf() - amount0;
+        amount1 = poolKey.currency1.balanceOfSelf() - amount1;
     }
 
     // recieves ETH from swaps, decreasing liquidity

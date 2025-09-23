@@ -250,13 +250,13 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             amount1: 0, // No direct WETH
             recipient: nft1Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(realWeth)), // Swap WETH to USDC
-            amountIn0: 2000000000000000, // 0.002 WETH to swap for USDC
-            amountOut0Min: 4000000, // ~4 USDC minimum
-            swapData0: _getUSDCtoWETHSwapData(), // This is actually WETH to USDC swap data
-            amountIn1: 0,
-            amountOut1Min: 0,
-            swapData1: hex"",
+            swapSourceToken: Currency.wrap(address(usdc)), // Swap USDC to WETH
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: hex"",
+            amountIn1: 873073,
+            amountOut1Min: 188428045653858,
+            swapData1: _getUSDCtoWETHSwapData(),
             amountAddMin0: 0,
             amountAddMin1: 0,
             permitData: hex"",
@@ -270,12 +270,12 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
         SwapAndIncreaseLiquidityTestParams memory params = SwapAndIncreaseLiquidityTestParams({
             tokenId: nft2TokenId,
             amount0: 0, // No direct ETH
-            amount1: 0, // No direct USDC
+            amount1: 6274987, // Add some more USDC, no enough fees available
             recipient: nft2Owner,
             deadline: block.timestamp,
             swapSourceToken: Currency.wrap(address(usdc)), // Swap USDC to ETH
-            amountIn0: 5000000, // 5 USDC to swap for ETH
-            amountOut0Min: 2000000000000000, // ~0.002 ETH minimum
+            amountIn0: 6274987,
+            amountOut0Min: 756050291375000,
             swapData0: _getUSDCtoETHSwapData(),
             amountIn1: 0,
             amountOut1Min: 0,
