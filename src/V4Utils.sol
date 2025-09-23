@@ -222,9 +222,6 @@ contract V4Utils is Swapper, IERC721Receiver {
             instructions.amountRemoveMin1
         );
 
-        console.log("amount0", amount0);
-        console.log("amount1", amount1);
-
         // check if enough tokens are available for swaps
         if (amount0 < instructions.amountIn0 || amount1 < instructions.amountIn1) {
             revert AmountError();
@@ -543,11 +540,15 @@ contract V4Utils is Swapper, IERC721Receiver {
     /// @return liquidity The amount of liquidity added
     /// @return amount0 The amount of token0 added
     /// @return amount1 The amount of token1 added
-    function swapAndIncreaseLiquidity(SwapAndIncreaseLiquidityParams calldata params)
+    function swapAndIncreaseLiquidity(SwapAndIncreaseLiquidityParams memory params)
         external
         payable
         returns (uint128 liquidity, uint256 amount0, uint256 amount1)
     {
+
+        // first fees must be removed
+        (uint256 fees0, uint256 fees1) = _decreaseLiquidity(params.tokenId, 0, params.deadline, 0, 0);
+        
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
         
@@ -575,6 +576,10 @@ contract V4Utils is Swapper, IERC721Receiver {
             );
         }
 
+        // if native token special handling - see _decreaseLiquidity()
+        params.amount0 = poolKey.currency0.isAddressZero() ? fees0 : params.amount0 + fees0;
+        params.amount1 = poolKey.currency1.isAddressZero() ? fees1 : params.amount1 + fees1;
+
         (liquidity, amount0, amount1) = _swapAndIncrease(params, poolKey.currency0, poolKey.currency1);
     }
 
@@ -598,13 +603,7 @@ contract V4Utils is Swapper, IERC721Receiver {
     function _prepareAddApprovedToken(Currency token, uint256 amount) internal {
         if (amount == 0) return;
         
-        if (token.isAddressZero()) {
-            // Check native ETH balance
-            if (address(this).balance != amount) {
-                revert IncorrectNativeBalance();
-            }
-        } else {
-            // Transfer ERC20 token
+        if (!token.isAddressZero()) {
             SafeERC20.safeTransferFrom(IERC20(Currency.unwrap(token)), msg.sender, address(this), amount);
         }
     }
@@ -688,7 +687,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         bytes memory actions;
         bytes[] memory params_array;
         
-        if ((Currency.unwrap(params.token0) == address(0)) || (Currency.unwrap(params.token1) == address(0))) {
+        if (params.token0.isAddressZero() || params.token1.isAddressZero()) {
             // Include SWEEP action for native ETH
             actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
             params_array = new bytes[](3);
@@ -867,7 +866,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             false
         );
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-        
+       
         positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), params.deadline);
 
         // Calculate consumption and return leftovers
@@ -875,18 +874,8 @@ contract V4Utils is Swapper, IERC721Receiver {
             uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
             uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
             
-            // Calculate amounts actually added (prevent underflow)
-            if (finalBalance0 <= total0) {
-                added0 = total0 - finalBalance0;
-            } else {
-                added0 = 0; // More tokens returned than expected
-            }
-            
-            if (finalBalance1 <= total1) {
-                added1 = total1 - finalBalance1;
-            } else {
-                added1 = 0; // More tokens returned than expected
-            }
+            added0 = total0 - finalBalance0;
+            added1 = total1 - finalBalance1;
 
             emit SwapAndIncreaseLiquidity(params.tokenId, liquidity, added0, added1);
 

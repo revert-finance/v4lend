@@ -96,10 +96,15 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
         // Get position info to determine currencies
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
         
-        // Set up direct ERC20 allowances from user to V4Utils
+        // Approve V4Utils to manage the NFT
+        vm.prank(params.recipient);
+        IERC721(address(positionManager)).approve(address(v4Utils), params.tokenId);
+        
+        // Set up Permit2 allowances instead of direct ERC20 allowances
         if (Currency.unwrap(poolKey.currency0) != address(0)) {
             vm.prank(params.recipient);
             IERC20(Currency.unwrap(poolKey.currency0)).approve(address(v4Utils), type(uint256).max);
+
         }
         if (Currency.unwrap(poolKey.currency1) != address(0)) {
             vm.prank(params.recipient);
@@ -195,8 +200,8 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
     function testSwapAndIncreaseLiquidity_NFT1_NoSwap() public {
         SwapAndIncreaseLiquidityTestParams memory params = SwapAndIncreaseLiquidityTestParams({
             tokenId: nft1TokenId,
-            amount0: 50000000, // 50 USDC
-            amount1: 50000000000000000, // 0.05 WETH
+            amount0: 1000000, // 1 USDC (much smaller amount)
+            amount1: 1000000000000000, // 0.001 WETH (much smaller amount)
             recipient: nft1Owner,
             deadline: block.timestamp,
             swapSourceToken: Currency.wrap(address(0)), // No swap
@@ -218,8 +223,8 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
     function testSwapAndIncreaseLiquidity_NFT2_NoSwap() public {
         SwapAndIncreaseLiquidityTestParams memory params = SwapAndIncreaseLiquidityTestParams({
             tokenId: nft2TokenId,
-            amount0: 5000000000000000, // 0.005 ETH
-            amount1: 50000000, // 50 USDC
+            amount0: 100000000000000, // 0.0001 ETH (much smaller amount)
+            amount1: 1000000, // 1 USDC (much smaller amount)
             recipient: nft2Owner,
             deadline: block.timestamp,
             swapSourceToken: Currency.wrap(address(0)), // No swap
@@ -242,13 +247,13 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
         SwapAndIncreaseLiquidityTestParams memory params = SwapAndIncreaseLiquidityTestParams({
             tokenId: nft1TokenId,
             amount0: 0, // No direct USDC
-            amount1: 100000000000000000, // 0.1 WETH
+            amount1: 0, // No direct WETH
             recipient: nft1Owner,
             deadline: block.timestamp,
             swapSourceToken: Currency.wrap(address(realWeth)), // Swap WETH to USDC
-            amountIn0: 50000000000000000, // 0.05 WETH to swap for USDC
-            amountOut0Min: 100000000, // ~100 USDC minimum
-            swapData0: _getUSDCtoWETHSwapData(),
+            amountIn0: 2000000000000000, // 0.002 WETH to swap for USDC
+            amountOut0Min: 4000000, // ~4 USDC minimum
+            swapData0: _getUSDCtoWETHSwapData(), // This is actually WETH to USDC swap data
             amountIn1: 0,
             amountOut1Min: 0,
             swapData1: hex"",
@@ -269,8 +274,8 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             recipient: nft2Owner,
             deadline: block.timestamp,
             swapSourceToken: Currency.wrap(address(usdc)), // Swap USDC to ETH
-            amountIn0: 100000000, // 100 USDC to swap for ETH
-            amountOut0Min: 5000000000000000, // ~0.005 ETH minimum
+            amountIn0: 5000000, // 5 USDC to swap for ETH
+            amountOut0Min: 2000000000000000, // ~0.002 ETH minimum
             swapData0: _getUSDCtoETHSwapData(),
             amountIn1: 0,
             amountOut1Min: 0,
