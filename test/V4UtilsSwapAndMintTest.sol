@@ -145,7 +145,8 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: params.amountAddMin0,
             amountAddMin1: params.amountAddMin1,
             returnData: params.returnData,
-            permitData: params.permitData
+            permitData: params.permitData,
+            hook: address(0)
         });
 
         // Execute swap and mint

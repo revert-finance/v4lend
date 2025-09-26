@@ -263,7 +263,8 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: "",
-            permitData: ""
+            permitData: "",
+            hook: address(0)
         });
         
         // Approve tokens

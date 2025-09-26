@@ -84,7 +84,8 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
             recipient: params.owner,
             recipientNFT: params.owner,
             returnData: "",
-            swapAndMintReturnData: ""
+            swapAndMintReturnData: "",
+            hook: address(0)
         });
 
         _executeInstructions(params.tokenId, instructions, params.owner);

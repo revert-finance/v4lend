@@ -87,6 +87,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         bytes returnData;
         // data sent with minted token to IERC721Receiver (optional)
         bytes swapAndMintReturnData;
+        // hook address for CHANGE_RANGE operations (optional)
+        address hook;
     }
 
     /// @notice Params for swap() function
@@ -132,6 +134,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         bytes returnData;
         // if permit2 signatures are used - set this
         bytes permitData;
+        // hook address for the pool (optional)
+        address hook;
     }
 
     /// @notice Params for swapAndIncreaseLiquidity() function
@@ -321,7 +325,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
-                        ""
+                        "",
+                        instructions.hook
                     )
                 );
             } else if (instructions.targetToken == token1) {
@@ -347,7 +352,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
-                        ""
+                        "",
+                        instructions.hook
                     )
                 );
             } else {
@@ -374,7 +380,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
-                        ""
+                        "",
+                        instructions.hook
                     )
                 );
             }
@@ -672,14 +679,13 @@ contract V4Utils is Swapper, IERC721Receiver {
     {
         (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(params);
 
-
         // V4 uses different approach - need to create PoolKey and use modifyLiquidities
         PoolKey memory poolKey = PoolKey({
             currency0: params.token0,
             currency1: params.token1,
             fee: params.fee,
             tickSpacing: 60, // Default tick spacing for V4
-            hooks: IHooks(address(0)) // No hooks for now
+            hooks: IHooks(params.hook) // Use hook from params
         });
         
         // For V4, we need to use modifyLiquidities with encoded actions
@@ -749,6 +755,23 @@ contract V4Utils is Swapper, IERC721Receiver {
             }
         }
     }
+
+    // Helper function to mint position and transfer NFT
+    function _mintPositionAndTransfer(
+        bytes memory actions,
+        bytes[] memory params_array, 
+        uint256 deadline,
+        address recipientNFT,
+        bytes memory returnData
+    ) private returns (uint256 tokenId) {
+        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), deadline);
+        
+        // Get the newly minted token ID
+        tokenId = positionManager.nextTokenId() - 1;
+        
+        // Transfer NFT to recipient
+        IERC721(address(positionManager)).safeTransferFrom(address(this), recipientNFT, tokenId, returnData);
+    }
     
     function _calculateLiquidity(
         int24 tickLower,
@@ -778,22 +801,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         );
     }
 
-    // Helper function to mint position and transfer NFT
-    function _mintPositionAndTransfer(
-        bytes memory actions,
-        bytes[] memory params_array, 
-        uint256 deadline,
-        address recipientNFT,
-        bytes memory returnData
-    ) private returns (uint256 tokenId) {
-        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), deadline);
-        
-        // Get the newly minted token ID
-        tokenId = positionManager.nextTokenId() - 1;
-        
-        // Transfer NFT to recipient
-        IERC721(address(positionManager)).safeTransferFrom(address(this), recipientNFT, tokenId, returnData);
-    }
 
     // swap and increase logic
     function _swapAndIncrease(SwapAndIncreaseLiquidityParams memory params, Currency token0, Currency token1)
@@ -822,7 +829,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                 params.amountAddMin0,
                 params.amountAddMin1,
                 "",
-                params.permitData
+                params.permitData,
+                address(0) // No hook for increase liquidity
             )
         );
 

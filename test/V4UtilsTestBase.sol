@@ -257,7 +257,8 @@ abstract contract V4UtilsTestBase is Test {
             recipient: owner,
             recipientNFT: owner,
             returnData: "",
-            swapAndMintReturnData: ""
+            swapAndMintReturnData: "",
+            hook: address(0)
         });
     }
     
