@@ -85,7 +85,9 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
             recipientNFT: params.owner,
             returnData: "",
             swapAndMintReturnData: "",
-            hook: address(0)
+            hook: address(0),
+            mintHookData: "",
+            decreaseLiquidityHookData: ""
         });
 
         _executeInstructions(params.tokenId, instructions, params.owner);

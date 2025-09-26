@@ -133,7 +133,8 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             swapData1: params.swapData1,
             amountAddMin0: params.amountAddMin0,
             amountAddMin1: params.amountAddMin1,
-            permitData: params.permitData
+            permitData: params.permitData,
+            decreaseLiquidityHookData: ""
         });
 
         // Execute swap and increase liquidity

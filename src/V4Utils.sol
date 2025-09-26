@@ -89,6 +89,10 @@ contract V4Utils is Swapper, IERC721Receiver {
         bytes swapAndMintReturnData;
         // hook address for CHANGE_RANGE operations (optional)
         address hook;
+        // hook data for mint in CHANGE_RANGE operations (optional)
+        bytes mintHookData;
+        // hook data for all operations which decrease liquidity (optional)
+        bytes decreaseLiquidityHookData;
     }
 
     /// @notice Params for swap() function
@@ -136,6 +140,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         bytes permitData;
         // hook address for the pool (optional)
         address hook;
+        // hook data (optional)
+        bytes mintHookData;
     }
 
     /// @notice Params for swapAndIncreaseLiquidity() function
@@ -162,6 +168,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amountAddMin1;
         // if permit2 signatures are used - set this
         bytes permitData;
+        // hook data for all operations which decrease liquidity (optional)
+        bytes decreaseLiquidityHookData;
     }
 
     /// @notice Constructor
@@ -223,7 +231,8 @@ contract V4Utils is Swapper, IERC721Receiver {
             instructions.liquidity,
             instructions.deadline,
             instructions.amountRemoveMin0,
-            instructions.amountRemoveMin1
+            instructions.amountRemoveMin1,
+            instructions.decreaseLiquidityHookData
         );
 
         // check if enough tokens are available for swaps
@@ -249,6 +258,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         "",
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
+                        "",
                         ""
                     ),
                     poolKey.currency0,
@@ -271,6 +281,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.swapData0,
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
+                        "",
                         ""
                     ),
                     poolKey.currency0,
@@ -294,6 +305,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                         "",
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
+                        "",
                         ""
                     ),
                     poolKey.currency0,
@@ -326,7 +338,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
                         "",
-                        instructions.hook
+                        instructions.hook,
+                        instructions.mintHookData
                     )
                 );
             } else if (instructions.targetToken == token1) {
@@ -353,7 +366,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
                         "",
-                        instructions.hook
+                        instructions.hook,
+                        instructions.mintHookData
                     )
                 );
             } else {
@@ -381,7 +395,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
                         "",
-                        instructions.hook
+                        instructions.hook,
+                        instructions.mintHookData
                     )
                 );
             }
@@ -554,7 +569,7 @@ contract V4Utils is Swapper, IERC721Receiver {
     {
 
         // first fees must be removed
-        (uint256 fees0, uint256 fees1) = _decreaseLiquidity(params.tokenId, 0, params.deadline, 0, 0);
+        (uint256 fees0, uint256 fees1) = _decreaseLiquidity(params.tokenId, 0, params.deadline, 0, 0, params.decreaseLiquidityHookData);
         
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
@@ -830,7 +845,8 @@ contract V4Utils is Swapper, IERC721Receiver {
                 params.amountAddMin1,
                 "",
                 params.permitData,
-                address(0) // No hook for increase liquidity
+                address(0), // No hook for increase liquidity
+                ""
             )
         );
 
@@ -1007,7 +1023,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint128 liquidity,
         uint256 deadline,
         uint256 token0Min,
-        uint256 token1Min
+        uint256 token1Min,
+        bytes memory hookData
     ) internal returns (uint256 amount0, uint256 amount1) {
 
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
@@ -1019,7 +1036,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             uint256(liquidity),
             uint128(token0Min), // amount0Min
             uint128(token1Min), // amount1Min
-            bytes("") // hookData
+            hookData
         );
         
         // Get position info to determine currencies for TAKE_PAIR
