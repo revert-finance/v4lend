@@ -228,11 +228,10 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amount1,
         Instructions memory instructions
     ) internal {
-        address token0 = Currency.unwrap(poolKey.currency0);
-        address token1 = Currency.unwrap(poolKey.currency1);
         uint128 liquidity;
+        address targetToken = instructions.targetToken;
 
-        if (instructions.targetToken == token0) {
+        if (targetToken == Currency.unwrap(poolKey.currency0)) {
             // Swap token1 to token0 and increase liquidity
             (liquidity, amount0, amount1) = _swapAndIncrease(
                 SwapAndIncreaseLiquidityParams(
@@ -255,7 +254,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                 poolKey.currency0,
                 poolKey.currency1
             );
-        } else if (instructions.targetToken == token1) {
+        } else if (targetToken == Currency.unwrap(poolKey.currency1)) {
             // Swap token0 to token1 and increase liquidity
             (liquidity, amount0, amount1) = _swapAndIncrease(
                 SwapAndIncreaseLiquidityParams(
@@ -313,10 +312,9 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amount1,
         Instructions memory instructions
     ) internal returns (uint256 newTokenId) {
-        address token0 = Currency.unwrap(poolKey.currency0);
-        address token1 = Currency.unwrap(poolKey.currency1);
+        address targetToken = instructions.targetToken;
 
-        if (instructions.targetToken == token0) {
+        if (targetToken == Currency.unwrap(poolKey.currency0)) {
             // Swap token1 to token0 and mint new position
             (newTokenId,,,) = _swapAndMint(
                 SwapAndMintParams(
@@ -345,7 +343,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     instructions.mintHookData
                 )
             );
-        } else if (instructions.targetToken == token1) {
+        } else if (targetToken == Currency.unwrap(poolKey.currency1)) {
             // Swap token0 to token1 and mint new position
             (newTokenId,,,) = _swapAndMint(
                 SwapAndMintParams(
@@ -416,16 +414,15 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amount1,
         Instructions memory instructions
     ) internal {
-        address token0 = Currency.unwrap(poolKey.currency0);
-        address token1 = Currency.unwrap(poolKey.currency1);
         uint256 targetAmount;
+        address targetToken = instructions.targetToken;
 
         // Swap token0 to target if needed
-        if (token0 != instructions.targetToken) {
+        if (Currency.unwrap(poolKey.currency0) != targetToken) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                 Swapper.RouterSwapParams(
                     poolKey.currency0,
-                    Currency.wrap(instructions.targetToken),
+                    Currency.wrap(targetToken),
                     instructions.amountIn0,
                     instructions.amountOut0Min,
                     instructions.swapData0
@@ -441,11 +438,11 @@ contract V4Utils is Swapper, IERC721Receiver {
         }
 
         // Swap token1 to target if needed
-        if (token1 != instructions.targetToken) {
+        if (Currency.unwrap(poolKey.currency1) != targetToken) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                 Swapper.RouterSwapParams(
                     poolKey.currency1,
-                    Currency.wrap(instructions.targetToken),
+                    Currency.wrap(targetToken),
                     instructions.amountIn1,
                     instructions.amountOut1Min,
                     instructions.swapData1
@@ -462,10 +459,10 @@ contract V4Utils is Swapper, IERC721Receiver {
 
         // Transfer complete target amount to recipient
         if (targetAmount != 0) {
-            Currency.wrap(instructions.targetToken).transfer(instructions.recipient, targetAmount);
+            Currency.wrap(targetToken).transfer(instructions.recipient, targetAmount);
         }
 
-        emit WithdrawAndCollectAndSwap(tokenId, instructions.targetToken, targetAmount);
+        emit WithdrawAndCollectAndSwap(tokenId, targetToken, targetAmount);
     }
 
     /// @notice ERC721 callback function. Called on safeTransferFrom and does manipulation as configured in encoded Instructions parameter.
@@ -651,9 +648,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             currency0: params.token0,
             currency1: params.token1,
             fee: params.fee,
-            // Note: Default tick spacing for V4 is 60
-            // This may need to be configurable for different fee tiers in production
-            tickSpacing: 60,
+            tickSpacing: params.tickSpacing, // Use dynamic tickSpacing from params
             hooks: IHooks(params.hook) // Use hook from params
         });
         
@@ -848,7 +843,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         internal
         returns (uint256 total0, uint256 total1)
     {
-        if (params.swapSourceToken == params.token0) {
+        Currency swapSource = params.swapSourceToken;
+        if (swapSource == params.token0) {
             if (params.amount0 < params.amountIn1) {
                 revert AmountError();
             }
@@ -859,7 +855,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             );
             total0 = params.amount0 - amountInDelta;
             total1 = params.amount1 + amountOutDelta;
-        } else if (params.swapSourceToken == params.token1) {
+        } else if (swapSource == params.token1) {
             if (params.amount1 < params.amountIn0) {
                 revert AmountError();
             }
@@ -873,12 +869,12 @@ contract V4Utils is Swapper, IERC721Receiver {
         } else {
             (uint256 amountInDelta0, uint256 amountOutDelta0) = _routerSwap(
                 Swapper.RouterSwapParams(
-                    params.swapSourceToken, params.token0, params.amountIn0, params.amountOut0Min, params.swapData0
+                    swapSource, params.token0, params.amountIn0, params.amountOut0Min, params.swapData0
                 )
             );
             (uint256 amountInDelta1, uint256 amountOutDelta1) = _routerSwap(
                 Swapper.RouterSwapParams(
-                    params.swapSourceToken, params.token1, params.amountIn1, params.amountOut1Min, params.swapData1
+                    swapSource, params.token1, params.amountIn1, params.amountOut1Min, params.swapData1
                 )
             );
             total0 = params.amount0 + amountOutDelta0;
@@ -888,7 +884,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             uint256 leftOver = params.amountIn0 + params.amountIn1 - amountInDelta0 - amountInDelta1;
 
             if (leftOver != 0) {
-                _transferToken(params.recipient, params.swapSourceToken, leftOver);
+                _transferToken(params.recipient, swapSource, leftOver);
             }
         }
 
@@ -942,6 +938,16 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 token1Min,
         bytes memory hookData
     ) internal returns (uint256 amount0, uint256 amount1) {
+        // Get position info to determine currencies for TAKE_PAIR
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        
+        // Cache currencies to save gas
+        Currency currency0 = poolKey.currency0;
+        Currency currency1 = poolKey.currency1;
+        
+        // check balance before decreasing liquidity
+        amount0 = currency0.balanceOfSelf();
+        amount1 = currency1.balanceOfSelf();
 
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
@@ -954,20 +960,13 @@ contract V4Utils is Swapper, IERC721Receiver {
             uint128(token1Min), // amount1Min
             hookData
         );
-        
-        // Get position info to determine currencies for TAKE_PAIR
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-        
-        // check balance before decreasing liquidity
-        amount0 = poolKey.currency0.balanceOfSelf();
-        amount1 = poolKey.currency1.balanceOfSelf();
+        params_array[1] = abi.encode(currency0, currency1, address(this));
 
         positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
         
         // calculate delta
-        amount0 = poolKey.currency0.balanceOfSelf() - amount0;
-        amount1 = poolKey.currency1.balanceOfSelf() - amount1;
+        amount0 = currency0.balanceOfSelf() - amount0;
+        amount1 = currency1.balanceOfSelf() - amount1;
     }
 
     // recieves ETH from swaps, decreasing liquidity

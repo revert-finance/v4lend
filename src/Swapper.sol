@@ -12,8 +12,6 @@ import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import "./lib/IUniversalRouter.sol";
 import "./Constants.sol";
 
-import {console} from "forge-std/console.sol";
-
 
 // base functionality to do swaps with different routing protocols
 abstract contract Swapper is Constants {
@@ -96,19 +94,20 @@ abstract contract Swapper is Constants {
                     }
                     IUniversalRouter(universalRouter).execute{value: params.tokenIn.isAddressZero() ? params.amountIn : 0}(data.commands, data.inputs, data.deadline);
                 } else {
-                    IERC20 tokenIn = IERC20(Currency.unwrap(params.tokenIn));
                     if (!params.tokenIn.isAddressZero()) {
+                        IERC20 tokenIn = IERC20(Currency.unwrap(params.tokenIn));
                         SafeERC20.safeIncreaseAllowance(tokenIn, zeroxAllowanceHolder, params.amountIn);
-                    }
-
-                    console.log(Currency.unwrap(params.tokenIn), params.amountIn);
-
-                    (bool success,) = zeroxAllowanceHolder.call{value: params.tokenIn.isAddressZero() ? params.amountIn : 0}(params.swapData);
-                    if (!success) {
-                        revert SwapFailed();
-                    }
-                    if (!params.tokenIn.isAddressZero()) {
+                        
+                        (bool success,) = zeroxAllowanceHolder.call(params.swapData);
+                        if (!success) {
+                            revert SwapFailed();
+                        }
                         SafeERC20.forceApprove(tokenIn, zeroxAllowanceHolder, 0);
+                    } else {
+                        (bool success,) = zeroxAllowanceHolder.call{value: params.amountIn}(params.swapData);
+                        if (!success) {
+                            revert SwapFailed();
+                        }
                     }
                 }
             }
@@ -133,17 +132,9 @@ abstract contract Swapper is Constants {
         address tokenInAddress = Currency.unwrap(tokenIn);
         address tokenOutAddress = Currency.unwrap(tokenOut);
         
-        // Check for WETH -> ETH (WETH to zero address)
-        if (tokenInAddress == wethAddress && tokenOutAddress == address(0)) {
-            return true;
-        }
-        
-        // Check for ETH -> WETH (zero address to WETH)
-        if (tokenInAddress == address(0) && tokenOutAddress == wethAddress) {
-            return true;
-        }
-        
-        return false;
+        // Check for WETH -> ETH (WETH to zero address) OR ETH -> WETH (zero address to WETH)
+        return (tokenInAddress == wethAddress && tokenOutAddress == address(0)) ||
+               (tokenInAddress == address(0) && tokenOutAddress == wethAddress);
     }
 
     /// @notice Handle direct WETH/ETH swaps using IWETH functions
