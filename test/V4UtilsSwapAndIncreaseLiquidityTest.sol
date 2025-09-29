@@ -36,7 +36,6 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
         bytes swapData1;
         uint256 amountAddMin0;
         uint256 amountAddMin1;
-        bytes permitData;
         string testName;
     }
 
@@ -133,7 +132,6 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             swapData1: params.swapData1,
             amountAddMin0: params.amountAddMin0,
             amountAddMin1: params.amountAddMin1,
-            permitData: params.permitData,
             decreaseLiquidityHookData: ""
         });
 
@@ -214,7 +212,6 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             swapData1: hex"",
             amountAddMin0: 0,
             amountAddMin1: 0,
-            permitData: hex"",
             testName: "NFT1 - No Swap"
         });
         
@@ -237,7 +234,6 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             swapData1: hex"",
             amountAddMin0: 0,
             amountAddMin1: 0,
-            permitData: hex"",
             testName: "NFT2 - No Swap"
         });
         
@@ -260,7 +256,6 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             swapData1: _getUSDCtoWETHSwapData(),
             amountAddMin0: 0,
             amountAddMin1: 0,
-            permitData: hex"",
             testName: "NFT1 - WETH to USDC Swap"
         });
         
@@ -283,7 +278,6 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             swapData1: hex"",
             amountAddMin0: 0,
             amountAddMin1: 0,
-            permitData: hex"",
             testName: "NFT2 - USDC to ETH Swap"
         });
         

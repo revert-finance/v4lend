@@ -7,7 +7,6 @@ import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
-import "@uniswap/v4-periphery/lib/permit2/src/interfaces/ISignatureTransfer.sol";
 
 import "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
@@ -104,7 +103,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 minAmountOut;
         address recipient; // recipient of tokenOut and leftover tokenIn (if any leftover)
         bytes swapData;
-        bytes permitData; // if permit2 signatures are used - set this
     }
 
     /// @notice Params for swapAndMint() function
@@ -136,8 +134,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amountAddMin1;
         // data to be sent along newly created NFT when transfered to recipientNFT (sent to IERC721Receiver callback)
         bytes returnData;
-        // if permit2 signatures are used - set this
-        bytes permitData;
         // hook address for the pool (optional)
         address hook;
         // hook data (optional)
@@ -166,8 +162,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         // min amount to be added after swap
         uint256 amountAddMin0;
         uint256 amountAddMin1;
-        // if permit2 signatures are used - set this
-        bytes permitData;
         // hook data for all operations which decrease liquidity (optional)
         bytes decreaseLiquidityHookData;
     }
@@ -258,7 +252,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                         "",
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
-                        "",
                         ""
                     ),
                     poolKey.currency0,
@@ -281,7 +274,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.swapData0,
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
-                        "",
                         ""
                     ),
                     poolKey.currency0,
@@ -305,7 +297,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                         "",
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
-                        "",
                         ""
                     ),
                     poolKey.currency0,
@@ -337,7 +328,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
-                        "",
                         instructions.hook,
                         instructions.mintHookData
                     )
@@ -365,7 +355,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
-                        "",
                         instructions.hook,
                         instructions.mintHookData
                     )
@@ -394,7 +383,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                         instructions.amountAddMin0,
                         instructions.amountAddMin1,
                         instructions.swapAndMintReturnData,
-                        "",
                         instructions.hook,
                         instructions.mintHookData
                     )
@@ -486,15 +474,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             revert SameToken();
         }
 
-        if (params.permitData.length != 0) {
-            (ISignatureTransfer.PermitBatchTransferFrom memory pbtf, bytes memory signature) =
-                abi.decode(params.permitData, (ISignatureTransfer.PermitBatchTransferFrom, bytes));
-            _prepareAddPermit2(
-                params.tokenIn, Currency.wrap(address(0)), Currency.wrap(address(0)), params.amountIn, 0, 0, pbtf, signature
-            );
-        } else {
-            _prepareAddApproved(params.tokenIn, Currency.wrap(address(0)), Currency.wrap(address(0)), params.amountIn, 0, 0);
-        }
+         _prepareAddApproved(params.tokenIn, Currency.wrap(address(0)), Currency.wrap(address(0)), params.amountIn, 0, 0);
 
         uint256 amountInDelta;
         (amountInDelta, amountOut) = _routerSwap(
@@ -530,29 +510,14 @@ contract V4Utils is Swapper, IERC721Receiver {
             revert SameToken();
         }
 
-        if (params.permitData.length != 0) {
-            (ISignatureTransfer.PermitBatchTransferFrom memory pbtf, bytes memory signature) =
-                abi.decode(params.permitData, (ISignatureTransfer.PermitBatchTransferFrom, bytes));
-            _prepareAddPermit2(
-                params.token0,
-                params.token1,
-                params.swapSourceToken,
-                params.amount0,
-                params.amount1,
-                params.amountIn0 + params.amountIn1,
-                pbtf,
-                signature
-            );
-        } else {
-            _prepareAddApproved(
-                params.token0,
-                params.token1,
-                params.swapSourceToken,
-                params.amount0,
-                params.amount1,
-                params.amountIn0 + params.amountIn1
-            );
-        }
+        _prepareAddApproved(
+            params.token0,
+            params.token1,
+            params.swapSourceToken,
+            params.amount0,
+            params.amount1,
+            params.amountIn0 + params.amountIn1
+        );
 
         (tokenId, liquidity, amount0, amount1) = _swapAndMint(params);
     }
@@ -574,21 +539,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
         
-        if (params.permitData.length != 0) {
-            (ISignatureTransfer.PermitBatchTransferFrom memory pbtf, bytes memory signature) =
-                abi.decode(params.permitData, (ISignatureTransfer.PermitBatchTransferFrom, bytes));
-            _prepareAddPermit2(
-                poolKey.currency0,
-                poolKey.currency1,
-                params.swapSourceToken,
-                params.amount0,
-                params.amount1,
-                params.amountIn0 + params.amountIn1,
-                pbtf,
-                signature
-            );
-        } else {
-            _prepareAddApproved(
+        _prepareAddApproved(
                 poolKey.currency0,
                 poolKey.currency1,
                 params.swapSourceToken,
@@ -596,7 +547,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                 params.amount1,
                 params.amountIn0 + params.amountIn1
             );
-        }
 
         // if native token special handling - see _decreaseLiquidity()
         params.amount0 = params.amount0 + fees0;
@@ -627,63 +577,6 @@ contract V4Utils is Swapper, IERC721Receiver {
         
         if (!token.isAddressZero()) {
             SafeERC20.safeTransferFrom(IERC20(Currency.unwrap(token)), msg.sender, address(this), amount);
-        }
-    }
-
-    struct PrepareAddPermit2State {
-        uint256 i;
-        uint256 balanceBefore0;
-        uint256 balanceBefore1;
-        uint256 balanceBeforeOther;
-    }
-
-    function _prepareAddPermit2(
-        Currency token0,
-        Currency token1,
-        Currency otherToken,
-        uint256 amount0,
-        uint256 amount1,
-        uint256 amountOther,
-        IPermit2.PermitBatchTransferFrom memory permit,
-        bytes memory signature
-    ) internal {
-        PrepareAddPermit2State memory state;
-
-        ISignatureTransfer.SignatureTransferDetails[] memory transferDetails =
-            new ISignatureTransfer.SignatureTransferDetails[](permit.permitted.length);
-
-        // permitted tokens must be in this same order
-        if (amount0 != 0 && !token0.isAddressZero()) {
-            state.balanceBefore0 = token0.balanceOfSelf();
-            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amount0);
-        }
-        if (amount1 != 0 && !token1.isAddressZero()) {
-            state.balanceBefore1 = token1.balanceOfSelf();
-            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amount1);
-        }
-        if (amountOther != 0 && !otherToken.isAddressZero()) {
-            state.balanceBeforeOther = otherToken.balanceOfSelf();
-            transferDetails[state.i++] = ISignatureTransfer.SignatureTransferDetails(address(this), amountOther);
-        }
-
-        // execute batch transfer
-        permit2.permitTransferFrom(permit, transferDetails, msg.sender, signature);
-
-        // check if recieved correct amount of tokens
-        if (amount0 != 0 && !token0.isAddressZero()) {
-            if (token0.balanceOfSelf() - state.balanceBefore0 != amount0) {
-                revert TransferError(); // reverts for fee-on-transfer tokens
-            }
-        }
-        if (amount1 != 0 && !token1.isAddressZero()) {
-            if (token1.balanceOfSelf() - state.balanceBefore1 != amount1) {
-                revert TransferError(); // reverts for fee-on-transfer tokens
-            }
-        }
-        if (amountOther != 0 && !otherToken.isAddressZero()) {
-            if (otherToken.balanceOfSelf() - state.balanceBeforeOther != amountOther) {
-                revert TransferError(); // reverts for fee-on-transfer tokens
-            }
         }
     }
 
@@ -844,7 +737,6 @@ contract V4Utils is Swapper, IERC721Receiver {
                 params.amountAddMin0,
                 params.amountAddMin1,
                 "",
-                params.permitData,
                 address(0), // No hook for increase liquidity
                 ""
             )

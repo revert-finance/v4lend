@@ -26,7 +26,6 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
         uint256 minAmountOut;
         address recipient;
         bytes swapData;
-        bytes permitData;
         string testName;
     }
 
@@ -87,8 +86,7 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
             amountIn: params.amountIn,
             minAmountOut: params.minAmountOut,
             recipient: params.recipient,
-            swapData: params.swapData,
-            permitData: params.permitData
+            swapData: params.swapData
         });
 
         // Execute swap
@@ -134,7 +132,6 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
             minAmountOut: 188428045653858,
             recipient: nft1Owner,
             swapData: _getUSDCtoWETHSwapData(),
-            permitData: hex"",
             testName: "USDC to WETH"
         });
         
@@ -149,7 +146,6 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
             minAmountOut: 4128717,
             recipient: nft1Owner,
             swapData: _getETHToUSDCSwapData(),
-            permitData: hex"",
             testName: "ETH to USDC"
         });
         
@@ -164,7 +160,6 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
             minAmountOut: 756050291375000,
             recipient: nft1Owner,
             swapData: _getUSDCtoETHSwapData(),
-            permitData: hex"",
             testName: "USDC to ETH"
         });
         
@@ -179,7 +174,6 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
             minAmountOut: 1000000000000000,
             recipient: nft1Owner,
             swapData: hex"", // No swap data needed for direct WETH->ETH
-            permitData: hex"",
             testName: "WETH to ETH (Direct)"
         });
         
@@ -194,7 +188,6 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
             minAmountOut: 1000000000000000,
             recipient: nft1Owner,
             swapData: hex"", // No swap data needed for direct ETH->WETH
-            permitData: hex"",
             testName: "ETH to WETH (Direct)"
         });
         

@@ -172,8 +172,7 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             amountIn: 1000 ether,
             minAmountOut: 0, // No slippage protection for this test
             recipient: user1,
-            swapData: "", // Empty swap data - would need real swap data in production
-            permitData: ""
+            swapData: "" // Empty swap data - would need real swap data in production
         });
         
         // Approve tokens
@@ -263,7 +262,6 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: "",
-            permitData: "",
             hook: address(0),
             mintHookData: ""
         });

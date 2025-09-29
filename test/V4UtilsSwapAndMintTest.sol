@@ -43,7 +43,6 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
         uint256 amountAddMin0;
         uint256 amountAddMin1;
         bytes returnData;
-        bytes permitData;
         string testName;
     }
 
@@ -145,7 +144,6 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: params.amountAddMin0,
             amountAddMin1: params.amountAddMin1,
             returnData: params.returnData,
-            permitData: params.permitData,
             hook: address(0),
             mintHookData: ""
         });
@@ -258,7 +256,6 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            permitData: hex"",
             testName: "WETH/USDC - No Swap"
         });
         
@@ -287,7 +284,6 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            permitData: hex"",
             testName: "ETH/USDC - No Swap"
         });
         
@@ -316,7 +312,6 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            permitData: hex"",
             testName: "ETH/USDC - Swap ETH to USDC"
         });
         
@@ -345,7 +340,6 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            permitData: hex"",
             testName: "ETH/USDC - Swap USDC to ETH"
         });
         
