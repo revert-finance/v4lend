@@ -31,8 +31,11 @@ import "./Swapper.sol";
 contract V4Utils is Swapper, IERC721Receiver {
     using SafeCast for uint256;
 
-    // @notice Permit2 contract
+    /// @notice Permit2 contract
     IPermit2 public immutable permit2;
+
+    /// @notice Tracks tokens that have been approved to Permit2
+    mapping(address => bool) private _permit2Approved;
 
     // events
     event CompoundFees(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
@@ -180,31 +183,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         permit2 = _permit2;
     }
 
-    /// @notice Execute instruction with EIP712 permit
-    /// @param tokenId Token to process
-    /// @param instructions Instructions to execute
-    /// @param v Signature values for EIP712 permit
-    /// @param r Signature values for EIP712 permit
-    /// @param s Signature values for EIP712 permit
-    /// @return newTokenId Id of position (if a new one was created)
-    function executeWithPermit(uint256 tokenId, Instructions memory instructions, uint8 v, bytes32 r, bytes32 s)
-        public
-        returns (uint256 newTokenId)
-    {
-        if (IERC721(address(positionManager)).ownerOf(tokenId) != msg.sender) {
-            revert Unauthorized();
-        }
-
-        // V4 uses different permit signature format - need to adapt
-        // For now, we'll implement a basic version that works with the V4 permit system
-        bytes memory signature = abi.encodePacked(r, s, v);
-        positionManager.permit(address(this), tokenId, instructions.deadline, 0, signature);
-        return execute(tokenId, instructions);
-
-        // NOTE: previous operator can not be reset as operator set by permit can not change operator - so this operator will stay until reset
-    }
-
-    /// @notice Execute instruction by pulling approved NFT instead of direct safeTransferFrom call from owner
+    /// @notice Execute instruction accessing approved NFT instead of direct safeTransferFrom call from owner
     /// @param tokenId Token to process
     /// @param instructions Instructions to execute
     /// @return newTokenId Id of position (if a new one was created)
@@ -458,7 +437,6 @@ contract V4Utils is Swapper, IERC721Receiver {
 
         execute(tokenId, instructions);
 
-        // For now, just return the token using transferFrom
         IERC721(address(positionManager)).safeTransferFrom(address(this), from, tokenId, instructions.returnData);
 
         return IERC721Receiver.onERC721Received.selector;
@@ -580,6 +558,35 @@ contract V4Utils is Swapper, IERC721Receiver {
         }
     }
 
+    /// @notice Build actions and params array with optional ETH SWEEP
+    /// @param baseAction The base action to perform (MINT_POSITION or INCREASE_LIQUIDITY)
+    /// @param hasNativeETH Whether native ETH is involved
+    /// @return actions Encoded actions
+    /// @return params_array Empty params array of correct size
+    function _buildActionsForNativeETH(
+        uint8 baseAction,
+        bool hasNativeETH
+    ) internal pure returns (bytes memory actions, bytes[] memory params_array) {
+        if (hasNativeETH) {
+            // Include SWEEP action for native ETH
+            actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
+            params_array = new bytes[](3);
+        } else {
+            // Standard actions for ERC20 tokens only
+            actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR));
+            params_array = new bytes[](2);
+        }
+    }
+
+    /// @notice Add SWEEP params if native ETH is involved
+    /// @param params_array The params array to modify
+    /// @param hasNativeETH Whether native ETH is involved
+    function _addSweepParamsIfNeeded(bytes[] memory params_array, bool hasNativeETH) internal view {
+        if (hasNativeETH) {
+            params_array[2] = abi.encode(Currency.wrap(address(0)), address(this));
+        }
+    }
+
     // swap and mint logic
     function _swapAndMint(SwapAndMintParams memory params)
         internal
@@ -592,27 +599,18 @@ contract V4Utils is Swapper, IERC721Receiver {
             currency0: params.token0,
             currency1: params.token1,
             fee: params.fee,
-            tickSpacing: 60, // Default tick spacing for V4
+            // Note: Default tick spacing for V4 is 60
+            // This may need to be configurable for different fee tiers in production
+            tickSpacing: 60,
             hooks: IHooks(params.hook) // Use hook from params
         });
         
-        // For V4, we need to use modifyLiquidities with encoded actions
-        // Include MINT_POSITION, SETTLE_PAIR, and optionally SWEEP for native ETH
-        bytes memory actions;
-        bytes[] memory params_array;
-        
-        if (params.token0.isAddressZero() || params.token1.isAddressZero()) {
-            // Include SWEEP action for native ETH
-            actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
-            params_array = new bytes[](3);
-            
-            // SWEEP parameters: sweep native ETH to this contract
-            params_array[2] = abi.encode(Currency.wrap(address(0)), address(this));
-        } else {
-            // Standard actions for ERC20 tokens only
-            actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-            params_array = new bytes[](2);
-        }
+
+        (bytes memory actions, bytes[] memory params_array) = _buildActionsForNativeETH(
+            uint8(Actions.MINT_POSITION),
+            params.token0.isAddressZero() || params.token1.isAddressZero()
+        );
+        _addSweepParamsIfNeeded(params_array, params.token0.isAddressZero() || params.token1.isAddressZero());
         
         liquidity = _calculateLiquidity(
             params.tickLower,
@@ -745,27 +743,14 @@ contract V4Utils is Swapper, IERC721Receiver {
         // Get position info to determine currencies for TAKE_PAIR
         (PoolKey memory poolKey, PositionInfo info) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
-        // V4 uses different approach - need to use modifyLiquidities with encoded actions
-        // Include INCREASE_LIQUIDITY, SETTLE_PAIR, and optionally SWEEP for native ETH
-        bytes memory actions;
-        bytes[] memory params_array;
-        
-        // If native ETH is involved
-        if (Currency.unwrap(poolKey.currency0) == address(0) || Currency.unwrap(poolKey.currency1) == address(0)) {
-            // Include SWEEP action for native ETH
-            actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
-            params_array = new bytes[](3);
-            
-            // SWEEP parameters: sweep native ETH to this contract
-            params_array[2] = abi.encode(Currency.wrap(address(0)), address(this));
-        } else {
-            // Standard actions for ERC20 tokens only
-            actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
-            params_array = new bytes[](2);
-        }
+        // Build actions for native ETH if needed
+        (bytes memory actions, bytes[] memory params_array) = _buildActionsForNativeETH(
+            uint8(Actions.INCREASE_LIQUIDITY),
+            Currency.unwrap(poolKey.currency0) == address(0) || Currency.unwrap(poolKey.currency1) == address(0)
+        );
+        _addSweepParamsIfNeeded(params_array, Currency.unwrap(poolKey.currency0) == address(0) || Currency.unwrap(poolKey.currency1) == address(0));
 
         // Calculate liquidity from amounts
-        // For simplicity, use the minimum of the two amounts as liquidity
         liquidity = _calculateLiquidity(
             info.tickLower(),
             info.tickUpper(),
@@ -854,46 +839,32 @@ contract V4Utils is Swapper, IERC721Receiver {
             }
         }
 
-        // approve tokens for positionManager
+        // approve tokens for positionManager (with caching)
         if (total0 != 0 && !params.token0.isAddressZero()) {
-            SafeERC20.forceApprove(IERC20(Currency.unwrap(params.token0)), address(permit2), type(uint256).max);
+            address token0Addr = Currency.unwrap(params.token0);
+            if (!_permit2Approved[token0Addr]) {
+                SafeERC20.forceApprove(IERC20(token0Addr), address(permit2), type(uint256).max);
+                _permit2Approved[token0Addr] = true;
+            }
             permit2.approve(
-                Currency.unwrap(params.token0),
+                token0Addr,
                 address(positionManager),
                 uint160(total0),
                 uint48(block.timestamp)
             );
         }
         if (total1 != 0 && !params.token1.isAddressZero()) {
-            SafeERC20.forceApprove(IERC20(Currency.unwrap(params.token1)), address(permit2), type(uint256).max);
+            address token1Addr = Currency.unwrap(params.token1);
+            if (!_permit2Approved[token1Addr]) {
+                SafeERC20.forceApprove(IERC20(token1Addr), address(permit2), type(uint256).max);
+                _permit2Approved[token1Addr] = true;
+            }
             permit2.approve(
-                Currency.unwrap(params.token1),
+                token1Addr,
                 address(positionManager),
                 uint160(total1),
                 uint48(block.timestamp)
             );
-        }
-    }
-
-    // returns leftover token balances
-    function _returnLeftoverTokens(
-        address to,
-        Currency token0,
-        Currency token1,
-        uint256 total0,
-        uint256 total1,
-        uint256 added0,
-        uint256 added1
-    ) internal {
-        uint256 left0 = total0 - added0;
-        uint256 left1 = total1 - added1;
-
-        // return leftovers
-        if (left0 != 0) {
-            _transferToken(to, token0, left0);
-        }
-        if (left1 != 0) {
-            _transferToken(to, token1, left1);
         }
     }
 
