@@ -72,6 +72,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         bytes swapData1; // encoded data from 0x api call (address,bytes) - allowanceTarget,data
         // for creating new positions with CHANGE_RANGE
         uint24 fee;
+        int24 tickSpacing;
         int24 tickLower;
         int24 tickUpper;
         // remove liquidity amount for COMPOUND_FEES (in this case should be probably 0) / CHANGE_RANGE / WITHDRAW_AND_COLLECT_AND_SWAP
@@ -113,6 +114,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         Currency token0;
         Currency token1;
         uint24 fee;
+        int24 tickSpacing;
         int24 tickLower;
         int24 tickUpper;
         // how much is provided of token0 and token1
@@ -188,18 +190,11 @@ contract V4Utils is Swapper, IERC721Receiver {
     /// @param instructions Instructions to execute
     /// @return newTokenId Id of position (if a new one was created)
     function execute(uint256 tokenId, Instructions memory instructions) public returns (uint256 newTokenId) {
-
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
         
-        // Get addresses for comparison
-        address token0 = Currency.unwrap(poolKey.currency0);
-        address token1 = Currency.unwrap(poolKey.currency1);
-
-        uint256 amount0;
-        uint256 amount1;
-        (amount0, amount1) = _decreaseLiquidity(
+        // Decrease liquidity and collect fees/tokens
+        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(
             tokenId,
             instructions.liquidity,
             instructions.deadline,
@@ -208,212 +203,269 @@ contract V4Utils is Swapper, IERC721Receiver {
             instructions.decreaseLiquidityHookData
         );
 
-        // check if enough tokens are available for swaps
+        // Validate sufficient tokens for swaps
         if (amount0 < instructions.amountIn0 || amount1 < instructions.amountIn1) {
             revert AmountError();
         }
 
+        // Execute the requested action
         if (instructions.whatToDo == WhatToDo.COMPOUND_FEES) {
-            if (instructions.targetToken == token0) {
-                (liquidity, amount0, amount1) = _swapAndIncrease(
-                    SwapAndIncreaseLiquidityParams(
-                        tokenId,
-                        amount0,
-                        amount1,
-                        instructions.recipient,
-                        instructions.deadline,
-                        poolKey.currency1,
-                        instructions.amountIn1,
-                        instructions.amountOut1Min,
-                        instructions.swapData1,
-                        0,
-                        0,
-                        "",
-                        instructions.amountAddMin0,
-                        instructions.amountAddMin1,
-                        ""
-                    ),
-                    poolKey.currency0,
-                    poolKey.currency1
-                );
-            } else if (instructions.targetToken == token1) {
-                (liquidity, amount0, amount1) = _swapAndIncrease(
-                    SwapAndIncreaseLiquidityParams(
-                        tokenId,
-                        amount0,
-                        amount1,
-                        instructions.recipient,
-                        instructions.deadline,
-                        poolKey.currency0,
-                        0,
-                        0,
-                        "",
-                        instructions.amountIn0,
-                        instructions.amountOut0Min,
-                        instructions.swapData0,
-                        instructions.amountAddMin0,
-                        instructions.amountAddMin1,
-                        ""
-                    ),
-                    poolKey.currency0,
-                    poolKey.currency1
-                );
-            } else {
-                // no swap is done here
-                (liquidity, amount0, amount1) = _swapAndIncrease(
-                    SwapAndIncreaseLiquidityParams(
-                        tokenId,
-                        amount0,
-                        amount1,
-                        instructions.recipient,
-                        instructions.deadline,
-                        Currency.wrap(address(0)),
-                        0,
-                        0,
-                        "",
-                        0,
-                        0,
-                        "",
-                        instructions.amountAddMin0,
-                        instructions.amountAddMin1,
-                        ""
-                    ),
-                    poolKey.currency0,
-                    poolKey.currency1
-                );
-            }
-            emit CompoundFees(tokenId, liquidity, amount0, amount1);
+            _executeCompoundFees(tokenId, poolKey, amount0, amount1, instructions);
         } else if (instructions.whatToDo == WhatToDo.CHANGE_RANGE) {
-            if (instructions.targetToken == token0) {
-                (newTokenId,,,) = _swapAndMint(
-                    SwapAndMintParams(
-                        poolKey.currency0,
-                        poolKey.currency1,
-                        instructions.fee,
-                        instructions.tickLower,
-                        instructions.tickUpper,
-                        amount0,
-                        amount1,
-                        instructions.recipient,
-                        instructions.recipientNFT,
-                        instructions.deadline,
-                        poolKey.currency1,
-                        instructions.amountIn1,
-                        instructions.amountOut1Min,
-                        instructions.swapData1,
-                        0,
-                        0,
-                        "",
-                        instructions.amountAddMin0,
-                        instructions.amountAddMin1,
-                        instructions.swapAndMintReturnData,
-                        instructions.hook,
-                        instructions.mintHookData
-                    )
-                );
-            } else if (instructions.targetToken == token1) {
-                (newTokenId,,,) = _swapAndMint(
-                    SwapAndMintParams(
-                        poolKey.currency0,
-                        poolKey.currency1,
-                        instructions.fee,
-                        instructions.tickLower,
-                        instructions.tickUpper,
-                        amount0,
-                        amount1,
-                        instructions.recipient,
-                        instructions.recipientNFT,
-                        instructions.deadline,
-                        poolKey.currency0,
-                        0,
-                        0,
-                        "",
-                        instructions.amountIn0,
-                        instructions.amountOut0Min,
-                        instructions.swapData0,
-                        instructions.amountAddMin0,
-                        instructions.amountAddMin1,
-                        instructions.swapAndMintReturnData,
-                        instructions.hook,
-                        instructions.mintHookData
-                    )
-                );
-            } else {
-                // no swap is done here
-                (newTokenId,,,) = _swapAndMint(
-                    SwapAndMintParams(
-                        poolKey.currency0,
-                        poolKey.currency1,
-                        instructions.fee,
-                        instructions.tickLower,
-                        instructions.tickUpper,
-                        amount0,
-                        amount1,
-                        instructions.recipient,
-                        instructions.recipientNFT,
-                        instructions.deadline,
-                        Currency.wrap(address(0)),
-                        0,
-                        0,
-                        "",
-                        0,
-                        0,
-                        "",
-                        instructions.amountAddMin0,
-                        instructions.amountAddMin1,
-                        instructions.swapAndMintReturnData,
-                        instructions.hook,
-                        instructions.mintHookData
-                    )
-                );
-            }
-            emit ChangeRange(tokenId, newTokenId);
+            newTokenId = _executeChangeRange(poolKey, amount0, amount1, instructions);
         } else if (instructions.whatToDo == WhatToDo.WITHDRAW_AND_COLLECT_AND_SWAP) {
-            uint256 targetAmount;
-            if (token0 != instructions.targetToken) {
-                (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
-                    Swapper.RouterSwapParams(
-                        poolKey.currency0,
-                        Currency.wrap(instructions.targetToken),
-                        instructions.amountIn0,
-                        instructions.amountOut0Min,
-                        instructions.swapData0
-                    )
-                );
-                if (amountInDelta < amount0) {
-                    _transferToken(instructions.recipient, poolKey.currency0, amount0 - amountInDelta);
-                }
-                targetAmount += amountOutDelta;
-            } else {
-                targetAmount += amount0;
-            }
-            if (token1 != instructions.targetToken) {
-                (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
-                    Swapper.RouterSwapParams(
-                        poolKey.currency1,
-                        Currency.wrap(instructions.targetToken),
-                        instructions.amountIn1,
-                        instructions.amountOut1Min,
-                        instructions.swapData1
-                    )
-                );
-                if (amountInDelta < amount1) {
-                    _transferToken(instructions.recipient, poolKey.currency1, amount1 - amountInDelta);
-                }
-                targetAmount += amountOutDelta;
-            } else {
-                targetAmount += amount1;
-            }
-
-            // send complete target amount
-            if (targetAmount != 0) {
-                Currency.wrap(instructions.targetToken).transfer(instructions.recipient, targetAmount);
-            }
-
-            emit WithdrawAndCollectAndSwap(tokenId, instructions.targetToken, targetAmount);
+            _executeWithdrawAndSwap(tokenId, poolKey, amount0, amount1, instructions);
         } else {
             revert NotSupportedWhatToDo();
         }
+    }
+
+    /// @notice Execute compound fees operation - swap tokens and increase liquidity
+    function _executeCompoundFees(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        uint256 amount0,
+        uint256 amount1,
+        Instructions memory instructions
+    ) internal {
+        address token0 = Currency.unwrap(poolKey.currency0);
+        address token1 = Currency.unwrap(poolKey.currency1);
+        uint128 liquidity;
+
+        if (instructions.targetToken == token0) {
+            // Swap token1 to token0 and increase liquidity
+            (liquidity, amount0, amount1) = _swapAndIncrease(
+                SwapAndIncreaseLiquidityParams(
+                    tokenId,
+                    amount0,
+                    amount1,
+                    instructions.recipient,
+                    instructions.deadline,
+                    poolKey.currency1,
+                    instructions.amountIn1,
+                    instructions.amountOut1Min,
+                    instructions.swapData1,
+                    0,
+                    0,
+                    "",
+                    instructions.amountAddMin0,
+                    instructions.amountAddMin1,
+                    ""
+                ),
+                poolKey.currency0,
+                poolKey.currency1
+            );
+        } else if (instructions.targetToken == token1) {
+            // Swap token0 to token1 and increase liquidity
+            (liquidity, amount0, amount1) = _swapAndIncrease(
+                SwapAndIncreaseLiquidityParams(
+                    tokenId,
+                    amount0,
+                    amount1,
+                    instructions.recipient,
+                    instructions.deadline,
+                    poolKey.currency0,
+                    0,
+                    0,
+                    "",
+                    instructions.amountIn0,
+                    instructions.amountOut0Min,
+                    instructions.swapData0,
+                    instructions.amountAddMin0,
+                    instructions.amountAddMin1,
+                    ""
+                ),
+                poolKey.currency0,
+                poolKey.currency1
+            );
+        } else {
+            // No swap - increase liquidity with both tokens
+            (liquidity, amount0, amount1) = _swapAndIncrease(
+                SwapAndIncreaseLiquidityParams(
+                    tokenId,
+                    amount0,
+                    amount1,
+                    instructions.recipient,
+                    instructions.deadline,
+                    Currency.wrap(address(0)),
+                    0,
+                    0,
+                    "",
+                    0,
+                    0,
+                    "",
+                    instructions.amountAddMin0,
+                    instructions.amountAddMin1,
+                    ""
+                ),
+                poolKey.currency0,
+                poolKey.currency1
+            );
+        }
+        
+        emit CompoundFees(tokenId, liquidity, amount0, amount1);
+    }
+
+    /// @notice Execute change range operation - swap tokens and mint new position
+    function _executeChangeRange(
+        PoolKey memory poolKey,
+        uint256 amount0,
+        uint256 amount1,
+        Instructions memory instructions
+    ) internal returns (uint256 newTokenId) {
+        address token0 = Currency.unwrap(poolKey.currency0);
+        address token1 = Currency.unwrap(poolKey.currency1);
+
+        if (instructions.targetToken == token0) {
+            // Swap token1 to token0 and mint new position
+            (newTokenId,,,) = _swapAndMint(
+                SwapAndMintParams(
+                    poolKey.currency0,
+                    poolKey.currency1,
+                    instructions.fee,
+                    instructions.tickSpacing,
+                    instructions.tickLower,
+                    instructions.tickUpper,
+                    amount0,
+                    amount1,
+                    instructions.recipient,
+                    instructions.recipientNFT,
+                    instructions.deadline,
+                    poolKey.currency1,
+                    instructions.amountIn1,
+                    instructions.amountOut1Min,
+                    instructions.swapData1,
+                    0,
+                    0,
+                    "",
+                    instructions.amountAddMin0,
+                    instructions.amountAddMin1,
+                    instructions.swapAndMintReturnData,
+                    instructions.hook,
+                    instructions.mintHookData
+                )
+            );
+        } else if (instructions.targetToken == token1) {
+            // Swap token0 to token1 and mint new position
+            (newTokenId,,,) = _swapAndMint(
+                SwapAndMintParams(
+                    poolKey.currency0,
+                    poolKey.currency1,
+                    instructions.fee,
+                    instructions.tickSpacing,
+                    instructions.tickLower,
+                    instructions.tickUpper,
+                    amount0,
+                    amount1,
+                    instructions.recipient,
+                    instructions.recipientNFT,
+                    instructions.deadline,
+                    poolKey.currency0,
+                    0,
+                    0,
+                    "",
+                    instructions.amountIn0,
+                    instructions.amountOut0Min,
+                    instructions.swapData0,
+                    instructions.amountAddMin0,
+                    instructions.amountAddMin1,
+                    instructions.swapAndMintReturnData,
+                    instructions.hook,
+                    instructions.mintHookData
+                )
+            );
+        } else {
+            // No swap - mint new position with both tokens
+            (newTokenId,,,) = _swapAndMint(
+                SwapAndMintParams(
+                    poolKey.currency0,
+                    poolKey.currency1,
+                    instructions.fee,
+                    instructions.tickSpacing,
+                    instructions.tickLower,
+                    instructions.tickUpper,
+                    amount0,
+                    amount1,
+                    instructions.recipient,
+                    instructions.recipientNFT,
+                    instructions.deadline,
+                    Currency.wrap(address(0)),
+                    0,
+                    0,
+                    "",
+                    0,
+                    0,
+                    "",
+                    instructions.amountAddMin0,
+                    instructions.amountAddMin1,
+                    instructions.swapAndMintReturnData,
+                    instructions.hook,
+                    instructions.mintHookData
+                )
+            );
+        }
+        
+        emit ChangeRange(0, newTokenId); // tokenId 0 as original position is handled elsewhere
+    }
+
+    /// @notice Execute withdraw, collect and swap operation
+    function _executeWithdrawAndSwap(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        uint256 amount0,
+        uint256 amount1,
+        Instructions memory instructions
+    ) internal {
+        address token0 = Currency.unwrap(poolKey.currency0);
+        address token1 = Currency.unwrap(poolKey.currency1);
+        uint256 targetAmount;
+
+        // Swap token0 to target if needed
+        if (token0 != instructions.targetToken) {
+            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+                Swapper.RouterSwapParams(
+                    poolKey.currency0,
+                    Currency.wrap(instructions.targetToken),
+                    instructions.amountIn0,
+                    instructions.amountOut0Min,
+                    instructions.swapData0
+                )
+            );
+            // Return any leftover token0
+            if (amountInDelta < amount0) {
+                _transferToken(instructions.recipient, poolKey.currency0, amount0 - amountInDelta);
+            }
+            targetAmount += amountOutDelta;
+        } else {
+            targetAmount += amount0;
+        }
+
+        // Swap token1 to target if needed
+        if (token1 != instructions.targetToken) {
+            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+                Swapper.RouterSwapParams(
+                    poolKey.currency1,
+                    Currency.wrap(instructions.targetToken),
+                    instructions.amountIn1,
+                    instructions.amountOut1Min,
+                    instructions.swapData1
+                )
+            );
+            // Return any leftover token1
+            if (amountInDelta < amount1) {
+                _transferToken(instructions.recipient, poolKey.currency1, amount1 - amountInDelta);
+            }
+            targetAmount += amountOutDelta;
+        } else {
+            targetAmount += amount1;
+        }
+
+        // Transfer complete target amount to recipient
+        if (targetAmount != 0) {
+            Currency.wrap(instructions.targetToken).transfer(instructions.recipient, targetAmount);
+        }
+
+        emit WithdrawAndCollectAndSwap(tokenId, instructions.targetToken, targetAmount);
     }
 
     /// @notice ERC721 callback function. Called on safeTransferFrom and does manipulation as configured in encoded Instructions parameter.
@@ -717,6 +769,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             SwapAndMintParams(
                 token0,
                 token1,
+                0,
                 0,
                 0,
                 0,

@@ -75,6 +75,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
             amountOut1Min: params.amountOut1Min,
             swapData1: params.swapData1,
             fee: 0, // Not used for WITHDRAW_AND_COLLECT_AND_SWAP
+            tickSpacing: 60,
             tickLower: 0, // Not used for WITHDRAW_AND_COLLECT_AND_SWAP
             tickUpper: 0, // Not used for WITHDRAW_AND_COLLECT_AND_SWAP
             liquidity: 0, // Not used for WITHDRAW_AND_COLLECT_AND_SWAP

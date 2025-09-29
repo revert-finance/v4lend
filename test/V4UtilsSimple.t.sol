@@ -244,7 +244,8 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
         V4Utils.SwapAndMintParams memory params = V4Utils.SwapAndMintParams({
             token0: Currency.wrap(address(token0)),
             token1: Currency.wrap(address(token1)),
-            fee: FEE,
+            fee: FEE,   
+            tickSpacing: 60,
             tickLower: TICK_LOWER,
             tickUpper: TICK_UPPER,
             amount0: 1000 ether,

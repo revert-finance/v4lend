@@ -75,6 +75,7 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
             amountOut1Min: params.amountOut1Min,
             swapData1: params.swapData1,
             fee: params.newFee,
+            tickSpacing: 60,
             tickLower: params.newTickLower,
             tickUpper: params.newTickUpper,
             liquidity: params.liquidityToRemove,

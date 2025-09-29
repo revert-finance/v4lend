@@ -127,6 +127,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             token0: params.token0,
             token1: params.token1,
             fee: params.fee,
+            tickSpacing: 60,
             tickLower: params.tickLower,
             tickUpper: params.tickUpper,
             amount0: params.amount0,

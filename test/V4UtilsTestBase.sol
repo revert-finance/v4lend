@@ -248,6 +248,7 @@ abstract contract V4UtilsTestBase is Test {
             amountOut1Min: 0,
             swapData1: "",
             fee: FEE,
+            tickSpacing: 60,
             tickLower: TICK_LOWER,
             tickUpper: TICK_UPPER,
             liquidity: liquidity,

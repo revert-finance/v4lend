@@ -202,6 +202,7 @@ contract V4UtilsCompoundFeesTest is V4UtilsExecuteTestBase {
             amountOut1Min: params.amountOut1Min,
             swapData1: params.swapData1,
             fee: 0, // Not used for COMPOUND_FEES
+            tickSpacing: 60,
             tickLower: 0, // Not used for COMPOUND_FEES
             tickUpper: 0, // Not used for COMPOUND_FEES
             liquidity: params.liquidityToRemove,
