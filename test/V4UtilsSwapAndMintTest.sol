@@ -44,6 +44,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
         uint256 amountAddMin1;
         bytes returnData;
         string testName;
+        address hook;
     }
 
     function _executeSwapAndMint(
@@ -98,15 +99,11 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             currency1: params.token1,
             fee: params.fee,
             tickSpacing: params.fee == 3000 ? int24(60) : int24(10), // Tick spacing based on fee
-            hooks: IHooks(address(0))
+            hooks: IHooks(params.hook)
         });
         
-        // Try to initialize the pool, but don't fail if it's already initialized
-        try poolManager.initialize(poolKey, 79228162514264337593543950336) {
-            console.log("Pool initialized successfully");
-        } catch {
-            console.log("Pool already initialized, continuing...");
-        }
+        // Initialize the pool with the hook if needed
+        _initializePoolWithHook(poolKey);
         
         // Set up direct ERC20 allowances from user to V4Utils (since swapAndMint uses direct transfers)
         if (Currency.unwrap(params.token0) != address(0)) {
@@ -145,7 +142,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: params.amountAddMin0,
             amountAddMin1: params.amountAddMin1,
             returnData: params.returnData,
-            hook: address(0),
+            hook: params.hook,
             mintHookData: ""
         });
 
@@ -257,7 +254,8 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            testName: "WETH/USDC - No Swap"
+            testName: "WETH/USDC - No Swap",
+            hook: address(0)
         });
         
         _executeSwapAndMint(params);
@@ -285,7 +283,8 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            testName: "ETH/USDC - No Swap"
+            testName: "ETH/USDC - No Swap",
+            hook: address(0)
         });
         
         _executeSwapAndMint(params);
@@ -313,7 +312,8 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            testName: "ETH/USDC - Swap ETH to USDC"
+            testName: "ETH/USDC - Swap ETH to USDC",
+            hook: address(0)
         });
         
         _executeSwapAndMint(params);
@@ -341,9 +341,40 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             returnData: hex"",
-            testName: "ETH/USDC - Swap USDC to ETH"
+            testName: "ETH/USDC - Swap USDC to ETH",
+            hook: address(0)
         });
         
         _executeSwapAndMint(params);
     }
+
+    function testSwapAndMint_WETH_USDC_WithHook() public {
+        SwapAndMintTestParams memory params = SwapAndMintTestParams({
+            token0: Currency.wrap(address(usdc)),
+            token1: Currency.wrap(address(realWeth)),
+            fee: 3000, // 0.3% fee
+            tickLower: -1200, // Tick range aligned with tick spacing 60
+            tickUpper: 1200,
+            amount0: 100000000, // 100 USDC (smaller amount)
+            amount1: 100000000000000000, // 0.1 WETH (user has ~0.1 WETH)
+            recipient: nft1Owner,
+            recipientNFT: nft1Owner,
+            deadline: block.timestamp,
+            swapSourceToken: Currency.wrap(address(0)), // No swap
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: hex"",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: hex"",
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            returnData: hex"",
+            testName: "WETH/USDC - No Swap With Hook",
+            hook: 0xeE20cE89b34815f7DE29eBdf33e2861AA128C444
+        });
+        
+        _executeSwapAndMint(params);
+    }
+
 }

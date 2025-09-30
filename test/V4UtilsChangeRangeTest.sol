@@ -86,7 +86,7 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
             recipientNFT: params.owner,
             returnData: "",
             swapAndMintReturnData: "",
-            hook: address(0),
+            hook: params.hook,
             mintHookData: "",
             decreaseLiquidityHookData: ""
         });
@@ -224,8 +224,39 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
             swapData1: hex"",
             amountAddMin0: 0,
             amountAddMin1: 0,
-            testName: "NFT1 - Change Range No Swap"
+            testName: "NFT1 - Change Range No Swap",
+            hook: address(0)
         });
+        
+        _executeChangeRange(params);
+    }
+
+    function testExecuteChangeRange_NFT1_NoSwapAndHook() public {
+        // Get current liquidity of the position
+        uint128 currentLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
+        
+        ChangeRangeTestParams memory params = ChangeRangeTestParams({
+            tokenId: nft1TokenId,
+            owner: nft1Owner,
+            targetToken: address(0), // No swap target
+            newFee: 3000, // 0.3% fee (different from original)
+            newTickLower: -960, // New tick range (aligned with tick spacing 60)
+            newTickUpper: 960,
+            liquidityToRemove: currentLiquidity, // Remove all liquidity
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: hex"",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: hex"",
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            testName: "NFT1 - Change Range No Swap And Hook",
+            hook: 0xeE20cE89b34815f7DE29eBdf33e2861AA128C444
+        });
+        
+        // Initialize the pool with the hook before executing change range
+        _initializePoolWithHook(params);
         
         _executeChangeRange(params);
     }
@@ -250,9 +281,29 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
             swapData1: _getUSDCtoWETHSwapData(),
             amountAddMin0: 0,
             amountAddMin1: 0,
-            testName: "NFT2 - Change Range With Swap"
+            testName: "NFT2 - Change Range With Swap",
+            hook: address(0)
         });
         
         _executeChangeRange(params);
+    }
+
+    /// @notice Initialize a pool with the specified hook for testing
+    /// @param params The test parameters containing pool configuration
+    function _initializePoolWithHook(ChangeRangeTestParams memory params) internal {
+        // Get the original pool info to determine the currencies
+        (PoolKey memory originalPoolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
+        
+        // Create a new pool key with the hook
+        PoolKey memory newPoolKey = PoolKey({
+            currency0: originalPoolKey.currency0,
+            currency1: originalPoolKey.currency1,
+            fee: params.newFee,
+            tickSpacing: 60, // Use tick spacing for 0.3% fee
+            hooks: IHooks(params.hook)
+        });
+        
+        // Use the base class function
+        _initializePoolWithHook(newPoolKey);
     }
 }

@@ -9,6 +9,8 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {V4Utils} from "../src/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
@@ -139,6 +141,7 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
         uint256 amountAddMin0;
         uint256 amountAddMin1;
         string testName;
+        address hook;
     }
 
     struct CompoundFeesTestParams {
@@ -213,5 +216,20 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
         console.log("WETH balance change:", int256(finalWethBalance) - int256(initialWethBalance));
         console.log("USDC balance change:", int256(finalUsdcBalance) - int256(initialUsdcBalance));
         console.log("ETH balance change:", int256(finalEthBalance) - int256(initialEthBalance));
+    }
+
+    /// @notice Initialize a pool with the specified hook for testing
+    /// @param poolKey The pool key to check and initialize
+    function _initializePoolWithHook(PoolKey memory poolKey) internal {
+        // Check if pool is already initialized by checking if sqrtPriceX96 is non-zero
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+        
+        if (sqrtPriceX96 == 0) {
+            // Pool not initialized, initialize it with a default sqrt price
+            poolManager.initialize(poolKey, 79228162514264337593543950336);
+            console.log("Pool initialized successfully with hook");
+        } else {
+            console.log("Pool already initialized, continuing...");
+        }
     }
 }
