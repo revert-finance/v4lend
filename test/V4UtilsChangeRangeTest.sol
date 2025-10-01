@@ -25,14 +25,10 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
     function _executeChangeRange(
         ChangeRangeTestParams memory params
     ) internal {
-        console.log("=== Testing CHANGE_RANGE:", params.testName);
+        _logTestStart("CHANGE_RANGE", params.testName);
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(params.owner);
-        uint256 initialUsdcBalance = usdc.balanceOf(params.owner);
-        uint256 initialEthBalance = params.owner.balance;
-        
-        _logInitialBalances(params.owner, initialWethBalance, initialUsdcBalance, initialEthBalance);
+        (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) = _recordInitialBalances(params.owner);
         
         // Get pool info to show token addresses and current tick range
         _logPositionInfo(params.tokenId);
@@ -41,21 +37,14 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
         _executeChangeRangeTest(params);
         
         // Record final balances
-        uint256 finalWethBalance = realWeth.balanceOf(params.owner);
-        uint256 finalUsdcBalance = usdc.balanceOf(params.owner);
-        uint256 finalEthBalance = params.owner.balance;
-        
-        _logBalanceChanges(
+        (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) = _recordFinalBalances(
             params.owner,
             initialWethBalance,
-            finalWethBalance,
             initialUsdcBalance,
-            finalUsdcBalance,
-            initialEthBalance,
-            finalEthBalance
+            initialEthBalance
         );
         
-        console.log("CHANGE_RANGE completed successfully");
+        _logTestCompletion("CHANGE_RANGE");
 
         // Assertions for CHANGE_RANGE operation
         _verifyChangeRangeResults(params, initialWethBalance, finalWethBalance, initialUsdcBalance, finalUsdcBalance, initialEthBalance, finalEthBalance);

@@ -25,14 +25,10 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
     function _executeWithdrawAndCollectAndSwap(
         WithdrawAndCollectAndSwapTestParams memory params
     ) internal {
-        console.log("=== Testing WITHDRAW_AND_COLLECT_AND_SWAP:", params.testName);
+        _logTestStart("WITHDRAW_AND_COLLECT_AND_SWAP", params.testName);
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(params.owner);
-        uint256 initialUsdcBalance = usdc.balanceOf(params.owner);
-        uint256 initialEthBalance = params.owner.balance;
-        
-        _logInitialBalances(params.owner, initialWethBalance, initialUsdcBalance, initialEthBalance);
+        (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) = _recordInitialBalances(params.owner);
         
         // Get pool info to show token addresses and current tick range
         _logPositionInfo(params.tokenId);
@@ -41,21 +37,14 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
         _executeWithdrawAndCollectAndSwapTest(params);
         
         // Record final balances
-        uint256 finalWethBalance = realWeth.balanceOf(params.owner);
-        uint256 finalUsdcBalance = usdc.balanceOf(params.owner);
-        uint256 finalEthBalance = params.owner.balance;
-        
-        _logBalanceChanges(
+        (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) = _recordFinalBalances(
             params.owner,
             initialWethBalance,
-            finalWethBalance,
             initialUsdcBalance,
-            finalUsdcBalance,
-            initialEthBalance,
-            finalEthBalance
+            initialEthBalance
         );
         
-        console.log("WITHDRAW_AND_COLLECT_AND_SWAP completed successfully");
+        _logTestCompletion("WITHDRAW_AND_COLLECT_AND_SWAP");
 
         // Assertions for WITHDRAW_AND_COLLECT_AND_SWAP operation
         _verifyWithdrawAndCollectAndSwapResults(params, initialWethBalance, finalWethBalance, initialUsdcBalance, finalUsdcBalance, initialEthBalance, finalEthBalance);

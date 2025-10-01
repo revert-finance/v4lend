@@ -50,14 +50,10 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
     function _executeSwapAndMint(
         SwapAndMintTestParams memory params
     ) internal {
-        console.log("=== Testing SWAP_AND_MINT:", params.testName);
+        _logTestStart("SWAP_AND_MINT", params.testName);
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(params.recipient);
-        uint256 initialUsdcBalance = usdc.balanceOf(params.recipient);
-        uint256 initialEthBalance = params.recipient.balance;
-        
-        _logInitialBalances(params.recipient, initialWethBalance, initialUsdcBalance, initialEthBalance);
+        (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) = _recordInitialBalances(params.recipient);
         
         // Log pool parameters
         console.log("Token0 address:", Currency.unwrap(params.token0));
@@ -72,21 +68,14 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
         _executeSwapAndMintTest(params);
         
         // Record final balances
-        uint256 finalWethBalance = realWeth.balanceOf(params.recipient);
-        uint256 finalUsdcBalance = usdc.balanceOf(params.recipient);
-        uint256 finalEthBalance = params.recipient.balance;
-        
-        _logBalanceChanges(
+        (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) = _recordFinalBalances(
             params.recipient,
             initialWethBalance,
-            finalWethBalance,
             initialUsdcBalance,
-            finalUsdcBalance,
-            initialEthBalance,
-            finalEthBalance
+            initialEthBalance
         );
         
-        console.log("SWAP_AND_MINT completed successfully");
+        _logTestCompletion("SWAP_AND_MINT");
 
         // Assertions for SWAP_AND_MINT operation
         _verifySwapAndMintResults(params, initialWethBalance, finalWethBalance, initialUsdcBalance, finalUsdcBalance, initialEthBalance, finalEthBalance);

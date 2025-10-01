@@ -32,14 +32,10 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
     function _executeSwap(
         SwapTestParams memory params
     ) internal {
-        console.log("=== Testing SWAP:", params.testName);
+        _logTestStart("SWAP", params.testName);
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(params.recipient);
-        uint256 initialUsdcBalance = usdc.balanceOf(params.recipient);
-        uint256 initialEthBalance = params.recipient.balance;
-        
-        _logInitialBalances(params.recipient, initialWethBalance, initialUsdcBalance, initialEthBalance);
+        (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) = _recordInitialBalances(params.recipient);
         
         // Log swap parameters
         console.log("TokenIn address:", Currency.unwrap(params.tokenIn));
@@ -52,21 +48,14 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
         _executeSwapTest(params);
         
         // Record final balances
-        uint256 finalWethBalance = realWeth.balanceOf(params.recipient);
-        uint256 finalUsdcBalance = usdc.balanceOf(params.recipient);
-        uint256 finalEthBalance = params.recipient.balance;
-        
-        _logBalanceChanges(
+        (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) = _recordFinalBalances(
             params.recipient,
             initialWethBalance,
-            finalWethBalance,
             initialUsdcBalance,
-            finalUsdcBalance,
-            initialEthBalance,
-            finalEthBalance
+            initialEthBalance
         );
         
-        console.log("SWAP completed successfully");
+        _logTestCompletion("SWAP");
 
         // Assertions for SWAP operation
         _verifySwapResults(params, initialWethBalance, finalWethBalance, initialUsdcBalance, finalUsdcBalance, initialEthBalance, finalEthBalance);

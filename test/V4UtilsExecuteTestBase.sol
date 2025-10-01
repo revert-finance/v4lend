@@ -232,4 +232,59 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
             console.log("Pool already initialized, continuing...");
         }
     }
+
+    /// @notice Common pattern for recording initial balances
+    /// @param owner The owner/recipient address for balance tracking
+    /// @return initialWethBalance Initial WETH balance
+    /// @return initialUsdcBalance Initial USDC balance  
+    /// @return initialEthBalance Initial ETH balance
+    function _recordInitialBalances(address owner) internal view returns (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) {
+        initialWethBalance = realWeth.balanceOf(owner);
+        initialUsdcBalance = usdc.balanceOf(owner);
+        initialEthBalance = owner.balance;
+        
+        _logInitialBalances(owner, initialWethBalance, initialUsdcBalance, initialEthBalance);
+    }
+
+    /// @notice Common pattern for recording final balances and logging changes
+    /// @param owner The owner/recipient address for balance tracking
+    /// @param initialWethBalance Initial WETH balance
+    /// @param initialUsdcBalance Initial USDC balance
+    /// @param initialEthBalance Initial ETH balance
+    /// @return finalWethBalance Final WETH balance
+    /// @return finalUsdcBalance Final USDC balance
+    /// @return finalEthBalance Final ETH balance
+    function _recordFinalBalances(
+        address owner,
+        uint256 initialWethBalance,
+        uint256 initialUsdcBalance,
+        uint256 initialEthBalance
+    ) internal view returns (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) {
+        finalWethBalance = realWeth.balanceOf(owner);
+        finalUsdcBalance = usdc.balanceOf(owner);
+        finalEthBalance = owner.balance;
+        
+        _logBalanceChanges(
+            owner,
+            initialWethBalance,
+            finalWethBalance,
+            initialUsdcBalance,
+            finalUsdcBalance,
+            initialEthBalance,
+            finalEthBalance
+        );
+    }
+
+    /// @notice Common pattern for logging test start
+    /// @param testType The type of test being executed
+    /// @param testName The name of the test
+    function _logTestStart(string memory testType, string memory testName) internal pure {
+        console.log("=== Testing", testType, ":", testName);
+    }
+
+    /// @notice Common pattern for logging test completion
+    /// @param testType The type of test that completed
+    function _logTestCompletion(string memory testType) internal pure {
+        console.log(testType, "completed successfully");
+    }
 }

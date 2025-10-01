@@ -42,14 +42,10 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
     function _executeSwapAndIncreaseLiquidity(
         SwapAndIncreaseLiquidityTestParams memory params
     ) internal {
-        console.log("=== Testing SWAP_AND_INCREASE_LIQUIDITY:", params.testName);
+        _logTestStart("SWAP_AND_INCREASE_LIQUIDITY", params.testName);
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(params.recipient);
-        uint256 initialUsdcBalance = usdc.balanceOf(params.recipient);
-        uint256 initialEthBalance = params.recipient.balance;
-        
-        _logInitialBalances(params.recipient, initialWethBalance, initialUsdcBalance, initialEthBalance);
+        (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) = _recordInitialBalances(params.recipient);
         
         // Log position and swap parameters
         console.log("TokenId:", params.tokenId);
@@ -71,21 +67,14 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
         _executeSwapAndIncreaseLiquidityTest(params);
         
         // Record final balances
-        uint256 finalWethBalance = realWeth.balanceOf(params.recipient);
-        uint256 finalUsdcBalance = usdc.balanceOf(params.recipient);
-        uint256 finalEthBalance = params.recipient.balance;
-        
-        _logBalanceChanges(
+        (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) = _recordFinalBalances(
             params.recipient,
             initialWethBalance,
-            finalWethBalance,
             initialUsdcBalance,
-            finalUsdcBalance,
-            initialEthBalance,
-            finalEthBalance
+            initialEthBalance
         );
         
-        console.log("SWAP_AND_INCREASE_LIQUIDITY completed successfully");
+        _logTestCompletion("SWAP_AND_INCREASE_LIQUIDITY");
 
         // Assertions for SWAP_AND_INCREASE_LIQUIDITY operation
         _verifySwapAndIncreaseLiquidityResults(params, initialLiquidity, initialWethBalance, finalWethBalance, initialUsdcBalance, finalUsdcBalance, initialEthBalance, finalEthBalance);

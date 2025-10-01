@@ -111,14 +111,10 @@ contract V4UtilsCompoundFeesTest is V4UtilsExecuteTestBase {
     function _executeCompoundFees(
         CompoundFeesTestParams memory params
     ) internal {
-        console.log("=== Testing COMPOUND_FEES:", params.testName);
+        _logTestStart("COMPOUND_FEES", params.testName);
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(params.owner);
-        uint256 initialUsdcBalance = usdc.balanceOf(params.owner);
-        uint256 initialEthBalance = params.owner.balance;
-        
-        _logInitialBalances(params.owner, initialWethBalance, initialUsdcBalance, initialEthBalance);
+        (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) = _recordInitialBalances(params.owner);
         
         // Get pool info to show token addresses and current tick range
         _logPositionInfo(params.tokenId);
@@ -131,21 +127,14 @@ contract V4UtilsCompoundFeesTest is V4UtilsExecuteTestBase {
         _executeCompoundFeesTest(params);
         
         // Record final balances
-        uint256 finalWethBalance = realWeth.balanceOf(params.owner);
-        uint256 finalUsdcBalance = usdc.balanceOf(params.owner);
-        uint256 finalEthBalance = params.owner.balance;
-        
-        _logBalanceChanges(
+        (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) = _recordFinalBalances(
             params.owner,
             initialWethBalance,
-            finalWethBalance,
             initialUsdcBalance,
-            finalUsdcBalance,
-            initialEthBalance,
-            finalEthBalance
+            initialEthBalance
         );
         
-        console.log("COMPOUND_FEES completed successfully");
+        _logTestCompletion("COMPOUND_FEES");
 
         // Assertions for COMPOUND_FEES operation
         _verifyCompoundFeesResults(params, initialLiquidity, initialWethBalance, finalWethBalance, initialUsdcBalance, finalUsdcBalance, initialEthBalance, finalEthBalance);
