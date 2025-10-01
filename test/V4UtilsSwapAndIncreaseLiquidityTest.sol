@@ -5,7 +5,7 @@ import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
@@ -192,7 +192,7 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             amount1: 1000000000000000, // 0.001 WETH (much smaller amount)
             recipient: nft1Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)), // No swap
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: hex"",
@@ -214,7 +214,7 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
             amount1: 1000000, // 1 USDC (much smaller amount)
             recipient: nft2Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)), // No swap
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: hex"",

@@ -5,7 +5,7 @@ import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {V4Utils} from "../src/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
@@ -129,7 +129,7 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
 
     function testSwap_ETH_to_USDC() public {
         SwapTestParams memory params = SwapTestParams({
-            tokenIn: Currency.wrap(address(0)), // ETH
+            tokenIn: CurrencyLibrary.ADDRESS_ZERO, // ETH
             tokenOut: Currency.wrap(address(usdc)),
             amountIn: 1000000000000000,
             minAmountOut: 4128717,
@@ -144,7 +144,7 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
     function testSwap_USDC_to_ETH() public {
         SwapTestParams memory params = SwapTestParams({
             tokenIn: Currency.wrap(address(usdc)),
-            tokenOut: Currency.wrap(address(0)), // ETH
+            tokenOut: CurrencyLibrary.ADDRESS_ZERO, // ETH
             amountIn: 6274987, 
             minAmountOut: 756050291375000,
             recipient: nft1Owner,
@@ -158,7 +158,7 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
     function testSwap_WETH_to_ETH() public {
         SwapTestParams memory params = SwapTestParams({
             tokenIn: Currency.wrap(address(realWeth)),
-            tokenOut: Currency.wrap(address(0)), // ETH
+            tokenOut: CurrencyLibrary.ADDRESS_ZERO, // ETH
             amountIn: 1000000000000000,
             minAmountOut: 1000000000000000,
             recipient: nft1Owner,
@@ -171,7 +171,7 @@ contract V4UtilsSwapTest is V4UtilsExecuteTestBase {
 
     function testSwap_ETH_to_WETH() public {
         SwapTestParams memory params = SwapTestParams({
-            tokenIn: Currency.wrap(address(0)), // ETH
+            tokenIn: CurrencyLibrary.ADDRESS_ZERO, // ETH
             tokenOut: Currency.wrap(address(realWeth)),
             amountIn: 1000000000000000,
             minAmountOut: 1000000000000000,

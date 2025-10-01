@@ -5,7 +5,7 @@ import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -233,7 +233,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             recipient: nft1Owner,
             recipientNFT: nft1Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)), // No swap
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: hex"",
@@ -252,7 +252,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
 
     function testSwapAndMint_ETH_USDC_NoSwap() public {
         SwapAndMintTestParams memory params = SwapAndMintTestParams({
-            token0: Currency.wrap(address(0)), // ETH
+            token0: CurrencyLibrary.ADDRESS_ZERO, // ETH
             token1: Currency.wrap(address(usdc)),
             fee: 3000, // 0.3% fee
             tickLower: -1200, // Tick range aligned with tick spacing 60
@@ -262,7 +262,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             recipient: nft2Owner,
             recipientNFT: nft2Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)), // No swap
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: hex"",
@@ -281,7 +281,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
 
     function testSwapAndMint_ETH_USDC_Swap() public {
         SwapAndMintTestParams memory params = SwapAndMintTestParams({
-            token0: Currency.wrap(address(0)), // ETH
+            token0: CurrencyLibrary.ADDRESS_ZERO, // ETH
             token1: Currency.wrap(address(usdc)),
             fee: 3000, // 0.3% fee
             tickLower: -1200, // Tick range aligned with tick spacing 60
@@ -291,7 +291,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             recipient: nft2Owner,
             recipientNFT: nft2Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)),
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO,
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: hex"",
@@ -310,7 +310,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
 
     function testSwapAndMint_USDC_ETH_Swap() public {
         SwapAndMintTestParams memory params = SwapAndMintTestParams({
-            token0: Currency.wrap(address(0)), // ETH
+            token0: CurrencyLibrary.ADDRESS_ZERO, // ETH
             token1: Currency.wrap(address(usdc)),
             fee: 3000, // 0.3% fee
             tickLower: -1200, // Tick range aligned with tick spacing 60
@@ -349,7 +349,7 @@ contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
             recipient: nft1Owner,
             recipientNFT: nft1Owner,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)), // No swap
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: hex"",

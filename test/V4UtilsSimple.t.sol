@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
@@ -253,7 +253,7 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             recipient: user1,
             recipientNFT: user1,
             deadline: block.timestamp,
-            swapSourceToken: Currency.wrap(address(0)), // No swap
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: "",

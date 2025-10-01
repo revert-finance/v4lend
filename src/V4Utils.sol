@@ -15,6 +15,7 @@ import "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import "@uniswap/v4-core/src/types/PoolKey.sol";
 import "@uniswap/v4-core/src/types/Currency.sol";
+import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import "@uniswap/v4-core/src/libraries/TickMath.sol";
@@ -286,7 +287,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     amount1,
                     instructions.recipient,
                     instructions.deadline,
-                    Currency.wrap(address(0)),
+                    CurrencyLibrary.ADDRESS_ZERO,
                     0,
                     0,
                     "",
@@ -387,7 +388,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     instructions.recipient,
                     instructions.recipientNFT,
                     instructions.deadline,
-                    Currency.wrap(address(0)),
+                    CurrencyLibrary.ADDRESS_ZERO,
                     0,
                     0,
                     "",
@@ -501,7 +502,7 @@ contract V4Utils is Swapper, IERC721Receiver {
             revert SameToken();
         }
 
-         _prepareAddApproved(params.tokenIn, Currency.wrap(address(0)), Currency.wrap(address(0)), params.amountIn, 0, 0);
+         _prepareAddApproved(params.tokenIn, CurrencyLibrary.ADDRESS_ZERO, CurrencyLibrary.ADDRESS_ZERO, params.amountIn, 0, 0);
 
         uint256 amountInDelta;
         (amountInDelta, amountOut) = _routerSwap(
@@ -632,7 +633,7 @@ contract V4Utils is Swapper, IERC721Receiver {
     /// @param hasNativeETH Whether native ETH is involved
     function _addSweepParamsIfNeeded(bytes[] memory params_array, bool hasNativeETH) internal view {
         if (hasNativeETH) {
-            params_array[2] = abi.encode(Currency.wrap(address(0)), address(this));
+            params_array[2] = abi.encode(CurrencyLibrary.ADDRESS_ZERO, address(this));
         }
     }
 

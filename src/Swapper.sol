@@ -128,13 +128,10 @@ abstract contract Swapper is Constants {
     /// @param tokenOut Output token
     /// @return true if this is a direct WETH/ETH swap
     function _isDirectWethSwap(Currency tokenIn, Currency tokenOut) internal view returns (bool) {
-        address wethAddress = address(weth);
-        address tokenInAddress = Currency.unwrap(tokenIn);
-        address tokenOutAddress = Currency.unwrap(tokenOut);
-        
+        Currency wethCurrency = Currency.wrap(address(weth));
         // Check for WETH -> ETH (WETH to zero address) OR ETH -> WETH (zero address to WETH)
-        return (tokenInAddress == wethAddress && tokenOutAddress == address(0)) ||
-               (tokenInAddress == address(0) && tokenOutAddress == wethAddress);
+        return (tokenIn == wethCurrency && tokenOut.isAddressZero()) ||
+               (tokenIn.isAddressZero() && tokenOut == wethCurrency);
     }
 
     /// @notice Handle direct WETH/ETH swaps using IWETH functions

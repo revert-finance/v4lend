@@ -40,7 +40,7 @@ contract EasyPosmTest is Test, Deployers {
 
         // Create the pool
         key = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
-        nativeKey = PoolKey(Currency.wrap(address(0)), currency1, 3000, 60, IHooks(address(0)));
+        nativeKey = PoolKey(CurrencyLibrary.ADDRESS_ZERO, currency1, 3000, 60, IHooks(address(0)));
 
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
         poolManager.initialize(nativeKey, Constants.SQRT_PRICE_1_1);
