@@ -8,7 +8,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
@@ -222,6 +222,69 @@ abstract contract V4UtilsTestBase is Test {
         
         vm.prank(owner);
         positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
+        
+        // Get the newly minted token ID
+        tokenId = positionManager.nextTokenId() - 1;
+        
+        return tokenId;
+    }
+    
+    function _createTestPositionWithETH(address owner) internal returns (uint256 tokenId) {
+        // Create a pool key with ETH as currency0
+        PoolKey memory poolKey = PoolKey({
+            currency0: CurrencyLibrary.ADDRESS_ZERO, // ETH
+            currency1: Currency.wrap(address(token1)),
+            fee: FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        
+        // Initialize the pool
+        vm.prank(owner);
+        poolManager.initialize(poolKey, 79228162514264337593543950336); // sqrt price
+        
+        // Set up ERC20 allowance for token1 only (ETH doesn't need approval)
+        vm.prank(owner);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Set up Permit2 allowances for token1 only
+        vm.prank(owner);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(INITIAL_LIQUIDITY),
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        
+        // Also set up Permit2 allowances for V4Utils
+        token1.approve(address(permit2), type(uint256).max);
+        
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(10_000_000 ether), // Large allowance for V4Utils
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        
+        // Create position using modifyLiquidities with MINT_POSITION action
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        uint256 ethAmount = 10 ether; // Use smaller amount of ETH that fits within user balance
+        
+        paramsArray[0] = abi.encode(
+            poolKey,
+            TICK_LOWER,
+            TICK_UPPER,
+            ethAmount,
+            ethAmount, // amount0Max (ETH)
+            ethAmount, // amount1Max (token1)
+            owner,             // recipient
+            ""                 // hookData
+        );
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(positionManager));
+        
+        vm.prank(owner);
+        positionManager.modifyLiquidities{value: ethAmount}(abi.encode(actions, paramsArray), block.timestamp);
         
         // Get the newly minted token ID
         tokenId = positionManager.nextTokenId() - 1;
