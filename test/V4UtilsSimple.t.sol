@@ -426,9 +426,6 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
         int24 initialTickUpper = positionInfo.tickUpper();
         
         // Record initial balances (including ETH)
-        uint256 initialBalance0 = token0.balanceOf(user1);
-        uint256 initialBalance1 = token1.balanceOf(user1);
-        uint256 initialEthBalance = user1.balance;
         uint256 initialV4UtilsBalance0 = token0.balanceOf(address(v4Utils));
         uint256 initialV4UtilsBalance1 = token1.balanceOf(address(v4Utils));
         uint256 initialV4UtilsEthBalance = address(v4Utils).balance;
@@ -669,7 +666,6 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
         console.log("=== Testing swapAndMint function with ETH ===");
         
         // Record initial balances (including ETH)
-        uint256 initialBalance0 = token0.balanceOf(user1);
         uint256 initialBalance1 = token1.balanceOf(user1);
         uint256 initialEthBalance = user1.balance;
         uint256 initialV4UtilsBalance0 = token0.balanceOf(address(v4Utils));
