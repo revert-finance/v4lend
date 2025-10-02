@@ -64,4 +64,5 @@ abstract contract Constants {
     error NotEnoughReward();
     error SameRange();
     error NotSupportedFeeTier();
+    error InsufficientAmountAdded();
 }

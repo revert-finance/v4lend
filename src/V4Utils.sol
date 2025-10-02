@@ -698,6 +698,14 @@ contract V4Utils is Swapper, IERC721Receiver {
             added0 = total0 >= finalBalance0 ? total0 - finalBalance0 : 0;
             added1 = total1 >= finalBalance1 ? total1 - finalBalance1 : 0;
 
+            // Check minimum amounts were added
+            if (added0 < params.amountAddMin0) {
+                revert InsufficientAmountAdded();
+            }
+            if (added1 < params.amountAddMin1) {
+                revert InsufficientAmountAdded();
+            }
+
             emit SwapAndMint(tokenId, liquidity, added0, added1);
 
             // Return leftover tokens
@@ -826,6 +834,14 @@ contract V4Utils is Swapper, IERC721Receiver {
             
             added0 = total0 - finalBalance0;
             added1 = total1 - finalBalance1;
+
+            // Check minimum amounts were added
+            if (added0 < params.amountAddMin0) {
+                revert InsufficientAmountAdded();
+            }
+            if (added1 < params.amountAddMin1) {
+                revert InsufficientAmountAdded();
+            }
 
             emit SwapAndIncreaseLiquidity(params.tokenId, liquidity, added0, added1);
 

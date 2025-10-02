@@ -10,6 +10,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {V4Utils} from "../src/V4Utils.sol";
+import {Constants} from "../src/Constants.sol";
 import "./V4UtilsTestBase.sol";
 
 /**
@@ -784,5 +785,194 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
         assertLe(ethConsumed, 10 ether, "Should not consume more ETH than provided");
         assertEq(ethConsumed, amount0, "ETH consumed should match amount0");
         assertEq(token1Consumed, amount1, "Token1 consumed should match amount1");
+    }
+    
+    function testSwapAndMintWithETH_InsufficientAmountAdded() public {
+        console.log("=== Testing swapAndMint with insufficient amount added ===");
+        
+        // First initialize the pool (required for V4) with ETH as currency0
+        PoolKey memory poolKey = PoolKey({
+            currency0: CurrencyLibrary.ADDRESS_ZERO, // ETH
+            currency1: Currency.wrap(address(token1)),
+            fee: FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        
+        // Initialize the pool
+        vm.prank(user1);
+        poolManager.initialize(poolKey, 79228162514264337593543950336); // sqrt price
+        
+        // Set up ERC20 allowance for token1 only (ETH doesn't need approval)
+        vm.prank(user1);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Set up Permit2 allowances for token1 only
+        vm.prank(user1);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(10 ether),
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        
+        // Prepare swap and mint parameters with ETH - set high minimum amounts to trigger error
+        V4Utils.SwapAndMintParams memory params = V4Utils.SwapAndMintParams({
+            token0: CurrencyLibrary.ADDRESS_ZERO, // ETH
+            token1: Currency.wrap(address(token1)),
+            fee: FEE,   
+            tickSpacing: 60,
+            tickLower: TICK_LOWER,
+            tickUpper: TICK_UPPER,
+            amount0: 1 ether, // Small ETH amount
+            amount1: 1 ether, // Small token1 amount
+            recipient: user1,
+            recipientNFT: user1,
+            deadline: block.timestamp,
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            amountAddMin0: 2 ether, // Higher than amount0 - should fail
+            amountAddMin1: 0, // No minimum for token1
+            returnData: "",
+            hook: address(0),
+            mintHookData: ""
+        });
+        
+        // Approve tokens (only token1, ETH doesn't need approval)
+        vm.prank(user1);
+        token1.approve(address(v4Utils), 1 ether);
+        
+        // Execute swap and mint with ETH value - should fail due to insufficient amount
+        vm.prank(user1);
+        vm.expectRevert(Constants.InsufficientAmountAdded.selector);
+        v4Utils.swapAndMint{value: 1 ether}(params);
+        
+        console.log("InsufficientAmountAdded error correctly thrown");
+    }
+    
+    function testSwapAndIncreaseLiquidity_InsufficientAmountAdded() public {
+        console.log("=== Testing swapAndIncreaseLiquidity with insufficient amount added ===");
+        
+        // Create a position first
+        uint256 tokenId = _createTestPosition(user1);
+        console.log("Created position with tokenId:", tokenId);
+        
+        // Set up ERC20 allowances for the increase
+        vm.prank(user1);
+        token0.approve(address(permit2), type(uint256).max);
+        vm.prank(user1);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Set up Permit2 allowances
+        vm.prank(user1);
+        permit2.approve(
+            address(token0),
+            address(positionManager),
+            uint160(1000 ether),
+            uint48(block.timestamp + 1 days)
+        );
+        vm.prank(user1);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(1000 ether),
+            uint48(block.timestamp + 1 days)
+        );
+        
+        // Prepare swap and increase liquidity parameters with high minimum amounts
+        V4Utils.SwapAndIncreaseLiquidityParams memory params = V4Utils.SwapAndIncreaseLiquidityParams({
+            tokenId: tokenId,
+            amount0: 1 ether, // Small amount
+            amount1: 1 ether, // Small amount
+            recipient: user1,
+            deadline: block.timestamp,
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            amountAddMin0: 2 ether, // Higher than amount0 - should fail
+            amountAddMin1: 0, // No minimum for token1
+            decreaseLiquidityHookData: ""
+        });
+        
+        // Approve V4Utils to manage the NFT
+        vm.prank(user1);
+        IERC721(address(positionManager)).approve(address(v4Utils), tokenId);
+        
+        // Approve tokens for V4Utils
+        vm.prank(user1);
+        token0.approve(address(v4Utils), 1 ether);
+        vm.prank(user1);
+        token1.approve(address(v4Utils), 1 ether);
+        
+        // Execute swap and increase liquidity - should fail due to insufficient amount
+        vm.prank(user1);
+        vm.expectRevert(Constants.InsufficientAmountAdded.selector);
+        v4Utils.swapAndIncreaseLiquidity(params);
+        
+        console.log("InsufficientAmountAdded error correctly thrown for swapAndIncreaseLiquidity");
+    }
+    
+    function testSwapAndIncreaseLiquidityWithETH_InsufficientAmountAdded() public {
+        console.log("=== Testing swapAndIncreaseLiquidity with ETH and insufficient amount added ===");
+        
+        // Create a position with ETH first
+        uint256 tokenId = _createTestPositionWithETH(user1);
+        console.log("Created position with tokenId:", tokenId);
+        
+        // Set up ERC20 allowance for token1 only (ETH doesn't need approval)
+        vm.prank(user1);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Set up Permit2 allowances for token1 only
+        vm.prank(user1);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(1000 ether),
+            uint48(block.timestamp + 1 days)
+        );
+        
+        // Prepare swap and increase liquidity parameters with ETH and high minimum amounts
+        V4Utils.SwapAndIncreaseLiquidityParams memory params = V4Utils.SwapAndIncreaseLiquidityParams({
+            tokenId: tokenId,
+            amount0: 1 ether, // Small ETH amount
+            amount1: 1 ether, // Small token1 amount
+            recipient: user1,
+            deadline: block.timestamp,
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            amountAddMin0: 2 ether, // Higher than amount0 - should fail
+            amountAddMin1: 0, // No minimum for token1
+            decreaseLiquidityHookData: ""
+        });
+        
+        // Approve V4Utils to manage the NFT
+        vm.prank(user1);
+        IERC721(address(positionManager)).approve(address(v4Utils), tokenId);
+        
+        // Approve tokens for V4Utils (only token1, ETH doesn't need approval)
+        vm.prank(user1);
+        token1.approve(address(v4Utils), 1 ether);
+        
+        // Execute swap and increase liquidity with ETH value - should fail due to insufficient amount
+        vm.prank(user1);
+        vm.expectRevert(Constants.InsufficientAmountAdded.selector);
+        v4Utils.swapAndIncreaseLiquidity{value: 1 ether}(params);
+        
+        console.log("InsufficientAmountAdded error correctly thrown for swapAndIncreaseLiquidity with ETH");
     }
 }
