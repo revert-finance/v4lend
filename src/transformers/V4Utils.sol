@@ -22,7 +22,7 @@ import "@uniswap/v4-core/src/libraries/TickMath.sol";
 import "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import "@uniswap/v4-core/src/types/PoolId.sol";
-import "./Swapper.sol";
+import "../utils/Swapper.sol";
 
 
 /// @title V4Utils v1.0

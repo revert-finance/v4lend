@@ -9,8 +9,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
-import {V4Utils} from "../src/V4Utils.sol";
-import {Constants} from "../src/Constants.sol";
+import {V4Utils} from "../src/transformers/V4Utils.sol";
+import {Constants} from "../src/utils/Constants.sol";
 import "./V4UtilsTestBase.sol";
 
 /**

@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "forge-std/console2.sol";
 import "forge-std/Script.sol";
 
-import {V4Utils} from "../src/V4Utils.sol";
+import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
