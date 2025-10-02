@@ -112,7 +112,7 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
     struct WithdrawAndCollectAndSwapTestParams {
         uint256 tokenId;
         address owner;
-        address swapTarget;
+        Currency swapTarget;
         bytes swapData0;
         bytes swapData1;
         uint256 amountIn0;
@@ -127,7 +127,7 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
     struct ChangeRangeTestParams {
         uint256 tokenId;
         address owner;
-        address targetToken;
+        Currency targetToken;
         uint24 newFee;
         int24 newTickLower;
         int24 newTickUpper;
@@ -147,7 +147,7 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
     struct CompoundFeesTestParams {
         uint256 tokenId;
         address owner;
-        address targetToken;
+        Currency targetToken;
         uint128 liquidityToRemove;
         uint256 amountIn0;
         uint256 amountOut0Min;

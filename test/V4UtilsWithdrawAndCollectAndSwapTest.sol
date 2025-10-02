@@ -129,7 +129,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
         WithdrawAndCollectAndSwapTestParams memory params = WithdrawAndCollectAndSwapTestParams({
             tokenId: nft1TokenId,
             owner: nft1Owner,
-            swapTarget: address(0), // Swap to ETH
+            swapTarget: Currency.wrap(address(0)), // Swap to ETH
             swapData0: _getUSDCtoETHSwapData(),
             swapData1: hex"",
             amountIn0: 6274987,
@@ -148,7 +148,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
         WithdrawAndCollectAndSwapTestParams memory params = WithdrawAndCollectAndSwapTestParams({
             tokenId: nft1TokenId,
             owner: nft1Owner,
-            swapTarget: address(0), // No swap target
+            swapTarget: Currency.wrap(address(0)), // No swap target
             swapData0: hex"",
             swapData1: hex"",
             amountIn0: 0,
@@ -167,7 +167,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
         WithdrawAndCollectAndSwapTestParams memory params = WithdrawAndCollectAndSwapTestParams({
             tokenId: nft2TokenId,
             owner: nft2Owner,
-            swapTarget: address(realWeth), // Swap to WETH
+            swapTarget: Currency.wrap(address(realWeth)), // Swap to WETH
             swapData0: hex"",
             swapData1: _get273073USDCtoWETHSwapData(),
             amountIn0: 63079250674003,
@@ -186,7 +186,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4UtilsExecuteTestBase {
         WithdrawAndCollectAndSwapTestParams memory params = WithdrawAndCollectAndSwapTestParams({
             tokenId: nft2TokenId,
             owner: nft2Owner,
-            swapTarget: address(0), // No swap target
+            swapTarget: Currency.wrap(address(0)), // No swap target
             swapData0: hex"",
             swapData1: hex"",
             amountIn0: 0,

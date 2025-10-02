@@ -301,7 +301,7 @@ abstract contract V4UtilsTestBase is Test {
     ) internal view returns (V4Utils.Instructions memory) {
         return V4Utils.Instructions({
             whatToDo: whatToDo,
-            targetToken: targetToken,
+            targetToken: Currency.wrap(targetToken),
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             amountIn0: 0,

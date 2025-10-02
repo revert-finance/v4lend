@@ -57,7 +57,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         // what action to perform on provided Uniswap v4 position
         WhatToDo whatToDo;
         // target token for swaps (address(0) for native ETH)
-        address targetToken;
+        Currency targetToken;
         // for removing liquidity slippage
         uint256 amountRemoveMin0;
         uint256 amountRemoveMin1;
@@ -230,9 +230,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         Instructions memory instructions
     ) internal {
         uint128 liquidity;
-        address targetToken = instructions.targetToken;
-
-        if (targetToken == Currency.unwrap(poolKey.currency0)) {
+Currency targetToken = instructions.targetToken;
+        if (targetToken == poolKey.currency0) {
             // Swap token1 to token0 and increase liquidity
             (liquidity, amount0, amount1) = _swapAndIncrease(
                 SwapAndIncreaseLiquidityParams(
@@ -255,7 +254,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                 poolKey.currency0,
                 poolKey.currency1
             );
-        } else if (targetToken == Currency.unwrap(poolKey.currency1)) {
+        } else if (targetToken == poolKey.currency1) {
             // Swap token0 to token1 and increase liquidity
             (liquidity, amount0, amount1) = _swapAndIncrease(
                 SwapAndIncreaseLiquidityParams(
@@ -313,9 +312,9 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amount1,
         Instructions memory instructions
     ) internal returns (uint256 newTokenId) {
-        address targetToken = instructions.targetToken;
+        Currency targetToken = instructions.targetToken;
 
-        if (targetToken == Currency.unwrap(poolKey.currency0)) {
+        if (targetToken == poolKey.currency0) {
             // Swap token1 to token0 and mint new position
             (newTokenId,,,) = _swapAndMint(
                 SwapAndMintParams(
@@ -344,7 +343,7 @@ contract V4Utils is Swapper, IERC721Receiver {
                     instructions.mintHookData
                 )
             );
-        } else if (targetToken == Currency.unwrap(poolKey.currency1)) {
+        } else if (targetToken == poolKey.currency1) {
             // Swap token0 to token1 and mint new position
             (newTokenId,,,) = _swapAndMint(
                 SwapAndMintParams(
@@ -416,14 +415,14 @@ contract V4Utils is Swapper, IERC721Receiver {
         Instructions memory instructions
     ) internal {
         uint256 targetAmount;
-        address targetToken = instructions.targetToken;
+        Currency targetToken = instructions.targetToken;
 
         // Swap token0 to target if needed
-        if (Currency.unwrap(poolKey.currency0) != targetToken) {
+        if (!(poolKey.currency0 == targetToken)) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                 Swapper.RouterSwapParams(
                     poolKey.currency0,
-                    Currency.wrap(targetToken),
+                    targetToken,
                     instructions.amountIn0,
                     instructions.amountOut0Min,
                     instructions.swapData0
@@ -439,11 +438,11 @@ contract V4Utils is Swapper, IERC721Receiver {
         }
 
         // Swap token1 to target if needed
-        if (Currency.unwrap(poolKey.currency1) != targetToken) {
+        if (!(poolKey.currency1 == targetToken)) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                 Swapper.RouterSwapParams(
                     poolKey.currency1,
-                    Currency.wrap(targetToken),
+                    targetToken,
                     instructions.amountIn1,
                     instructions.amountOut1Min,
                     instructions.swapData1
@@ -460,10 +459,10 @@ contract V4Utils is Swapper, IERC721Receiver {
 
         // Transfer complete target amount to recipient
         if (targetAmount != 0) {
-            Currency.wrap(targetToken).transfer(instructions.recipient, targetAmount);
+            targetToken.transfer(instructions.recipient, targetAmount);
         }
 
-        emit WithdrawAndCollectAndSwap(tokenId, targetToken, targetAmount);
+        emit WithdrawAndCollectAndSwap(tokenId, Currency.unwrap(targetToken), targetAmount);
     }
 
     /// @notice ERC721 callback function. Called on safeTransferFrom and does manipulation as configured in encoded Instructions parameter.

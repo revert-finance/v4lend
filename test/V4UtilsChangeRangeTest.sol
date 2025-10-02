@@ -200,7 +200,7 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
         ChangeRangeTestParams memory params = ChangeRangeTestParams({
             tokenId: nft1TokenId,
             owner: nft1Owner,
-            targetToken: address(0), // No swap target
+            targetToken: Currency.wrap(address(0)), // No swap target
             newFee: 3000, // 0.3% fee (different from original)
             newTickLower: -960, // New tick range (aligned with tick spacing 60)
             newTickUpper: 960,
@@ -227,7 +227,7 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
         ChangeRangeTestParams memory params = ChangeRangeTestParams({
             tokenId: nft1TokenId,
             owner: nft1Owner,
-            targetToken: address(0), // No swap target
+            targetToken: Currency.wrap(address(0)), // No swap target
             newFee: 3000, // 0.3% fee (different from original)
             newTickLower: -960, // New tick range (aligned with tick spacing 60)
             newTickUpper: 960,
@@ -257,7 +257,7 @@ contract V4UtilsChangeRangeTest is V4UtilsExecuteTestBase {
         ChangeRangeTestParams memory params = ChangeRangeTestParams({
             tokenId: nft2TokenId,
             owner: nft2Owner,
-            targetToken: address(realWeth), // Swap to WETH
+            targetToken: Currency.wrap(address(realWeth)), // Swap to WETH
             newFee: 3000, // 0.3% fee (same as original)
             newTickLower: -1200, // New tick range (aligned with tick spacing 60)
             newTickUpper: 1200,

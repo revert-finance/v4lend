@@ -223,7 +223,7 @@ contract V4UtilsCompoundFeesTest is V4UtilsExecuteTestBase {
         CompoundFeesTestParams memory params = CompoundFeesTestParams({
             tokenId: nft1TokenId,
             owner: nft1Owner,
-            targetToken: address(0), // No swap target
+            targetToken: Currency.wrap(address(0)), // No swap target
             liquidityToRemove: 0, // Collect fees only, don't remove liquidity
             amountIn0: 0,
             amountOut0Min: 0,
@@ -243,7 +243,7 @@ contract V4UtilsCompoundFeesTest is V4UtilsExecuteTestBase {
         CompoundFeesTestParams memory params = CompoundFeesTestParams({
             tokenId: nft2TokenId,
             owner: nft2Owner,
-            targetToken: address(0), // No swap target
+            targetToken: Currency.wrap(address(0)), // No swap target
             liquidityToRemove: 0, // Collect fees only, don't remove liquidity
             amountIn0: 0,
             amountOut0Min: 0,
