@@ -12,30 +12,169 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 /**
  * @title V4OracleTest
  * @notice Comprehensive test suite for V4Oracle functionality
- * @dev Tests each V4Oracle function by calling it and logging results
  */
 contract V4OracleTest is ForkTestBase {
     
-    function testGetPositionBreakdown() public {
-        console.log("=== Testing testGetPositionBreakdown with Actual Token Collection ===");
-        console.log("");
-        
+    function testGetValue() public {
         // Test with the two preconfigured NFT positions from ForkTestBase
         uint256[] memory testTokenIds = new uint256[](2);
         testTokenIds[0] = nft1TokenId; // NFT 1 from ForkTestBase
         testTokenIds[1] = nft2TokenId; // NFT 2 from ForkTestBase
         
-        address[] memory owners = new address[](2);
-        owners[0] = nft1Owner; // NFT 1 owner
-        owners[1] = nft2Owner; // NFT 2 owner
+        // Test tokens configured in the oracle (from ForkTestBase setup)
+        address[] memory testTokens = new address[](4);
+        testTokens[0] = USDC_ADDRESS;  // USDC (reference token)
+        testTokens[1] = DAI_ADDRESS;   // DAI
+        testTokens[2] = WETH_ADDRESS;  // WETH
+        testTokens[3] = address(0);    // Native ETH
+        
+        for (uint256 i = 0; i < testTokenIds.length; i++) {
+            for (uint256 j = 0; j < testTokens.length; j++) {
+                _testGetValueForToken(testTokenIds[i], testTokens[j]);
+            }
+        }
+        
+        // Test edge cases
+        _testGetValueEdgeCases();
+    }
+    
+    function _testGetValueForToken(uint256 tokenId, address token) internal {
+        // Call getValue and assert it doesn't revert
+        (uint256 value, uint256 feeValue, uint256 price0X96, uint256 price1X96) = 
+            v4Oracle.getValue(tokenId, token);
+        
+        // Assertions for basic validity
+        assertTrue(value >= feeValue, "Total value should be >= fee value");
+        assertTrue(price0X96 > 0, "Price0X96 should be positive");
+        assertTrue(price1X96 > 0, "Price1X96 should be positive");
+        
+        // Assert that prices are in reasonable Q96 format (not too small)
+        assertTrue(price0X96 >= 1e12, "Price0X96 should be reasonable magnitude");
+        assertTrue(price1X96 >= 1e12, "Price1X96 should be reasonable magnitude");
+        
+        // Test specific token behaviors
+        if (token == USDC_ADDRESS) {
+            // USDC is the reference token, so one price should be Q96
+            assertTrue(price0X96 == 79228162514264337593543950336 || 
+                      price1X96 == 79228162514264337593543950336, 
+                      "One price should be Q96 for reference token");
+        }
+        
+        // Test that getValue is deterministic (same inputs = same outputs)
+        (uint256 value2, uint256 feeValue2, uint256 price0X96_2, uint256 price1X96_2) = 
+            v4Oracle.getValue(tokenId, token);
+        
+        assertEq(value, value2, "getValue should be deterministic");
+        assertEq(feeValue, feeValue2, "getValue fee should be deterministic");
+        assertEq(price0X96, price0X96_2, "getValue price0 should be deterministic");
+        assertEq(price1X96, price1X96_2, "getValue price1 should be deterministic");
+    }
+    
+    function _testGetValueEdgeCases() internal {
+        // Test with invalid tokenId (should revert)
+        vm.expectRevert();
+        v4Oracle.getValue(999999, USDC_ADDRESS);
+        
+        // Test with unconfigured token (should revert)
+        vm.expectRevert();
+        v4Oracle.getValue(nft1TokenId, address(0x1234567890123456789012345678901234567890));
+    }
+    
+    function testGetValueWithNonExistingToken() public {
+        // Test with a non-existing token address
+        address nonExistingToken = address(0x9999999999999999999999999999999999999999);
+        
+        // Test with both NFT positions
+        uint256[] memory testTokenIds = new uint256[](2);
+        testTokenIds[0] = nft1TokenId;
+        testTokenIds[1] = nft2TokenId;
         
         for (uint256 i = 0; i < testTokenIds.length; i++) {
             uint256 tokenId = testTokenIds[i];
-            address owner = owners[i];
             
+            // This should revert with NotConfigured because the token is not configured in the oracle
+            vm.expectRevert(abi.encodeWithSignature("NotConfigured()"));
+            v4Oracle.getValue(tokenId, nonExistingToken);
+        }
+    }
+    
+    function testGetValueWithNonExistingTokenId() public {
+ 
+        // Test with additional non-existing tokenIds
+        uint256[] memory additionalTokenIds = new uint256[](3);
+        additionalTokenIds[0] = 9999999;
+        additionalTokenIds[1] = 20000000;
+        additionalTokenIds[2] = 0; // Edge case: tokenId 0
+        
+        for (uint256 i = 0; i < additionalTokenIds.length; i++) {
+            uint256 tokenId = additionalTokenIds[i];
+            
+            // All should revert because these tokenIds don't exist
+            vm.expectRevert();
+            v4Oracle.getValue(tokenId, USDC_ADDRESS);
+        }
+    }
+    
+    function testGetPositionBreakdownConsistency() public {
+        // Test with the two preconfigured NFT positions from ForkTestBase
+        uint256[] memory testTokenIds = new uint256[](2);
+        testTokenIds[0] = nft1TokenId; // NFT 1 from ForkTestBase
+        testTokenIds[1] = nft2TokenId; // NFT 2 from ForkTestBase
+        
+        for (uint256 i = 0; i < testTokenIds.length; i++) {
+            uint256 tokenId = testTokenIds[i];
+            
+            // Get data from both functions
+            (uint128 liquidityFromBreakdown, uint128 fees0FromBreakdown, uint128 fees1FromBreakdown) = 
+                _getLiquidityAndFeesFromBreakdown(tokenId);
+            (uint128 liquidityFromFees, uint128 fees0FromFees, uint128 fees1FromFees) = 
+                v4Oracle.getLiquidityAndFees(tokenId);
+            
+            // Assert that liquidity values match
+            assertEq(liquidityFromBreakdown, liquidityFromFees, 
+                "Liquidity from getPositionBreakdown should match getLiquidityAndFees");
+            
+            // Assert that fee values match
+            assertEq(fees0FromBreakdown, fees0FromFees, 
+                "Fees0 from getPositionBreakdown should match getLiquidityAndFees");
+            assertEq(fees1FromBreakdown, fees1FromFees, 
+                "Fees1 from getPositionBreakdown should match getLiquidityAndFees");
+            
+            // Additional validation: ensure values are reasonable
+            assertTrue(liquidityFromBreakdown >= 0, "Liquidity should be non-negative");
+            assertTrue(fees0FromBreakdown >= 0, "Fees0 should be non-negative");
+            assertTrue(fees1FromBreakdown >= 0, "Fees1 should be non-negative");
+        }
+    }
+    
+    function _getLiquidityAndFeesFromBreakdown(uint256 tokenId) internal view returns (
+        uint128 liquidity, 
+        uint128 fees0, 
+        uint128 fees1
+    ) {
+        (, , , liquidity, , , fees0, fees1) = v4Oracle.getPositionBreakdown(tokenId);
+    }
+
+    function testGetPositionBreakdown() public {
+        console.log("=== Testing testGetPositionBreakdown with Actual Token Collection ===");
+        console.log("");
+
+        // Test with the two preconfigured NFT positions from ForkTestBase
+        uint256[] memory testTokenIds = new uint256[](2);
+        testTokenIds[0] = nft1TokenId; // NFT 1 from ForkTestBase
+        testTokenIds[1] = nft2TokenId; // NFT 2 from ForkTestBase
+
+        address[] memory owners = new address[](2);
+        owners[0] = nft1Owner; // NFT 1 owner
+        owners[1] = nft2Owner; // NFT 2 owner
+
+        for (uint256 i = 0; i < testTokenIds.length; i++) {
+            uint256 tokenId = testTokenIds[i];
+            address owner = owners[i];
+
             console.log(string(abi.encodePacked("=== Testing NFT TokenId: ", vm.toString(tokenId), " ===")));
             console.log("Owner:", owner);
-            
+
             (
                 Currency currency0,
                 Currency currency1,
@@ -46,35 +185,36 @@ contract V4OracleTest is ForkTestBase {
                 uint128 fees0,
                 uint128 fees1
             ) = v4Oracle.getPositionBreakdown(tokenId);
-           
-           console.log("Currency0:", Currency.unwrap(currency0));
-           console.log("Currency1:", Currency.unwrap(currency1));
-           console.log("Fee:", fee);
-           console.log("Liquidity:", liquidity);
-           console.log("Amount0:", amount0);
-           console.log("Amount1:", amount1);
-           console.log("Fees0:", fees0);
-           console.log("Fees1:", fees1);
+
+            uint balance0 = currency0.balanceOfSelf();
+            uint balance1 = currency1.balanceOfSelf();
+
+            bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+            bytes[] memory params_array = new bytes[](2);
+            params_array[0] = abi.encode(
+                tokenId,
+                uint256(0),
+                uint128(0), // amount0Min
+                uint128(0),
+                ""
+            );
+            params_array[1] = abi.encode(currency0, currency1, address(this));
+            vm.prank(owner);
+            positionManager.modifyLiquidities(abi.encode(actions, params_array), block.timestamp);
+
+            balance0 = currency0.balanceOfSelf() - balance0;
+            balance1 = currency1.balanceOfSelf() - balance1;
+
+            assertEq(balance0, fees0, "Collected amount0 does not match fees0");
+            assertEq(balance1, fees1, "Collected amount1 does not match fees1");
         }
-        
+
         console.log("=== getLiquidityAndFees Validation Tests Complete ===");
         console.log("Summary: Tested oracle accuracy against actual token collections");
         console.log("");
     }
-    
-   
-    // Helper function to get token symbol for logging
-    function _getTokenSymbol(address token) internal pure returns (string memory) {
-        if (token == 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2) return "WETH";
-        if (token == 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48) return "USDC";
-        if (token == 0x6B175474E89094C44Da98b954EedeAC495271d0F) return "DAI";
-        if (token == 0xdAC17F958D2ee523a2206206994597C13D831ec7) return "USDT";
-        if (token == address(0)) return "ETH";
-        return "UNKNOWN";
-    }
-    
-    // Helper function to calculate absolute difference
-    function _absDiff(uint128 a, uint256 b) internal pure returns (uint256) {
-        return a > b ? a - b : b - a;
+
+    // recieves ETH from decreasing liquidity
+    receive() external payable {
     }
 }

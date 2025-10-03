@@ -39,7 +39,6 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     event TokenConfigUpdated(address indexed token, TokenConfig config);
     event SetMaxPoolPriceDifference(uint16 maxPoolPriceDifference);
-    event SetEmergencyAdmin(address emergencyAdmin);
     event SetSequencerUptimeFeed(address sequencerUptimeFeed);
 
     IPoolManager public immutable poolManager;
@@ -49,7 +48,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     address public immutable referenceToken;
     uint8 public immutable referenceTokenDecimals;
 
-    // Common token used in Chainlink feeds as "pair" (address(0) if USD reference)
+    // Common token used in Chainlink feeds as "pair" (address(0xdead) if USD or other non-token reference)
     address public immutable chainlinkReferenceToken;
 
     struct TokenConfig {
@@ -67,6 +66,12 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     // Feed to check sequencer up on L2s - address(0) when not needed
     address public sequencerUptimeFeed;
 
+    /// @dev Constructor for V4Oracle deployment
+    /// @notice Initializes the V4Oracle contract with core V4 components
+    /// @param _poolManager The Uniswap V4 PoolManager contract instance
+    /// @param _positionManager The Uniswap V4 PositionManager contract instance  
+    /// @param _referenceToken Token used as reference for price calculations (typically WETH or USDC)
+    /// @param _chainlinkReferenceToken Token used as base currency for Chainlink feeds (typically USD-linked token)
     constructor(
         IPoolManager _poolManager,
         IPositionManager _positionManager,
@@ -80,13 +85,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         chainlinkReferenceToken = _chainlinkReferenceToken;
     }
 
-    /// @notice Gets value and prices of a V4 position in specified token
-    /// @param tokenId Token ID of the position NFT
-    /// @param token Address of token in which value should be calculated
-    /// @return value Value of complete position at oracle prices
-    /// @return feeValue Value of position fees only at oracle prices  
-    /// @return price0X96 Price of token0 in reference token
-    /// @return price1X96 Price of token1 in reference token
+    /// @notice Gets value of a V4 position in a specific token
+    /// @dev Calculates position value using liquidity amount + uncollected fees at current Oracle prices
+    /// @param tokenId Token ID of the position NFT to be valued
+    /// @param token Token address to quote the position value in (use address(0) for native ETH)
+    /// @return value Total value of complete position (liquidity + fees) at Oracle prices in the specified token
+    /// @return feeValue Value of uncollected fees only at Oracle prices in the specified token
+    /// @return price0X96 Price of token0 normalized to Q96 format in the specified token
+    /// @return price1X96 Price of token1 normalized to Q96 format in the specified token
     function getValue(uint256 tokenId, address token)
         external
         view
@@ -94,9 +100,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         returns (uint256 value, uint256 feeValue, uint256 price0X96, uint256 price1X96)
     {
         PositionState memory state = _loadPositionState(tokenId);
-
         (uint256 amount0, uint256 amount1) = _getAmounts(state);
-        (uint128 fees0, uint128 fees1) = _getFees(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
+        (uint128 fees0, uint128 fees1) = _getFees(state);
 
         // Get price of quote token in reference token
         uint256 priceTokenX96;
@@ -115,16 +120,38 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         price1X96 = state.price1X96 * Q96 / priceTokenX96;
     }
 
-    /// @notice Gets breakdown of a V4 position
-    /// @param tokenId Token ID of the position NFT
-    /// @return currency0 Token0 currency of position
-    /// @return currency1 Token1 currency of position  
-    /// @return fee Fee tier of position
-    /// @return liquidity Liquidity of position
-    /// @return amount0 Current amount token0
-    /// @return amount1 Current amount token1
-    /// @return fees0 Current token0 fees of position
-    /// @return fees1 Current token1 fees of position
+    /// @notice Gets liquidity and uncollected fees for a V4 position by tokenId
+    /// @dev Calculates current position liquidity and uncollected trading fees following Uniswap V4 methodology
+    /// @param tokenId Token ID of the position NFT to analyze
+    /// @return liquidity Current liquidity amount remaining in the position
+    /// @return fees0 Uncollected token0 fees that have accrued since last collection
+    /// @return fees1 Uncollected token1 fees that have accrued since last collection
+    function getLiquidityAndFees(uint256 tokenId)
+        external
+        view
+        override
+        returns (uint128 liquidity, uint128 fees0, uint128 fees1)
+    {
+        PositionState memory state = _loadPositionState(tokenId);
+        
+        // Get position liquidity
+        liquidity = state.liquidity;
+    
+        // Get uncollected fees
+        (fees0, fees1) = _getFees(state);
+    }
+
+    /// @notice Gets comprehensive breakdown of a V4 position
+    /// @dev Returns all essential position data including currencies, liquidity, token amounts, and fees
+    /// @param tokenId Token ID of the position NFT to analyze
+    /// @return currency0 Currency struct representing token0 of the position (use Currency.unwrap() to get address)
+    /// @return currency1 Currency struct representing token1 of the position (use Currency.unwrap() to get address)
+    /// @return fee Fee tier of the position in basis points (e.g., 3000 = 0.3%)
+    /// @return liquidity Current liquidity amount in the position
+    /// @return amount0 Current token amount of token0 based on oracle-derived price
+    /// @return amount1 Current token amount of token1 based on oracle-derived price  
+    /// @return fees0 Uncollected token0 fees accrued by the position
+    /// @return fees1 Uncollected token1 fees accrued by the position
     function getPositionBreakdown(uint256 tokenId)
         external
         view
@@ -142,7 +169,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     {
         PositionState memory state = _loadPositionState(tokenId);
         (amount0, amount1) = _getAmounts(state);
-        (fees0, fees1) = _getFees(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
+        (fees0, fees1) = _getFees(state);
         liquidity = state.liquidity;
         // Extract basic position data
         currency0 = state.currency0;
@@ -150,10 +177,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         fee = state.fee;
     }
 
-    /// @notice Sets or updates the feed configuration for a token (onlyOwner)
-    /// @param token Token to configure
-    /// @param feed Chainlink feed for this token
-    /// @param maxFeedAge Max allowable chainlink feed age in seconds
+    /// @notice Sets or updates the Chainlink feed configuration for a token (requires owner privileges)
+    /// @dev Configures oracle connection to Chainlink price feed with age verification
+    /// @param token Token address to configure (use address(0) for native ETH)
+    /// @param feed Valid Chainlink AggregatorV3Interface contract address for price data
+    /// @param maxFeedAge Maximum age of Chainlink feed data in seconds before considering stale
     function setTokenConfig(
         address token,
         AggregatorV3Interface feed,
@@ -173,21 +201,28 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         emit TokenConfigUpdated(token, config);
     }
 
-    /// @notice Sets the max pool difference parameter (onlyOwner)
-    /// @param _maxPoolPriceDifference Set max allowable difference x10000
+    /// @notice Sets the maximum price difference parameter for validation (requires owner privileges)
+    /// @dev Controls price deviation tolerance between different oracle sources
+    /// @param _maxPoolPriceDifference Maximum allowable price difference expressed in basis points ×100 (e.g., 1000 = 10%)
     function setMaxPoolPriceDifference(uint16 _maxPoolPriceDifference) external onlyOwner {
         maxPoolPriceDifference = _maxPoolPriceDifference;
         emit SetMaxPoolPriceDifference(_maxPoolPriceDifference);
     }
 
-    /// @notice Sets sequencer uptime feed for L2 where needed (onlyOwner)
-    /// @param feed Sequencer uptime feed address
+    /// @notice Sets sequencer uptime feed for L2 validation (requires owner privileges)
+    /// @dev Configures Chainlink sequencer uptime monitor for L2 networks like Arbitrum/Optimism
+    /// @param feed Address of Chainlink sequencer uptime feed (use address(0) to disable for L1)
     function setSequencerUptimeFeed(address feed) external onlyOwner {
         sequencerUptimeFeed = feed;
         emit SetSequencerUptimeFeed(feed);
     }
 
-    /// @notice Gets Chainlink price for a token in reference token terms
+    /// @notice Gets Chainlink price for a token in reference token terms with caching support
+    /// @dev Internal function that calculates relative price between a token and the reference token
+    /// @param token Token address to get price for (use address(0) for native ETH)
+    /// @param cachedChainlinkReferencePriceX96 Cached price of reference token to avoid redundant Chainlink calls
+    /// @return priceX96 Price of token relative to reference token in Q128 format
+    /// @return chainlinkReferencePriceX96 Chainlink price of reference token used for calculation
     function _getReferenceTokenPriceX96(address token, uint256 cachedChainlinkReferencePriceX96) internal view returns (uint256 priceX96, uint256 chainlinkReferencePriceX96) {
         if (token == referenceToken) {
             return (Q96, cachedChainlinkReferencePriceX96);
@@ -211,7 +246,10 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
     }
 
-    /// @notice Calculates Chainlink price given token addresses
+    /// @notice Calculates Chainlink price with validation for given token address
+    /// @dev Internal function that fetches Chainlink price with sequencer and stale check validation
+    /// @param token Token address to get price for (use address(0) for native ETH)
+    /// @return uint256 Chainlink price normalized to Q128 format (decimal adjustment included)
     function _getChainlinkPriceX96(address token) internal view returns (uint256) {
         if (token == chainlinkReferenceToken) {
             return Q96;
@@ -257,7 +295,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         return uint256(answer) * Q96 / (10 ** feedConfig.feedDecimals);
     }
 
-    /// @notice Requires that price difference doesn't exceed maximum
+    /// @notice Validates that price difference between two sources doesn't exceed maximum threshold
+    /// @dev Internal function that enforces price deviation limits for oracle validation
+    /// @param priceX96 First price in Q128 format for comparison
+    /// @param verifyPriceX96 Second price in Q128 format for comparison  
+    /// @param maxDifferenceX10000 Maximum allowable difference expressed in basis points ×100 (e.g., 1000 = 10%)
     function _requireMaxDifference(uint256 priceX96, uint256 verifyPriceX96, uint16 maxDifferenceX10000) internal pure {
 
         
@@ -274,6 +316,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     }
 
     struct PositionState {
+        uint256 tokenId;
         PoolId poolId;
         PoolKey poolKey;
         Currency currency0;
@@ -282,6 +325,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         int24 tickLower;
         int24 tickUpper;
         uint128 liquidity;
+        uint256 feeGrowthInside0LastX128;
+        uint256 feeGrowthInside1LastX128;
         uint160 sqrtPriceX96;
         int24 tick;
         uint160 sqrtPriceX96Lower;
@@ -292,19 +337,23 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint256 cachedChainlinkReferencePriceX96;
     }
 
-    /// @notice Loads position state from V4 position manager using tokenId
+    /// @notice Loads complete position state and price data from V4 position manager using tokenId
+    /// @dev Internal function that consolidates all position data including liquidity, ticks, currencies, and price calculations
+    /// @param tokenId Token ID of the position NFT to load state for
+    /// @return state Complete PositionState struct containing all position data and calculated prices
     function _loadPositionState(uint256 tokenId) internal view returns (PositionState memory state) {
+        
+        state.tokenId = tokenId;
+
         // Get position info from PositionManager
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         
+        state.poolId = PoolIdLibrary.toId(poolKey);
         state.poolKey = poolKey;
 
         // Extract position data
         state.tickLower = PositionInfoLibrary.tickLower(positionInfo);
         state.tickUpper = PositionInfoLibrary.tickUpper(positionInfo);
-        
-        // Convert PoolKey to PoolId
-        state.poolId = PoolIdLibrary.toId(poolKey);
         
         state.poolId = PoolIdLibrary.toId(poolKey);
         state.currency0 = poolKey.currency0;
@@ -314,12 +363,9 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         // Get basic pool slot0 data (price, tick)
         (state.sqrtPriceX96, state.tick,,) = StateLibrary.getSlot0(poolManager, state.poolId);
         
-        // Get position liquidity
-        state.liquidity = _getPositionLiquidity(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
-    
         // Get price data from chainlink feeds
         (state.price0X96, state.cachedChainlinkReferencePriceX96) = _getReferenceTokenPriceX96(Currency.unwrap(state.currency0), state.cachedChainlinkReferencePriceX96);
-        (state.price1X96, state.cachedChainlinkReferencePriceX96) = _getReferenceTokenPriceX96(Currency.unwrap(state.currency1), state.cachedChainlinkReferencePriceX96);
+        (state.price1X96, ) = _getReferenceTokenPriceX96(Currency.unwrap(state.currency1), state.cachedChainlinkReferencePriceX96);
 
         // Check derived pool price for manipulation attacks
         uint256 derivedPoolPriceX96 = state.price0X96 * Q96 / state.price1X96;
@@ -330,10 +376,23 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
         // Calculate derived sqrt price
         state.derivedSqrtPriceX96 = SafeCast.toUint160(Math.sqrt(derivedPoolPriceX96) * (2 ** 48));
+
+        // Get position liquidity and previous fee growth data
+        (state.liquidity, state.feeGrowthInside0LastX128, state.feeGrowthInside1LastX128) = StateLibrary.getPositionInfo(
+            poolManager, 
+            state.poolId, 
+            address(positionManager), 
+            state.tickLower, 
+            state.tickUpper, 
+            bytes32(tokenId)
+        );
     }
 
-
-    /// @notice Calculate position amounts given derived price from oracle
+    /// @notice Calculates token amounts of a position based on oracle-derived price
+    /// @dev Internal function that converts liquidity to token amounts using oracle price instead of pool price
+    /// @param state Complete PositionState struct containing position data and derived price
+    /// @return amount0 Calculated amount of token0 based on oracle-derived sqrt price
+    /// @return amount1 Calculated amount of token1 based on oracle-derived sqrt price
     function _getAmounts(PositionState memory state) internal pure returns (uint256 amount0, uint256 amount1) {
         if (state.liquidity != 0) {
             // Calculate sqrt prices for tick range using derived price from oracle
@@ -351,105 +410,40 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
     }
 
-    /// @notice Calculate uncollected position fees for V4
-    /// @param poolId Pool ID of the position
-    /// @param owner Owner address (position manager)
-    /// @param tickLower Lower tick of position
-    /// @param tickUpper Upper tick of position
-    /// @param salt Salt (tokenId) for the position
-    /// @return fees0 Uncollected fees in token0
-    /// @return fees1 Uncollected fees in token1
-    function _getFees(
-        PoolId poolId,
-        address owner,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 salt
+    /// @notice Calculates uncollected fees for a V4 position using FullMath precision
+    /// @dev Internal function that computes accrued trading fees following Uniswap V4 fee calculation methodology
+    /// @param state PositionState
+    function _getFees(PositionState memory state
     ) internal view returns (uint128 fees0, uint128 fees1) {
-        // Get position liquidity and previous fee growth data
-        (uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128) = 
-            _getPositionInfo(poolId, owner, tickLower, tickUpper, salt);
-        
-        if (liquidity == 0) {
+
+        if (state.liquidity == 0) {
             return (0, 0);
         }
         
         // Get current fee growth inside the position range
         (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128) = 
-            StateLibrary.getFeeGrowthInside(poolManager, poolId, tickLower, tickUpper);
+            StateLibrary.getFeeGrowthInside(poolManager, state.poolId, state.tickLower, state.tickUpper);
         
         // Calculate uncollected fees following Uniswap V4 guide
         fees0 = _calculateUncollectedFees(
             feeGrowthInside0X128,
-            feeGrowthInside0LastX128,
-            liquidity
+            state.feeGrowthInside0LastX128,
+            state.liquidity
         );
         
         fees1 = _calculateUncollectedFees(
             feeGrowthInside1X128,
-            feeGrowthInside1LastX128,
-            liquidity
-        );
-    }
-
-    /// @notice Gets liquidity and uncollected fees for a position by tokenId (V4-specific)
-    /// @param tokenId Token ID of the position NFT
-    /// @return liquidity Liquidity of position
-    /// @return fees0 Current token0 fees of position
-    /// @return fees1 Current token1 fees of position
-    function getLiquidityAndFees(uint256 tokenId)
-        external
-        view
-        override
-        returns (uint128 liquidity, uint128 fees0, uint128 fees1)
-    {
-        PositionState memory state = _loadPositionState(tokenId);
-
-        // Get position liquidity
-        liquidity = state.liquidity;
-        
-        // Get uncollected fees using the refactored helper method
-        (fees0, fees1) = _getFees(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
-    }
-    
-    /// @notice Helper function to get complete position info in one call
-    function _getPositionInfo(
-        PoolId poolId,
-        address owner,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 salt
-    ) internal view returns (uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128) {
-        (liquidity, feeGrowthInside0LastX128, feeGrowthInside1LastX128) = StateLibrary.getPositionInfo(
-            poolManager, 
-            poolId, 
-            owner, 
-            tickLower, 
-            tickUpper, 
-            bytes32(salt)
+            state.feeGrowthInside1LastX128,
+            state.liquidity
         );
     }
     
-    /// @notice Helper function to get position liquidity
-    function _getPositionLiquidity(
-        PoolId poolId,
-        address owner,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 salt
-    ) internal view returns (uint128) {
-        (uint128 liquidity,,) = StateLibrary.getPositionInfo(
-            poolManager, 
-            poolId, 
-            owner, 
-            tickLower, 
-            tickUpper, 
-            bytes32(salt)
-        );
-        return liquidity;
-    }
-    
-    /// @notice Helper function to calculate uncollected fees using FullMath
+    /// @notice Helper function to calculate uncollected fees using FullMath precision math
+    /// @dev Internal function that implements the core fee calculation formula: liquidity * (feeGrowth - feeGrowthLast) / Q128
+    /// @param feeGrowthInsideX128 Current fee growth accumulator inside the position range (Q128 format)
+    /// @param feeGrowthInsideLastX128 Last fee growth accumulator when fees were collected (Q128 format)  
+    /// @param liquidity Current liquidity amount in the position
+    /// @return uint128 Calculated uncollected fees for this token type
     function _calculateUncollectedFees(
         uint256 feeGrowthInsideX128,
         uint256 feeGrowthInsideLastX128,
