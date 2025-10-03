@@ -13,14 +13,14 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./V4UtilsExecuteTestBase.sol";
+import "./ForkTestBase.sol";
 
 /**
  * @title V4UtilsSwapAndMintTest
  * @notice Test suite for V4Utils.swapAndMint() functionality
  * @dev Tests creating new liquidity positions with optional token swaps
  */
-contract V4UtilsSwapAndMintTest is V4UtilsExecuteTestBase {
+contract V4UtilsSwapAndMintTest is ForkTestBase {
 
     struct SwapAndMintTestParams {
         Currency token0;

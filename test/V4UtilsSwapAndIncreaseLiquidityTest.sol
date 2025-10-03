@@ -12,14 +12,14 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./V4UtilsExecuteTestBase.sol";
+import "./ForkTestBase.sol";
 
 /**
  * @title V4UtilsSwapAndIncreaseLiquidityTest
  * @notice Test suite for V4Utils.swapAndIncreaseLiquidity() functionality
  * @dev Tests adding liquidity to existing positions with optional token swaps
  */
-contract V4UtilsSwapAndIncreaseLiquidityTest is V4UtilsExecuteTestBase {
+contract V4UtilsSwapAndIncreaseLiquidityTest is ForkTestBase {
 
     struct SwapAndIncreaseLiquidityTestParams {
         uint256 tokenId;

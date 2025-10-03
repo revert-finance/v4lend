@@ -430,7 +430,7 @@ Currency targetToken = instructions.targetToken;
             );
             // Return any leftover token0
             if (amountInDelta < amount0) {
-                _transferToken(instructions.recipient, poolKey.currency0, amount0 - amountInDelta);
+                poolKey.currency0.transfer(instructions.recipient, amount0 - amountInDelta);
             }
             targetAmount += amountOutDelta;
         } else {
@@ -450,7 +450,7 @@ Currency targetToken = instructions.targetToken;
             );
             // Return any leftover token1
             if (amountInDelta < amount1) {
-                _transferToken(instructions.recipient, poolKey.currency1, amount1 - amountInDelta);
+                poolKey.currency1.transfer(instructions.recipient, amount1 - amountInDelta);
             }
             targetAmount += amountOutDelta;
         } else {
@@ -512,13 +512,13 @@ Currency targetToken = instructions.targetToken;
 
         // send swapped amount of tokenOut
         if (amountOut != 0) {
-            _transferToken(params.recipient, params.tokenOut, amountOut);
+            params.tokenOut.transfer(params.recipient, amountOut);
         }
 
         // if not all was swapped - return leftovers of tokenIn
         uint256 leftOver = params.amountIn - amountInDelta;
         if (leftOver != 0) {
-            _transferToken(params.recipient, params.tokenIn, leftOver);
+            params.tokenIn.transfer(params.recipient, leftOver);
         }
     }
 
@@ -846,10 +846,10 @@ Currency targetToken = instructions.targetToken;
 
             // Return leftover tokens
             if (finalBalance0 != 0) {
-                _transferToken(params.recipient, token0, finalBalance0);
+                token0.transfer(params.recipient, finalBalance0);
             }
             if (finalBalance1 != 0) {
-                _transferToken(params.recipient, token1, finalBalance1);
+                token1.transfer(params.recipient, finalBalance1);
             }
         }
     }
@@ -900,7 +900,7 @@ Currency targetToken = instructions.targetToken;
             uint256 leftOver = params.amountIn0 + params.amountIn1 - amountInDelta0 - amountInDelta1;
 
             if (leftOver != 0) {
-                _transferToken(params.recipient, swapSource, leftOver);
+                swapSource.transfer(params.recipient, leftOver);
             }
         }
 
@@ -933,17 +933,6 @@ Currency targetToken = instructions.targetToken;
         }
     }
 
-    // transfers token or ETH
-    function _transferToken(address to, Currency token, uint256 amount) internal {
-        if (token.isAddressZero()) {
-            (bool sent,) = to.call{value: amount}("");
-            if (!sent) {
-                revert EtherSendFailed();
-            }
-        } else {
-            token.transfer(to, amount);
-        }
-    }
 
     // decreases liquidity from uniswap v4 position
     function _decreaseLiquidity(

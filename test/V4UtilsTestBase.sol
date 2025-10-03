@@ -28,7 +28,7 @@ import {V4PositionManagerDeployer} from "hookmate/artifacts/V4PositionManager.so
 import {V4RouterDeployer} from "hookmate/artifacts/V4Router.sol";
 
 import {V4Utils} from "../src/transformers/V4Utils.sol";
-
+import {V4Oracle, AggregatorV3Interface} from "../src/V4Oracle.sol";
 
 /**
  * @title V4UtilsTestBase
@@ -41,7 +41,9 @@ abstract contract V4UtilsTestBase is Test {
     IPoolManager public poolManager;
     IPositionManager public positionManager;
     IUniswapV4Router04 public swapRouter;
+    
     V4Utils public v4Utils;
+    V4Oracle public v4Oracle;
     
     // Test tokens
     ERC20Mock public token0;

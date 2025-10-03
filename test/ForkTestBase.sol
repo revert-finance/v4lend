@@ -18,11 +18,11 @@ import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import "./V4UtilsTestBase.sol";
 
 /**
- * @title V4UtilsExecuteTestBase
+ * @title ForkTestBase
  * @notice Base contract with common logic for V4Utils.execute() tests
  * @dev Contains shared setup, structs, and helper functions
  */
-contract V4UtilsExecuteTestBase is V4UtilsTestBase {
+contract ForkTestBase is V4UtilsTestBase {
     // Mainnet fork configuration
     uint256 constant MAINNET_FORK_BLOCK = 23248232; 
     
@@ -31,6 +31,10 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
     address constant USDC_ADDRESS = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // Real USDC
     address constant USDT_ADDRESS = 0xdAC17F958D2ee523a2206206994597C13D831ec7; // Real USDT
     address constant DAI_ADDRESS = 0x6B175474E89094C44Da98b954EedeAC495271d0F; // Real DAI
+
+    address constant CHAINLINK_USDC_USD = 0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6;
+    address constant CHAINLINK_DAI_USD = 0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9;
+    address constant CHAINLINK_ETH_USD = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
     
     // Real tokens from mainnet
     IWETH9 public realWeth;
@@ -82,8 +86,35 @@ contract V4UtilsExecuteTestBase is V4UtilsTestBase {
             positionManager, address(swapRouter), address(0x0000000000001fF3684f28c67538d4D072C22734), permit2
         );
 
-        address hardCodedV4UtilsAddress = 0x3434567890123123789012345678901234567890;
+        // Deploy V4Oracle with the real deployed contracts
+        v4Oracle = new V4Oracle(
+            poolManager, positionManager, address(USDC_ADDRESS), 0x000000000000000000000000000000000000dEaD
+        );
 
+        v4Oracle.setMaxPoolPriceDifference(200);
+        v4Oracle.setTokenConfig(
+            address(USDC_ADDRESS),
+            AggregatorV3Interface(CHAINLINK_USDC_USD),
+            3600 * 24 * 30
+        );
+        v4Oracle.setTokenConfig(
+            address(DAI_ADDRESS),
+            AggregatorV3Interface(CHAINLINK_DAI_USD),
+            3600 * 24 * 30
+        );
+        v4Oracle.setTokenConfig(
+            address(WETH_ADDRESS),
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30
+        );
+        v4Oracle.setTokenConfig(
+            address(0),
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30
+        );
+
+        // hardcode for 0x calls to work
+        address hardCodedV4UtilsAddress = 0x3434567890123123789012345678901234567890;
         vm.etch(hardCodedV4UtilsAddress, address(v4Utils).code);
         vm.copyStorage(address(v4Utils), hardCodedV4UtilsAddress);
         v4Utils = V4Utils(payable(hardCodedV4UtilsAddress));

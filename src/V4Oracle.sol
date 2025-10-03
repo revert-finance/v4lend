@@ -23,6 +23,8 @@ import "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import "./utils/Constants.sol";
 import "./interfaces/IV4Oracle.sol";
 
+import "forge-std/console.sol";
+
 // Chainlink Price Feed Interface
 interface AggregatorV3Interface {
     function decimals() external view returns (uint8);
@@ -69,9 +71,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         IPoolManager _poolManager,
         IPositionManager _positionManager,
         address _referenceToken,
-        address _chainlinkReferenceToken,
-        address _initialOwner
-    ) Ownable(_initialOwner) {
+        address _chainlinkReferenceToken
+    ) Ownable(msg.sender) {
         poolManager = _poolManager;
         positionManager = _positionManager;
         referenceToken = _referenceToken;
@@ -88,6 +89,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @return price1X96 Price of token1 in reference token
     function getValue(uint256 tokenId, address token)
         external
+        view
         override
         returns (uint256 value, uint256 feeValue, uint256 price0X96, uint256 price1X96)
     {
@@ -103,7 +105,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         } else if (state.currency1 == Currency.wrap(token)) {
             priceTokenX96 = state.price1X96;
         } else {
-            priceTokenX96 = _getReferenceTokenPriceX96(token);
+            (priceTokenX96,) = _getReferenceTokenPriceX96(token, state.cachedChainlinkReferencePriceX96);
         }
 
         // Calculate outputs
@@ -125,6 +127,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @return fees1 Current token1 fees of position
     function getPositionBreakdown(uint256 tokenId)
         external
+        view
+        override
         returns (
             Currency currency0,
             Currency currency1,
@@ -136,16 +140,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             uint128 fees1
         )
     {
-        // Get position info from PositionManager
-        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(tokenId);
-        
+        PositionState memory state = _loadPositionState(tokenId);
+        (amount0, amount1) = _getAmounts(state);
+        (fees0, fees1) = _getFees(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
+        liquidity = state.liquidity;
         // Extract basic position data
-        currency0 = poolKey.currency0;
-        currency1 = poolKey.currency1;
-        fee = poolKey.fee;
-        
-        // Use simplified calculation to avoid stack issues
-        (liquidity, fees0, fees1, amount0, amount1) = _getPositionData(tokenId);
+        currency0 = state.currency0;
+        currency1 = state.currency1;
+        fee = state.fee;
     }
 
     /// @notice Sets or updates the feed configuration for a token (onlyOwner)
@@ -158,7 +160,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint32 maxFeedAge
     ) external onlyOwner {
         uint8 feedDecimals = feed.decimals();
-        uint8 tokenDecimals = IERC20Metadata(token).decimals();
+        uint8 tokenDecimals = address(token) == address(0) ? 18 : IERC20Metadata(token).decimals();
 
         TokenConfig memory config = TokenConfig(
             feed,
@@ -186,12 +188,27 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     }
 
     /// @notice Gets Chainlink price for a token in reference token terms
-    function _getReferenceTokenPriceX96(address token) internal view returns (uint256) {
+    function _getReferenceTokenPriceX96(address token, uint256 cachedChainlinkReferencePriceX96) internal view returns (uint256 priceX96, uint256 chainlinkReferencePriceX96) {
         if (token == referenceToken) {
-            return Q96;
+            return (Q96, cachedChainlinkReferencePriceX96);
         }
 
-        return _getChainlinkPriceX96(token);
+        uint256 chainlinkPriceX96 = _getChainlinkPriceX96(token);
+        chainlinkReferencePriceX96 = cachedChainlinkReferencePriceX96 == 0
+            ? _getChainlinkPriceX96(referenceToken)
+            : cachedChainlinkReferencePriceX96;
+
+        TokenConfig memory feedConfig = feedConfigs[token];
+
+        if (referenceTokenDecimals > feedConfig.tokenDecimals) {
+            priceX96 = (10 ** (referenceTokenDecimals - feedConfig.tokenDecimals)) * chainlinkPriceX96
+                * Q96 / chainlinkReferencePriceX96;
+        } else if (referenceTokenDecimals < feedConfig.tokenDecimals) {
+            priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96
+                / (10 ** (feedConfig.tokenDecimals - referenceTokenDecimals));
+        } else {
+            priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96;
+        }
     }
 
     /// @notice Calculates Chainlink price given token addresses
@@ -199,7 +216,6 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         if (token == chainlinkReferenceToken) {
             return Q96;
         }
-
         // Sequencer check on chains where needed
         if (sequencerUptimeFeed != address(0)) {
             (, int256 sequencerAnswer, uint256 startedAt,,) =
@@ -243,6 +259,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     /// @notice Requires that price difference doesn't exceed maximum
     function _requireMaxDifference(uint256 priceX96, uint256 verifyPriceX96, uint16 maxDifferenceX10000) internal pure {
+
+        
         uint256 differenceX10000 =
             priceX96 >= verifyPriceX96 ? (priceX96 - verifyPriceX96) * 10000 : (verifyPriceX96 - priceX96) * 10000;
 
@@ -300,8 +318,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         state.liquidity = _getPositionLiquidity(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
     
         // Get price data from chainlink feeds
-        state.price0X96 = _getReferenceTokenPriceX96(Currency.unwrap(state.currency0));
-        state.price1X96 = _getReferenceTokenPriceX96(Currency.unwrap(state.currency1));
+        (state.price0X96, state.cachedChainlinkReferencePriceX96) = _getReferenceTokenPriceX96(Currency.unwrap(state.currency0), state.cachedChainlinkReferencePriceX96);
+        (state.price1X96, state.cachedChainlinkReferencePriceX96) = _getReferenceTokenPriceX96(Currency.unwrap(state.currency1), state.cachedChainlinkReferencePriceX96);
 
         // Check derived pool price for manipulation attacks
         uint256 derivedPoolPriceX96 = state.price0X96 * Q96 / state.price1X96;
@@ -325,7 +343,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             // Use LiquidityAmounts library to calculate amounts from liquidity
             // Similar to V4Utils._calculateLiquidity but in reverse (amounts from liquidity)
             (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(
-                state.derivedSqrtPriceX96,  // Current price (from oracle)
+                state.derivedSqrtPriceX96,    // Current price (from oracle)
                 state.sqrtPriceX96Lower,     // Lower tick price
                 state.sqrtPriceX96Upper,     // Upper tick price
                 state.liquidity              // Position liquidity
@@ -387,38 +405,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     {
         PositionState memory state = _loadPositionState(tokenId);
 
-
         // Get position liquidity
         liquidity = state.liquidity;
         
         // Get uncollected fees using the refactored helper method
         (fees0, fees1) = _getFees(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
-    }
-    
-    /// @notice Helper function to get position data while avoiding stack too deep
-    function _getPositionData(uint256 tokenId) internal returns (uint128 liquidity, uint128 fees0, uint128 fees1, uint256 amount0, uint256 amount1) {
-        PositionState memory state = _loadPositionState(tokenId);
-        (amount0, amount1) = _getAmounts(state);
-        (fees0, fees1) = _getFees(state.poolId, address(positionManager), state.tickLower, state.tickUpper, tokenId);
-        liquidity = state.liquidity;
-    }
-    
-    /// @notice Helper function to get position liquidity and fee growth data
-    function _getPositionFeeGrowth(
-        PoolId poolId,
-        address owner,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 salt
-    ) internal view returns (uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128) {
-        (, feeGrowthInside0LastX128, feeGrowthInside1LastX128) = StateLibrary.getPositionInfo(
-            poolManager, 
-            poolId, 
-            owner, 
-            tickLower, 
-            tickUpper, 
-            bytes32(salt)
-        );
     }
     
     /// @notice Helper function to get complete position info in one call
