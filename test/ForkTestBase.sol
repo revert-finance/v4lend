@@ -56,7 +56,7 @@ contract ForkTestBase is V4UtilsTestBase {
     address nft2Owner;
     uint256 nft2TokenId;
 
-    function setUp() public override {
+    function setUp() public virtual override {
 
         // Fork mainnet at specified block
         // Note: Replace with your own RPC URL (Alchemy, Infura, etc.)

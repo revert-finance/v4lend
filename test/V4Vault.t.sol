@@ -76,7 +76,8 @@ contract V4VaultIntegrationTest is ForkTestBase {
             address(usdc), 
             positionManager, 
             interestRateModel, 
-            v4Oracle
+            v4Oracle,
+            realWeth
         );
         
         vault.setTokenConfig(address(usdc), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
@@ -340,7 +341,6 @@ contract V4VaultIntegrationTest is ForkTestBase {
             0,
             0,
             "",
-            0,
             0,
             0,
             0,

@@ -900,7 +900,8 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             swapData1: "",
             amountAddMin0: 2 ether, // Higher than amount0 - should fail
             amountAddMin1: 0, // No minimum for token1
-            decreaseLiquidityHookData: ""
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
         });
         
         // Approve V4Utils to manage the NFT
@@ -957,7 +958,8 @@ contract V4UtilsSimpleTest is V4UtilsTestBase {
             swapData1: "",
             amountAddMin0: 2 ether, // Higher than amount0 - should fail
             amountAddMin1: 0, // No minimum for token1
-            decreaseLiquidityHookData: ""
+            decreaseLiquidityHookData: "", 
+            increaseLiquidityHookData: ""
         });
         
         // Approve V4Utils to manage the NFT

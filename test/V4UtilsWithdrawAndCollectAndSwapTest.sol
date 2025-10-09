@@ -76,8 +76,8 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is ForkTestBase {
             returnData: "",
             swapAndMintReturnData: "",
             hook: address(0),
-            mintHookData: "",
-            decreaseLiquidityHookData: ""
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
         });
 
         _executeInstructions(params.tokenId, instructions, params.owner);

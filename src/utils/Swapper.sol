@@ -3,8 +3,21 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import "@uniswap/v4-core/src/types/PoolKey.sol";
 import "@uniswap/v4-core/src/types/Currency.sol";
+import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import "@uniswap/v4-core/src/libraries/TickMath.sol";
+import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import "@uniswap/v4-core/src/types/PoolId.sol";
+
 import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
 import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
@@ -23,11 +36,17 @@ abstract contract Swapper is Constants {
     /// @notice Uniswap v4 position manager
     IPositionManager public immutable positionManager;
 
+    /// @notice Uniswap v4 pool manager
+    IPoolManager public immutable poolManager;
+
     /// @notice Uniswap Universal Router
     address public immutable universalRouter;
 
     /// @notice 0x Protocol AllowanceHolder contract
     address public immutable zeroxAllowanceHolder;
+
+    /// @notice Tracks tokens that have been approved to Permit2
+    mapping(address => bool) private _permit2Approved;
 
     /// @notice Constructor
     /// @param _positionManager Uniswap v4 position manager
@@ -40,6 +59,7 @@ abstract contract Swapper is Constants {
     ) {
         weth = NativeWrapper(payable(address(_positionManager))).WETH9();
         positionManager = _positionManager;
+        poolManager = IPoolManager(_positionManager.poolManager());
         universalRouter = _universalRouter;
         zeroxAllowanceHolder = _zeroxAllowanceHolder;
     }
@@ -150,5 +170,98 @@ abstract contract Swapper is Constants {
             // ETH -> WETH: deposit ETH to get WETH
             weth.deposit{value: amount}();
         }
+    }
+
+    function _handleApproval(IPermit2 permit2, Currency token, uint256 amount) internal {
+        if (amount != 0 && !token.isAddressZero()) {
+            address tokenAddr = Currency.unwrap(token);
+            if (!_permit2Approved[tokenAddr]) {
+                SafeERC20.forceApprove(IERC20(tokenAddr), address(permit2), type(uint256).max);
+                _permit2Approved[tokenAddr] = true;
+            }
+            permit2.approve(tokenAddr, address(positionManager), uint160(amount), uint48(block.timestamp));
+        }
+    }
+
+    function _buildActionsForIncreasingLiquidity(
+        uint8 baseAction,
+        Currency token0, 
+        Currency token1
+    ) internal view returns (bytes memory actions, bytes[] memory params_array) {
+        if (token0.isAddressZero() || token1.isAddressZero()) {
+            // Include SWEEP action for native ETH
+            actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
+            params_array = new bytes[](3);
+            params_array[2] = abi.encode(address(0), address(this));
+        } else {
+            // Standard actions for ERC20 tokens only
+            actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR));
+            params_array = new bytes[](2);
+        }
+        params_array[1] = abi.encode(token0, token1, address(this));
+    }
+
+
+    function _calculateLiquidity(
+        int24 tickLower,
+        int24 tickUpper,
+        PoolKey memory poolKey,
+        uint256 amount0,
+        uint256 amount1
+    ) internal view returns (uint128 maxLiquidity) {
+        // Get current price from pool
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+
+        // Calculate sqrt prices for tick range
+        uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
+
+        // Calculate max liquidity
+        maxLiquidity =
+            LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, amount0, amount1);
+    }
+
+    // decreases liquidity from uniswap v4 position
+    function _decreaseLiquidity(
+        uint256 tokenId,
+        uint128 liquidityRemove, 
+        uint256 amount0Min,
+        uint256 amount1Min,
+        bytes memory decreaseLiquidityHookData,
+        uint256 deadline
+    ) internal returns (uint256 amount0, uint256 amount1) {
+        // Get position info to determine currencies for TAKE_PAIR
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        
+        // Cache currencies to save gas
+        Currency currency0 = poolKey.currency0;
+        Currency currency1 = poolKey.currency1;
+        
+        // check balance before decreasing liquidity
+        amount0 = currency0.balanceOfSelf();
+        amount1 = currency1.balanceOfSelf();
+
+        // V4 uses different approach - need to use modifyLiquidities with encoded actions
+        // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
+        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory params_array = new bytes[](2);
+        params_array[0] = abi.encode(
+            tokenId,
+            uint256(liquidityRemove),
+            uint128(amount0Min),
+            uint128(amount1Min),
+            decreaseLiquidityHookData
+        );
+        params_array[1] = abi.encode(currency0, currency1, address(this));
+
+        positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
+        
+        // calculate delta
+        amount0 = currency0.balanceOfSelf() - amount0;
+        amount1 = currency1.balanceOfSelf() - amount1;
+    }
+
+    // recieves ETH from swaps
+    receive() external payable {
     }
 }

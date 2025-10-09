@@ -76,8 +76,8 @@ contract V4UtilsChangeRangeTest is ForkTestBase {
             returnData: "",
             swapAndMintReturnData: "",
             hook: params.hook,
-            mintHookData: "",
-            decreaseLiquidityHookData: ""
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
         });
 
         _executeInstructions(params.tokenId, instructions, params.owner);

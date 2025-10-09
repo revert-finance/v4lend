@@ -121,7 +121,8 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is ForkTestBase {
             swapData1: params.swapData1,
             amountAddMin0: params.amountAddMin0,
             amountAddMin1: params.amountAddMin1,
-            decreaseLiquidityHookData: ""
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
         });
 
         // Execute swap and increase liquidity

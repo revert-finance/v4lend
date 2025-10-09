@@ -325,8 +325,8 @@ abstract contract V4UtilsTestBase is Test {
             returnData: "",
             swapAndMintReturnData: "",
             hook: address(0),
-            mintHookData: "",
-            decreaseLiquidityHookData: ""
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
         });
     }
     

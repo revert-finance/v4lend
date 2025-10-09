@@ -22,21 +22,21 @@ import "@uniswap/v4-core/src/libraries/TickMath.sol";
 import "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import "@uniswap/v4-core/src/types/PoolId.sol";
-import "../utils/Swapper.sol";
 
+import "../utils/Swapper.sol";
+import "../interfaces/IVault.sol";
+import "./Transformer.sol";
 
 /// @title V4Utils v1.0
 /// @notice Utility functions for Uniswap V4 positions
 /// It does not hold any ERC20 or NFTs.
 /// It can be simply redeployed when new / better functionality is implemented
-contract V4Utils is Swapper, IERC721Receiver {
+contract V4Utils is Transformer, Swapper, IERC721Receiver {
     using SafeCast for uint256;
 
     /// @notice Permit2 contract
     IPermit2 public immutable permit2;
 
-    /// @notice Tracks tokens that have been approved to Permit2
-    mapping(address => bool) private _permit2Approved;
 
     // events
     event CompoundFees(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
@@ -93,10 +93,10 @@ contract V4Utils is Swapper, IERC721Receiver {
         bytes swapAndMintReturnData;
         // hook address for CHANGE_RANGE operations (optional)
         address hook;
-        // hook data for mint in CHANGE_RANGE operations (optional)
-        bytes mintHookData;
         // hook data for all operations which decrease liquidity (optional)
         bytes decreaseLiquidityHookData;
+        // hook data for all operations which mint / increase liquidity (optional)
+        bytes increaseLiquidityHookData;
     }
 
     /// @notice Params for swap() function
@@ -170,6 +170,8 @@ contract V4Utils is Swapper, IERC721Receiver {
         uint256 amountAddMin1;
         // hook data for all operations which decrease liquidity (optional)
         bytes decreaseLiquidityHookData;
+        // hook data for all operations which increase liquidity (optional)
+        bytes increaseLiquidityHookData;
     }
 
     /// @notice Constructor
@@ -182,7 +184,7 @@ contract V4Utils is Swapper, IERC721Receiver {
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2
-    ) Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) {
+    ) Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) Ownable(msg.sender) {
         permit2 = _permit2;
     }
 
@@ -191,6 +193,9 @@ contract V4Utils is Swapper, IERC721Receiver {
     /// @param instructions Instructions to execute
     /// @return newTokenId Id of position (if a new one was created)
     function execute(uint256 tokenId, Instructions memory instructions) public returns (uint256 newTokenId) {
+        
+        _validateCaller(positionManager, tokenId);
+
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         
@@ -249,7 +254,8 @@ Currency targetToken = instructions.targetToken;
                     "",
                     instructions.amountAddMin0,
                     instructions.amountAddMin1,
-                    ""
+                    "",
+                    instructions.increaseLiquidityHookData
                 ),
                 poolKey.currency0,
                 poolKey.currency1
@@ -272,7 +278,8 @@ Currency targetToken = instructions.targetToken;
                     instructions.swapData0,
                     instructions.amountAddMin0,
                     instructions.amountAddMin1,
-                    ""
+                    "",
+                    instructions.increaseLiquidityHookData
                 ),
                 poolKey.currency0,
                 poolKey.currency1
@@ -295,7 +302,8 @@ Currency targetToken = instructions.targetToken;
                     "",
                     instructions.amountAddMin0,
                     instructions.amountAddMin1,
-                    ""
+                    "",
+                    instructions.increaseLiquidityHookData
                 ),
                 poolKey.currency0,
                 poolKey.currency1
@@ -340,7 +348,7 @@ Currency targetToken = instructions.targetToken;
                     instructions.amountAddMin1,
                     instructions.swapAndMintReturnData,
                     instructions.hook,
-                    instructions.mintHookData
+                    instructions.increaseLiquidityHookData
                 )
             );
         } else if (targetToken == poolKey.currency1) {
@@ -369,7 +377,7 @@ Currency targetToken = instructions.targetToken;
                     instructions.amountAddMin1,
                     instructions.swapAndMintReturnData,
                     instructions.hook,
-                    instructions.mintHookData
+                    instructions.increaseLiquidityHookData
                 )
             );
         } else {
@@ -398,7 +406,7 @@ Currency targetToken = instructions.targetToken;
                     instructions.amountAddMin1,
                     instructions.swapAndMintReturnData,
                     instructions.hook,
-                    instructions.mintHookData
+                    instructions.increaseLiquidityHookData
                 )
             );
         }
@@ -607,26 +615,6 @@ Currency targetToken = instructions.targetToken;
         }
     }
 
-    /// @notice Build actions and params array with optional ETH SWEEP
-    /// @param baseAction The base action to perform (MINT_POSITION or INCREASE_LIQUIDITY)
-    /// @param hasNativeETH Whether native ETH is involved
-    /// @return actions Encoded actions
-    /// @return params_array Empty params array of correct size
-    function _buildActionsForNativeETH(
-        uint8 baseAction,
-        bool hasNativeETH
-    ) internal pure returns (bytes memory actions, bytes[] memory params_array) {
-        if (hasNativeETH) {
-            // Include SWEEP action for native ETH
-            actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
-            params_array = new bytes[](3);
-        } else {
-            // Standard actions for ERC20 tokens only
-            actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR));
-            params_array = new bytes[](2);
-        }
-    }
-
     /// @notice Add SWEEP params if native ETH is involved
     /// @param params_array The params array to modify
     /// @param hasNativeETH Whether native ETH is involved
@@ -651,14 +639,13 @@ Currency targetToken = instructions.targetToken;
             tickSpacing: params.tickSpacing, // Use dynamic tickSpacing from params
             hooks: IHooks(params.hook) // Use hook from params
         });
-        
 
-        (bytes memory actions, bytes[] memory params_array) = _buildActionsForNativeETH(
+        (bytes memory actions, bytes[] memory params_array) = _buildActionsForIncreasingLiquidity(
             uint8(Actions.MINT_POSITION),
-            params.token0.isAddressZero() || params.token1.isAddressZero()
+            params.token0, 
+            params.token1
         );
-        _addSweepParamsIfNeeded(params_array, params.token0.isAddressZero() || params.token1.isAddressZero());
-        
+
         liquidity = _calculateLiquidity(
             params.tickLower,
             params.tickUpper,
@@ -677,8 +664,7 @@ Currency targetToken = instructions.targetToken;
             address(this), // recipient
             bytes("") // hookData
         );
-        params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-        
+
         // Mint position and handle transfers
         tokenId = _mintPositionAndTransfer(
             actions,
@@ -733,35 +719,6 @@ Currency targetToken = instructions.targetToken;
         // Transfer NFT to recipient
         IERC721(address(positionManager)).safeTransferFrom(address(this), recipientNFT, tokenId, returnData);
     }
-    
-    function _calculateLiquidity(
-        int24 tickLower,
-        int24 tickUpper,
-        PoolKey memory poolKey,
-        uint256 amount0,
-        uint256 amount1
-    ) internal view returns (uint128 maxLiquidity) {
-
-        // Get poolManager from positionManager
-        IPoolManager poolManager = IPoolManager(positionManager.poolManager());
-        
-        // Get current price from pool
-        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
-        
-        // Calculate sqrt prices for tick range
-        uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
-    
-        // Calculate max liquidity
-        maxLiquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
-            sqrtPriceAX96,
-            sqrtPriceBX96,
-            amount0,
-            amount1
-        );
-    }
-
 
     // swap and increase logic
     function _swapAndIncrease(SwapAndIncreaseLiquidityParams memory params, Currency token0, Currency token1)
@@ -800,11 +757,11 @@ Currency targetToken = instructions.targetToken;
         (PoolKey memory poolKey, PositionInfo info) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
         // Build actions for native ETH if needed
-        (bytes memory actions, bytes[] memory params_array) = _buildActionsForNativeETH(
+        (bytes memory actions, bytes[] memory params_array) = _buildActionsForIncreasingLiquidity(
             uint8(Actions.INCREASE_LIQUIDITY),
-            Currency.unwrap(poolKey.currency0) == address(0) || Currency.unwrap(poolKey.currency1) == address(0)
+            poolKey.currency0,
+            poolKey.currency1
         );
-        _addSweepParamsIfNeeded(params_array, Currency.unwrap(poolKey.currency0) == address(0) || Currency.unwrap(poolKey.currency1) == address(0));
 
         // Calculate liquidity from amounts
         liquidity = _calculateLiquidity(
@@ -818,9 +775,9 @@ Currency targetToken = instructions.targetToken;
         params_array[0] = abi.encode(
             params.tokenId,
             liquidity,
-            uint128(total0), // amount0Max
-            uint128(total1), // amount1Max
-            false
+            uint128(total0),
+            uint128(total1),
+            params.increaseLiquidityHookData
         );
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
        
@@ -904,33 +861,8 @@ Currency targetToken = instructions.targetToken;
             }
         }
 
-        // approve tokens for positionManager (with caching)
-        if (total0 != 0 && !params.token0.isAddressZero()) {
-            address token0Addr = Currency.unwrap(params.token0);
-            if (!_permit2Approved[token0Addr]) {
-                SafeERC20.forceApprove(IERC20(token0Addr), address(permit2), type(uint256).max);
-                _permit2Approved[token0Addr] = true;
-            }
-            permit2.approve(
-                token0Addr,
-                address(positionManager),
-                uint160(total0),
-                uint48(block.timestamp)
-            );
-        }
-        if (total1 != 0 && !params.token1.isAddressZero()) {
-            address token1Addr = Currency.unwrap(params.token1);
-            if (!_permit2Approved[token1Addr]) {
-                SafeERC20.forceApprove(IERC20(token1Addr), address(permit2), type(uint256).max);
-                _permit2Approved[token1Addr] = true;
-            }
-            permit2.approve(
-                token1Addr,
-                address(positionManager),
-                uint160(total1),
-                uint48(block.timestamp)
-            );
-        }
+        _handleApproval(permit2, params.token0, total0);
+        _handleApproval(permit2, params.token1, total1);
     }
 
 
@@ -972,9 +904,5 @@ Currency targetToken = instructions.targetToken;
         // calculate delta
         amount0 = currency0.balanceOfSelf() - amount0;
         amount1 = currency1.balanceOfSelf() - amount1;
-    }
-
-    // recieves ETH from swaps, decreasing liquidity
-    receive() external payable {
     }
 }
