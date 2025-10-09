@@ -569,6 +569,85 @@ contract V4VaultIntegrationTest is ForkTestBase {
         assertEq(vault.loanAtIndex(nft2Owner, 0), nft2TokenId, "Loan should still be the same NFT");
     }
 
+     function testMainScenario() external {
+        assertEq(vault.totalSupply(), 0);
+        assertEq(vault.debtSharesTotal(), 0);
+        assertEq(vault.loanCount(nft1Owner), 0);
+
+        // lending 2 usdc
+        vm.prank(WHALE_ACCOUNT);
+        usdc.approve(address(vault), 2000000);
+
+        vm.prank(WHALE_ACCOUNT);
+        vault.deposit(2000000, WHALE_ACCOUNT);
+        assertEq(vault.totalSupply(), 2000000);
+
+        // withdrawing 1 usdc
+        vm.prank(WHALE_ACCOUNT);
+        vault.withdraw(1000000, WHALE_ACCOUNT, WHALE_ACCOUNT);
+
+        assertEq(vault.totalSupply(), 1000000);
+
+        // borrowing 1 usdc
+
+        uint balance = usdc.balanceOf(nft1Owner);
+        _createAndBorrow(nft1TokenId, nft1Owner, 1000000);
+        assertEq(usdc.balanceOf(nft1Owner) - balance, 1000000);
+
+        assertEq(vault.loanCount(nft1Owner), 1);
+        assertEq(vault.loanAtIndex(nft1Owner, 0), nft1TokenId);
+        assertEq(vault.ownerOf(nft1TokenId), nft1Owner);
+
+        // gift some usdc so later he may repay all
+        vm.prank(WHALE_ACCOUNT);
+        usdc.transfer(nft1Owner, 4946);
+
+        assertEq(vault.debtSharesTotal(), 1000000);
+
+        // wait 7 days
+        vm.warp(block.timestamp + 7 days);
+
+        // verify to date values
+        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
+        console.log("Debt after 7 days:", debt);
+        console.log("Full value after 7 days:", fullValue);
+        console.log("Collateral value after 7 days:", collateralValue);
+        uint256 lent = vault.lendInfo(WHALE_ACCOUNT);
+        console.log("Lent after 7 days:", lent);
+
+        vm.prank(nft1Owner);
+        usdc.approve(address(vault), 1004946);
+
+        // repay partially
+        vm.prank(nft1Owner);
+        vault.repay(nft1TokenId, 1000000, false);
+        (debt,,,,) = vault.loanInfo(nft1TokenId);
+        (uint256 debtShares) = vault.loans(nft1TokenId);
+        console.log("Remaining debt shares:", debtShares);
+        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault));
+        console.log("Remaining debt:", debt);
+
+        // repay full
+        vm.prank(nft1Owner);
+        vault.repay(nft1TokenId, debtShares, true);
+
+        (debt,,,,) = vault.loanInfo(nft1TokenId);
+        assertEq(debt, 0);
+
+        // still in vault
+        assertEq(vault.loanCount(nft1Owner), 1);
+        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault));
+        assertEq(vault.ownerOf(nft1TokenId), nft1Owner);
+
+        vm.prank(nft1Owner);
+        vault.remove(nft1TokenId, nft1Owner, "");
+
+        assertEq(vault.loanCount(nft1Owner), 0);
+        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), nft1Owner);
+        assertEq(vault.ownerOf(nft1TokenId), address(0));
+    }
+
+
     /*
     function testTransformChangeRange() external {
         _setupBasicLoan(true);
@@ -900,82 +979,6 @@ contract V4VaultIntegrationTest is ForkTestBase {
         assertEq(totalDebtShares, 0);
     }
 
-    function testMainScenario() external {
-        assertEq(vault.totalSupply(), 0);
-        assertEq(vault.debtSharesTotal(), 0);
-        assertEq(vault.loanCount(nft1Owner), 0);
-
-        // lending 2 usdc
-        vm.prank(WHALE_ACCOUNT);
-        usdc.approve(address(vault), 2000000);
-
-        vm.prank(WHALE_ACCOUNT);
-        vault.deposit(2000000, WHALE_ACCOUNT);
-        assertEq(vault.totalSupply(), 2000000);
-
-        // withdrawing 1 usdc
-        vm.prank(WHALE_ACCOUNT);
-        vault.withdraw(1000000, WHALE_ACCOUNT, WHALE_ACCOUNT);
-
-        assertEq(vault.totalSupply(), 1000000);
-
-        // borrowing 1 usdc
-        _createAndBorrow(nft1TokenId, nft1Owner, 1000000);
-        assertEq(usdc.balanceOf(nft1Owner), 1000000);
-
-        assertEq(vault.loanCount(nft1Owner), 1);
-        assertEq(vault.loanAtIndex(nft1Owner, 0), nft1TokenId);
-        assertEq(vault.ownerOf(nft1TokenId), nft1Owner);
-
-        // gift some usdc so later he may repay all
-        vm.prank(WHALE_ACCOUNT);
-        usdc.transfer(nft1Owner, 4946);
-
-        assertEq(vault.debtSharesTotal(), 1000000);
-
-        // wait 7 days
-        vm.warp(block.timestamp + 7 days);
-
-        // verify to date values
-        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
-        console.log("Debt after 7 days:", debt);
-        console.log("Full value after 7 days:", fullValue);
-        console.log("Collateral value after 7 days:", collateralValue);
-        uint256 lent = vault.lendInfo(WHALE_ACCOUNT);
-        console.log("Lent after 7 days:", lent);
-
-        vm.prank(nft1Owner);
-        usdc.approve(address(vault), 1004946);
-
-        // repay partially
-        vm.prank(nft1Owner);
-        vault.repay(nft1TokenId, 1000000, false);
-        (debt,,,,) = vault.loanInfo(nft1TokenId);
-        (uint256 debtShares) = vault.loans(nft1TokenId);
-        console.log("Remaining debt shares:", debtShares);
-        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault));
-        console.log("Remaining debt:", debt);
-
-        // repay full
-        vm.prank(nft1Owner);
-        vault.repay(nft1TokenId, debtShares, true);
-
-        (debt,,,,) = vault.loanInfo(nft1TokenId);
-        assertEq(debt, 0);
-
-        // still in vault
-        assertEq(vault.loanCount(nft1Owner), 1);
-        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault));
-        assertEq(vault.ownerOf(nft1TokenId), nft1Owner);
-
-        vm.prank(nft1Owner);
-        vault.remove(nft1TokenId, nft1Owner, "");
-
-        assertEq(vault.loanCount(nft1Owner), 0);
-        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), nft1Owner);
-        assertEq(vault.ownerOf(nft1TokenId), address(0));
-    }
-
     function testMultiLendLoan() external {
         _deposit(2000000, WHALE_ACCOUNT);
         _deposit(1000000, nft1Owner_2);
@@ -1243,9 +1246,6 @@ contract V4VaultIntegrationTest is ForkTestBase {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, msgHash);
         return bytes.concat(r, s, bytes1(v));
     }
-
-    // Note: TransformExploit test depends on AutoCompound which is not available in V4 codebase
-    // This test has been removed as it depends on missing components
 
     function test_LeverageDown() public {
         LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, UNIVERSAL_ROUTER, EX0x, permit2);
