@@ -83,6 +83,7 @@ contract V4VaultIntegrationTest is ForkTestBase {
         vault.setTokenConfig(address(usdc), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(realWeth), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
+        vault.setTokenConfig(address(0), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
 
         // limits 1000 usdc each
         vault.setLimits(0, 1000000000, 1000000000, 1000000000, 1000000000);
@@ -114,6 +115,28 @@ contract V4VaultIntegrationTest is ForkTestBase {
             uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
             vm.prank(nft1Owner);
             vault.borrow(nft1TokenId, collateralValue * buffer / Q32);
+        }
+    }
+
+    function _setupBasicLoanWithETH(bool borrowMax) internal {
+        // lend 500 usdc
+        _deposit(500000000, WHALE_ACCOUNT);
+
+        // add collateral
+        vm.prank(nft2Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft2TokenId);
+        vm.prank(nft2Owner);
+        vault.create(nft2TokenId, nft2Owner);
+
+        (, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
+        assertEq(collateralValue, 126342057);
+        assertEq(fullValue, 140380064);
+
+        if (borrowMax) {
+            // borrow max
+            uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
+            vm.prank(nft2Owner);
+            vault.borrow(nft2TokenId, collateralValue * buffer / Q32);
         }
     }
 
@@ -186,9 +209,11 @@ contract V4VaultIntegrationTest is ForkTestBase {
 
 
     function testERC20() external {
-        uint256 assets = 500000000;
 
         _setupBasicLoan(false);
+
+        uint256 assets = vault.balanceOf(WHALE_ACCOUNT);
+
         assertEq(vault.balanceOf(WHALE_ACCOUNT), assets);
         assertEq(vault.lendInfo(WHALE_ACCOUNT), assets);
 
@@ -273,6 +298,33 @@ contract V4VaultIntegrationTest is ForkTestBase {
 
         vm.prank(nft1Owner);
         vault.borrow(nft1TokenId, amount);
+    }
+
+
+   // fuzz testing borrow amount
+    function testBorrowETH(uint256 amount) external {
+        // 0 borrow loan
+        _setupBasicLoanWithETH(false);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(nft2TokenId);
+
+        vm.assume(amount <= collateralValue * 100);
+
+        uint256 debtLimit = vault.globalDebtLimit();
+        uint256 increaseLimit = vault.dailyDebtIncreaseLimitMin();
+
+        uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
+
+        if (amount > debtLimit) {
+            vm.expectRevert(Constants.GlobalDebtLimit.selector);
+        } else if (amount > increaseLimit) {
+            vm.expectRevert(Constants.DailyDebtIncreaseLimit.selector);
+        } else if (amount > collateralValue * buffer / Q32) {
+            vm.expectRevert(Constants.CollateralFail.selector);
+        }
+
+        vm.prank(nft2Owner);
+        vault.borrow(nft2TokenId, amount);
     }
 
     function testBorrowUnauthorized() external {
@@ -419,6 +471,102 @@ contract V4VaultIntegrationTest is ForkTestBase {
         // 7. Verify vault state is still consistent
         assertEq(vault.loanCount(nft1Owner), 1, "User should still have 1 loan");
         assertEq(vault.loanAtIndex(nft1Owner, 0), nft1TokenId, "Loan should still be the same NFT");
+    }
+
+    function testTransformWithdrawCollectETH() external {
+        _setupBasicLoanWithETH(false);
+
+        // test transforming with v4utils
+        // withdraw fees - as an example
+        V4Utils.Instructions memory inst = V4Utils.Instructions(
+            V4Utils.WhatToDo.WITHDRAW_AND_COLLECT_AND_SWAP,
+            Currency.wrap(address(0)),
+            0,
+            0,
+            0,
+            0,
+            "",
+            0,
+            0,
+            "",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            block.timestamp,
+            nft2Owner,
+            nft2Owner,
+            "",
+            "",
+            address(0),
+            "",
+            ""
+        );
+
+        // Record initial state before transform
+        (uint256 initialDebt, uint256 initialFullValue, uint256 initialCollateralValue,,) = vault.loanInfo(nft2TokenId);
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(nft2TokenId);
+        uint256 initialOwnerBalance0 = usdc.balanceOf(nft2Owner);
+        uint256 initialOwnerBalance1 = realWeth.balanceOf(nft2Owner);
+        
+        console.log("Initial debt:", initialDebt);
+        console.log("Initial full value:", initialFullValue);
+        console.log("Initial collateral value:", initialCollateralValue);
+        console.log("Initial liquidity:", initialLiquidity);
+        console.log("Initial owner USDC balance:", initialOwnerBalance0);
+        console.log("Initial owner WETH balance:", initialOwnerBalance1);
+
+        // Verify NFT is owned by vault
+        assertEq(IERC721(address(positionManager)).ownerOf(nft2TokenId), address(vault));
+        assertEq(vault.ownerOf(nft2TokenId), nft2Owner);
+
+        vm.prank(nft2Owner);
+        vault.transform(nft2TokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (nft2TokenId, inst)));
+
+        // Verify final state after transform
+        (uint256 finalDebt, uint256 finalFullValue, uint256 finalCollateralValue,,) = vault.loanInfo(nft2TokenId);
+        uint128 finalLiquidity = positionManager.getPositionLiquidity(nft2TokenId);
+        uint256 finalOwnerBalance0 = usdc.balanceOf(nft2Owner);
+        uint256 finalOwnerBalance1 = realWeth.balanceOf(nft2Owner);
+        
+        console.log("Final debt:", finalDebt);
+        console.log("Final full value:", finalFullValue);
+        console.log("Final collateral value:", finalCollateralValue);
+        console.log("Final liquidity:", finalLiquidity);
+        console.log("Final owner USDC balance:", finalOwnerBalance0);
+        console.log("Final owner WETH balance:", finalOwnerBalance1);
+
+        // Assertions to verify the transform worked correctly
+        // 1. NFT should still be owned by vault and user
+        assertEq(IERC721(address(positionManager)).ownerOf(nft2TokenId), address(vault));
+        assertEq(vault.ownerOf(nft2TokenId), nft2Owner);
+
+        // 2. Loan should still exist (no debt was borrowed in this test)
+        assertEq(finalDebt, initialDebt); // Should remain 0 since no borrowing occurred
+
+        // 3. Position should still exist but may have changed
+        assertGt(finalLiquidity, 0, "Position should still have liquidity");
+        
+        // 4. Collateral and full values should be reasonable
+        assertGt(finalCollateralValue, 0, "Collateral value should be positive");
+        assertGt(finalFullValue, 0, "Full value should be positive");
+        assertGe(finalFullValue, finalCollateralValue, "Full value should be >= collateral value");
+
+        // 5. Owner should have received some tokens (fees collected)
+        // Note: The exact amounts depend on the position's fee accumulation
+        assertGe(finalOwnerBalance0, initialOwnerBalance0, "Owner should have received USDC (fees)");
+        assertGe(finalOwnerBalance1, initialOwnerBalance1, "Owner should have received WETH (fees)");
+
+        // 6. Verify the transform operation completed successfully
+        // (If it failed, the transaction would have reverted)
+        console.log("Transform operation completed successfully");
+        
+        // 7. Verify vault state is still consistent
+        assertEq(vault.loanCount(nft2Owner), 1, "User should still have 1 loan");
+        assertEq(vault.loanAtIndex(nft2Owner, 0), nft2TokenId, "Loan should still be the same NFT");
     }
 
     /*

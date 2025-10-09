@@ -65,4 +65,6 @@ abstract contract Constants {
     error SameRange();
     error NotSupportedFeeTier();
     error InsufficientAmountAdded();
+
+    error HookNotAllowed();
 }

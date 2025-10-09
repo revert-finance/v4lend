@@ -104,6 +104,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     event SetTokenConfig(address token, uint32 collateralFactorX32, uint32 collateralValueLimitFactorX32);
 
     event SetEmergencyAdmin(address emergencyAdmin);
+    event SetHookAllowList(address hook, bool isAllowed);
 
     // configured tokens
     struct TokenConfig {
@@ -113,6 +114,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     mapping(address => TokenConfig) public tokenConfigs;
+
+    // hooks which are allowed in positions
+    mapping(address => bool) public hookAllowList;
 
     // total of debt shares - increases when borrow - decreases when repay
     uint256 public debtSharesTotal;
@@ -444,6 +448,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             }
             loans[tokenId] = Loan(0);
 
+            _checkHookAllowed(tokenId);
             _addTokenToOwner(owner, tokenId);
             emit Add(tokenId, owner, 0);
         } else {
@@ -459,6 +464,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 // copy debt to new token
                 loans[tokenId] = Loan(debtShares);
 
+                _checkHookAllowed(tokenId);
                 _addTokenToOwner(owner, tokenId);
                 emit Add(tokenId, owner, oldTokenId);
 
@@ -871,6 +877,17 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         config.collateralFactorX32 = collateralFactorX32; 
         config.collateralValueLimitFactorX32 = collateralValueLimitFactorX32;
         emit SetTokenConfig(token, collateralFactorX32, collateralValueLimitFactorX32);
+    }
+
+    /// @notice Sets or updates the allow list for a hook (onlyOwner)
+    /// @param hook Hook to configure
+    /// @param isAllowed Whether the hook is allowed
+    function setHookAllowList(address hook, bool isAllowed) external onlyOwner {
+        if (hook == address(0)) {
+            revert InvalidConfig();
+        }
+        hookAllowList[hook] = isAllowed;
+        emit SetHookAllowList(hook, isAllowed);
     }
 
     /// @notice Updates emergency admin address (onlyOwner)
@@ -1385,6 +1402,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         tokenOwner[tokenId] = to;
     }
 
+    function _checkHookAllowed(uint256 tokenId) internal view {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        if (address(poolKey.hooks) != address(0) && !hookAllowList[address(poolKey.hooks)]) {
+            revert HookNotAllowed();
+        }
+    }
+
     function _removeTokenFromOwner(address from, uint256 tokenId) internal {
         uint256 lastTokenIndex = ownedTokens[from].length - 1;
         uint256 tokenIndex = ownedTokensIndex[tokenId];
@@ -1403,5 +1427,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert();
         }
         return uint192(value);
+    }
+
+    // recieves ETH from fees or when decreasing liquidity
+    receive() external payable {
     }
 }
