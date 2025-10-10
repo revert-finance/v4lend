@@ -217,7 +217,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         if (instructions.whatToDo == WhatToDo.COMPOUND_FEES) {
             _executeCompoundFees(tokenId, poolKey, amount0, amount1, instructions);
         } else if (instructions.whatToDo == WhatToDo.CHANGE_RANGE) {
-            newTokenId = _executeChangeRange(poolKey, amount0, amount1, instructions);
+            newTokenId = _executeChangeRange(tokenId, poolKey, amount0, amount1, instructions);
         } else if (instructions.whatToDo == WhatToDo.WITHDRAW_AND_COLLECT_AND_SWAP) {
             _executeWithdrawAndSwap(tokenId, poolKey, amount0, amount1, instructions);
         } else {
@@ -314,6 +314,7 @@ Currency targetToken = instructions.targetToken;
 
     /// @notice Execute change range operation - swap tokens and mint new position
     function _executeChangeRange(
+        uint256 tokenId,
         PoolKey memory poolKey,
         uint256 amount0,
         uint256 amount1,
@@ -410,7 +411,7 @@ Currency targetToken = instructions.targetToken;
             );
         }
         
-        emit ChangeRange(0, newTokenId); // tokenId 0 as original position is handled elsewhere
+        emit ChangeRange(tokenId, newTokenId);
     }
 
     /// @notice Execute withdraw, collect and swap operation
@@ -677,7 +678,7 @@ Currency targetToken = instructions.targetToken;
         {
             uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
             uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
-            
+
             // Calculate amounts actually added (prevent underflow if balance bigger)
             added0 = total0 >= finalBalance0 ? total0 - finalBalance0 : 0;
             added1 = total1 >= finalBalance1 ? total1 - finalBalance1 : 0;
@@ -815,6 +816,7 @@ Currency targetToken = instructions.targetToken;
         internal
         returns (uint256 total0, uint256 total1)
     {
+
         Currency swapSource = params.swapSourceToken;
         if (swapSource == params.token0) {
             if (params.amount0 < params.amountIn1) {
@@ -831,6 +833,7 @@ Currency targetToken = instructions.targetToken;
             if (params.amount1 < params.amountIn0) {
                 revert AmountError();
             }
+
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
                 Swapper.RouterSwapParams(
                     params.token1, params.token0, params.amountIn0, params.amountOut0Min, params.swapData0

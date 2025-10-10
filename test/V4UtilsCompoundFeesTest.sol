@@ -13,14 +13,14 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./ForkTestBase.sol";
+import "./V4ForkTestBase.sol";
 
 /**
  * @title V4UtilsCompoundFeesTest
  * @notice Test suite for V4Utils.execute() COMPOUND_FEES functionality
  * @dev Tests fee compounding operations on existing positions
  */
-contract V4UtilsCompoundFeesTest is ForkTestBase {
+contract V4UtilsCompoundFeesTest is V4ForkTestBase {
     
     function testExecuteCompoundFees() public {
         console.log("=== Testing COMPOUND_FEES with real mainnet tokens ===");

@@ -11,14 +11,14 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {Constants} from "../src/utils/Constants.sol";
-import "./V4UtilsTestBase.sol";
+import "./V4TestBase.sol";
 
 /**
  * @title V4UtilsSimpleTest
  * @notice Simple test suite for V4Utils.execute() function
  * @dev Tests core functionality without mainnet forking
  */
-contract V4UtilsSimpleTest is V4UtilsTestBase {
+contract V4UtilsSimpleTest is V4TestBase {
     
     function testExecuteCompoundFees() public {
         console.log("=== Testing COMPOUND_FEES ===");

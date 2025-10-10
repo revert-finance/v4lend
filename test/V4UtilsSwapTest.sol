@@ -10,14 +10,14 @@ import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./ForkTestBase.sol";
+import "./V4ForkTestBase.sol";
 
 /**
  * @title V4UtilsSwapTest
  * @notice Test suite for V4Utils.swap() functionality
  * @dev Tests token swaps with optional permit2 signatures
  */
-contract V4UtilsSwapTest is ForkTestBase {
+contract V4UtilsSwapTest is V4ForkTestBase {
 
     struct SwapTestParams {
         Currency tokenIn;

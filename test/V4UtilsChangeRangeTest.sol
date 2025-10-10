@@ -13,14 +13,14 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./ForkTestBase.sol";
+import "./V4ForkTestBase.sol";
 
 /**
  * @title V4UtilsChangeRangeTest
  * @notice Test suite for V4Utils.execute() CHANGE_RANGE functionality
  * @dev Tests changing tick ranges of existing positions
  */
-contract V4UtilsChangeRangeTest is ForkTestBase {
+contract V4UtilsChangeRangeTest is V4ForkTestBase {
 
     function _executeChangeRange(
         ChangeRangeTestParams memory params

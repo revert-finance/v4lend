@@ -15,14 +15,14 @@ import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./V4UtilsTestBase.sol";
+import "./V4TestBase.sol";
 
 /**
- * @title ForkTestBase
+ * @title V4ForkTestBase
  * @notice Base contract with common logic for V4Utils.execute() tests
  * @dev Contains shared setup, structs, and helper functions
  */
-contract ForkTestBase is V4UtilsTestBase {
+contract V4ForkTestBase is V4TestBase {
     // Mainnet fork configuration
     uint256 constant MAINNET_FORK_BLOCK = 23248232; 
     
@@ -79,7 +79,6 @@ contract ForkTestBase is V4UtilsTestBase {
         usdc = IERC20(USDC_ADDRESS);
         usdt = IERC20(USDT_ADDRESS);
         dai = IERC20(DAI_ADDRESS);
-        
         
         // Deploy V4Utils with the real deployed contracts
         v4Utils = new V4Utils(

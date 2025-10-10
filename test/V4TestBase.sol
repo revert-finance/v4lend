@@ -31,11 +31,11 @@ import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {V4Oracle, AggregatorV3Interface} from "../src/V4Oracle.sol";
 
 /**
- * @title TestBase
+ * @title V4TestBase
  * @notice Base contract for V4Utils tests with shared setup and utilities
  * @dev Contains common deployment, setup, and helper functions
  */
-abstract contract TestBase is Test {
+abstract contract V4TestBase is Test {
     // V4 Contracts
     IPermit2 public permit2;
     IPoolManager public poolManager;

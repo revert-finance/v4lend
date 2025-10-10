@@ -23,17 +23,14 @@ import {V4Utils} from "../src/transformers/V4Utils.sol";
 
 import {Constants} from "../src/utils/Constants.sol";
 import {Swapper} from "../src/utils/Swapper.sol";
-import {ForkTestBase} from "./ForkTestBase.sol";
+import {V4ForkTestBase} from "./V4ForkTestBase.sol";
 
-contract V4VaultIntegrationTest is ForkTestBase {
+contract V4VaultIntegrationTest is V4ForkTestBase {
     uint256 constant Q32 = 2 ** 32;
     uint256 constant Q64 = 2 ** 64;
     uint256 constant Q96 = 2 ** 96;
 
     uint256 constant YEAR_SECS = 31557600; // taking into account leap years
-
-    address EX0x = 0xDef1C0ded9bec7F1a1670819833240f027b25EfF; // 0x exchange proxy
-    address UNIVERSAL_ROUTER = 0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD;
 
     address WHALE_ACCOUNT = 0x4CD83180d9b62405d1178ed8Dcef6D251F31Fc40;
 
@@ -42,7 +39,7 @@ contract V4VaultIntegrationTest is ForkTestBase {
     InterestRateModel interestRateModel;
 
     function setUp() public override {
-        super.setUp(); // Call ForkTestBase setUp first
+        super.setUp(); // Call V4ForkTestBase setUp first
 
         // 0% base rate - 5% multiplier - after 80% - 109% jump multiplier (like in compound v2 deployed)  (-> max rate 25.8% per year)
         interestRateModel = new InterestRateModel(0, Q64 * 5 / 100, Q64 * 109 / 100, Q64 * 80 / 100);
@@ -648,35 +645,29 @@ contract V4VaultIntegrationTest is ForkTestBase {
     }
 
 
-    /*
+
     function testTransformChangeRange() external {
         _setupBasicLoan(true);
-
-        // Use V4Utils from ForkTestBase
-        V4Utils localV4Utils = new V4Utils(positionManager, address(swapRouter), EX0x, permit2);
-        vault.setTransformer(address(localV4Utils), true);
-        localV4Utils.setVault(address(vault));
 
         // Get position info for V4
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(nft1TokenId);
         uint128 liquidity = positionManager.getPositionLiquidity(nft1TokenId);
         console.log("Initial liquidity:", liquidity);
+        uint256 swapAmountIn = 12707757619098052 / 2;
+        uint256 swapAmountMinOut = 1000000;
 
-        uint256 swapAmountIn = 20000000000000000;
-        uint256 swapAmountMinOut = 100;
-
-        // universalrouter swap data (single swap command) - swap 0.01 dai to usdc - and sweep
+        // universalrouter swap data (single swap command)
         bytes[] memory inputs = new bytes[](2);
         inputs[0] = abi.encode(
             address(v4Utils),
             swapAmountIn,
             swapAmountMinOut,
-            abi.encodePacked(address(dai), uint24(500), address(usdc)),
+            abi.encodePacked(address(realWeth), uint24(500), address(usdc)),
             false
         );
-        inputs[1] = abi.encode(address(dai), address(v4Utils), 0);
+        inputs[1] = abi.encode(address(realWeth), address(v4Utils), 0);
         bytes memory swapData =
-            abi.encode(UNIVERSAL_ROUTER, abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp)));
+            abi.encode(address(swapRouter), abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp)));
 
         // test transforming with v4utils - changing range
         V4Utils.Instructions memory inst = V4Utils.Instructions(
@@ -684,18 +675,17 @@ contract V4VaultIntegrationTest is ForkTestBase {
             Currency.wrap(address(usdc)),
             0,
             0,
+            0,
+            0, 
+            "",
             swapAmountIn,
             swapAmountMinOut,
             swapData,
-            0,
-            0,
-            "",
-            500,
-            0,
-            -276330,
-            -276320,
+            poolKey.fee,
+            poolKey.tickSpacing,
+            positionInfo.tickLower(),
+            positionInfo.tickUpper(),
             liquidity,
-            0,
             0,
             0,
             block.timestamp,
@@ -704,7 +694,7 @@ contract V4VaultIntegrationTest is ForkTestBase {
             "",
             "",
             address(0),
-            abi.encode(true),
+            "",
             ""
         );
 
@@ -734,6 +724,8 @@ contract V4VaultIntegrationTest is ForkTestBase {
         console.log("New collateral value:", collateralValue);
         console.log("New full value:", fullValue);
     }
+
+    /*
 
     // Note: AutoCompound and AutoRange transformers are not available in V4 codebase
     // These tests have been removed as they depend on missing components

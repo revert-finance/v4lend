@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
 
-import "./ForkTestBase.sol";
+import "./V4ForkTestBase.sol";
 import "../src/V4Oracle.sol";
 import "../src/interfaces/IV4Oracle.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -13,15 +13,15 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
  * @title V4OracleTest
  * @notice Comprehensive test suite for V4Oracle functionality
  */
-contract V4OracleTest is ForkTestBase {
+contract V4OracleTest is V4ForkTestBase {
     
     function testGetValue() public {
-        // Test with the two preconfigured NFT positions from ForkTestBase
+        // Test with the two preconfigured NFT positions from V4ForkTestBase
         uint256[] memory testTokenIds = new uint256[](2);
-        testTokenIds[0] = nft1TokenId; // NFT 1 from ForkTestBase
-        testTokenIds[1] = nft2TokenId; // NFT 2 from ForkTestBase
+        testTokenIds[0] = nft1TokenId; // NFT 1 from V4ForkTestBase
+        testTokenIds[1] = nft2TokenId; // NFT 2 from V4ForkTestBase
         
-        // Test tokens configured in the oracle (from ForkTestBase setup)
+        // Test tokens configured in the oracle (from V4ForkTestBase setup)
         address[] memory testTokens = new address[](4);
         testTokens[0] = USDC_ADDRESS;  // USDC (reference token)
         testTokens[1] = DAI_ADDRESS;   // DAI
@@ -116,10 +116,10 @@ contract V4OracleTest is ForkTestBase {
     }
     
     function testGetPositionBreakdownConsistency() public {
-        // Test with the two preconfigured NFT positions from ForkTestBase
+        // Test with the two preconfigured NFT positions from V4ForkTestBase
         uint256[] memory testTokenIds = new uint256[](2);
-        testTokenIds[0] = nft1TokenId; // NFT 1 from ForkTestBase
-        testTokenIds[1] = nft2TokenId; // NFT 2 from ForkTestBase
+        testTokenIds[0] = nft1TokenId; // NFT 1 from V4ForkTestBase
+        testTokenIds[1] = nft2TokenId; // NFT 2 from V4ForkTestBase
         
         for (uint256 i = 0; i < testTokenIds.length; i++) {
             uint256 tokenId = testTokenIds[i];
@@ -159,10 +159,10 @@ contract V4OracleTest is ForkTestBase {
         console.log("=== Testing testGetPositionBreakdown with Actual Token Collection ===");
         console.log("");
 
-        // Test with the two preconfigured NFT positions from ForkTestBase
+        // Test with the two preconfigured NFT positions from V4ForkTestBase
         uint256[] memory testTokenIds = new uint256[](2);
-        testTokenIds[0] = nft1TokenId; // NFT 1 from ForkTestBase
-        testTokenIds[1] = nft2TokenId; // NFT 2 from ForkTestBase
+        testTokenIds[0] = nft1TokenId; // NFT 1 from V4ForkTestBase
+        testTokenIds[1] = nft2TokenId; // NFT 2 from V4ForkTestBase
 
         address[] memory owners = new address[](2);
         owners[0] = nft1Owner; // NFT 1 owner

@@ -13,14 +13,14 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./ForkTestBase.sol";
+import "./V4ForkTestBase.sol";
 
 /**
  * @title V4UtilsWithdrawAndCollectAndSwapTest
  * @notice Test suite for V4Utils.execute() WITHDRAW_AND_COLLECT_AND_SWAP functionality
  * @dev Tests withdrawing liquidity, collecting fees, and swapping tokens
  */
-contract V4UtilsWithdrawAndCollectAndSwapTest is ForkTestBase {
+contract V4UtilsWithdrawAndCollectAndSwapTest is V4ForkTestBase {
 
     function _executeWithdrawAndCollectAndSwap(
         WithdrawAndCollectAndSwapTestParams memory params
