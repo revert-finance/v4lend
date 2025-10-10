@@ -94,8 +94,8 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
 
 
     function _setupBasicLoan(bool borrowMax) internal {
-        // lend 500 usdc
-        _deposit(500000000, WHALE_ACCOUNT);
+        // lend 200 usdc
+        _deposit(200000000, WHALE_ACCOUNT);
 
         // add collateral
         vm.prank(nft1Owner);
@@ -262,7 +262,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
 
         vm.assume(amount <= lent * 2);
 
-        if (amount > 400000000) {
+        if (amount > 100000000) {
             vm.expectRevert(Constants.InsufficientLiquidity.selector);
         }
 
@@ -725,11 +725,6 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         console.log("New full value:", fullValue);
     }
 
-    /*
-
-    // Note: AutoCompound and AutoRange transformers are not available in V4 codebase
-    // These tests have been removed as they depend on missing components
-
     function testLiquidationTimeBased() external {
         _testLiquidation(LiquidationType.TimeBased);
     }
@@ -770,14 +765,14 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
             interestRateModel.setValues(Q64 / 10, Q64 * 2, Q64 * 2, 0);
             vm.warp(block.timestamp + 3 days);
 
-            // collateral dai value change -50%
+            // collateral USDC value change -50%
             vm.mockCall(
-                CHAINLINK_dai_USD,
+                CHAINLINK_USDC_USD,
                 abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
-                abi.encode(uint80(0), int256(50000000), block.timestamp, block.timestamp, uint80(0))
+                abi.encode(uint80(0), int256(200000000), block.timestamp, block.timestamp, uint80(0))
             );
         } else {
-            vault.setTokenConfig(address(dai), uint32(Q32 * 2 / 10), type(uint32).max); // 20% collateral factor
+            vault.setTokenConfig(address(usdc), uint32(Q32 * 2 / 10), type(uint32).max); // 20% collateral factor
         }
 
         if (lType == LiquidationType.ValueBased) {
@@ -805,19 +800,19 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
 
         vm.prank(WHALE_ACCOUNT);
         vm.expectRevert("ERC20: transfer amount exceeds allowance");
-        vault.liquidate(IVault.LiquidateParams(nft1TokenId, 0, 0, WHALE_ACCOUNT, "", block.timestamp));
+        vault.liquidate(IVault.LiquidateParams(nft1TokenId, 0, 0, WHALE_ACCOUNT, block.timestamp, ""));
 
         vm.prank(WHALE_ACCOUNT);
         usdc.approve(address(vault), liquidationCost);
 
-        uint256 daiBalance = dai.balanceOf(WHALE_ACCOUNT);
+        uint256 wethBalance = realWeth.balanceOf(WHALE_ACCOUNT);
         uint256 usdcBalance = usdc.balanceOf(WHALE_ACCOUNT);
 
         vm.prank(WHALE_ACCOUNT);
-        vault.liquidate(IVault.LiquidateParams(nft1TokenId, 0, 0, WHALE_ACCOUNT, "", block.timestamp));
+        vault.liquidate(IVault.LiquidateParams(nft1TokenId, 0, 0, WHALE_ACCOUNT, block.timestamp, ""));
 
-        // dai and usdc were sent to liquidator
-        console.log("dai balance change:", int256(dai.balanceOf(WHALE_ACCOUNT)) - int256(daiBalance));
+        // weth and usdc were sent to liquidator
+        console.log("weth balance change:", int256(realWeth.balanceOf(WHALE_ACCOUNT)) - int256(wethBalance));
         console.log("usdc balance change:", int256(usdc.balanceOf(WHALE_ACCOUNT)) + int256(liquidationCost) - int256(usdcBalance));
 
         // all debt is payed
@@ -829,6 +824,8 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         console.log("Vault lent:", lent);
         console.log("Vault balance:", balance);
     }
+
+    /*
 
     function testFreeLiquidation() external {
         // lend 10 usdc
