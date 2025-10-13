@@ -31,17 +31,22 @@ contract V4ForkTestBase is V4TestBase {
     address constant USDC_ADDRESS = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // Real USDC
     address constant USDT_ADDRESS = 0xdAC17F958D2ee523a2206206994597C13D831ec7; // Real USDT
     address constant DAI_ADDRESS = 0x6B175474E89094C44Da98b954EedeAC495271d0F; // Real DAI
+    address constant WBTC_ADDRESS = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599; // Real WBTC
 
     address constant CHAINLINK_USDC_USD = 0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6;
     address constant CHAINLINK_DAI_USD = 0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9;
     address constant CHAINLINK_ETH_USD = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
-    
+    address constant CHAINLINK_BTC_USD = 0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c;
+
+    address constant EX0x = 0x0000000000001fF3684f28c67538d4D072C22734;
+
     // Real tokens from mainnet
     IWETH9 public realWeth;
     IERC20 public usdc;
     IERC20 public usdt;
     IERC20 public dai;
-    
+    IERC20 public wbtc;
+
     // Test users with mainnet balances
     address public whale1; // WETH whale
     address public whale2; // USDC whale
@@ -55,6 +60,10 @@ contract V4ForkTestBase is V4TestBase {
     // USDC / ETH 0.3%
     address nft2Owner;
     uint256 nft2TokenId;
+
+    address nft7Owner;
+    uint256 nft7TokenId;
+    
 
     function setUp() public virtual override {
 
@@ -79,10 +88,11 @@ contract V4ForkTestBase is V4TestBase {
         usdc = IERC20(USDC_ADDRESS);
         usdt = IERC20(USDT_ADDRESS);
         dai = IERC20(DAI_ADDRESS);
-        
+        wbtc = IERC20(WBTC_ADDRESS);
+
         // Deploy V4Utils with the real deployed contracts
         v4Utils = new V4Utils(
-            positionManager, address(swapRouter), address(0x0000000000001fF3684f28c67538d4D072C22734), permit2
+            positionManager, address(swapRouter), EX0x, permit2
         );
 
         // Deploy V4Oracle with the real deployed contracts
@@ -104,6 +114,11 @@ contract V4ForkTestBase is V4TestBase {
         v4Oracle.setTokenConfig(
             address(WETH_ADDRESS),
             AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30
+        );
+        v4Oracle.setTokenConfig(
+            address(WBTC_ADDRESS),
+            AggregatorV3Interface(CHAINLINK_BTC_USD),
             3600 * 24 * 30
         );
         v4Oracle.setTokenConfig(
@@ -136,6 +151,9 @@ contract V4ForkTestBase is V4TestBase {
 
         nft2TokenId = 2;
         nft2Owner = 0x929716bCDCAf51897A3Dbb65d04FAf9f4Bf9C907;
+
+        nft7TokenId = 7;
+        nft7Owner = 0x4423B0D6955aF39B48cf215577a79Ce574299D3f;
     }
 
     // Common structs for different test types

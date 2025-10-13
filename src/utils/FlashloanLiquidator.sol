@@ -93,7 +93,12 @@ contract FlashloanLiquidator is Swapper, IUnlockCallback {
                 flashCallbackData.decreaseLiquidityHookData
             )
         );
+
         SafeERC20.forceApprove(IERC20(Currency.unwrap(flashCallbackData.asset)), address(flashCallbackData.vault), 0);
+
+        // do swaps
+        _routerSwap(flashCallbackData.swap0);
+        _routerSwap(flashCallbackData.swap1);
 
         // sync the balance before repayment with `sync`
         poolManager.sync(flashCallbackData.asset);
@@ -101,10 +106,6 @@ contract FlashloanLiquidator is Swapper, IUnlockCallback {
         flashCallbackData.asset.transfer(address(poolManager), flashCallbackData.liquidationCost);
         // settle the balance after repayment with `settle`.
         poolManager.settle();
-
-        // do swaps
-        _routerSwap(flashCallbackData.swap0);
-        _routerSwap(flashCallbackData.swap1);
 
         uint256 balance;
 

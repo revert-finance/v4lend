@@ -20,6 +20,7 @@ import {IVault} from "../src/interfaces/IVault.sol";
 // transformers
 import {LeverageTransformer} from "../src/transformers/LeverageTransformer.sol";
 import {V4Utils} from "../src/transformers/V4Utils.sol";
+import {FlashloanLiquidator} from "../src/utils/FlashloanLiquidator.sol";
 
 import {Constants} from "../src/utils/Constants.sol";
 import {Swapper} from "../src/utils/Swapper.sol";
@@ -44,29 +45,6 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         // 0% base rate - 5% multiplier - after 80% - 109% jump multiplier (like in compound v2 deployed)  (-> max rate 25.8% per year)
         interestRateModel = new InterestRateModel(0, Q64 * 5 / 100, Q64 * 109 / 100, Q64 * 80 / 100);
 
-        // use tolerant oracles (so timewarp for until 30 days works in tests - also allow divergence from price for mocked price results)
-        v4Oracle.setMaxPoolPriceDifference(200);
-        v4Oracle.setTokenConfig(
-            address(usdc),
-            AggregatorV3Interface(CHAINLINK_USDC_USD),
-            3600 * 24 * 30
-        );
-        v4Oracle.setTokenConfig(
-            address(dai),
-            AggregatorV3Interface(CHAINLINK_DAI_USD),
-            3600 * 24 * 30
-        );
-        v4Oracle.setTokenConfig(
-            address(realWeth),
-            AggregatorV3Interface(CHAINLINK_ETH_USD),
-            3600 * 24 * 30
-        );
-        v4Oracle.setTokenConfig(
-            address(0), // native ETH
-            AggregatorV3Interface(CHAINLINK_ETH_USD),
-            3600 * 24 * 30
-        );
-
         vault = new V4Vault(
             "Revert Lend usdc", 
             "rlusdc", 
@@ -80,6 +58,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         vault.setTokenConfig(address(usdc), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(realWeth), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
+        vault.setTokenConfig(address(wbtc), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(0), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
 
         // limits 1000 usdc each
@@ -825,36 +804,35 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         console.log("Vault balance:", balance);
     }
 
-    /*
 
     function testFreeLiquidation() external {
         // lend 10 usdc
         _deposit(20000000, WHALE_ACCOUNT);
 
         // add collateral
-        vm.prank(nft1TokenId_dai_realWeth_ACCOUNT);
-        IERC721(address(positionManager)).approve(address(vault), nft1TokenId_dai_realWeth);
-        vm.prank(nft1TokenId_dai_realWeth_ACCOUNT);
-        vault.create(nft1TokenId_dai_realWeth, nft1TokenId_dai_realWeth_ACCOUNT);
+        vm.prank(nft7Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft7TokenId);
+        vm.prank(nft7Owner);
+        vault.create(nft7TokenId, nft7Owner);
 
         (uint256 debt, uint256 fullValue, uint256 collateralValue, uint256 liquidationCost, uint256 liquidationValue) =
-            vault.loanInfo(nft1TokenId_dai_realWeth);
+            vault.loanInfo(nft7TokenId);
 
         assertEq(debt, 0);
-        console.log("dai/realWeth collateral value:", collateralValue);
-        console.log("dai/realWeth full value:", fullValue);
+        console.log("usdc/weth collateral value:", collateralValue);
+        console.log("usdc/weth full value:", fullValue);
         assertEq(liquidationCost, 0);
         assertEq(liquidationValue, 0);
 
         // borrow max
-        vm.prank(nft1TokenId_dai_realWeth_ACCOUNT);
-        vault.borrow(nft1TokenId_dai_realWeth, 20000000);
+        vm.prank(nft7Owner);
+        vault.borrow(nft7TokenId, 20000000);
 
         v4Oracle.setMaxPoolPriceDifference(type(uint16).max);
 
         // make it (almost) worthless
         vm.mockCall(
-            CHAINLINK_dai_USD,
+            CHAINLINK_BTC_USD,
             abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
             abi.encode(uint80(0), int256(1), block.timestamp, block.timestamp, uint80(0))
         );
@@ -865,18 +843,18 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
             abi.encode(uint80(0), int256(1), block.timestamp, block.timestamp, uint80(0))
         );
 
-        (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft1TokenId_dai_realWeth);
+        (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft7TokenId);
         assertEq(debt, 20000000);
-        assertEq(collateralValue, 1);
-        assertEq(fullValue, 2);
+        assertEq(collateralValue, 0);
+        assertEq(fullValue, 0);
         assertEq(liquidationCost, 0);
-        assertEq(liquidationValue, 2);
+        assertEq(liquidationValue, 0);
 
         vm.prank(WHALE_ACCOUNT);
-        vault.liquidate(IVault.LiquidateParams(nft1TokenId_dai_realWeth, 0, 0, WHALE_ACCOUNT, "", block.timestamp));
+        vault.liquidate(IVault.LiquidateParams(nft7TokenId, 0, 0, WHALE_ACCOUNT, block.timestamp, ""));
 
         // all debt is payed
-        assertEq(vault.loans(nft1TokenId_dai_realWeth), 0);
+        assertEq(vault.loans(nft7TokenId), 0);
         assertEq(vault.debtSharesTotal(), 0);
     }
 
@@ -885,13 +863,13 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         _deposit(20000000, WHALE_ACCOUNT);
 
         // add collateral
-        vm.prank(nft1TokenId_dai_realWeth_ACCOUNT);
-        IERC721(address(positionManager)).approve(address(vault), nft1TokenId_dai_realWeth);
-        vm.prank(nft1TokenId_dai_realWeth_ACCOUNT);
-        vault.create(nft1TokenId_dai_realWeth, nft1TokenId_dai_realWeth_ACCOUNT);
+        vm.prank(nft1Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
+        vm.prank(nft1Owner);
+        vault.create(nft1TokenId, nft1Owner);
 
         (uint256 debt, uint256 fullValue, uint256 collateralValue, uint256 liquidationCost, uint256 liquidationValue) =
-            vault.loanInfo(nft1TokenId_dai_realWeth);
+            vault.loanInfo(nft1TokenId);
 
         assertEq(debt, 0);
         console.log("dai/realWeth collateral value:", collateralValue);
@@ -900,38 +878,105 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         assertEq(liquidationValue, 0);
 
         // borrow max
-        vm.prank(nft1TokenId_dai_realWeth_ACCOUNT);
-        vault.borrow(nft1TokenId_dai_realWeth, 20000000);
+        vm.prank(nft1Owner);
+        vault.borrow(nft1TokenId, 20000000);
 
         // set collateral factor to 0
-        vault.setTokenConfig(address(dai), 0, type(uint32).max); // 0% collateral factor / max 100% collateral value
+        vault.setTokenConfig(address(realWeth), 0, type(uint32).max); // 0% collateral factor / max 100% collateral value
 
-        (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft1TokenId_dai_realWeth);
+        (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft1TokenId);
         assertEq(debt, 20000000);
         assertEq(collateralValue, 0);
-        assertEq(fullValue, 57155642989);
+        assertEq(fullValue, 140380064);
         assertEq(liquidationCost, 20000000);
-        assertEq(liquidationValue, 10999999);
+        assertEq(liquidationValue, 21999999);
 
         vm.prank(WHALE_ACCOUNT);
         usdc.approve(address(vault), liquidationCost);
 
         vm.prank(WHALE_ACCOUNT);
-        vault.liquidate(IVault.LiquidateParams(nft1TokenId_dai_realWeth, 0, 0, WHALE_ACCOUNT, "", block.timestamp));
+        vault.liquidate(IVault.LiquidateParams(nft1TokenId, 0, 0, WHALE_ACCOUNT, block.timestamp, ""));
 
         // all debt is payed
-        assertEq(vault.loans(nft1TokenId_dai_realWeth), 0);
+        assertEq(vault.loans(nft1TokenId), 0);
         assertEq(vault.debtSharesTotal(), 0);
     }
 
-    // Note: FlashloanLiquidator is not available in V4 codebase
-    // This test has been removed as it depends on missing components
+
+    function testLiquidationWithFlashloan() external {
+        _setupBasicLoan(true);
+
+        // wait 15 days - interest growing
+        interestRateModel.setValues(Q64 / 10, Q64 * 2, Q64 * 2, 0);
+        vm.warp(block.timestamp + 15 days);
+
+        // debt is greater than collateral value
+        (uint256 debt,,, uint256 liquidationCost, uint256 liquidationValue) = vault.loanInfo(nft1TokenId);
+
+        assertEq(debt, 126434088);
+        assertEq(liquidationCost, 126434088);
+        assertEq(liquidationValue, 129699012);
+
+        (Currency token0, Currency token1,,,,,,) = v4Oracle.getPositionBreakdown(nft1TokenId);
+
+        uint256 token0Before = IERC20(Currency.unwrap(token0)).balanceOf(address(this));
+        uint256 token1Before = IERC20(Currency.unwrap(token1)).balanceOf(address(this));
+
+        FlashloanLiquidator liquidator = new FlashloanLiquidator(positionManager, address(swapRouter), EX0x);
+
+        // available from liquidation (from static call to liquidate())
+        uint256 amount0 = 381693758226627942;
+
+        // universalrouter swap data (single swap command) - swap available DAI to USDC - and sweep
+        bytes[] memory inputs = new bytes[](2);
+        inputs[0] = abi.encode(address(liquidator), amount0, 0, abi.encodePacked(token0, uint24(500), token1), false);
+        inputs[1] = abi.encode(token0, address(liquidator), 0);
+        bytes memory swapData0 =
+            abi.encode(swapRouter, abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp)));
+
+        vm.expectRevert(Constants.NotEnoughReward.selector);
+        liquidator.liquidate(
+            FlashloanLiquidator.LiquidateParams(
+                nft1TokenId, vault, amount0, swapData0, 0, "", 1000000, block.timestamp, ""
+            )
+        );
+
+        liquidator.liquidate(
+            FlashloanLiquidator.LiquidateParams(
+                nft1TokenId, vault, amount0, swapData0, 0, "", 850023, block.timestamp, ""
+            )
+        );
+
+        vm.expectRevert(Constants.NotLiquidatable.selector);
+        liquidator.liquidate(
+            FlashloanLiquidator.LiquidateParams(
+                nft1TokenId, vault, 0, "", 0, "", 0, block.timestamp, ""
+            )
+        );
+
+        assertEq(liquidationValue - liquidationCost, 901846); // promised liquidation premium
+
+        assertEq(token0.balanceOf(address(this)) - token0Before, 11913310321146742);
+        assertEq(token1.balanceOf(address(this)) - token1Before, 890180); // actual liquidation premium (less because of swap)
+
+        (debt,,,,) = vault.loanInfo(nft1TokenId);
+        assertEq(debt, 0);
+
+        // remove liquidated NFT
+        vm.prank(nft1Owner);
+        vault.remove(nft1TokenId, nft1Owner, "");
+
+        //  NFT was returned to owner
+        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), nft1Owner);
+    }
+
+/*
 
     function testCollateralValueLimit() external {
         _setupBasicLoan(false);
-        vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), uint32(Q32 / 10)); // max 10% debt for dai
+        vault.setTokenConfig(address(realWeth), uint32(Q32 * 9 / 10), uint32(Q32 / 10)); // max 10% debt for weth
 
-        (,, uint192 totalDebtShares) = vault.tokenConfigs(address(dai));
+        (,, uint192 totalDebtShares) = vault.tokenConfigs(address(realWeth));
         assertEq(totalDebtShares, 0);
         (,, totalDebtShares) = vault.tokenConfigs(address(usdc));
         assertEq(totalDebtShares, 0);
@@ -940,7 +985,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         vm.prank(nft1Owner);
         vault.borrow(nft1TokenId, 800000);
 
-        (,, totalDebtShares) = vault.tokenConfigs(address(dai));
+        (,, totalDebtShares) = vault.tokenConfigs(address(realWeth));
         assertEq(totalDebtShares, 800000);
         (,, totalDebtShares) = vault.tokenConfigs(address(usdc));
         assertEq(totalDebtShares, 800000);
@@ -962,11 +1007,12 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         vault.repay(nft1TokenId, debtShares, true);
 
         // collateral is removed
-        (,, totalDebtShares) = vault.tokenConfigs(address(dai));
+        (,, totalDebtShares) = vault.tokenConfigs(address(realWeth));
         assertEq(totalDebtShares, 0);
         (,, totalDebtShares) = vault.tokenConfigs(address(usdc));
         assertEq(totalDebtShares, 0);
     }
+
 
     function testMultiLendLoan() external {
         _deposit(2000000, WHALE_ACCOUNT);
