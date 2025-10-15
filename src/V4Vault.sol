@@ -25,6 +25,7 @@ import "./interfaces/IV4Oracle.sol";
 import "./interfaces/IInterestRateModel.sol";
 import "./utils/Constants.sol";
 
+
 /// @title Revert Lend Vault for token lending / borrowing using Uniswap V4 LP positions as collateral
 /// @notice The vault manages ONE ERC20 (eg. USDC) asset for lending / borrowing, but collateral positions can be composed of any 2 tokens configured each with a collateralFactor > 0
 /// Vault implements IERC4626 Vault Standard and is itself a ERC20 which represent shares of total lending pool
@@ -1143,8 +1144,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         Currency currency1 = poolKey.currency1;
         
         // check balance before decreasing liquidity
-        amount0 = currency0.balanceOfSelf();
-        amount1 = currency1.balanceOfSelf();
+        amount0 = currency0.balanceOf(recipient);
+        amount1 = currency1.balanceOf(recipient);
 
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
@@ -1160,10 +1161,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         params_array[1] = abi.encode(currency0, currency1, recipient);
 
         positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
-        
+
         // calculate delta
-        amount0 = currency0.balanceOfSelf() - amount0;
-        amount1 = currency1.balanceOfSelf() - amount1;
+        amount0 = currency0.balanceOf(recipient) - amount0;
+        amount1 = currency1.balanceOf(recipient) - amount1;
     }
 
     // cleans up loan when it is closed because of replacement, repayment or liquidation

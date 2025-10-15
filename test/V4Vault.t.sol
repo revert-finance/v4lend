@@ -21,6 +21,7 @@ import {IVault} from "../src/interfaces/IVault.sol";
 import {LeverageTransformer} from "../src/transformers/LeverageTransformer.sol";
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {FlashloanLiquidator} from "../src/utils/FlashloanLiquidator.sol";
+import {IUniswapV3Pool} from "../src/utils/FlashloanLiquidator.sol";
 
 import {Constants} from "../src/utils/Constants.sol";
 import {Swapper} from "../src/utils/Swapper.sol";
@@ -919,45 +920,51 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
 
         (Currency token0, Currency token1,,,,,,) = v4Oracle.getPositionBreakdown(nft1TokenId);
 
+        console.log("token0:", Currency.unwrap(token0));
+        console.log("token1:", Currency.unwrap(token1));
+
         uint256 token0Before = IERC20(Currency.unwrap(token0)).balanceOf(address(this));
         uint256 token1Before = IERC20(Currency.unwrap(token1)).balanceOf(address(this));
 
+        // For V3 flashloan, we need a V3 pool address
+        // This would typically be a USDC/WETH pool address on mainnet
+        address v3PoolAddress = 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640; // USDC/WETH 0.05% pool on mainnet
         FlashloanLiquidator liquidator = new FlashloanLiquidator(positionManager, address(swapRouter), EX0x);
 
-        // available from liquidation (from static call to liquidate())
-        uint256 amount0 = 381693758226627942;
+        // WETH amount available from liquidation (from static call to liquidate())
+        uint256 amount1 = 21362433248179720;
 
         // universalrouter swap data (single swap command) - swap available DAI to USDC - and sweep
         bytes[] memory inputs = new bytes[](2);
-        inputs[0] = abi.encode(address(liquidator), amount0, 0, abi.encodePacked(token0, uint24(500), token1), false);
-        inputs[1] = abi.encode(token0, address(liquidator), 0);
-        bytes memory swapData0 =
+        inputs[0] = abi.encode(address(liquidator), amount1, 0, abi.encodePacked(token1, uint24(3000), token0), false);
+        inputs[1] = abi.encode(token1, address(liquidator), 0);
+        bytes memory swapData1 =
             abi.encode(swapRouter, abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp)));
 
         vm.expectRevert(Constants.NotEnoughReward.selector);
         liquidator.liquidate(
             FlashloanLiquidator.LiquidateParams(
-                nft1TokenId, vault, amount0, swapData0, 0, "", 1000000, block.timestamp, ""
+                nft1TokenId, vault, IUniswapV3Pool(v3PoolAddress), 0, "", amount1, swapData1, 129699012, block.timestamp, ""
             )
         );
 
         liquidator.liquidate(
             FlashloanLiquidator.LiquidateParams(
-                nft1TokenId, vault, amount0, swapData0, 0, "", 850023, block.timestamp, ""
+                nft1TokenId, vault, IUniswapV3Pool(v3PoolAddress), 0, "", amount1, swapData1, 3160994, block.timestamp, ""
             )
         );
 
         vm.expectRevert(Constants.NotLiquidatable.selector);
         liquidator.liquidate(
             FlashloanLiquidator.LiquidateParams(
-                nft1TokenId, vault, 0, "", 0, "", 0, block.timestamp, ""
+                nft1TokenId, vault, IUniswapV3Pool(v3PoolAddress), 0, "", 0, "", 0, block.timestamp, ""
             )
         );
 
-        assertEq(liquidationValue - liquidationCost, 901846); // promised liquidation premium
+        assertEq(liquidationValue - liquidationCost, 3264924); // promised liquidation premium
 
-        assertEq(token0.balanceOf(address(this)) - token0Before, 11913310321146742);
-        assertEq(token1.balanceOf(address(this)) - token1Before, 890180); // actual liquidation premium (less because of swap)
+        assertEq(token0.balanceOf(address(this)) - token0Before, 3160994);
+        assertEq(token1.balanceOf(address(this)) - token1Before, 0); // actual liquidation premium (less because of swap)
 
         (debt,,,,) = vault.loanInfo(nft1TokenId);
         assertEq(debt, 0);
