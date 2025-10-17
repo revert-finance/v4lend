@@ -7,7 +7,6 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 
-import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import "./V4ForkTestBase.sol";

@@ -408,6 +408,105 @@ contract V4UtilsSimpleTest is V4TestBase {
         assertEq(token0Consumed, amount0, "Token0 consumed should match amount0");
         assertEq(token1Consumed, amount1, "Token1 consumed should match amount1");
     }
+
+    function testSwapAndIncreaseLiquidity() public {
+        console.log("=== Testing swapAndIncreaseLiquidity (successful case) ===");
+        
+        // Create a position first
+        uint256 tokenId = _createTestPosition(user1);
+        console.log("Created position with tokenId:", tokenId);
+        
+        // Record initial state
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 initialBalance0 = token0.balanceOf(user1);
+        uint256 initialBalance1 = token1.balanceOf(user1);
+        
+        console.log("Initial liquidity:", initialLiquidity);
+        console.log("Initial token0 balance:", initialBalance0);
+        console.log("Initial token1 balance:", initialBalance1);
+        
+        // Set up ERC20 allowances for the increase
+        vm.prank(user1);
+        token0.approve(address(permit2), type(uint256).max);
+        vm.prank(user1);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Set up Permit2 allowances
+        vm.prank(user1);
+        permit2.approve(
+            address(token0),
+            address(positionManager),
+            uint160(1000 ether),
+            uint48(block.timestamp + 1 days)
+        );
+        vm.prank(user1);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(1000 ether),
+            uint48(block.timestamp + 1 days)
+        );
+        
+        // Prepare swap and increase liquidity parameters
+        V4Utils.SwapAndIncreaseLiquidityParams memory params = V4Utils.SwapAndIncreaseLiquidityParams({
+            tokenId: tokenId,
+            amount0: 10 ether, // Add 10 token0
+            amount1: 10 ether, // Add 10 token1
+            recipient: user1,
+            deadline: block.timestamp,
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            amountAddMin0: 0, // No minimum requirements
+            amountAddMin1: 0, // No minimum requirements
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
+        });
+        
+        // Approve V4Utils to manage the NFT
+        vm.prank(user1);
+        IERC721(address(positionManager)).approve(address(v4Utils), tokenId);
+        
+        // Approve tokens for V4Utils
+        vm.prank(user1);
+        token0.approve(address(v4Utils), 10 ether);
+        vm.prank(user1);
+        token1.approve(address(v4Utils), 10 ether);
+        
+        // Execute swap and increase liquidity
+        vm.prank(user1);
+        v4Utils.swapAndIncreaseLiquidity(params);
+        
+        // Record final state
+        uint128 finalLiquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 finalBalance0 = token0.balanceOf(user1);
+        uint256 finalBalance1 = token1.balanceOf(user1);
+        
+        console.log("Final liquidity:", finalLiquidity);
+        console.log("Final token0 balance:", finalBalance0);
+        console.log("Final token1 balance:", finalBalance1);
+        
+        // Assertions
+        // 1. Position ownership should remain with user1
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId), user1, "Position should still be owned by user1");
+        
+        // 2. Liquidity should increase
+        assertGt(finalLiquidity, initialLiquidity, "Liquidity should increase after adding tokens");
+        
+        // 3. Token balances should decrease (tokens were added to position)
+        assertLt(finalBalance0, initialBalance0, "Token0 balance should decrease after adding to position");
+        assertLt(finalBalance1, initialBalance1, "Token1 balance should decrease after adding to position");
+        
+        // 4. Verify the amounts were actually added
+        uint256 liquidityIncrease = finalLiquidity - initialLiquidity;
+        assertGt(liquidityIncrease, 0, "Liquidity should increase significantly");
+        
+        console.log("swapAndIncreaseLiquidity test completed successfully");
+    }
     
     function testExecuteCompoundFeesWithETH() public {
         console.log("=== Testing COMPOUND_FEES with ETH ===");
@@ -785,6 +884,100 @@ contract V4UtilsSimpleTest is V4TestBase {
         assertLe(ethConsumed, 10 ether, "Should not consume more ETH than provided");
         assertEq(ethConsumed, amount0, "ETH consumed should match amount0");
         assertEq(token1Consumed, amount1, "Token1 consumed should match amount1");
+    }
+
+    function testSwapAndIncreaseLiquidityWithETH() public {
+        console.log("=== Testing swapAndIncreaseLiquidity with ETH (successful case) ===");
+        
+        // Create a position with ETH first
+        uint256 tokenId = _createTestPositionWithETH(user1);
+        console.log("Created position with tokenId:", tokenId);
+        
+        // Record initial state
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 initialEthBalance = user1.balance;
+        uint256 initialToken1Balance = token1.balanceOf(user1);
+        
+        console.log("Initial liquidity:", initialLiquidity);
+        console.log("Initial ETH balance:", initialEthBalance);
+        console.log("Initial token1 balance:", initialToken1Balance);
+        
+        // Set up ERC20 allowance for token1 only (ETH doesn't need approval)
+        vm.prank(user1);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Set up Permit2 allowances for token1 only
+        vm.prank(user1);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(1000 ether),
+            uint48(block.timestamp + 1 days)
+        );
+        
+        // Prepare swap and increase liquidity parameters with ETH
+        V4Utils.SwapAndIncreaseLiquidityParams memory params = V4Utils.SwapAndIncreaseLiquidityParams({
+            tokenId: tokenId,
+            amount0: 1 ether, // Add 1 ETH
+            amount1: 5 ether, // Add 5 token1
+            recipient: user1,
+            deadline: block.timestamp,
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO, // No swap
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            amountAddMin0: 0, // No minimum requirements
+            amountAddMin1: 0, // No minimum requirements
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
+        });
+        
+        // Approve V4Utils to manage the NFT
+        vm.prank(user1);
+        IERC721(address(positionManager)).approve(address(v4Utils), tokenId);
+        
+        // Approve token1 for V4Utils (ETH doesn't need approval)
+        vm.prank(user1);
+        token1.approve(address(v4Utils), 5 ether);
+        
+        // Execute swap and increase liquidity with ETH value
+        vm.prank(user1);
+        v4Utils.swapAndIncreaseLiquidity{value: 1 ether}(params);
+        
+        // Record final state
+        uint128 finalLiquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 finalEthBalance = user1.balance;
+        uint256 finalToken1Balance = token1.balanceOf(user1);
+        
+        console.log("Final liquidity:", finalLiquidity);
+        console.log("Final ETH balance:", finalEthBalance);
+        console.log("Final token1 balance:", finalToken1Balance);
+        
+        // Assertions
+        // 1. Position ownership should remain with user1
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId), user1, "Position should still be owned by user1");
+        
+        // 2. Liquidity should increase
+        assertGt(finalLiquidity, initialLiquidity, "Liquidity should increase after adding tokens");
+        
+        // 3. ETH balance should decrease (ETH was added to position)
+        assertLt(finalEthBalance, initialEthBalance, "ETH balance should decrease after adding to position");
+        
+        // 4. Token1 balance should decrease (token1 was added to position)
+        assertLt(finalToken1Balance, initialToken1Balance, "Token1 balance should decrease after adding to position");
+        
+        // 5. Verify the amounts were actually added
+        uint256 liquidityIncrease = finalLiquidity - initialLiquidity;
+        assertGt(liquidityIncrease, 0, "Liquidity should increase significantly");
+        
+        // 6. Verify ETH was consumed (should be approximately 1 ether less)
+        uint256 ethConsumed = initialEthBalance - finalEthBalance;
+        assertApproxEqRel(ethConsumed, 1 ether, 0.01e18, "Should consume approximately 1 ETH");
+        
+        console.log("swapAndIncreaseLiquidity with ETH test completed successfully");
     }
     
     function testSwapAndMintWithETH_InsufficientAmountAdded() public {

@@ -5,8 +5,8 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 
 import "./V4ForkTestBase.sol";
-import "../src/V4Oracle.sol";
-import "../src/interfaces/IV4Oracle.sol";
+import "../../src/V4Oracle.sol";
+import "../../src/interfaces/IV4Oracle.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 /**
