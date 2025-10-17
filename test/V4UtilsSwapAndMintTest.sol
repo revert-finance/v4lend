@@ -224,7 +224,7 @@ contract V4UtilsSwapAndMintTest is V4ForkTestBase {
     function testSwapAndMint_WETH_USDC_NoSwap() public {
         SwapAndMintTestParams memory params = SwapAndMintTestParams({
             token0: Currency.wrap(address(usdc)),
-            token1: Currency.wrap(address(realWeth)),
+            token1: Currency.wrap(address(weth)),
             fee: 3000, // 0.3% fee
             tickLower: -1200, // Tick range aligned with tick spacing 60
             tickUpper: 1200,
@@ -340,7 +340,7 @@ contract V4UtilsSwapAndMintTest is V4ForkTestBase {
     function testSwapAndMint_WETH_USDC_WithHook() public {
         SwapAndMintTestParams memory params = SwapAndMintTestParams({
             token0: Currency.wrap(address(usdc)),
-            token1: Currency.wrap(address(realWeth)),
+            token1: Currency.wrap(address(weth)),
             fee: 3000, // 0.3% fee
             tickLower: -1200, // Tick range aligned with tick spacing 60
             tickUpper: 1200,

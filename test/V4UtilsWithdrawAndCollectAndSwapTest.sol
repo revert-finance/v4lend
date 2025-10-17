@@ -167,7 +167,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4ForkTestBase {
         WithdrawAndCollectAndSwapTestParams memory params = WithdrawAndCollectAndSwapTestParams({
             tokenId: nft2TokenId,
             owner: nft2Owner,
-            swapTarget: Currency.wrap(address(realWeth)), // Swap to WETH
+            swapTarget: Currency.wrap(address(weth)), // Swap to WETH
             swapData0: hex"",
             swapData1: _get273073USDCtoWETHSwapData(),
             amountIn0: 63079250674003,

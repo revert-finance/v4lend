@@ -25,9 +25,11 @@ import {IUniswapV3Pool} from "../src/utils/FlashloanLiquidator.sol";
 
 import {Constants} from "../src/utils/Constants.sol";
 import {Swapper} from "../src/utils/Swapper.sol";
+
 import {V4ForkTestBase} from "./V4ForkTestBase.sol";
 
-contract V4VaultIntegrationTest is V4ForkTestBase {
+
+contract V4VaultTest is V4ForkTestBase {
     uint256 constant Q32 = 2 ** 32;
     uint256 constant Q64 = 2 ** 64;
     uint256 constant Q96 = 2 ** 96;
@@ -53,12 +55,12 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
             positionManager, 
             interestRateModel, 
             v4Oracle,
-            realWeth
+            weth
         );
         
         vault.setTokenConfig(address(usdc), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
-        vault.setTokenConfig(address(realWeth), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
+        vault.setTokenConfig(address(weth), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(wbtc), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(0), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
 
@@ -391,7 +393,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         (uint256 initialDebt, uint256 initialFullValue, uint256 initialCollateralValue,,) = vault.loanInfo(nft1TokenId);
         uint128 initialLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
         uint256 initialOwnerBalance0 = usdc.balanceOf(nft1Owner);
-        uint256 initialOwnerBalance1 = realWeth.balanceOf(nft1Owner);
+        uint256 initialOwnerBalance1 = weth.balanceOf(nft1Owner);
         
         console.log("Initial debt:", initialDebt);
         console.log("Initial full value:", initialFullValue);
@@ -411,7 +413,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         (uint256 finalDebt, uint256 finalFullValue, uint256 finalCollateralValue,,) = vault.loanInfo(nft1TokenId);
         uint128 finalLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
         uint256 finalOwnerBalance0 = usdc.balanceOf(nft1Owner);
-        uint256 finalOwnerBalance1 = realWeth.balanceOf(nft1Owner);
+        uint256 finalOwnerBalance1 = weth.balanceOf(nft1Owner);
         
         console.log("Final debt:", finalDebt);
         console.log("Final full value:", finalFullValue);
@@ -487,7 +489,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         (uint256 initialDebt, uint256 initialFullValue, uint256 initialCollateralValue,,) = vault.loanInfo(nft2TokenId);
         uint128 initialLiquidity = positionManager.getPositionLiquidity(nft2TokenId);
         uint256 initialOwnerBalance0 = usdc.balanceOf(nft2Owner);
-        uint256 initialOwnerBalance1 = realWeth.balanceOf(nft2Owner);
+        uint256 initialOwnerBalance1 = weth.balanceOf(nft2Owner);
         
         console.log("Initial debt:", initialDebt);
         console.log("Initial full value:", initialFullValue);
@@ -507,7 +509,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         (uint256 finalDebt, uint256 finalFullValue, uint256 finalCollateralValue,,) = vault.loanInfo(nft2TokenId);
         uint128 finalLiquidity = positionManager.getPositionLiquidity(nft2TokenId);
         uint256 finalOwnerBalance0 = usdc.balanceOf(nft2Owner);
-        uint256 finalOwnerBalance1 = realWeth.balanceOf(nft2Owner);
+        uint256 finalOwnerBalance1 = weth.balanceOf(nft2Owner);
         
         console.log("Final debt:", finalDebt);
         console.log("Final full value:", finalFullValue);
@@ -625,7 +627,6 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
     }
 
 
-
     function testTransformChangeRange() external {
         _setupBasicLoan(true);
 
@@ -636,18 +637,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         uint256 swapAmountIn = 12707757619098052 / 2;
         uint256 swapAmountMinOut = 1000000;
 
-        // universalrouter swap data (single swap command)
-        bytes[] memory inputs = new bytes[](2);
-        inputs[0] = abi.encode(
-            address(v4Utils),
-            swapAmountIn,
-            swapAmountMinOut,
-            abi.encodePacked(address(realWeth), uint24(500), address(usdc)),
-            false
-        );
-        inputs[1] = abi.encode(address(realWeth), address(v4Utils), 0);
-        bytes memory swapData =
-            abi.encode(address(swapRouter), abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp)));
+        bytes memory swapData = _createSwapData(swapAmountIn, swapAmountMinOut, address(weth), address(usdc), address(v4Utils));
 
         // test transforming with v4utils - changing range
         V4Utils.Instructions memory inst = V4Utils.Instructions(
@@ -785,14 +775,14 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         usdc.approve(address(vault), liquidationCost);
 
-        uint256 wethBalance = realWeth.balanceOf(WHALE_ACCOUNT);
+        uint256 wethBalance = weth.balanceOf(WHALE_ACCOUNT);
         uint256 usdcBalance = usdc.balanceOf(WHALE_ACCOUNT);
 
         vm.prank(WHALE_ACCOUNT);
         vault.liquidate(IVault.LiquidateParams(nft1TokenId, 0, 0, WHALE_ACCOUNT, block.timestamp, ""));
 
         // weth and usdc were sent to liquidator
-        console.log("weth balance change:", int256(realWeth.balanceOf(WHALE_ACCOUNT)) - int256(wethBalance));
+        console.log("weth balance change:", int256(weth.balanceOf(WHALE_ACCOUNT)) - int256(wethBalance));
         console.log("usdc balance change:", int256(usdc.balanceOf(WHALE_ACCOUNT)) + int256(liquidationCost) - int256(usdcBalance));
 
         // all debt is payed
@@ -873,8 +863,8 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
             vault.loanInfo(nft1TokenId);
 
         assertEq(debt, 0);
-        console.log("dai/realWeth collateral value:", collateralValue);
-        console.log("dai/realWeth full value:", fullValue);
+        console.log("dai/weth collateral value:", collateralValue);
+        console.log("dai/weth full value:", fullValue);
         assertEq(liquidationCost, 0);
         assertEq(liquidationValue, 0);
 
@@ -883,7 +873,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         vault.borrow(nft1TokenId, 20000000);
 
         // set collateral factor to 0
-        vault.setTokenConfig(address(realWeth), 0, type(uint32).max); // 0% collateral factor / max 100% collateral value
+        vault.setTokenConfig(address(weth), 0, type(uint32).max); // 0% collateral factor / max 100% collateral value
 
         (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft1TokenId);
         assertEq(debt, 20000000);
@@ -977,44 +967,43 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), nft1Owner);
     }
 
-/*
 
     function testCollateralValueLimit() external {
         _setupBasicLoan(false);
-        vault.setTokenConfig(address(realWeth), uint32(Q32 * 9 / 10), uint32(Q32 / 10)); // max 10% debt for weth
+        vault.setTokenConfig(address(weth), uint32(Q32 * 9 / 10), uint32(Q32 / 10)); // max 10% debt for weth
 
-        (,, uint192 totalDebtShares) = vault.tokenConfigs(address(realWeth));
+        (,, uint192 totalDebtShares) = vault.tokenConfigs(address(weth));
         assertEq(totalDebtShares, 0);
         (,, totalDebtShares) = vault.tokenConfigs(address(usdc));
         assertEq(totalDebtShares, 0);
 
         // borrow certain amount works
         vm.prank(nft1Owner);
-        vault.borrow(nft1TokenId, 800000);
+        vault.borrow(nft1TokenId, 19000000);
 
-        (,, totalDebtShares) = vault.tokenConfigs(address(realWeth));
-        assertEq(totalDebtShares, 800000);
+        (,, totalDebtShares) = vault.tokenConfigs(address(weth));
+        assertEq(totalDebtShares, 19000000);
         (,, totalDebtShares) = vault.tokenConfigs(address(usdc));
-        assertEq(totalDebtShares, 800000);
+        assertEq(totalDebtShares, 19000000);
 
         // borrow more doesnt work anymore - because more than max value of collateral is used
         vm.expectRevert(Constants.CollateralValueLimit.selector);
         vm.prank(nft1Owner);
-        vault.borrow(nft1TokenId, 200001);
+        vault.borrow(nft1TokenId, 10000000);
 
         // repay all
         vm.prank(nft1Owner);
-        usdc.approve(address(vault), 1100000);
+        usdc.approve(address(vault), 19000000);
 
         // get debt shares
         (uint256 debtShares) = vault.loans(nft1TokenId);
-        assertEq(debtShares, 800000);
+        assertEq(debtShares, 19000000);
 
         vm.prank(nft1Owner);
         vault.repay(nft1TokenId, debtShares, true);
 
         // collateral is removed
-        (,, totalDebtShares) = vault.tokenConfigs(address(realWeth));
+        (,, totalDebtShares) = vault.tokenConfigs(address(weth));
         assertEq(totalDebtShares, 0);
         (,, totalDebtShares) = vault.tokenConfigs(address(usdc));
         assertEq(totalDebtShares, 0);
@@ -1022,46 +1011,44 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
 
 
     function testMultiLendLoan() external {
-        _deposit(2000000, WHALE_ACCOUNT);
-        _deposit(1000000, nft1Owner_2);
 
-        // gift some usdc so later he may repay all
-        vm.prank(WHALE_ACCOUNT);
-        usdc.transfer(nft1Owner, 1000000);
+
+        _deposit(2000000, WHALE_ACCOUNT);
+        _deposit(1000000, nft2Owner);
 
         _createAndBorrow(nft1TokenId, nft1Owner, 1000000);
-        _createAndBorrow(nft1TokenId_2, nft1Owner_2, 2000000);
+        _createAndBorrow(nft2TokenId, nft2Owner, 2000000);
 
         assertEq(vault.balanceOf(WHALE_ACCOUNT), 2000000);
-        assertEq(vault.balanceOf(nft1Owner_2), 1000000);
+        assertEq(vault.balanceOf(nft2Owner), 1000000);
 
         // wait 7 days (should generate around 0.49%)
         vm.warp(block.timestamp + 7 days);
 
-        _deposit(1000000, nft1Owner_2);
-        assertEq(vault.balanceOf(nft1Owner_2), 1995079); // less shares because more valuable
+        _deposit(1000000, nft2Owner);
+        assertEq(vault.balanceOf(nft2Owner), 1995079); // less shares because more valuable
 
         // whale won double interest
         assertEq(vault.lendInfo(WHALE_ACCOUNT), 2009889);
-        assertEq(vault.lendInfo(nft1Owner_2), 2004943);
+        assertEq(vault.lendInfo(nft2Owner), 2004943);
 
         // repay debts
         (uint256 debt,,,,) = vault.loanInfo(nft1TokenId);
         console.log("Debt for nft1TokenId:", debt);
         _repay(debt, nft1Owner, nft1TokenId, true);
 
-        (debt,,,,) = vault.loanInfo(nft1TokenId_2);
-        console.log("Debt for nft1TokenId_2:", debt);
-        _repay(debt, nft1Owner_2, nft1TokenId_2, true);
+        (debt,,,,) = vault.loanInfo(nft2TokenId);
+        console.log("Debt for nft2TokenId:", debt);
+        _repay(debt, nft2Owner, nft2TokenId, true);
 
         // withdraw shares
         uint256 shares = vault.balanceOf(WHALE_ACCOUNT);
         vm.prank(WHALE_ACCOUNT);
         vault.redeem(shares, WHALE_ACCOUNT, WHALE_ACCOUNT);
 
-        shares = vault.balanceOf(nft1Owner_2);
-        vm.prank(nft1Owner_2);
-        vault.redeem(shares, nft1Owner_2, nft1Owner_2);
+        shares = vault.balanceOf(nft2Owner);
+        vm.prank(nft2Owner);
+        vault.redeem(shares, nft2Owner, nft2Owner);
 
         // check remaining
         console.log("Remaining vault usdc balance:", usdc.balanceOf(address(vault)));
@@ -1157,7 +1144,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         if (lent > globalLendLimit) {
             vm.expectRevert(Constants.GlobalLendLimit.selector);
         } else if (lent > dailyLendIncreaseLimitMin) {
-            vm.expectRevert(Constants.dailyLendIncreaseLimit.selector);
+            vm.expectRevert(Constants.DailyLendIncreaseLimit.selector);
         } else if (whaleBalance < lent) {
             vm.expectRevert("ERC20: transfer amount exceeds balance");
         }
@@ -1179,7 +1166,7 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         if (debt > globalDebtLimit) {
             vm.expectRevert(Constants.GlobalDebtLimit.selector);
         } else if (debt > dailyDebtIncreaseLimitMin) {
-            vm.expectRevert(Constants.dailyDebtIncreaseLimit.selector);
+            vm.expectRevert(Constants.DailyDebtIncreaseLimit.selector);
         } else if (collateralValue * buffer / Q32 < debt) {
             vm.expectRevert(Constants.CollateralFail.selector);
         } else if (vaultBalance < debt) {
@@ -1217,84 +1204,13 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
         vault.withdraw(withdraw, WHALE_ACCOUNT, WHALE_ACCOUNT);
     }
 
-    function testDepositAndRepayWithPermit2() external {
-        uint256 amount = 1000000;
-        uint256 privateKey = 123;
-        address addr = vm.addr(privateKey);
-
-        // give coins
-        vm.deal(addr, 1 ether);
-        vm.prank(WHALE_ACCOUNT);
-        usdc.transfer(addr, amount * 2);
-
-        vm.prank(addr);
-        usdc.approve(PERMIT2, type(uint256).max);
-
-        ISignatureTransfer.PermitTransferFrom memory tf = ISignatureTransfer.PermitTransferFrom(
-            ISignatureTransfer.TokenPermissions(address(usdc), amount), 1, block.timestamp
-        );
-        bytes memory signature = _getPermitTransferFromSignature(tf, privateKey, address(vault));
-        bytes memory permitData = abi.encode(tf, signature);
-
-        assertEq(vault.lendInfo(addr), 0);
-
-        vm.prank(addr);
-        vault.deposit(amount, addr, permitData);
-        assertEq(vault.lendInfo(addr), 1000000);
-
-        vm.prank(nft1Owner);
-        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
-        vm.prank(nft1Owner);
-        vault.create(nft1TokenId, nft1Owner);
-        vm.prank(nft1Owner);
-        vault.borrow(nft1TokenId, amount);
-
-        (uint256 debt,,,,) = vault.loanInfo(nft1TokenId);
-        assertEq(debt, 1000000);
-
-        tf = ISignatureTransfer.PermitTransferFrom(
-            ISignatureTransfer.TokenPermissions(address(usdc), amount), 2, block.timestamp
-        );
-        signature = _getPermitTransferFromSignature(tf, privateKey, address(vault));
-        permitData = abi.encode(tf, signature);
-
-        vm.prank(addr);
-        vault.repay(nft1TokenId, amount, false, permitData);
-
-        (debt,,,,) = vault.loanInfo(nft1TokenId);
-        assertEq(debt, 0);
-    }
-
-    function _getPermitTransferFromSignature(
-        ISignatureTransfer.PermitTransferFrom memory permit,
-        uint256 privateKey,
-        address to
-    ) internal returns (bytes memory sig) {
-        bytes32 _PERMIT_TRANSFER_FROM_TYPEHASH = keccak256(
-            "PermitTransferFrom(TokenPermissions permitted,address spender,uint256 nonce,uint256 deadline)TokenPermissions(address token,uint256 amount)"
-        );
-        bytes32 _TOKEN_PERMISSIONS_TYPEHASH = keccak256("TokenPermissions(address token,uint256 amount)");
-        bytes32 tokenPermissions = keccak256(abi.encode(_TOKEN_PERMISSIONS_TYPEHASH, permit.permitted));
-        bytes32 msgHash = keccak256(
-            abi.encodePacked(
-                "\x19\x01",
-                IPermit2(PERMIT2).DOMAIN_SEPARATOR(),
-                keccak256(
-                    abi.encode(_PERMIT_TRANSFER_FROM_TYPEHASH, tokenPermissions, to, permit.nonce, permit.deadline)
-                )
-            )
-        );
-
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, msgHash);
-        return bytes.concat(r, s, bytes1(v));
-    }
-
+    // leverage tests
     function test_LeverageDown() public {
-        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, UNIVERSAL_ROUTER, EX0x, permit2);
+        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
         vault.setTransformer(address(leverageTransformer), true);
         leverageTransformer.setVault(address(vault));
 
-        _deposit(20000000, WHALE_ACCOUNT);
+        _deposit(10000000, WHALE_ACCOUNT);
 
         vm.startPrank(nft1Owner);
         IERC721(address(positionManager)).approve(address(positionManager), nft1TokenId);
@@ -1302,7 +1218,28 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
 
         vault.create(nft1TokenId, nft1Owner);
 
+        // Record initial state
+        uint256 initialDebtShares = vault.loans(nft1TokenId);
+        (uint256 initialDebt,,,,) = vault.loanInfo(nft1TokenId);
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
+        uint256 initialUsdcBalance = usdc.balanceOf(nft1Owner);
+        uint256 initialWethBalance = weth.balanceOf(nft1Owner);
+
+        console.log("=== LEVERAGE DOWN TEST ===");
+        console.log("Initial debt shares:", initialDebtShares);
+        console.log("Initial debt amount:", initialDebt);
+        console.log("Initial liquidity:", initialLiquidity);
+        console.log("Initial USDC balance:", initialUsdcBalance);
+        console.log("Initial WETH balance:", initialWethBalance);
+
         vault.borrow(nft1TokenId, 1);
+
+        // Record state after borrowing
+        uint256 debtSharesAfterBorrow = vault.loans(nft1TokenId);
+        (uint256 debtAfterBorrow,,,,) = vault.loanInfo(nft1TokenId);
+        
+        console.log("Debt shares after borrow:", debtSharesAfterBorrow);
+        console.log("Debt amount after borrow:", debtAfterBorrow);
 
         LeverageTransformer.LeverageDownParams memory params = LeverageTransformer.LeverageDownParams({
             tokenId: nft1TokenId,
@@ -1316,7 +1253,8 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
             amountOut1Min: 0,
             swapData1: "",
             recipient: nft1Owner,
-            deadline: block.timestamp
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: ""
         });
 
         vault.transform(
@@ -1325,8 +1263,129 @@ contract V4VaultIntegrationTest is V4ForkTestBase {
             abi.encodeWithSelector(LeverageTransformer.leverageDown.selector, params)
         );
 
+        // Record final state
+        uint256 finalDebtShares = vault.loans(nft1TokenId);
+        (uint256 finalDebt,,,,) = vault.loanInfo(nft1TokenId);
+        uint128 finalLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
+
+        console.log("Final debt shares:", finalDebtShares);
+        console.log("Final debt amount:", finalDebt);
+        console.log("Final liquidity:", finalLiquidity);
+
+        // Assertions
+        // 1. Position ownership should remain with vault
+        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault), "Position should still be owned by vault");
+        
+        // 2. Debt should be reduced (leverage down means reducing debt)
+        assertLt(finalDebtShares, debtSharesAfterBorrow, "Debt shares should decrease after leverage down");
+        assertLt(finalDebt, debtAfterBorrow, "Debt amount should decrease after leverage down");
+        
+        // 3. Position liquidity should be reduced
+        assertLt(finalLiquidity, initialLiquidity, "Position liquidity should decrease after leverage down");
+        
+        // 4. Loan should still be healthy
+        (uint256 debtCheck, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
+        assertTrue(collateralValue > debtCheck, "Loan should remain healthy after leverage down");
+
         vault.remove(nft1TokenId, nft1Owner, "");
         vm.stopPrank();
     }
-    */
+
+    // leverage tests
+    function test_LeverageUp() public {
+        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        vault.setTransformer(address(leverageTransformer), true);
+        leverageTransformer.setVault(address(vault));
+
+        _deposit(10000000, WHALE_ACCOUNT);
+
+        vm.startPrank(nft1Owner);
+        IERC721(address(positionManager)).approve(address(positionManager), nft1TokenId);
+        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
+
+        vault.create(nft1TokenId, nft1Owner);
+
+        // Record initial state
+        uint256 initialDebtShares = vault.loans(nft1TokenId);
+        (uint256 initialDebt,,,,) = vault.loanInfo(nft1TokenId);
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
+        uint256 initialUsdcBalance = usdc.balanceOf(nft1Owner);
+        uint256 initialWethBalance = weth.balanceOf(nft1Owner);
+
+        console.log("=== LEVERAGE UP TEST ===");
+        console.log("Initial debt shares:", initialDebtShares);
+        console.log("Initial debt amount:", initialDebt);
+        console.log("Initial liquidity:", initialLiquidity);
+        console.log("Initial USDC balance:", initialUsdcBalance);
+        console.log("Initial WETH balance:", initialWethBalance);
+
+        vault.borrow(nft1TokenId, 1000000);
+
+        // Record state after initial borrow
+        uint256 debtSharesAfterBorrow = vault.loans(nft1TokenId);
+        (uint256 debtAfterBorrow,,,,) = vault.loanInfo(nft1TokenId);
+        uint128 liquidityAfterBorrow = positionManager.getPositionLiquidity(nft1TokenId);
+        
+        console.log("Debt shares after initial borrow:", debtSharesAfterBorrow);
+        console.log("Debt amount after initial borrow:", debtAfterBorrow);
+        console.log("Liquidity after initial borrow:", liquidityAfterBorrow);
+
+        bytes memory swapData = _createSwapData(500000, 1, address(usdc), address(weth), address(leverageTransformer));
+
+        LeverageTransformer.LeverageUpParams memory params = LeverageTransformer.LeverageUpParams({
+            tokenId: nft1TokenId,
+            borrowAmount: 1000000,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 500000,
+            amountOut1Min: 1,
+            swapData1: swapData,
+            amountAddMin0: 1,
+            amountAddMin1: 1,
+            recipient: nft1Owner,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
+        });
+
+        vault.transform(
+            nft1TokenId,
+            address(leverageTransformer),
+            abi.encodeWithSelector(LeverageTransformer.leverageUp.selector, params)
+        );
+
+        // Record final state
+        uint256 finalDebtShares = vault.loans(nft1TokenId);
+        (uint256 finalDebt,,,,) = vault.loanInfo(nft1TokenId);
+        uint128 finalLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
+
+        console.log("Final debt shares:", finalDebtShares);
+        console.log("Final debt amount:", finalDebt);
+        console.log("Final liquidity:", finalLiquidity);
+
+        // Assertions
+        // 1. Position ownership should remain with vault
+        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault), "Position should still be owned by vault");
+        
+        // 2. Debt should increase (leverage up means increasing debt)
+        assertGt(finalDebtShares, debtSharesAfterBorrow, "Debt shares should increase after leverage up");
+        assertGt(finalDebt, debtAfterBorrow, "Debt amount should increase after leverage up");
+        
+        // 3. Position liquidity should increase (more tokens added to position)
+        assertGt(finalLiquidity, liquidityAfterBorrow, "Position liquidity should increase after leverage up");
+        
+        // 4. Loan should still be healthy
+        (uint256 debtCheck, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
+        assertTrue(collateralValue > debtCheck, "Loan should remain healthy after leverage up");
+        
+        // 5. Total debt increase should be approximately the borrow amount
+        assertApproxEqRel(finalDebt - debtAfterBorrow, 1000000, 0.01e18, "Debt increase should be approximately the borrow amount");
+        
+        // 6. Liquidity increase should be significant (more tokens added to position)
+        assertGt(finalLiquidity - liquidityAfterBorrow, 0, "Liquidity should increase significantly");
+
+        vm.stopPrank();
+    }
+
 }

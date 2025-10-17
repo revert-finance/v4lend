@@ -634,7 +634,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         (uint256 newDebtExchangeRateX96,) = _updateGlobalInterest();
 
-        _decreaseLiquidity(
+        (amount0, amount1) = _decreaseLiquidity(
             params.tokenId,
             params.liquidity,
             params.amount0Min,

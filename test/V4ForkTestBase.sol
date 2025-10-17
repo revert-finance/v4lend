@@ -12,6 +12,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 
+import {Swapper} from "../src/utils/Swapper.sol";
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
@@ -41,7 +42,7 @@ contract V4ForkTestBase is V4TestBase {
     address constant EX0x = 0x0000000000001fF3684f28c67538d4D072C22734;
 
     // Real tokens from mainnet
-    IWETH9 public realWeth;
+    IWETH9 public weth;
     IERC20 public usdc;
     IERC20 public usdt;
     IERC20 public dai;
@@ -84,7 +85,7 @@ contract V4ForkTestBase is V4TestBase {
         console.log("Forked mainnet at block:", MAINNET_FORK_BLOCK);
         
         // Initialize real tokens
-        realWeth = IWETH9(WETH_ADDRESS);
+        weth = IWETH9(WETH_ADDRESS);
         usdc = IERC20(USDC_ADDRESS);
         usdt = IERC20(USDT_ADDRESS);
         dai = IERC20(DAI_ADDRESS);
@@ -141,10 +142,11 @@ contract V4ForkTestBase is V4TestBase {
         
         console.log("=== Mainnet Fork Test Setup Complete ===");
         console.log("Forked mainnet at block:", MAINNET_FORK_BLOCK);
-        console.log("Using real WETH:", address(realWeth));
+        console.log("Using real WETH:", address(weth));
         console.log("Using real USDC:", address(usdc));
         console.log("Using real USDT:", address(usdt));
         console.log("Using real DAI:", address(dai));
+        console.log("Using real WBTC:", address(wbtc));
 
         nft1TokenId = 1;
         nft1Owner = 0x4423B0D6955aF39B48cf215577a79Ce574299D3f;
@@ -222,8 +224,25 @@ contract V4ForkTestBase is V4TestBase {
     function _verifyContractCleanup() internal {
         // Verify V4Utils contract has no leftover tokens
         assertEq(address(v4Utils).balance, 0, "V4Utils ETH balance should be 0");
-        assertEq(realWeth.balanceOf(address(v4Utils)), 0, "V4Utils WETH balance should be 0");
+        assertEq(weth.balanceOf(address(v4Utils)), 0, "V4Utils WETH balance should be 0");
         assertEq(usdc.balanceOf(address(v4Utils)), 0, "V4Utils USDC balance should be 0");
+    }
+
+
+    function _createSwapData(uint256 amountIn, uint256 amountOutMin, address tokenIn, address tokenOut, address recipient) internal view returns (bytes memory swapData) {
+
+         // universalrouter swap data (single swap command)
+        bytes[] memory inputs = new bytes[](2);
+        inputs[0] = abi.encode(
+            recipient,
+            amountIn,
+            amountOutMin,
+            abi.encodePacked(address(tokenIn), uint24(500), address(tokenOut)),
+            false
+        );
+        inputs[1] = abi.encode(address(tokenIn), recipient, 0);
+        swapData = abi.encode(address(swapRouter), abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp)));
+
     }
 
     function _logPositionInfo(uint256 tokenId) internal view {
@@ -287,7 +306,7 @@ contract V4ForkTestBase is V4TestBase {
     /// @return initialUsdcBalance Initial USDC balance  
     /// @return initialEthBalance Initial ETH balance
     function _recordInitialBalances(address owner) internal view returns (uint256 initialWethBalance, uint256 initialUsdcBalance, uint256 initialEthBalance) {
-        initialWethBalance = realWeth.balanceOf(owner);
+        initialWethBalance = weth.balanceOf(owner);
         initialUsdcBalance = usdc.balanceOf(owner);
         initialEthBalance = owner.balance;
         
@@ -308,7 +327,7 @@ contract V4ForkTestBase is V4TestBase {
         uint256 initialUsdcBalance,
         uint256 initialEthBalance
     ) internal view returns (uint256 finalWethBalance, uint256 finalUsdcBalance, uint256 finalEthBalance) {
-        finalWethBalance = realWeth.balanceOf(owner);
+        finalWethBalance = weth.balanceOf(owner);
         finalUsdcBalance = usdc.balanceOf(owner);
         finalEthBalance = owner.balance;
         

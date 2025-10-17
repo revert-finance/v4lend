@@ -48,7 +48,7 @@ abstract contract V4TestBase is Test {
     // Test tokens
     ERC20Mock public token0;
     ERC20Mock public token1;
-    ERC20Mock public weth;
+    ERC20Mock public mockWeth;
     
     // Test users
     address public user1;
@@ -125,7 +125,7 @@ abstract contract V4TestBase is Test {
         // Deploy mock tokens
         ERC20Mock tempToken0 = new ERC20Mock();
         ERC20Mock tempToken1 = new ERC20Mock();
-        weth = new ERC20Mock();
+        mockWeth = new ERC20Mock();
         
         // Ensure proper ordering: token0 < token1 (address-wise)
         if (address(tempToken0) < address(tempToken1)) {
@@ -139,7 +139,7 @@ abstract contract V4TestBase is Test {
         // Mint tokens to this contract
         token0.mint(address(this), 100_000_000 ether);
         token1.mint(address(this), 100_000_000 ether);
-        weth.mint(address(this), 100_000_000 ether);
+        mockWeth.mint(address(this), 100_000_000 ether);
     }
     
     function _fundUsers() internal {
@@ -345,7 +345,7 @@ abstract contract V4TestBase is Test {
         console.log("Token0 balance:", token0.balanceOf(user));
         console.log("Token1 balance:", token1.balanceOf(user));
         console.log("ETH balance:", user.balance);
-        console.log("WETH balance:", weth.balanceOf(user));
+        console.log("WETH balance:", mockWeth.balanceOf(user));
     }
     
     function _approveTokens(address user, uint256 amount) internal {

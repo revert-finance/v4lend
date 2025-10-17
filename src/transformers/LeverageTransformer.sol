@@ -47,11 +47,9 @@ contract LeverageTransformer is Transformer, Swapper {
         uint256 amountIn1;
         uint256 amountOut1Min;
         bytes swapData1;
-        // precalculated liquidity to add - includes fees currently in position
-        uint128 liquidity;
         // for adding liquidity slippage
-        uint256 amountAddMax0;
-        uint256 amountAddMax1;
+        uint256 amountAddMin0;
+        uint256 amountAddMin1;
         // recipient for leftover tokens
         address recipient;
         // for all uniswap deadlineable functions
@@ -74,7 +72,7 @@ contract LeverageTransformer is Transformer, Swapper {
         
         Currency token = Currency.wrap(IVault(msg.sender).asset());
 
-        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(params.tokenId);
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
  
@@ -109,6 +107,8 @@ contract LeverageTransformer is Transformer, Swapper {
         _handleApproval(permit2, token0, amount0);
         _handleApproval(permit2, token1, amount1);
 
+        uint128 liquidity = _calculateLiquidity(positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1);
+
         (bytes memory actions, bytes[] memory params_array) = _buildActionsForIncreasingLiquidity(
             uint8(Actions.INCREASE_LIQUIDITY),
             token0,
@@ -116,9 +116,9 @@ contract LeverageTransformer is Transformer, Swapper {
         );
         params_array[0] = abi.encode(
             params.tokenId,
-            params.liquidity,
-            params.amountAddMax0, // amount0Max
-            params.amountAddMax1, // amount1Max
+            liquidity,
+            type(uint128).max,
+            type(uint128).max,
             params.increaseLiquidityHookData
         );
        
@@ -126,6 +126,13 @@ contract LeverageTransformer is Transformer, Swapper {
 
         uint256 added0 = amount0 - token0.balanceOfSelf();
         uint256 added1 = amount1 - token1.balanceOfSelf();
+
+        if (added0 < params.amountAddMin0) {
+            revert InsufficientAmountAdded();
+        }
+        if (added1 < params.amountAddMin1) {
+            revert InsufficientAmountAdded();
+        }
 
         // send leftover tokens
         if (amount0 > added0) {

@@ -257,7 +257,7 @@ contract V4UtilsChangeRangeTest is V4ForkTestBase {
         ChangeRangeTestParams memory params = ChangeRangeTestParams({
             tokenId: nft2TokenId,
             owner: nft2Owner,
-            targetToken: Currency.wrap(address(realWeth)), // Swap to WETH
+            targetToken: Currency.wrap(address(weth)), // Swap to WETH
             newFee: 3000, // 0.3% fee (same as original)
             newTickLower: -1200, // New tick range (aligned with tick spacing 60)
             newTickUpper: 1200,

@@ -116,7 +116,7 @@ contract V4UtilsSwapTest is V4ForkTestBase {
     function testSwap_USDC_to_WETH() public {
         SwapTestParams memory params = SwapTestParams({
             tokenIn: Currency.wrap(address(usdc)),
-            tokenOut: Currency.wrap(address(realWeth)),
+            tokenOut: Currency.wrap(address(weth)),
             amountIn: 873073,
             minAmountOut: 188428045653858,
             recipient: nft1Owner,
@@ -157,7 +157,7 @@ contract V4UtilsSwapTest is V4ForkTestBase {
 
     function testSwap_WETH_to_ETH() public {
         SwapTestParams memory params = SwapTestParams({
-            tokenIn: Currency.wrap(address(realWeth)),
+            tokenIn: Currency.wrap(address(weth)),
             tokenOut: CurrencyLibrary.ADDRESS_ZERO, // ETH
             amountIn: 1000000000000000,
             minAmountOut: 1000000000000000,
@@ -172,7 +172,7 @@ contract V4UtilsSwapTest is V4ForkTestBase {
     function testSwap_ETH_to_WETH() public {
         SwapTestParams memory params = SwapTestParams({
             tokenIn: CurrencyLibrary.ADDRESS_ZERO, // ETH
-            tokenOut: Currency.wrap(address(realWeth)),
+            tokenOut: Currency.wrap(address(weth)),
             amountIn: 1000000000000000,
             minAmountOut: 1000000000000000,
             recipient: nft1Owner,

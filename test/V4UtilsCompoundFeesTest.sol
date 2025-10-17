@@ -26,7 +26,7 @@ contract V4UtilsCompoundFeesTest is V4ForkTestBase {
         console.log("=== Testing COMPOUND_FEES with real mainnet tokens ===");
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(nft1Owner);
+        uint256 initialWethBalance = weth.balanceOf(nft1Owner);
         uint256 initialUsdcBalance = usdc.balanceOf(nft1Owner);
         uint256 initialEthBalance = nft1Owner.balance;
 
@@ -56,7 +56,7 @@ contract V4UtilsCompoundFeesTest is V4ForkTestBase {
         assertGt(finalLiquidity, 0, "Position should have liquidity after compounding fees");
         
         // Verify balances changed (fees were collected and compounded)
-        uint256 finalWethBalance = realWeth.balanceOf(nft1Owner);
+        uint256 finalWethBalance = weth.balanceOf(nft1Owner);
         uint256 finalUsdcBalance = usdc.balanceOf(nft1Owner);
         uint256 finalEthBalance = nft1Owner.balance;
         
@@ -69,7 +69,7 @@ contract V4UtilsCompoundFeesTest is V4ForkTestBase {
         console.log("=== Testing COMPOUND_FEES with ETH Native ===");
         
         // Record initial balances
-        uint256 initialWethBalance = realWeth.balanceOf(nft2Owner);
+        uint256 initialWethBalance = weth.balanceOf(nft2Owner);
         uint256 initialUsdcBalance = usdc.balanceOf(nft2Owner);
         uint256 initialEthBalance = nft2Owner.balance;
 
@@ -99,7 +99,7 @@ contract V4UtilsCompoundFeesTest is V4ForkTestBase {
         assertGt(finalLiquidity, 0, "Position should have liquidity after compounding fees");
         
         // Verify balances changed (fees were collected and compounded)
-        uint256 finalWethBalance = realWeth.balanceOf(nft2Owner);
+        uint256 finalWethBalance = weth.balanceOf(nft2Owner);
         uint256 finalUsdcBalance = usdc.balanceOf(nft2Owner);
         uint256 finalEthBalance = nft2Owner.balance;
         
