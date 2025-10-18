@@ -893,6 +893,78 @@ contract V4VaultTest is V4ForkTestBase {
         assertEq(vault.debtSharesTotal(), 0);
     }
 
+    function testLiquidationWithZeroCollateralFactorNFT2() external {
+        // lend 10 usdc
+        _deposit(20000000, WHALE_ACCOUNT);
+
+        // add collateral (NFT2 is USDC/ETH position)
+        vm.prank(nft2Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft2TokenId);
+        vm.prank(nft2Owner);
+        vault.create(nft2TokenId, nft2Owner);
+
+        (uint256 debt, uint256 fullValue, uint256 collateralValue, uint256 liquidationCost, uint256 liquidationValue) =
+            vault.loanInfo(nft2TokenId);
+
+        assertEq(debt, 0);
+        console.log("usdc/eth collateral value:", collateralValue);
+        console.log("usdc/eth full value:", fullValue);
+        assertEq(liquidationCost, 0);
+        assertEq(liquidationValue, 0);
+
+        // borrow max
+        vm.prank(nft2Owner);
+        vault.borrow(nft2TokenId, 20000000);
+
+        // set collateral factor to 0 for native ETH (address 0)
+        vault.setTokenConfig(address(0), 0, type(uint32).max); // 0% collateral factor / max 100% collateral value
+
+        (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft2TokenId);
+        assertEq(debt, 20000000);
+        assertEq(collateralValue, 0);
+        assertEq(fullValue, 42537606);
+        assertEq(liquidationCost, 20000000);
+        assertEq(liquidationValue, 21999999);
+
+        vm.prank(WHALE_ACCOUNT);
+        usdc.approve(address(vault), liquidationCost);
+
+        // Record balances before liquidation
+        uint256 wethBalanceBefore = weth.balanceOf(WHALE_ACCOUNT);
+        uint256 usdcBalanceBefore = usdc.balanceOf(WHALE_ACCOUNT);
+        uint256 ethBalanceBefore = WHALE_ACCOUNT.balance;
+
+        vm.prank(WHALE_ACCOUNT);
+        vault.liquidate(IVault.LiquidateParams(nft2TokenId, 1, 1, WHALE_ACCOUNT, block.timestamp, ""));
+
+        // Record balances after liquidation
+        uint256 wethBalanceAfter = weth.balanceOf(WHALE_ACCOUNT);
+        uint256 usdcBalanceAfter = usdc.balanceOf(WHALE_ACCOUNT);
+        uint256 ethBalanceAfter = WHALE_ACCOUNT.balance;
+
+        // Calculate balance changes
+        int256 wethBalanceChange = int256(wethBalanceAfter) - int256(wethBalanceBefore);
+        int256 usdcBalanceChange = int256(usdcBalanceAfter) + int256(liquidationCost) - int256(usdcBalanceBefore);
+        int256 ethBalanceChange = int256(ethBalanceAfter) - int256(ethBalanceBefore);
+
+        console.log("WETH balance change:", wethBalanceChange);
+        console.log("USDC balance change:", usdcBalanceChange);
+        console.log("ETH balance change:", ethBalanceChange);
+
+        // Assert that liquidator received assets
+        // For USDC/ETH position, liquidator should receive native ETH and USDC (not WETH)
+        assertEq(wethBalanceChange, 0, "Liquidator should not receive WETH for USDC/ETH position");
+        assertGt(ethBalanceChange, 0, "Liquidator should receive native ETH");
+        
+        // USDC balance change should account for the liquidation cost paid
+        // The net USDC received should be positive (liquidation value > liquidation cost)
+        assertGt(usdcBalanceChange, 0, "Liquidator should receive net USDC");
+
+        // all debt is payed
+        assertEq(vault.loans(nft2TokenId), 0);
+        assertEq(vault.debtSharesTotal(), 0);
+    }
+
 
     function testLiquidationWithFlashloan() external {
         _setupBasicLoan(true);
