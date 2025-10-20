@@ -289,7 +289,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     /// @inheritdoc IERC4626
     function totalAssets() public view override returns (uint256) {
-        return IERC20(asset).balanceOf(address(this));
+        (, uint256 lendExchangeRateX96) = _calculateGlobalInterest();
+        return _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Floor);
     }
 
     /// @inheritdoc IERC4626
@@ -1043,7 +1044,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         view
         returns (uint256 balance, uint256 reserves)
     {
-        balance = totalAssets();
+        balance = Currency.wrap(asset).balanceOfSelf();
         uint256 debt = _convertToAssets(debtSharesTotal, debtExchangeRateX96, Math.Rounding.Ceil);
         uint256 lent = _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Ceil);
         reserves = balance + debt > lent ? balance + debt - lent : 0;

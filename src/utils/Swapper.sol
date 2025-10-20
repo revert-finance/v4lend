@@ -116,8 +116,7 @@ abstract contract Swapper is Constants {
                 } else {
                     if (!params.tokenIn.isAddressZero()) {
                         IERC20 tokenIn = IERC20(Currency.unwrap(params.tokenIn));
-                        SafeERC20.safeIncreaseAllowance(tokenIn, zeroxAllowanceHolder, params.amountIn);
-                        
+                        SafeERC20.forceApprove(tokenIn, zeroxAllowanceHolder, params.amountIn);
                         (bool success,) = zeroxAllowanceHolder.call(params.swapData);
                         if (!success) {
                             revert SwapFailed();
