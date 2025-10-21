@@ -98,7 +98,7 @@ contract V4ForkTestBase is V4TestBase {
 
         // Deploy V4Oracle with the real deployed contracts
         v4Oracle = new V4Oracle(
-            poolManager, positionManager, address(USDC_ADDRESS), 0x000000000000000000000000000000000000dEaD
+            positionManager, address(USDC_ADDRESS), 0x000000000000000000000000000000000000dEaD
         );
 
         v4Oracle.setMaxPoolPriceDifference(200);

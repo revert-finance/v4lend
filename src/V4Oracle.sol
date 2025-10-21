@@ -68,17 +68,15 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     /// @dev Constructor for V4Oracle deployment
     /// @notice Initializes the V4Oracle contract with core V4 components
-    /// @param _poolManager The Uniswap V4 PoolManager contract instance
     /// @param _positionManager The Uniswap V4 PositionManager contract instance  
     /// @param _referenceToken Token used as reference for price calculations (typically WETH or USDC)
     /// @param _chainlinkReferenceToken Token used as base currency for Chainlink feeds (typically USD-linked token)
     constructor(
-        IPoolManager _poolManager,
         IPositionManager _positionManager,
         address _referenceToken,
         address _chainlinkReferenceToken
     ) Ownable(msg.sender) {
-        poolManager = _poolManager;
+        poolManager = _positionManager.poolManager();
         positionManager = _positionManager;
         referenceToken = _referenceToken;
         referenceTokenDecimals = IERC20Metadata(_referenceToken).decimals();
