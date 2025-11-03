@@ -153,7 +153,7 @@ contract RevertHook is BaseHook {
         onlyPoolManager
         returns (bytes4, BalanceDelta)
     {
-       _updatePositionTickMappings(key, params, true);
+       //_updatePositionTickMappings(key, params, true);
         return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -20,6 +21,7 @@ import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 contract RevertHookTest is BaseTest {
     using EasyPosm for IPositionManager;
@@ -36,10 +38,14 @@ contract RevertHookTest is BaseTest {
     PoolId poolId;
 
     uint256 tokenId;
-    uint256 token2Id;
-    
     int24 tickLower;
     int24 tickUpper;
+
+    uint256 token2Id;
+    int24 tickLower2;
+    int24 tickUpper2;
+
+    int24 tickStart;
 
     function setUp() public {
         // Deploys all required artifacts.
@@ -66,6 +72,9 @@ contract RevertHookTest is BaseTest {
         tickLower = TickMath.minUsableTick(poolKey.tickSpacing);
         tickUpper = TickMath.maxUsableTick(poolKey.tickSpacing);
 
+        tickStart = TickMath.getTickAtSqrtPrice(Constants.SQRT_PRICE_1_1);
+
+        console.log("tickStart", tickStart);
         uint128 liquidityAmount = 100e18;
 
         (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
@@ -75,6 +84,7 @@ contract RevertHookTest is BaseTest {
             liquidityAmount
         );
 
+        // full range mint
         (tokenId,) = positionManager.mint(
             poolKey,
             tickLower,
@@ -87,10 +97,14 @@ contract RevertHookTest is BaseTest {
             Constants.ZERO_BYTES
         );
 
+        tickLower2 = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
+        tickUpper2 = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
+
+        // 2 tick range mint
         (token2Id,) = positionManager.mint(
             poolKey,
-            tickLower,
-            tickUpper,
+            tickLower2,
+            tickUpper2,
             liquidityAmount,
             amount0Expected + 1,
             amount1Expected + 1,
@@ -101,14 +115,22 @@ contract RevertHookTest is BaseTest {
 
         assertEq(hook.lowerTrigger(poolId, tickLower, 0), tokenId);
         assertEq(hook.upperTrigger(poolId, tickUpper, 0), tokenId);
-        assertEq(hook.lowerTrigger(poolId, tickLower, 1), token2Id);
-        assertEq(hook.upperTrigger(poolId, tickUpper, 1), token2Id);
+        assertEq(hook.lowerTrigger(poolId, tickLower2, 0), token2Id);
+        assertEq(hook.upperTrigger(poolId, tickUpper2, 0), token2Id);
     }
 
-    function testCounterHooks() public {
+    function testBasicAutoExit() public {
+
+        hook.setPositionConfig(token2Id, false, false, true);
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Assert that token2Id position has > 0 liquidity after swap (out of range)
+        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2Liquidity, 0, "token2Id should have 0 liquidity");
 
         // Perform a test swap //
-        uint256 amountIn = 1e18;
+        uint256 amountIn = 7e17;
         BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
             amountIn: amountIn,
             amountOutMin: 0, // Very bad, but we want to allow for unlimited price impact
@@ -121,6 +143,18 @@ contract RevertHookTest is BaseTest {
         // ------------------- //
 
         assertEq(int256(swapDelta.amount0()), -int256(amountIn));
+
+        console.log("swapDelta.amount0()", swapDelta.amount0());
+        console.log("swapDelta.amount1()", swapDelta.amount1());
+
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap", currentTick);
+
+        assertTrue(currentTick < tickLower2, "token2Id position should be out of range (currentTick < tickLower2)");
+
+        token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity");
     }
 
     function testLiquidityHooks() public {
@@ -155,5 +189,11 @@ contract RevertHookTest is BaseTest {
 
         assertEq(hook.lowerTrigger(poolId, tickLower, 0), token2Id);
         assertEq(hook.upperTrigger(poolId, tickUpper, 0), token2Id);
+    }
+
+    function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
+        int24 compressed = tick / tickSpacing;
+        if (tick < 0 && tick % tickSpacing != 0) compressed--;
+        return compressed * tickSpacing;
     }
 }
