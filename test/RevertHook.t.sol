@@ -59,7 +59,7 @@ contract RevertHookTest is BaseTest {
                 Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
-        bytes memory constructorArgs = abi.encode(positionManager, poolManager); // Add all the necessary constructor arguments from the hook
+        bytes memory constructorArgs = abi.encode(positionManager, poolManager, address(this)); // Add all the necessary constructor arguments from the hook
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
@@ -112,28 +112,94 @@ contract RevertHookTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-
-        assertEq(hook.lowerTrigger(poolId, tickLower, 0), tokenId);
-        assertEq(hook.upperTrigger(poolId, tickUpper, 0), tokenId);
-        assertEq(hook.lowerTrigger(poolId, tickLower2, 0), token2Id);
-        assertEq(hook.upperTrigger(poolId, tickUpper2, 0), token2Id);
     }
 
-    function testBasicAutoExit() public {
+    function testBasicAutoCompound() public {
 
-        hook.setPositionConfig(token2Id, false, false, true);
+        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
+            doAutoCompound: true,
+            doAutoRange: false,
+            doAutoExit: false,
+            slippageBps: 100,
+            autoExitTickLower: 0,
+            autoExitTickUpper: 0,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0
+        }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
         // Assert that token2Id position has > 0 liquidity after swap (out of range)
         uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
-        assertGt(token2Liquidity, 0, "token2Id should have 0 liquidity");
+        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
 
-        // Perform a test swap //
+        // Perform swaps (in both directions) to generate some fees
+        uint256 amountIn = 1e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        // ------------------- //
+
+        RevertHook.AutoCompoundParams[] memory params = new RevertHook.AutoCompoundParams[](1);
+        params[0] = RevertHook.AutoCompoundParams({
+            tokenId: token2Id,
+            zeroForOne: true,
+            swapAmount: 0
+        });
+
+        hook.autoCompound(params);
+   
+        uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2LiquidityAfter, token2Liquidity, "token2Id should have more liquidity");  
+    }
+
+    function testBasicAutoExit() public {
+
+        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
+            doAutoCompound: false,
+            doAutoRange: false,
+            doAutoExit: true,
+            slippageBps: 100,
+            autoExitTickLower: tickLower2,
+            autoExitTickUpper: tickUpper2,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Assert that token2Id position has > 0 liquidity after swap (out of range)
+        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
+
+        // Perform a swap to activate auto exit
         uint256 amountIn = 7e17;
         BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
             amountIn: amountIn,
-            amountOutMin: 0, // Very bad, but we want to allow for unlimited price impact
+            amountOutMin: 0,
             zeroForOne: true,
             poolKey: poolKey,
             hookData: Constants.ZERO_BYTES,
@@ -157,39 +223,6 @@ contract RevertHookTest is BaseTest {
         assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity");
     }
 
-    function testLiquidityHooks() public {
-
-        // remove half liquidity
-        uint256 liquidityToRemove = positionManager.getPositionLiquidity(tokenId) / 2;
-        positionManager.decreaseLiquidity(
-            tokenId,
-            liquidityToRemove,
-            0, // Max slippage, token0
-            0, // Max slippage, token1
-            address(this),
-            block.timestamp,
-            Constants.ZERO_BYTES
-        );
-
-        assertEq(hook.lowerTrigger(poolId, tickLower, 0), tokenId);
-        assertEq(hook.upperTrigger(poolId, tickUpper, 0), tokenId);
-
-
-        // remove rest of liquidity
-        liquidityToRemove = positionManager.getPositionLiquidity(tokenId);
-        positionManager.decreaseLiquidity(
-            tokenId,
-            liquidityToRemove,
-            0, // Max slippage, token0
-            0, // Max slippage, token1
-            address(this),
-            block.timestamp,
-            Constants.ZERO_BYTES
-        );
-
-        assertEq(hook.lowerTrigger(poolId, tickLower, 0), token2Id);
-        assertEq(hook.upperTrigger(poolId, tickUpper, 0), token2Id);
-    }
 
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
         int24 compressed = tick / tickSpacing;
