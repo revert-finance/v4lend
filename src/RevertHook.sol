@@ -213,15 +213,19 @@ contract RevertHook is BaseHook, IUnlockCallback {
 
     // handle token id - when detected as triggered by a swap
     function _handleTokenId(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger, int24 tick) internal {
-        bool executeAutoRange = false; // TODO implement auto range condition
+        
         bool executeAutoExitLower = positionConfigs[tokenId].doAutoExit && !isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickLower;
         bool executeAutoExitUpper = positionConfigs[tokenId].doAutoExit && isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickUpper;
+        
         if (executeAutoExitLower) {
             _autoExit(poolKey, poolId, tokenId, isUpperTrigger, positionConfigs[tokenId].autoExitSwapLower);
         } else if (executeAutoExitUpper) {
             _autoExit(poolKey, poolId, tokenId, isUpperTrigger, positionConfigs[tokenId].autoExitSwapUpper);
-        } else if (executeAutoRange) {
-            _autoRange(poolKey, poolId, tokenId, tick);
+        } else {
+            bool executeAutoRange = positionConfigs[tokenId].doAutoRange; // TODO condition 
+            if (executeAutoRange) {
+                _autoRange(poolKey, poolId, tokenId);
+            }
         }
     }
 
@@ -382,8 +386,11 @@ contract RevertHook is BaseHook, IUnlockCallback {
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
     }
 
-    function _autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, int24 tickBase) internal {
+    function _autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+
+        (, int24 tick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 tickBase = _getTickLower(tick, poolKey.tickSpacing);
 
         int24 tickLower = tickBase + positionConfigs[tokenId].autoRangeLowerDelta;
         int24 tickUpper = tickBase + positionConfigs[tokenId].autoRangeUpperDelta;
@@ -486,13 +493,21 @@ contract RevertHook is BaseHook, IUnlockCallback {
 
         uint160 sqrtPriceX96;
 
+        console.log("currentAmount0", currentAmount0);
+        console.log("currentAmount1", currentAmount1);
+
         for (uint256 i = 0; i < maxIterations; i++) {
             // Get current price
             (sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolId);
 
+            console.log("tick", TickMath.getTickAtSqrtPrice(sqrtPriceX96));
+
             // Calculate perfect proportions
             (uint256 swapAmount, bool zeroForOne) =
                 _calculatePerfectProportions(sqrtPriceX96, tickLower, tickUpper, currentAmount0, currentAmount1);
+
+            console.log("swapAmount", swapAmount);
+            console.log("zeroForOne", zeroForOne);
 
             // Check if swapAmount is at least priceToleranceBps of total token amount
             if (swapAmount * (10000 / priceToleranceBps) < (zeroForOne ? currentAmount0 : currentAmount1)) {
@@ -502,6 +517,9 @@ contract RevertHook is BaseHook, IUnlockCallback {
             // Execute swap (TODO optimize: only do in poolmanager - and settle amounts at the end)
             BalanceDelta swapDelta = _swap(poolKey, poolId, zeroForOne, swapAmount, 500);
             (currentAmount0, currentAmount1) = _applyBalanceDelta(swapDelta, currentAmount0, currentAmount1);
+
+            console.log("currentAmount0", currentAmount0);
+            console.log("currentAmount1", currentAmount1);
         }
         return (currentAmount0, currentAmount1);
     }
@@ -522,6 +540,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         uint256 amount0Available,
         uint256 amount1Available
     ) internal pure returns (uint256 swapAmount, bool zeroForOne) {
+
         // Calculate perfect proportions for the position range at current price
         uint128 unitLiquidity = 1e18; // Use a large unit to avoid precision issues
         (uint256 perfectAmount0, uint256 perfectAmount1) = LiquidityAmounts.getAmountsForLiquidity(
@@ -535,20 +554,11 @@ contract RevertHook is BaseHook, IUnlockCallback {
             totalValue1 += FullMath.mulDiv(amount0Available, priceX96, FixedPoint96.Q96);
         }
 
-        uint256 targetAmount0;
-        uint256 targetAmount1;
-
         // Calculate the ratio we need
         if (perfectAmount0 == 0) {
-            // Position is entirely token1 (price above range)
-            targetAmount0 = 0;
-            targetAmount1 = totalValue1;
             swapAmount = amount0Available;
             zeroForOne = true;
         } else if (perfectAmount1 == 0) {
-            // Position is entirely token0 (price below range)
-            targetAmount0 = totalValue1;
-            targetAmount1 = 0;
             swapAmount = amount1Available;
             zeroForOne = false;
         } else {
@@ -557,16 +567,16 @@ contract RevertHook is BaseHook, IUnlockCallback {
             uint256 ratio1To0X96 = FullMath.mulDiv(perfectAmount1, FixedPoint96.Q96, perfectAmount0);
             uint256 denominator = priceX96 + ratio1To0X96;
 
-            targetAmount0 = FullMath.mulDiv(totalValue1, FixedPoint96.Q96, denominator);
-            targetAmount1 = FullMath.mulDiv(targetAmount0, ratio1To0X96, FixedPoint96.Q96);
+            uint256 targetAmount0 = FullMath.mulDiv(totalValue1, FixedPoint96.Q96, denominator);
+            uint256 targetAmount1 = FullMath.mulDiv(targetAmount0, ratio1To0X96, FixedPoint96.Q96);
 
             // Calculate swap amount needed
-            if (amount0Available < targetAmount0) {
-                swapAmount = targetAmount0 - amount0Available;
-                zeroForOne = false; // Swap token1 -> token0
-            } else if (amount1Available < targetAmount1) {
+            if (amount0Available > targetAmount0) {
                 swapAmount = amount0Available - targetAmount0;
                 zeroForOne = true; // Swap token0 -> token1
+            } else if (amount1Available > targetAmount1) {
+                swapAmount = amount1Available - targetAmount1;
+                zeroForOne = false; // Swap token1 -> token0
             } else {
                 swapAmount = 0;
             }

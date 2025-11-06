@@ -14,6 +14,7 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
+import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
@@ -112,6 +113,64 @@ contract RevertHookTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
+    }
+
+    function testBasicAutoRange() public {
+        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
+            doAutoCompound: false,
+            doAutoRange: true,
+            doAutoExit: false,
+            slippageBps: 100,
+            autoExitTickLower: 0,
+            autoExitTickUpper: 0,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: -60,
+            autoRangeUpperDelta: 60
+        }));
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Assert that token2Id position has > 0 liquidity after swap (out of range)
+        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
+
+        // Store initial state
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        
+        // Get initial position info
+        (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token2Id);
+        int24 initialTickLower = posInfoBefore.tickLower();
+        int24 initialTickUpper = posInfoBefore.tickUpper();
+        
+        // Perform swap to activate auto range
+        uint256 amountIn = 7e17;
+        BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap", currentTick);
+        
+        // Assert swap was successful
+        assertEq(int256(swapDelta.amount0()), -int256(amountIn), "Swap should consume amountIn token0");
+        
+        // Calculate expected new range based on autoRangeLowerDelta (-60) and autoRangeUpperDelta (+60)
+        int24 expectedTickLower = currentTick - 60;
+        int24 expectedTickUpper = currentTick + 60;
+        
+        // Verify expected range bounds are calculated correctly
+        assertTrue(expectedTickLower < expectedTickUpper, "Expected tickLower should be less than tickUpper");
+
+        // TODO correct asserts
     }
 
     function testBasicAutoCompound() public {
