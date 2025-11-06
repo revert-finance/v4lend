@@ -3,6 +3,9 @@ pragma solidity ^0.8.26;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
@@ -16,13 +19,15 @@ import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/type
 import {BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Position} from "@uniswap/v4-core/src/libraries/Position.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {IUnlockCallback} from '@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol';
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/lib/v4-core/test/utils/LiquidityAmounts.sol";
 import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+
+import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
 import {console} from "forge-std/console.sol";
 
@@ -36,13 +41,19 @@ contract RevertHook is BaseHook, IUnlockCallback {
     // events for auto actions
     event AutoCompound(uint256 tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
     event AutoExit(uint256 tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
-    event AutoRange(uint256 tokenId, uint256 newTokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
+    event AutoRange(
+        uint256 tokenId, uint256 newTokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1
+    );
 
     // events for other actions
     event SetPositionConfig(uint256 tokenId, PositionConfig positionConfig);
     event SendLeftoverTokens(uint256 tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
-    event SendFees(uint256 tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1, address recipient);
+    event SendFees(
+        uint256 tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1, address recipient
+    );
 
+    IPermit2 public immutable permit2;
+    mapping(address => bool) private permit2Approved;
 
     IPositionManager public immutable positionManager;
 
@@ -64,11 +75,15 @@ contract RevertHook is BaseHook, IUnlockCallback {
     // recipient for protocol fees
     address public protocolFeeRecipient;
 
-    constructor(IPositionManager positionManager_, IPoolManager _poolManager, address protocolFeeRecipient_)
-        BaseHook(_poolManager)
-    {
+    constructor(
+        IPositionManager positionManager_,
+        IPoolManager _poolManager,
+        address protocolFeeRecipient_,
+        IPermit2 _permit2
+    ) BaseHook(_poolManager) {
         positionManager = positionManager_;
         protocolFeeRecipient = protocolFeeRecipient_;
+        permit2 = _permit2;
     }
 
     mapping(uint256 tokenId => PositionConfig positionConfig) public positionConfigs;
@@ -77,16 +92,13 @@ contract RevertHook is BaseHook, IUnlockCallback {
         bool doAutoCompound;
         bool doAutoRange;
         bool doAutoExit;
-
         // general config for swap operations
         uint16 slippageBps;
-
         // auto exit config
         int24 autoExitTickLower;
         int24 autoExitTickUpper;
         bool autoExitSwapLower;
         bool autoExitSwapUpper;
-
         // auto range config
         int24 autoRangeLowerLimit;
         int24 autoRangeUpperLimit;
@@ -109,12 +121,30 @@ contract RevertHook is BaseHook, IUnlockCallback {
         }
 
         // basic validation
-        require(positionConfig.autoExitTickLower % poolKey.tickSpacing == 0, "autoExitTickLower must be divisible by tickSpacing");
-        require(positionConfig.autoExitTickUpper % poolKey.tickSpacing == 0, "autoExitTickUpper must be divisible by tickSpacing");
-        require(positionConfig.autoRangeLowerLimit % poolKey.tickSpacing == 0, "autoRangeLowerLimit must be divisible by tickSpacing");
-        require(positionConfig.autoRangeUpperLimit % poolKey.tickSpacing == 0, "autoRangeUpperLimit must be divisible by tickSpacing");
-        require(positionConfig.autoRangeLowerDelta % poolKey.tickSpacing == 0, "autoRangeLowerDelta must be divisible by tickSpacing");
-        require(positionConfig.autoRangeUpperDelta % poolKey.tickSpacing == 0, "autoRangeUpperDelta must be divisible by tickSpacing");
+        require(
+            positionConfig.autoExitTickLower % poolKey.tickSpacing == 0,
+            "autoExitTickLower must be divisible by tickSpacing"
+        );
+        require(
+            positionConfig.autoExitTickUpper % poolKey.tickSpacing == 0,
+            "autoExitTickUpper must be divisible by tickSpacing"
+        );
+        require(
+            positionConfig.autoRangeLowerLimit % poolKey.tickSpacing == 0,
+            "autoRangeLowerLimit must be divisible by tickSpacing"
+        );
+        require(
+            positionConfig.autoRangeUpperLimit % poolKey.tickSpacing == 0,
+            "autoRangeUpperLimit must be divisible by tickSpacing"
+        );
+        require(
+            positionConfig.autoRangeLowerDelta % poolKey.tickSpacing == 0,
+            "autoRangeLowerDelta must be divisible by tickSpacing"
+        );
+        require(
+            positionConfig.autoRangeUpperDelta % poolKey.tickSpacing == 0,
+            "autoRangeUpperDelta must be divisible by tickSpacing"
+        );
 
         // update tick mappings
         _updatePositionTickMappings(tokenId, posInfo.tickLower(), posInfo.tickUpper(), poolKey, positionConfig);
@@ -155,7 +185,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         poolManager.unlock(abi.encode(params));
     }
 
-     function unlockCallback(bytes calldata data) external returns (bytes memory) {
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
         // disallow arbitrary caller
         if (msg.sender != address(poolManager)) {
             revert Unauthorized();
@@ -212,17 +242,20 @@ contract RevertHook is BaseHook, IUnlockCallback {
     }
 
     // handle token id - when detected as triggered by a swap
-    function _handleTokenId(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger, int24 tick) internal {
-        
-        bool executeAutoExitLower = positionConfigs[tokenId].doAutoExit && !isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickLower;
-        bool executeAutoExitUpper = positionConfigs[tokenId].doAutoExit && isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickUpper;
-        
+    function _handleTokenId(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger, int24 tick)
+        internal
+    {
+        bool executeAutoExitLower =
+            positionConfigs[tokenId].doAutoExit && !isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickLower;
+        bool executeAutoExitUpper =
+            positionConfigs[tokenId].doAutoExit && isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickUpper;
+
         if (executeAutoExitLower) {
             _autoExit(poolKey, poolId, tokenId, isUpperTrigger, positionConfigs[tokenId].autoExitSwapLower);
         } else if (executeAutoExitUpper) {
             _autoExit(poolKey, poolId, tokenId, isUpperTrigger, positionConfigs[tokenId].autoExitSwapUpper);
         } else {
-            bool executeAutoRange = positionConfigs[tokenId].doAutoRange; // TODO condition 
+            bool executeAutoRange = positionConfigs[tokenId].doAutoRange; // TODO condition
             if (executeAutoRange) {
                 _autoRange(poolKey, poolId, tokenId);
             }
@@ -241,11 +274,14 @@ contract RevertHook is BaseHook, IUnlockCallback {
         return BaseHook.beforeAddLiquidity.selector;
     }
 
-    function _afterAddLiquidity(address, PoolKey calldata key, ModifyLiquidityParams calldata params, BalanceDelta, BalanceDelta, bytes calldata)
-        internal
-        override
-        returns (bytes4, BalanceDelta)
-    {
+    function _afterAddLiquidity(
+        address,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        BalanceDelta,
+        BalanceDelta,
+        bytes calldata
+    ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
         _updatePositionTickMappings(tokenId, params.tickLower, params.tickUpper, key, positionConfigs[tokenId]);
         return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
@@ -269,13 +305,19 @@ contract RevertHook is BaseHook, IUnlockCallback {
     /// @param tickLower The lower tick of the position
     /// @param tickUpper The upper tick of the position
     /// @param key The pool key
-    /// @param newConfig The new position config   
-    function _updatePositionTickMappings(uint256 tokenId, int24 tickLower, int24 tickUpper, PoolKey memory key, PositionConfig memory newConfig) internal {
-
+    /// @param newConfig The new position config
+    function _updatePositionTickMappings(
+        uint256 tokenId,
+        int24 tickLower,
+        int24 tickUpper,
+        PoolKey memory key,
+        PositionConfig memory newConfig
+    ) internal {
         PoolId poolId = key.toId();
 
         // Calculate positionId to check liquidity
-        bytes32 positionId = Position.calculatePositionKey(address(positionManager), tickLower, tickUpper, bytes32(tokenId));
+        bytes32 positionId =
+            Position.calculatePositionKey(address(positionManager), tickLower, tickUpper, bytes32(tokenId));
 
         // Check current liquidity after the operation
         (uint128 liquidity,,) = StateLibrary.getPositionInfo(poolManager, poolId, positionId);
@@ -389,27 +431,69 @@ contract RevertHook is BaseHook, IUnlockCallback {
     function _autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
-        (, int24 tick,,) = StateLibrary.getSlot0(poolManager, poolId);
-        int24 tickBase = _getTickLower(tick, poolKey.tickSpacing);
+        (int24 tickLower, int24 tickUpper) = _calculateAutoRangeTicks(poolKey, poolId, tokenId);
 
-        int24 tickLower = tickBase + positionConfigs[tokenId].autoRangeLowerDelta;
-        int24 tickUpper = tickBase + positionConfigs[tokenId].autoRangeUpperDelta;
-
-        (amount0, amount1) = _iterateSwapToPerfectProportions(poolKey, poolId, tickLower, tickUpper, amount0, amount1);
+        (amount0, amount1) = _iterateSwapToPerfectProportions(
+            poolKey, poolId, tickLower, tickUpper, amount0, amount1, positionConfigs[tokenId].slippageBps
+        );
 
         amount0 = uint128(amount0 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * amount0 / 10000);
         amount1 = uint128(amount1 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * amount1 / 10000);
 
-        uint256 newTokenId;
+        uint256 newTokenId = _mintAndFinalizeAutoRange(
+            poolKey, tickLower, tickUpper, uint128(amount0), uint128(amount1), currency0, currency1, tokenId
+        );
 
-        (newTokenId, amount0, amount1) = _mintNewPosition(poolKey, tickLower, tickUpper, uint128(amount0), uint128(amount1), _getOwner(tokenId));
+        emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
+    }
+
+    /// @notice Calculates the tick range for auto-range based on current tick and config
+    /// @param poolKey The pool key
+    /// @param poolId The pool ID
+    /// @param tokenId The token ID
+    /// @return tickLower The lower tick for the new range
+    /// @return tickUpper The upper tick for the new range
+    function _calculateAutoRangeTicks(PoolKey memory poolKey, PoolId poolId, uint256 tokenId)
+        internal
+        view
+        returns (int24 tickLower, int24 tickUpper)
+    {
+        (, int24 tick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 tickBase = _getTickLower(tick, poolKey.tickSpacing);
+
+        tickLower = tickBase + positionConfigs[tokenId].autoRangeLowerDelta;
+        tickUpper = tickBase + positionConfigs[tokenId].autoRangeUpperDelta;
+    }
+
+    /// @notice Mints new position and handles fees/leftover tokens
+    /// @param poolKey The pool key
+    /// @param tickLower The lower tick
+    /// @param tickUpper The upper tick
+    /// @param amount0 The amount0 to mint with
+    /// @param amount1 The amount1 to mint with
+    /// @param currency0 The currency0
+    /// @param currency1 The currency1
+    /// @param tokenId The original token ID
+    /// @return newTokenId The newly minted token ID
+    function _mintAndFinalizeAutoRange(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 amount0,
+        uint128 amount1,
+        Currency currency0,
+        Currency currency1,
+        uint256 tokenId
+    ) internal returns (uint256 newTokenId) {
+        address owner = _getOwner(tokenId);
+
+        _handleApproval(currency0, amount0);
+        _handleApproval(currency1, amount1);
+
+        (newTokenId, amount0, amount1) = _mintNewPosition(poolKey, tickLower, tickUpper, amount0, amount1, owner);
 
         _sendFees(currency0, currency1, amount0, amount1, autoRangeProtocolFeeBps, protocolFeeRecipient);
-
-        _sendLeftoverTokens(currency0, currency1, _getOwner(tokenId));
-
-        
-        emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
+        _sendLeftoverTokens(currency0, currency1, owner);
     }
 
     /// @notice Auto-compounds fees from a position
@@ -451,6 +535,10 @@ contract RevertHook is BaseHook, IUnlockCallback {
         // Step 4: Add liquidity
         uint128 maxAddable0 = uint128(fees0 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * fees0 / 10000);
         uint128 maxAddable1 = uint128(fees1 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * fees1 / 10000);
+        
+        _handleApproval(poolKey.currency0, maxAddable0);
+        _handleApproval(poolKey.currency1, maxAddable1);
+        
         (uint256 amount0Added, uint256 amount1Added) =
             _increaseLiquidity(tokenId, poolKey, posInfo, maxAddable0, maxAddable1);
 
@@ -484,19 +572,12 @@ contract RevertHook is BaseHook, IUnlockCallback {
         int24 tickLower,
         int24 tickUpper,
         uint256 currentAmount0,
-        uint256 currentAmount1
+        uint256 currentAmount1,
+        uint256 slippageBps
     ) internal returns (uint256 newAmount0, uint256 newAmount1) {
-
-        // TODO decide on optimal value
-        uint256 maxIterations = 5;
-        uint256 priceToleranceBps = 50;
-
         uint160 sqrtPriceX96;
 
-        console.log("currentAmount0", currentAmount0);
-        console.log("currentAmount1", currentAmount1);
-
-        for (uint256 i = 0; i < maxIterations; i++) {
+        for (uint256 i = 0; i < 50; i++) {
             // Get current price
             (sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolId);
 
@@ -509,18 +590,17 @@ contract RevertHook is BaseHook, IUnlockCallback {
             console.log("swapAmount", swapAmount);
             console.log("zeroForOne", zeroForOne);
 
-            // Check if swapAmount is at least priceToleranceBps of total token amount
-            if (swapAmount * (10000 / priceToleranceBps) < (zeroForOne ? currentAmount0 : currentAmount1)) {
+            // Check if swapAmount is at least 0.5% of total token amount
+            if (swapAmount * (10000 / 50) < (zeroForOne ? currentAmount0 : currentAmount1)) {
                 break;
             }
 
             // Execute swap (TODO optimize: only do in poolmanager - and settle amounts at the end)
-            BalanceDelta swapDelta = _swap(poolKey, poolId, zeroForOne, swapAmount, 500);
+            BalanceDelta swapDelta = _swap(poolKey, poolId, zeroForOne, swapAmount, slippageBps);
             (currentAmount0, currentAmount1) = _applyBalanceDelta(swapDelta, currentAmount0, currentAmount1);
 
-            console.log("currentAmount0", currentAmount0);
-            console.log("currentAmount1", currentAmount1);
         }
+
         return (currentAmount0, currentAmount1);
     }
 
@@ -540,7 +620,6 @@ contract RevertHook is BaseHook, IUnlockCallback {
         uint256 amount0Available,
         uint256 amount1Available
     ) internal pure returns (uint256 swapAmount, bool zeroForOne) {
-
         // Calculate perfect proportions for the position range at current price
         uint128 unitLiquidity = 1e18; // Use a large unit to avoid precision issues
         (uint256 perfectAmount0, uint256 perfectAmount1) = LiquidityAmounts.getAmountsForLiquidity(
@@ -667,7 +746,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         uint128 available0,
         uint128 available1,
         address recipient
-    ) internal returns (uint256 newTokenId, uint256 amount0Added, uint256 amount1Added) {
+    ) internal returns (uint256 newTokenId, uint128 amount0Added, uint128 amount1Added) {
         Currency currency0 = poolKey.currency0;
         Currency currency1 = poolKey.currency1;
 
@@ -675,8 +754,8 @@ contract RevertHook is BaseHook, IUnlockCallback {
         newTokenId = positionManager.nextTokenId();
 
         // Record balances before minting
-        amount0Added = currency0.balanceOfSelf();
-        amount1Added = currency1.balanceOfSelf();
+        amount0Added = uint128(currency0.balanceOfSelf());
+        amount1Added = uint128(currency1.balanceOfSelf());
 
         // Calculate liquidity from available amounts
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
@@ -713,8 +792,8 @@ contract RevertHook is BaseHook, IUnlockCallback {
         positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array);
 
         // Calculate actual amounts added by comparing balances before and after
-        amount0Added -= currency0.balanceOfSelf();
-        amount1Added -= currency1.balanceOfSelf();
+        amount0Added -= uint128(currency0.balanceOfSelf());
+        amount1Added -= uint128(currency1.balanceOfSelf());
     }
 
     /// @notice Decreases full liquidity from a position using PositionManager
@@ -890,6 +969,17 @@ contract RevertHook is BaseHook, IUnlockCallback {
             newAmount1 = amount1 - uint256(int256(-balanceDelta.amount1()));
         } else {
             newAmount1 = amount1 + uint256(int256(balanceDelta.amount1()));
+        }
+    }
+
+    function _handleApproval(Currency token, uint256 amount) internal {
+        if (amount != 0 && !token.isAddressZero()) {
+            address tokenAddr = Currency.unwrap(token);
+            if (!permit2Approved[tokenAddr]) {
+                SafeERC20.forceApprove(IERC20(tokenAddr), address(permit2), type(uint256).max);
+                permit2Approved[tokenAddr] = true;
+            }
+            permit2.approve(tokenAddr, address(positionManager), uint160(amount), uint48(block.timestamp));
         }
     }
 }

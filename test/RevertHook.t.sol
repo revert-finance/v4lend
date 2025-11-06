@@ -46,6 +46,10 @@ contract RevertHookTest is BaseTest {
     int24 tickLower2;
     int24 tickUpper2;
 
+    uint256 token3Id;
+    int24 tickLower3;
+    int24 tickUpper3;
+
     int24 tickStart;
 
     function setUp() public {
@@ -60,7 +64,7 @@ contract RevertHookTest is BaseTest {
                 Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
-        bytes memory constructorArgs = abi.encode(positionManager, poolManager, address(this)); // Add all the necessary constructor arguments from the hook
+        bytes memory constructorArgs = abi.encode(positionManager, poolManager, address(this), permit2); // Add all the necessary constructor arguments from the hook
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
@@ -113,10 +117,26 @@ contract RevertHookTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
+
+        tickLower3 = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
+        tickUpper3 = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
+
+        // 2 tick range mint - smaller liquidity
+        (token3Id,) = positionManager.mint(
+            poolKey,
+            tickLower3,
+            tickUpper3,
+            liquidityAmount / 10,
+            amount0Expected + 1,
+            amount1Expected + 1,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
     }
 
     function testBasicAutoRange() public {
-        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
+        hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
             doAutoCompound: false,
             doAutoRange: true,
             doAutoExit: false,
@@ -130,17 +150,17 @@ contract RevertHookTest is BaseTest {
             autoRangeLowerDelta: -60,
             autoRangeUpperDelta: 60
         }));
-        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
 
-        // Assert that token2Id position has > 0 liquidity after swap (out of range)
-        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
-        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
+        // Assert that token3Id position has > 0 liquidity after swap (out of range)
+        uint128 token3Liquidity = positionManager.getPositionLiquidity(token3Id);
+        assertGt(token3Liquidity, 0, "token2Id should have > 0 liquidity");
 
         // Store initial state
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
         
         // Get initial position info
-        (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token2Id);
+        (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token3Id);
         int24 initialTickLower = posInfoBefore.tickLower();
         int24 initialTickUpper = posInfoBefore.tickUpper();
         
@@ -162,15 +182,63 @@ contract RevertHookTest is BaseTest {
         
         // Assert swap was successful
         assertEq(int256(swapDelta.amount0()), -int256(amountIn), "Swap should consume amountIn token0");
-        
-        // Calculate expected new range based on autoRangeLowerDelta (-60) and autoRangeUpperDelta (+60)
-        int24 expectedTickLower = currentTick - 60;
-        int24 expectedTickUpper = currentTick + 60;
-        
-        // Verify expected range bounds are calculated correctly
-        assertTrue(expectedTickLower < expectedTickUpper, "Expected tickLower should be less than tickUpper");
 
-        // TODO correct asserts
+        // Calculate expected new range based on autoRangeLowerDelta (-60) and autoRangeUpperDelta (+60)
+        {
+            int24 tickBase = _getTickLower(currentTick, poolKey.tickSpacing);
+            int24 expectedTickLower = tickBase - 60;
+            int24 expectedTickUpper = tickBase + 60;
+
+            // Verify expected range bounds are calculated correctly
+            assertTrue(expectedTickLower < expectedTickUpper, "Expected tickLower should be less than tickUpper");
+            assertTrue(currentTick >= expectedTickLower && currentTick <= expectedTickUpper, 
+                "Current tick should be within expected auto-range bounds");
+        }
+
+        // After auto-range execution, verify the old position has 0 liquidity
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "token3Id should have 0 liquidity after auto-range");
+
+        // Verify a new position was minted
+        {
+            uint256 nextTokenIdAfter = positionManager.nextTokenId();
+            assertEq(nextTokenIdAfter, nextTokenIdBefore + 1, "A new position should be minted");
+        }
+
+        // Get the new position info and verify properties
+        {
+            uint256 newTokenId = nextTokenIdBefore;
+            (, PositionInfo posInfoNew) = positionManager.getPoolAndPositionInfo(newTokenId);
+            int24 newTickLower = posInfoNew.tickLower();
+            int24 newTickUpper = posInfoNew.tickUpper();
+
+            // Calculate expected range again for comparison
+            int24 tickBase = _getTickLower(currentTick, poolKey.tickSpacing);
+            int24 expectedTickLower = tickBase - 60;
+            int24 expectedTickUpper = tickBase + 60;
+
+            // Verify new position has the expected tick range
+            assertEq(newTickLower, expectedTickLower, "New position tickLower should match expected");
+            assertEq(newTickUpper, expectedTickUpper, "New position tickUpper should match expected");
+
+            // Verify new position has liquidity > 0
+            assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "New position should have liquidity > 0");
+
+            // Verify new position is owned by the same owner
+            assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(this), 
+                "New position should be owned by the same address");
+
+            // Verify current tick is within the new position's range
+            assertTrue(currentTick >= newTickLower && currentTick <= newTickUpper, 
+                "Current tick should be within the new position's range");
+
+            // Verify the old position's range is different from the new position's range
+            assertTrue(newTickLower != initialTickLower || newTickUpper != initialTickUpper, 
+                "New position should have a different range than the old position");
+        }
+
+        // Verify hook contract has no leftover token balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-range");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-range");
     }
 
     function testBasicAutoCompound() public {
@@ -228,7 +296,11 @@ contract RevertHookTest is BaseTest {
         hook.autoCompound(params);
    
         uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
-        assertGt(token2LiquidityAfter, token2Liquidity, "token2Id should have more liquidity");  
+        assertGt(token2LiquidityAfter, token2Liquidity, "token2Id should have more liquidity");
+
+        // Verify hook contract has no leftover token balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-compound");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-compound");
     }
 
     function testBasicAutoExit() public {
@@ -280,6 +352,10 @@ contract RevertHookTest is BaseTest {
 
         token2Liquidity = positionManager.getPositionLiquidity(token2Id);
         assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity");
+
+        // Verify hook contract has no leftover token balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-exit");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
     }
 
 
