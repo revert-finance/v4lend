@@ -7,17 +7,55 @@ import "@uniswap/v4-core/src/libraries/UnsafeMath.sol";
 import "@uniswap/v4-core/src/libraries/SwapMath.sol";
 import "@uniswap/v4-core/src/libraries/TickBitmap.sol";
 import "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
+import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import "@uniswap/v4-core/src/libraries/BitMath.sol";
+import "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import "@uniswap/v4-core/src/types/PoolId.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 library OptimalSwap {
-    using TickMath for int24;
     using FullMath for uint256;
     using UnsafeMath for uint256;
+    using StateLibrary for IPoolManager;
 
     uint256 internal constant MAX_FEE_PIPS = 1e6;
 
     error Invalid_Pool();
     error Invalid_Tick_Range();
     error Math_Overflow();
+
+    /// @notice V4 Pool Callee struct that wraps IPoolManager, PoolId, and tickSpacing
+    struct V4PoolCallee {
+        IPoolManager poolManager;
+        PoolId poolId;
+        int24 tickSpacing;
+    }
+
+    /// @notice Parameters for finding the next initialized tick
+    struct NextInitializedTickParams {
+        V4PoolCallee pool;
+        int24 tick;
+        int24 tickSpacing;
+        bool zeroForOne;
+        int16 wordPos;
+        uint256 tickWord;
+    }
+
+    /// @notice Result of finding the next initialized tick
+    struct NextInitializedTickResult {
+        int24 tickNext;
+        int16 wordPos;
+        uint256 tickWord;
+    }
+
+    /// @notice Parameters for crossing ticks during optimal swap calculation
+    struct CrossTicksParams {
+        V4PoolCallee pool;
+        SwapState state;
+        uint160 sqrtPriceX96;
+        bool zeroForOne;
+    }
 
     struct SwapState {
         // liquidity in range after swap, accessible by `mload(state)`
@@ -45,7 +83,7 @@ library OptimalSwap {
     /// @dev Given the elegant analytic solution and custom optimizations to Uniswap libraries,
     /// the amount of gas is at the order of 10k depending on the swap amount and the number of ticks crossed,
     /// an order of magnitude less than that achieved by binary search, which can be calculated on-chain.
-    /// @param pool Uniswap v3 pool
+    /// @param pool Uniswap v4 pool callee
     /// @param tickLower The lower tick of the position in which to add liquidity
     /// @param tickUpper The upper tick of the position in which to add liquidity
     /// @param amount0Desired The desired amount of token0 to be spent
@@ -55,7 +93,7 @@ library OptimalSwap {
     /// @return zeroForOne The direction of the swap, true for token0 to token1, false for token1 to token0
     /// @return sqrtPriceX96 The sqrt(price) after the swap
     function getOptimalSwap(
-        V3PoolCallee pool,
+        V4PoolCallee memory pool,
         int24 tickLower,
         int24 tickUpper,
         uint256 amount0Desired,
@@ -64,9 +102,10 @@ library OptimalSwap {
         if (amount0Desired == 0 && amount1Desired == 0) return (0, 0, false, 0);
         if (tickLower >= tickUpper || tickLower < TickMath.MIN_TICK || tickUpper > TickMath.MAX_TICK)
             revert Invalid_Tick_Range();
-        // Ensure the pool exists.
+        // Ensure the pool manager exists.
         assembly ("memory-safe") {
-            let poolCodeSize := extcodesize(pool)
+            let poolManager := mload(pool)
+            let poolCodeSize := extcodesize(poolManager)
             if iszero(poolCodeSize) {
                 // revert Invalid_Pool()
                 mstore(0, 0x01ac05a5)
@@ -78,16 +117,19 @@ library OptimalSwap {
         // Populate `SwapState` with hardcoded offsets.
         {
             int24 tick;
-            (sqrtPriceX96, tick) = pool.sqrtPriceX96AndTick();
+            uint24 protocolFee;
+            uint24 lpFee;
+            (sqrtPriceX96, tick, protocolFee, lpFee) = pool.poolManager.getSlot0(pool.poolId);
             assembly ("memory-safe") {
                 // state.tick = tick
                 mstore(add(state, 0x40), tick)
             }
         }
         {
-            uint128 liquidity = pool.liquidity();
-            uint256 feePips = pool.fee();
-            int24 tickSpacing = pool.tickSpacing();
+            uint128 liquidity = pool.poolManager.getLiquidity(pool.poolId);
+            (, , , uint24 lpFee) = pool.poolManager.getSlot0(pool.poolId);
+            int24 tickSpacing = pool.tickSpacing;
+            uint256 feePips = uint256(lpFee);
             assembly ("memory-safe") {
                 // state.liquidity = liquidity
                 mstore(state, liquidity)
@@ -103,8 +145,8 @@ library OptimalSwap {
                 mstore(add(state, 0x100), tickSpacing)
             }
         }
-        uint160 sqrtRatioLowerX96 = tickLower.getSqrtRatioAtTick();
-        uint160 sqrtRatioUpperX96 = tickUpper.getSqrtRatioAtTick();
+        uint160 sqrtRatioLowerX96 = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtRatioUpperX96 = TickMath.getSqrtPriceAtTick(tickUpper);
         assembly ("memory-safe") {
             // state.sqrtRatioLowerX96 = sqrtRatioLowerX96
             mstore(add(state, 0xa0), sqrtRatioLowerX96)
@@ -113,7 +155,14 @@ library OptimalSwap {
         }
         zeroForOne = isZeroForOne(amount0Desired, amount1Desired, sqrtPriceX96, sqrtRatioLowerX96, sqrtRatioUpperX96);
         // Simulate optimal swap by crossing ticks until the direction reverses.
-        crossTicks(pool, state, sqrtPriceX96, zeroForOne);
+        crossTicks(
+            CrossTicksParams({
+                pool: pool,
+                state: state,
+                sqrtPriceX96: sqrtPriceX96,
+                zeroForOne: zeroForOne
+            })
+        );
         // Active liquidity at the last tick of optimal swap
         uint128 liquidityLast;
         // sqrt(price) at the last tick of optimal swap
@@ -231,10 +280,168 @@ library OptimalSwap {
         }
     }
 
+    /// @dev Find the next initialized tick in the given direction, using V4 StateLibrary
+    /// @param params The parameters for finding the next initialized tick
+    /// @return result The result containing the next initialized tick and updated state
+    function _nextInitializedTick(NextInitializedTickParams memory params)
+        private
+        view
+        returns (NextInitializedTickResult memory result)
+    {
+        bool lte = params.zeroForOne; // lte = less than or equal (search left)
+        int24 compressed = TickBitmap.compress(params.tick, params.tickSpacing);
+        (int16 currentWordPos, uint8 bitPos) = TickBitmap.position(compressed);
+        
+        // If we have a cached word and it's the current word, check it first
+        if (params.wordPos == currentWordPos && params.tickWord != 0) {
+            result.tickNext = _nextInitializedTickInWord(
+                params.tickWord,
+                compressed,
+                bitPos,
+                params.tickSpacing,
+                lte
+            );
+            if (result.tickNext != params.tick) {
+                result.wordPos = currentWordPos;
+                result.tickWord = params.tickWord;
+                return result;
+            }
+        }
+        
+        // Search through words until we find an initialized tick
+        int16 searchWordPos = params.wordPos == type(int16).min ? currentWordPos : params.wordPos;
+        uint256 tickWord = params.tickWord;
+        
+        while (true) {
+            if (lte) {
+                // Search left (decreasing ticks)
+                if (searchWordPos < currentWordPos - 100) {
+                    // Went too far, return the boundary tick
+                    result.tickNext = (compressed - int24(uint24(type(uint8).max))) * params.tickSpacing;
+                    result.wordPos = searchWordPos;
+                    result.tickWord = 0;
+                    return result;
+                }
+                if (searchWordPos == currentWordPos && tickWord == 0) {
+                    tickWord = params.pool.poolManager.getTickBitmap(params.pool.poolId, searchWordPos);
+                } else if (searchWordPos < currentWordPos) {
+                    searchWordPos--;
+                    tickWord = params.pool.poolManager.getTickBitmap(params.pool.poolId, searchWordPos);
+                } else {
+                    searchWordPos--;
+                    if (searchWordPos >= currentWordPos - 100) {
+                        tickWord = params.pool.poolManager.getTickBitmap(params.pool.poolId, searchWordPos);
+                    } else {
+                        result.tickNext = (compressed - int24(uint24(type(uint8).max))) * params.tickSpacing;
+                        result.wordPos = searchWordPos;
+                        result.tickWord = 0;
+                        return result;
+                    }
+                }
+            } else {
+                // Search right (increasing ticks)
+                if (searchWordPos > currentWordPos + 100) {
+                    // Went too far, return the boundary tick
+                    result.tickNext = (compressed + int24(uint24(type(uint8).max))) * params.tickSpacing;
+                    result.wordPos = searchWordPos;
+                    result.tickWord = 0;
+                    return result;
+                }
+                if (searchWordPos == currentWordPos && tickWord == 0) {
+                    tickWord = params.pool.poolManager.getTickBitmap(params.pool.poolId, searchWordPos + 1);
+                    searchWordPos++;
+                } else if (searchWordPos <= currentWordPos) {
+                    searchWordPos = currentWordPos + 1;
+                    tickWord = params.pool.poolManager.getTickBitmap(params.pool.poolId, searchWordPos);
+                } else {
+                    searchWordPos++;
+                    if (searchWordPos <= currentWordPos + 100) {
+                        tickWord = params.pool.poolManager.getTickBitmap(params.pool.poolId, searchWordPos);
+                    } else {
+                        result.tickNext = (compressed + int24(uint24(type(uint8).max))) * params.tickSpacing;
+                        result.wordPos = searchWordPos;
+                        result.tickWord = 0;
+                        return result;
+                    }
+                }
+            }
+            
+            if (tickWord != 0) {
+                // Found a word with initialized ticks
+                int24 searchCompressed = lte ? compressed : compressed + 1;
+                if (searchWordPos != currentWordPos) {
+                    searchCompressed = int24(searchWordPos) * 256;
+                    if (!lte) searchCompressed++;
+                }
+                uint8 searchBitPos = uint8(uint24(searchCompressed) & 0xff);
+                result.tickNext = _nextInitializedTickInWord(
+                    tickWord,
+                    searchCompressed,
+                    searchBitPos,
+                    params.tickSpacing,
+                    lte
+                );
+                result.wordPos = searchWordPos;
+                result.tickWord = tickWord;
+                return result;
+            }
+        }
+    }
+    
+    /// @dev Find the next initialized tick within a single word
+    /// @param word The tick bitmap word
+    /// @param compressed The compressed tick
+    /// @param bitPos The bit position in the word
+    /// @param tickSpacing The tick spacing
+    /// @param lte Whether to search left (true) or right (false)
+    /// @return tickNext The next initialized tick
+    function _nextInitializedTickInWord(
+        uint256 word,
+        int24 compressed,
+        uint8 bitPos,
+        int24 tickSpacing,
+        bool lte
+    ) private pure returns (int24 tickNext) {
+        unchecked {
+            if (lte) {
+                // Search left: mask all bits at or to the right of current bitPos
+                uint256 mask = type(uint256).max >> (uint256(type(uint8).max) - bitPos);
+                uint256 masked = word & mask;
+                
+                if (masked != 0) {
+                    // Found initialized tick
+                    uint8 msb = BitMath.mostSignificantBit(masked);
+                    tickNext = (compressed - int24(uint24(bitPos - msb))) * tickSpacing;
+                } else {
+                    // No initialized tick in this word, return rightmost tick
+                    tickNext = (compressed - int24(uint24(bitPos))) * tickSpacing;
+                }
+            } else {
+                // Search right: start from next compressed tick
+                compressed++;
+                bitPos = uint8(uint24(compressed) & 0xff);
+                // Mask all bits at or to the left of bitPos
+                uint256 mask = ~((1 << bitPos) - 1);
+                uint256 masked = word & mask;
+                
+                if (masked != 0) {
+                    // Found initialized tick
+                    uint8 lsb = BitMath.leastSignificantBit(masked);
+                    tickNext = (compressed + int24(uint24(lsb - bitPos))) * tickSpacing;
+                } else {
+                    // No initialized tick in this word, return leftmost tick
+                    tickNext = (compressed + int24(uint24(type(uint8).max - bitPos))) * tickSpacing;
+                }
+            }
+        }
+    }
+
     /// @dev Check if the remaining amount is enough to cross the next initialized tick.
     // If so, check whether the swap direction changes for optimal deposit. If so, we swap too much and the final sqrt
     // price must be between the current tick and the next tick. Otherwise the next tick must be crossed.
-    function crossTicks(V3PoolCallee pool, SwapState memory state, uint160 sqrtPriceX96, bool zeroForOne) private view {
+    /// @param params The parameters for crossing ticks, including pool, state, current sqrtPrice, and swap direction
+    /// @notice Modifies params.state and params.sqrtPriceX96 in place
+    function crossTicks(CrossTicksParams memory params) private view {
         // the next tick to swap to from the current tick in the swap direction
         int24 tickNext;
         // Ensure the initial `wordPos` doesn't coincide with the starting tick's.
@@ -243,62 +450,78 @@ library OptimalSwap {
         uint256 tickWord;
 
         do {
-            (tickNext, wordPos, tickWord) = TickBitmap.nextInitializedTick(
-                pool,
-                state.tick,
-                state.tickSpacing,
-                zeroForOne,
-                wordPos,
-                tickWord
+            NextInitializedTickResult memory result = _nextInitializedTick(
+                NextInitializedTickParams({
+                    pool: params.pool,
+                    tick: params.state.tick,
+                    tickSpacing: params.state.tickSpacing,
+                    zeroForOne: params.zeroForOne,
+                    wordPos: wordPos,
+                    tickWord: tickWord
+                })
             );
+            tickNext = result.tickNext;
+            wordPos = result.wordPos;
+            tickWord = result.tickWord;
             // sqrt(price) for the next tick (1/0)
-            uint160 sqrtPriceNextX96 = tickNext.getSqrtRatioAtTick();
+            uint160 sqrtPriceNextX96 = TickMath.getSqrtPriceAtTick(tickNext);
             // The desired amount of token0 to add liquidity after swap
             uint256 amount0Desired;
             // The desired amount of token1 to add liquidity after swap
             uint256 amount1Desired;
 
             unchecked {
-                if (!zeroForOne) {
+                if (!params.zeroForOne) {
                     // Abuse `amount1Desired` to store `amountIn` to avoid stack too deep errors.
-                    (sqrtPriceX96, amount1Desired, amount0Desired) = SwapMath.computeSwapStepExactIn(
-                        uint160(state.sqrtPriceX96),
+                    uint256 amountIn;
+                    uint256 feeAmount;
+                    (params.sqrtPriceX96, amountIn, amount0Desired, feeAmount) = SwapMath.computeSwapStep(
+                        uint160(params.state.sqrtPriceX96),
                         sqrtPriceNextX96,
-                        state.liquidity,
-                        state.amount1Desired,
-                        state.feePips
+                        params.state.liquidity,
+                        -int256(params.state.amount1Desired),
+                        uint24(params.state.feePips)
                     );
-                    amount0Desired = state.amount0Desired + amount0Desired;
-                    amount1Desired = state.amount1Desired - amount1Desired;
+                    amount1Desired = amountIn + feeAmount; // total amount consumed
+                    amount0Desired = params.state.amount0Desired + amount0Desired;
+                    amount1Desired = params.state.amount1Desired - amount1Desired;
                 } else {
                     // Abuse `amount0Desired` to store `amountIn` to avoid stack too deep errors.
-                    (sqrtPriceX96, amount0Desired, amount1Desired) = SwapMath.computeSwapStepExactIn(
-                        uint160(state.sqrtPriceX96),
+                    uint256 amountIn;
+                    uint256 feeAmount;
+                    (params.sqrtPriceX96, amountIn, amount1Desired, feeAmount) = SwapMath.computeSwapStep(
+                        uint160(params.state.sqrtPriceX96),
                         sqrtPriceNextX96,
-                        state.liquidity,
-                        state.amount0Desired,
-                        state.feePips
+                        params.state.liquidity,
+                        -int256(params.state.amount0Desired),
+                        uint24(params.state.feePips)
                     );
-                    amount0Desired = state.amount0Desired - amount0Desired;
-                    amount1Desired = state.amount1Desired + amount1Desired;
+                    amount0Desired = amountIn + feeAmount; // total amount consumed
+                    amount0Desired = params.state.amount0Desired - amount0Desired;
+                    amount1Desired = params.state.amount1Desired + amount1Desired;
                 }
             }
 
             // If the remaining amount is large enough to consume the current tick and the optimal swap direction
             // doesn't change, continue crossing ticks.
-            if (sqrtPriceX96 != sqrtPriceNextX96) break;
+            if (params.sqrtPriceX96 != sqrtPriceNextX96) break;
             if (
                 isZeroForOne(
                     amount0Desired,
                     amount1Desired,
-                    sqrtPriceX96,
-                    state.sqrtRatioLowerX96,
-                    state.sqrtRatioUpperX96
-                ) != zeroForOne
+                    params.sqrtPriceX96,
+                    params.state.sqrtRatioLowerX96,
+                    params.state.sqrtRatioUpperX96
+                ) != params.zeroForOne
             ) {
                 break;
             } else {
-                int128 liquidityNet = pool.liquidityNet(tickNext);
+                (, int128 liquidityNet) = params.pool.poolManager.getTickLiquidity(params.pool.poolId, tickNext);
+                // Load values into local variables for assembly access
+                bool zeroForOne = params.zeroForOne;
+                SwapState memory state = params.state;
+                uint160 sqrtPriceX96 = params.sqrtPriceX96;
+                
                 assembly ("memory-safe") {
                     // If we're moving leftward, we interpret `liquidityNet` as the opposite sign.
                     // If zeroForOne, liquidityNet = -liquidityNet = ~liquidityNet + 1 = -1 ^ liquidityNet + 1.
@@ -315,6 +538,10 @@ library OptimalSwap {
                     // state.amount1Desired = amount1Desired
                     mstore(add(state, 0x80), amount1Desired)
                 }
+                
+                // Update params with modified values
+                params.state = state;
+                params.sqrtPriceX96 = sqrtPriceX96;
             }
         } while (true);
     }
@@ -366,19 +593,19 @@ library OptimalSwap {
                         revert(0x1c, 0x04)
                     }
                 }
-                b = a0.mulDivQ96(state.sqrtRatioLowerX96);
+                b = FullMath.mulDiv(a0, state.sqrtRatioLowerX96, FixedPoint96.Q96);
                 assembly {
                     b := add(div(mul(feePips, liquidity), FEE_COMPLEMENT), b)
                 }
             }
             {
                 // c = amount1Desired + liquidity * sqrtPrice - liquidity * sqrtRatioLower / (1 - f)
-                uint256 c0 = liquidity.mulDivQ96(sqrtPriceX96);
+                uint256 c0 = FullMath.mulDiv(liquidity, sqrtPriceX96, FixedPoint96.Q96);
                 assembly ("memory-safe") {
                     // c0 = amount1Desired + liquidity * sqrtPrice
                     c0 := add(mload(add(state, 0x80)), c0)
                 }
-                c = c0 - liquidity.mulDivQ96((MAX_FEE_PIPS * state.sqrtRatioLowerX96) / FEE_COMPLEMENT);
+                c = c0 - FullMath.mulDiv(liquidity, (MAX_FEE_PIPS * state.sqrtRatioLowerX96) / FEE_COMPLEMENT, FixedPoint96.Q96);
                 b -= c0.mulDiv(FixedPoint96.Q96, sqrtRatioUpperX96);
             }
             assembly {
@@ -388,7 +615,7 @@ library OptimalSwap {
         }
         // Given a root exists, the following calculations cannot realistically overflow/underflow.
         unchecked {
-            uint256 numerator = FullMath.sqrt(b * b + a * c) + b;
+            uint256 numerator = Math.sqrt(b * b + a * c) + b;
             assembly {
                 // `numerator` and `a` must be positive so use `div`.
                 sqrtPriceFinalX96 := div(shl(96, numerator), a)
@@ -445,14 +672,14 @@ library OptimalSwap {
                     a0 := add(mload(add(state, 0x60)), div(liquidityX96, sqrtPriceX96))
                     a := sub(a0, div(mul(MAX_FEE_PIPS, liquidityX96), mul(FEE_COMPLEMENT, sqrtRatioUpperX96)))
                 }
-                b = a0.mulDivQ96(state.sqrtRatioLowerX96);
+                b = FullMath.mulDiv(a0, state.sqrtRatioLowerX96, FixedPoint96.Q96);
                 assembly {
                     b := sub(b, div(mul(feePips, liquidity), FEE_COMPLEMENT))
                 }
             }
             {
                 // c = amount1Desired + liquidity * sqrtPrice / (1 - f) - liquidity * sqrtRatioLower
-                uint256 c0 = liquidity.mulDivQ96((MAX_FEE_PIPS * sqrtPriceX96) / FEE_COMPLEMENT);
+                uint256 c0 = FullMath.mulDiv(liquidity, (MAX_FEE_PIPS * sqrtPriceX96) / FEE_COMPLEMENT, FixedPoint96.Q96);
                 uint256 amount1Desired;
                 assembly ("memory-safe") {
                     // amount1Desired = state.amount1Desired
@@ -460,7 +687,7 @@ library OptimalSwap {
                     // c0 = amount1Desired + liquidity * sqrtPrice / (1 - f)
                     c0 := add(amount1Desired, c0)
                 }
-                c = c0 - liquidity.mulDivQ96(state.sqrtRatioLowerX96);
+                c = c0 - FullMath.mulDiv(liquidity, state.sqrtRatioLowerX96, FixedPoint96.Q96);
                 assembly ("memory-safe") {
                     // `c` is always positive and greater than `amount1Desired`.
                     if iszero(gt(c, amount1Desired)) {
@@ -478,7 +705,7 @@ library OptimalSwap {
         }
         // Given a root exists, the following calculations cannot realistically overflow/underflow.
         unchecked {
-            uint256 numerator = FullMath.sqrt(b * b + a * c) + b;
+            uint256 numerator = Math.sqrt(b * b + a * c) + b;
             assembly {
                 // `numerator` and `a` may be negative so use `sdiv`.
                 sqrtPriceFinalX96 := sdiv(shl(96, numerator), a)
@@ -515,7 +742,11 @@ library OptimalSwap {
         //     = liquidity * (sqrt(current) - sqrt(lower)) * amount0
         unchecked {
             return
-                amount0Desired.mulDivQ96(sqrtPriceX96).mulDivQ96(sqrtPriceX96 - sqrtRatioLowerX96) >
+                FullMath.mulDiv(
+                    FullMath.mulDiv(amount0Desired, sqrtPriceX96, FixedPoint96.Q96),
+                    sqrtPriceX96 - sqrtRatioLowerX96,
+                    FixedPoint96.Q96
+                ) >
                 amount1Desired.mulDiv(sqrtRatioUpperX96 - sqrtPriceX96, sqrtRatioUpperX96);
         }
     }
