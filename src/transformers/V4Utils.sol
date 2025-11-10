@@ -615,15 +615,6 @@ Currency targetToken = instructions.targetToken;
         }
     }
 
-    /// @notice Add SWEEP params if native ETH is involved
-    /// @param params_array The params array to modify
-    /// @param hasNativeETH Whether native ETH is involved
-    function _addSweepParamsIfNeeded(bytes[] memory params_array, bool hasNativeETH) internal view {
-        if (hasNativeETH) {
-            params_array[2] = abi.encode(CurrencyLibrary.ADDRESS_ZERO, address(this));
-        }
-    }
-
     // swap and mint logic
     function _swapAndMint(SwapAndMintParams memory params)
         internal
