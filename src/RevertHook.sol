@@ -194,6 +194,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         for (uint256 i = 0; i < tokenIds.length; i++) {
             _autoCompound(tokenIds[i]);
         }
+        return "";
     }
 
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
@@ -267,8 +268,9 @@ contract RevertHook is BaseHook, IUnlockCallback {
         }
     }
 
-    function _beforeAddLiquidity(address sender, PoolKey calldata key, ModifyLiquidityParams calldata, bytes calldata)
+    function _beforeAddLiquidity(address sender, PoolKey calldata /* key */, ModifyLiquidityParams calldata, bytes calldata)
         internal
+        view
         override
         returns (bytes4)
     {
@@ -440,7 +442,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         });
     }
 
-    function _autoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper, bool doSwap) internal {
+    function _autoExit(PoolKey memory poolKey, PoolId /* poolId */, uint256 tokenId, bool isUpper, bool doSwap) internal {
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
         if (doSwap) {
@@ -822,7 +824,6 @@ contract RevertHook is BaseHook, IUnlockCallback {
             }
             // Handle swap deltas - settle what we owe, take what we receive
         } catch (bytes memory reason) {
-
             // emit event
             emit SwapFailed(poolKey, swapParams, reason);
 
