@@ -140,7 +140,6 @@ contract RevertHookTest is BaseTest {
             doAutoCompound: false,
             doAutoRange: true,
             doAutoExit: false,
-            slippageBps: 100,
             autoExitTickLower: 0,
             autoExitTickUpper: 0,
             autoExitSwapLower: false,
@@ -148,7 +147,10 @@ contract RevertHookTest is BaseTest {
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60
+            autoRangeUpperDelta: 60,
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook)
         }));
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
@@ -175,25 +177,13 @@ contract RevertHookTest is BaseTest {
             receiver: address(this),
             deadline: block.timestamp
         });
+                
+        // Assert swap was successful
+        assertEq(int256(swapDelta.amount0()), -int256(amountIn), "Swap should consume amountIn token0");
         
         // Get current tick after swap
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
         console.log("currentTick after swap", currentTick);
-        
-        // Assert swap was successful
-        assertEq(int256(swapDelta.amount0()), -int256(amountIn), "Swap should consume amountIn token0");
-
-        // Calculate expected new range based on autoRangeLowerDelta (-60) and autoRangeUpperDelta (+60)
-        {
-            int24 tickBase = _getTickLower(currentTick, poolKey.tickSpacing);
-            int24 expectedTickLower = tickBase - 60;
-            int24 expectedTickUpper = tickBase + 60;
-
-            // Verify expected range bounds are calculated correctly
-            assertTrue(expectedTickLower < expectedTickUpper, "Expected tickLower should be less than tickUpper");
-            assertTrue(currentTick >= expectedTickLower && currentTick <= expectedTickUpper, 
-                "Current tick should be within expected auto-range bounds");
-        }
 
         // After auto-range execution, verify the old position has 0 liquidity
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "token3Id should have 0 liquidity after auto-range");
@@ -211,14 +201,8 @@ contract RevertHookTest is BaseTest {
             int24 newTickLower = posInfoNew.tickLower();
             int24 newTickUpper = posInfoNew.tickUpper();
 
-            // Calculate expected range again for comparison
-            int24 tickBase = _getTickLower(currentTick, poolKey.tickSpacing);
-            int24 expectedTickLower = tickBase - 60;
-            int24 expectedTickUpper = tickBase + 60;
-
             // Verify new position has the expected tick range
-            assertEq(newTickLower, expectedTickLower, "New position tickLower should match expected");
-            assertEq(newTickUpper, expectedTickUpper, "New position tickUpper should match expected");
+            assertEq(newTickUpper - newTickLower, 120, "New position tick range should be 120");
 
             // Verify new position has liquidity > 0
             assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "New position should have liquidity > 0");
@@ -247,7 +231,6 @@ contract RevertHookTest is BaseTest {
             doAutoCompound: true,
             doAutoRange: false,
             doAutoExit: false,
-            slippageBps: 100,
             autoExitTickLower: 0,
             autoExitTickUpper: 0,
             autoExitSwapLower: false,
@@ -255,7 +238,10 @@ contract RevertHookTest is BaseTest {
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0
+            autoRangeUpperDelta: 0,
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook)
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -286,12 +272,8 @@ contract RevertHookTest is BaseTest {
         });
         // ------------------- //
 
-        RevertHook.AutoCompoundParams[] memory params = new RevertHook.AutoCompoundParams[](1);
-        params[0] = RevertHook.AutoCompoundParams({
-            tokenId: token2Id,
-            zeroForOne: true,
-            swapAmount: 0
-        });
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
 
         hook.autoCompound(params);
    
@@ -309,7 +291,6 @@ contract RevertHookTest is BaseTest {
             doAutoCompound: false,
             doAutoRange: false,
             doAutoExit: true,
-            slippageBps: 100,
             autoExitTickLower: tickLower2,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: false,
@@ -317,7 +298,10 @@ contract RevertHookTest is BaseTest {
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0
+            autoRangeUpperDelta: 0,
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook)
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);

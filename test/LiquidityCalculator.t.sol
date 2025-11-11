@@ -35,7 +35,7 @@ contract LiquidityCalculatorHelper {
         uint256 amt0,
         uint256 amt1
     ) external view returns (uint256 inAmt, uint256 outAmt, bool dir, uint160 price) {
-        return LiquidityCalculator.calculate(cfg, lower, upper, amt0, amt1);
+        return LiquidityCalculator.calculateSamePool(cfg, lower, upper, amt0, amt1);
     }
 }
 

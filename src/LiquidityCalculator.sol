@@ -76,6 +76,254 @@ library LiquidityCalculator {
     }
 
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit
+    /// @dev Simplified version that assumes swap happens in another pool (no tick crossing simulation)
+    /// @param sqrtPrice Current sqrt price of the pool
+    /// @param lowerTick Lower bound of the position
+    /// @param upperTick Upper bound of the position
+    /// @param amount0 Desired amount of token0
+    /// @param amount1 Desired amount of token1
+    /// @param feeRate Fee rate in hundredths of a bip (e.g., 3000 = 0.3%)
+    /// @return inputAmount Optimal swap input amount
+    /// @return outputAmount Expected swap output amount (before fees)
+    /// @return swapDir0to1 Direction: true for token0->token1, false for token1->token0
+    function calculateSimple(
+        uint160 sqrtPrice,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0,
+        uint256 amount1,
+        uint24 feeRate
+    ) internal pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) {
+        if (amount0 == 0 && amount1 == 0) return (0, 0, false);
+        if (lowerTick >= upperTick || lowerTick < TickMath.MIN_TICK || upperTick > TickMath.MAX_TICK) {
+            revert Invalid_Tick_Range();
+        }
+        
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(lowerTick);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upperTick);
+        
+        // Determine swap direction
+        swapDir0to1 = shouldSwap0to1(amount0, amount1, sqrtPrice, sqrtLower, sqrtUpper);
+        
+        unchecked {
+            if (sqrtPrice <= sqrtLower) {
+                (inputAmount, outputAmount) = _calculateSwapBelowRange(amount0, amount1, sqrtPrice, sqrtLower, feeRate);
+            } else if (sqrtPrice >= sqrtUpper) {
+                (inputAmount, outputAmount) = _calculateSwapAboveRange(amount0, amount1, sqrtPrice, sqrtUpper, feeRate);
+            } else {
+                (inputAmount, outputAmount) = _calculateSwapInRange(
+                    amount0,
+                    amount1,
+                    sqrtPrice,
+                    sqrtLower,
+                    sqrtUpper,
+                    feeRate,
+                    swapDir0to1
+                );
+            }
+        }
+    }
+
+    /// @notice Calculate swap when price is below range (need all token0)
+    /// @param amount1 Current amount of token1
+    /// @param sqrtPrice Current sqrt price
+    /// @param sqrtLower Lower bound sqrt price
+    /// @param feeRate Fee rate
+    /// @return inputAmount Swap input amount
+    /// @return outputAmount Swap output amount
+    function _calculateSwapBelowRange(
+        uint256 /* amount0 */,
+        uint256 amount1,
+        uint160 sqrtPrice,
+        uint160 sqrtLower,
+        uint24 feeRate
+    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
+        if (amount1 == 0) return (0, 0);
+        
+        // Swap all token1 -> token0
+        inputAmount = amount1;
+        uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
+        outputAmount = FullMath.mulDiv(
+            FullMath.mulDiv(amount1, sqrtPrice, sqrtLower),
+            feeMultiplier,
+            MAX_FEE_PIPS
+        );
+    }
+
+    /// @notice Calculate swap when price is above range (need all token1)
+    /// @param amount0 Current amount of token0
+    /// @param sqrtPrice Current sqrt price
+    /// @param sqrtUpper Upper bound sqrt price
+    /// @param feeRate Fee rate
+    /// @return inputAmount Swap input amount
+    /// @return outputAmount Swap output amount
+    function _calculateSwapAboveRange(
+        uint256 amount0,
+        uint256 /* amount1 */,
+        uint160 sqrtPrice,
+        uint160 sqrtUpper,
+        uint24 feeRate
+    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
+        if (amount0 == 0) return (0, 0);
+        
+        // Swap all token0 -> token1
+        inputAmount = amount0;
+        uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
+        outputAmount = FullMath.mulDiv(
+            FullMath.mulDiv(amount0, sqrtUpper, sqrtPrice),
+            feeMultiplier,
+            MAX_FEE_PIPS
+        );
+    }
+
+    /// @notice Calculate swap when price is in range (need optimal ratio)
+    /// @param amount0 Current amount of token0
+    /// @param amount1 Current amount of token1
+    /// @param sqrtPrice Current sqrt price
+    /// @param sqrtLower Lower bound sqrt price
+    /// @param sqrtUpper Upper bound sqrt price
+    /// @param feeRate Fee rate
+    /// @param swapDir0to1 Swap direction
+    /// @return inputAmount Swap input amount
+    /// @return outputAmount Swap output amount
+    function _calculateSwapInRange(
+        uint256 amount0,
+        uint256 amount1,
+        uint160 sqrtPrice,
+        uint160 sqrtLower,
+        uint160 sqrtUpper,
+        uint24 feeRate,
+        bool swapDir0to1
+    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
+        uint256 requiredRatio = _calculateRequiredRatio(sqrtPrice, sqrtLower, sqrtUpper);
+        uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
+        
+        if (swapDir0to1) {
+            (inputAmount, outputAmount) = _calculateSwap0to1InRange(
+                amount0,
+                amount1,
+                sqrtPrice,
+                sqrtUpper,
+                requiredRatio,
+                feeMultiplier
+            );
+        } else {
+            (inputAmount, outputAmount) = _calculateSwap1to0InRange(
+                amount0,
+                amount1,
+                sqrtPrice,
+                sqrtLower,
+                requiredRatio,
+                feeMultiplier
+            );
+        }
+    }
+
+    /// @notice Calculate required ratio for perfect liquidity in range
+    /// @dev For price P in range [Pa, Pb]: ratio = (sqrt(Pb) - sqrt(P)) / (sqrt(Pb) * sqrt(P) * (sqrt(P) - sqrt(Pa)))
+    /// @param sqrtPrice Current sqrt price
+    /// @param sqrtLower Lower bound sqrt price
+    /// @param sqrtUpper Upper bound sqrt price
+    /// @return requiredRatio Required ratio scaled by Q96
+    function _calculateRequiredRatio(
+        uint160 sqrtPrice,
+        uint160 sqrtLower,
+        uint160 sqrtUpper
+    ) private pure returns (uint256 requiredRatio) {
+        uint256 numerator = sqrtUpper - sqrtPrice;
+        uint256 denominator = FullMath.mulDiv(
+            FullMath.mulDiv(sqrtUpper, sqrtPrice, FixedPoint96.Q96),
+            sqrtPrice - sqrtLower,
+            FixedPoint96.Q96
+        );
+        requiredRatio = FullMath.mulDiv(numerator, FixedPoint96.Q96, denominator);
+    }
+
+    /// @notice Calculate swap when swapping token0 -> token1 in range
+    /// @param amount0 Current amount of token0
+    /// @param amount1 Current amount of token1
+    /// @param sqrtPrice Current sqrt price
+    /// @param sqrtUpper Upper bound sqrt price
+    /// @param requiredRatio Required ratio scaled by Q96
+    /// @param feeMultiplier Fee multiplier (MAX_FEE_PIPS - feeRate)
+    /// @return inputAmount Swap input amount
+    /// @return outputAmount Swap output amount
+    function _calculateSwap0to1InRange(
+        uint256 amount0,
+        uint256 amount1,
+        uint160 sqrtPrice,
+        uint160 sqrtUpper,
+        uint256 requiredRatio,
+        uint256 feeMultiplier
+    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
+        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
+        if (amount0 <= requiredAmount0) return (0, 0);
+        
+        uint256 excess0 = amount0 - requiredAmount0;
+        uint256 swapRate = FullMath.mulDiv(
+            FullMath.mulDiv(requiredRatio, feeMultiplier, FixedPoint96.Q96),
+            sqrtPrice,
+            sqrtUpper
+        );
+        uint256 denominator = FixedPoint96.Q96 + swapRate;
+        inputAmount = FullMath.mulDiv(excess0, FixedPoint96.Q96, denominator);
+        
+        // Cap at available amount
+        if (inputAmount > amount0) inputAmount = amount0;
+        
+        // Calculate output
+        outputAmount = FullMath.mulDiv(
+            FullMath.mulDiv(inputAmount, sqrtPrice, sqrtUpper),
+            feeMultiplier,
+            MAX_FEE_PIPS
+        );
+    }
+
+    /// @notice Calculate swap when swapping token1 -> token0 in range
+    /// @param amount0 Current amount of token0
+    /// @param amount1 Current amount of token1
+    /// @param sqrtPrice Current sqrt price
+    /// @param sqrtLower Lower bound sqrt price
+    /// @param requiredRatio Required ratio scaled by Q96
+    /// @param feeMultiplier Fee multiplier (MAX_FEE_PIPS - feeRate)
+    /// @return inputAmount Swap input amount
+    /// @return outputAmount Swap output amount
+    function _calculateSwap1to0InRange(
+        uint256 amount0,
+        uint256 amount1,
+        uint160 sqrtPrice,
+        uint160 sqrtLower,
+        uint256 requiredRatio,
+        uint256 feeMultiplier
+    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
+        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
+        if (requiredAmount0 <= amount0) return (0, 0);
+        
+        uint256 deficit0 = requiredAmount0 - amount0;
+        uint256 swapRate = FullMath.mulDiv(
+            FullMath.mulDiv(requiredRatio, feeMultiplier, FixedPoint96.Q96),
+            sqrtLower,
+            sqrtPrice
+        );
+        uint256 denominator = FullMath.mulDiv(feeMultiplier, sqrtLower, sqrtPrice) + swapRate;
+        inputAmount = FullMath.mulDiv(
+            FullMath.mulDiv(deficit0, sqrtPrice, sqrtLower),
+            MAX_FEE_PIPS,
+            denominator
+        );
+        
+        // Cap at available amount
+        if (inputAmount > amount1) inputAmount = amount1;
+        
+        // Calculate output
+        outputAmount = FullMath.mulDiv(
+            FullMath.mulDiv(inputAmount, sqrtLower, sqrtPrice),
+            feeMultiplier,
+            MAX_FEE_PIPS
+        );
+    }
+
+    /// @notice Calculate optimal swap amount for double-sided liquidity deposit
     /// @dev Simulates crossing ticks to find optimal swap point, then uses analytic solution
     /// @param pool Pool configuration
     /// @param lowerTick Lower bound of the position
@@ -86,7 +334,7 @@ library LiquidityCalculator {
     /// @return outputAmount Expected swap output amount
     /// @return swapDir0to1 Direction: true for token0->token1, false for token1->token0
     /// @return sqrtPrice Final sqrt price after optimal swap
-    function calculate(
+    function calculateSamePool(
         V4PoolInfo memory pool,
         int24 lowerTick,
         int24 upperTick,
