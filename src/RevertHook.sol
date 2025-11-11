@@ -53,6 +53,9 @@ contract RevertHook is BaseHook, IUnlockCallback {
 
     // special event for swap failures
     event SwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
+    
+    // special event for modifyLiquidities failures
+    event ModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
 
     IPermit2 public immutable permit2;
     mapping(address => bool) private permit2Approved;
@@ -261,7 +264,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         } else if (executeAutoExitUpper) {
             _autoExit(poolKey, poolId, tokenId, isUpperTrigger, positionConfigs[tokenId].autoExitSwapUpper);
         } else {
-            bool executeAutoRange = positionConfigs[tokenId].doAutoRange && !isUpperTrigger;
+            bool executeAutoRange = positionConfigs[tokenId].doAutoRange; // TODO check condition properly
             if (executeAutoRange) {
                 _autoRange(poolKey, poolId, tokenId, baseTick);
             }
@@ -638,11 +641,17 @@ contract RevertHook is BaseHook, IUnlockCallback {
         params_array[1] = abi.encode(currency0, currency1, address(this));
 
         // Execute via PositionManager
-        positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array);
-
-        // Calculate actual amounts added by comparing balances before and after
-        amount0Added -= currency0.balanceOfSelf();
-        amount1Added -= currency1.balanceOfSelf();
+        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array) {
+            // Calculate actual amounts added by comparing balances before and after
+            amount0Added -= currency0.balanceOfSelf();
+            amount1Added -= currency1.balanceOfSelf();
+        } catch (bytes memory reason) {
+            // emit event
+            emit ModifyLiquiditiesFailed(actions, params_array, reason);
+            // Return zero amounts on failure
+            amount0Added = 0;
+            amount1Added = 0;
+        }
     }
 
     /// @notice Mints a new position using PositionManager
@@ -706,15 +715,21 @@ contract RevertHook is BaseHook, IUnlockCallback {
         params_array[1] = abi.encode(currency0, currency1, address(this));
 
         // Execute via PositionManager
-        positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array);
-
-        // Calculate actual amounts added by comparing balances before and after
-        amount0Added -= uint128(currency0.balanceOfSelf());
-        amount1Added -= uint128(currency1.balanceOfSelf());
+        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array) {
+            // Calculate actual amounts added by comparing balances before and after
+            amount0Added -= uint128(currency0.balanceOfSelf());
+            amount1Added -= uint128(currency1.balanceOfSelf());
+        } catch (bytes memory reason) {
+            // emit event
+            emit ModifyLiquiditiesFailed(actions, params_array, reason);
+            // Return zero amounts on failure
+            amount0Added = 0;
+            amount1Added = 0;
+        }
     }
 
     /// @notice Decreases full liquidity from a position using PositionManager
-    /// @dev Gets position liquidity, then uses PositionManager.modifyLiquidities with DECREASE_LIQUIDITY and TAKE_PAIR actions
+    /// @dev Gets position liquidity, then uses modifyLiquidities with DECREASE_LIQUIDITY and TAKE_PAIR actions
     ///      to remove all liquidity and collect tokens/fees
     /// @param tokenId The position NFT token ID
     /// @return currency0 The currency of the token0
@@ -737,11 +752,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
             return (currency0, currency1, 0, 0);
         }
 
-        // Step 2: Record balances before decreasing liquidity
-        amount0 = currency0.balanceOfSelf();
-        amount1 = currency1.balanceOfSelf();
-
-        // Step 3: Decrease all liquidity using PositionManager
+        // Step 2: Decrease all liquidity using PositionManager
         // Use DECREASE_LIQUIDITY and TAKE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
         bytes[] memory params_array = new bytes[](2);
@@ -758,11 +769,14 @@ contract RevertHook is BaseHook, IUnlockCallback {
         // TAKE_PAIR params: (currency0, currency1, recipient)
         params_array[1] = abi.encode(currency0, currency1, address(this));
 
-        positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array);
-
-        // Step 4: Calculate amounts actually received
-        amount0 = currency0.balanceOfSelf() - amount0;
-        amount1 = currency1.balanceOfSelf() - amount1;
+        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array) {
+            // Step 3: Calculate amounts actually received
+            amount0 = currency0.balanceOfSelf();
+            amount1 = currency1.balanceOfSelf();
+        } catch (bytes memory reason) {
+            // emit event
+            emit ModifyLiquiditiesFailed(actions, params_array, reason);
+        }
     }
 
     /// @notice Executes a swap via poolManager and handles balance deltas
