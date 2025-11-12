@@ -252,21 +252,29 @@ contract RevertHook is BaseHook, IUnlockCallback {
     function _handleTokenId(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger, int24 baseTick)
         internal
     {
+        PositionConfig memory config = positionConfigs[tokenId];
+
         // check conditions again - there may be leftover triggers which are not valid anymore
-        bool executeAutoExitLower = positionConfigs[tokenId].doAutoExit && !isUpperTrigger
-            && baseTick == positionConfigs[tokenId].autoExitTickLower;
-        bool executeAutoExitUpper = positionConfigs[tokenId].doAutoExit && isUpperTrigger
-            && baseTick == positionConfigs[tokenId].autoExitTickUpper;
+        bool executeAutoExitLower = config.doAutoExit && !isUpperTrigger
+            && baseTick == config.autoExitTickLower;
+        bool executeAutoExitUpper = config.doAutoExit && isUpperTrigger
+            && baseTick == config.autoExitTickUpper;
 
         // there may only be one action configured for a tokenid/tick - auto exit takes priority over auto range
         if (executeAutoExitLower) {
-            _autoExit(poolKey, poolId, tokenId, isUpperTrigger, positionConfigs[tokenId].autoExitSwapLower);
+            _autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
         } else if (executeAutoExitUpper) {
-            _autoExit(poolKey, poolId, tokenId, isUpperTrigger, positionConfigs[tokenId].autoExitSwapUpper);
+            _autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper);
         } else {
-            bool executeAutoRange = positionConfigs[tokenId].doAutoRange; // TODO check condition properly
+            bool executeAutoRange = config.doAutoRange;
             if (executeAutoRange) {
-                _autoRange(poolKey, poolId, tokenId, baseTick);
+                (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+                int24 tickLower = posInfo.tickLower();
+                int24 tickUpper = posInfo.tickUpper();
+                if (baseTick == tickLower - config.autoRangeLowerLimit && !isUpperTrigger || 
+                    baseTick == tickUpper + config.autoRangeUpperLimit && isUpperTrigger) {
+                    _autoRange(poolKey, poolId, tokenId, baseTick);
+                }
             }
         }
     }

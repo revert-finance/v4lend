@@ -33,6 +33,7 @@ contract RevertHookTest is BaseTest {
     Currency currency0;
     Currency currency1;
 
+    PoolKey nonHookedPoolKey;
     PoolKey poolKey;
 
     RevertHook hook;
@@ -69,9 +70,11 @@ contract RevertHookTest is BaseTest {
         hook = RevertHook(flags);
 
         // Create the pool
+        nonHookedPoolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
         poolId = poolKey.toId();
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
+        poolManager.initialize(nonHookedPoolKey, Constants.SQRT_PRICE_1_1);
 
         // Provide full-range liquidity to the pool
         tickLower = TickMath.minUsableTick(poolKey.tickSpacing);
@@ -88,7 +91,20 @@ contract RevertHookTest is BaseTest {
             TickMath.getSqrtPriceAtTick(tickUpper),
             liquidityAmount
         );
-
+    
+        // full range mint (non-hooked pool)
+        (tokenId,) = positionManager.mint(
+            nonHookedPoolKey,
+            tickLower,
+            tickUpper,
+            liquidityAmount,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+    
         // full range mint
         (tokenId,) = positionManager.mint(
             poolKey,
@@ -340,6 +356,96 @@ contract RevertHookTest is BaseTest {
         // Verify hook contract has no leftover token balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-exit");
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
+    }
+
+    function testBasicAutoExit_NonHookedPool() public {
+
+        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
+            doAutoCompound: false,
+            doAutoRange: false,
+            doAutoExit: true,
+            autoExitTickLower: tickLower2,
+            autoExitTickUpper: tickUpper2,
+            autoExitSwapLower: true, // Enable swap when exiting at lower bound
+            autoExitSwapUpper: false,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(address(0)) // Use nonHookedPool for swapping
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Assert that token2Id position has > 0 liquidity after swap (out of range)
+        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
+
+        // Record initial state of nonHookedPool before swap
+        PoolId nonHookedPoolId = nonHookedPoolKey.toId();
+        (uint160 sqrtPriceX96NonHookedBefore, int24 tickNonHookedBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+        console.log("NonHookedPool sqrtPrice BEFORE swap:", sqrtPriceX96NonHookedBefore);
+        console.log("NonHookedPool tick BEFORE swap:", tickNonHookedBefore);
+
+        // Perform a swap to activate auto exit
+        uint256 amountIn = 7e17;
+        BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        // ------------------- //
+
+        assertEq(int256(swapDelta.amount0()), -int256(amountIn));
+
+        console.log("swapDelta.amount0()", swapDelta.amount0());
+        console.log("swapDelta.amount1()", swapDelta.amount1());
+
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap", currentTick);
+
+        assertTrue(currentTick < tickLower2, "token2Id position should be out of range (currentTick < tickLower2)");
+
+        token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity");
+
+        // Verify hook contract has no leftover token balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-exit");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
+        
+        // Verify that the swap happened in the nonHookedPool by checking its state
+        // The nonHookedPool should be initialized and have a price
+        (uint160 sqrtPriceX96NonHookedAfter, int24 tickNonHookedAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+        assertGt(sqrtPriceX96NonHookedAfter, 0, "NonHookedPool should be initialized and have a price");
+        
+        console.log("NonHookedPool sqrtPrice AFTER swap:", sqrtPriceX96NonHookedAfter);
+        console.log("NonHookedPool tick AFTER swap:", tickNonHookedAfter);
+        
+        // Verify the price changed in the nonHookedPool (proving swap happened there)
+        assertTrue(
+            sqrtPriceX96NonHookedAfter != sqrtPriceX96NonHookedBefore,
+            "NonHookedPool price should have changed after swap"
+        );
+        assertTrue(
+            tickNonHookedAfter != tickNonHookedBefore,
+            "NonHookedPool tick should have changed after swap"
+        );
+        
+        console.log("Price change:", 
+            sqrtPriceX96NonHookedAfter > sqrtPriceX96NonHookedBefore ? "increased" : "decreased");
+        console.log("Tick change:", int256(tickNonHookedAfter) - int256(tickNonHookedBefore));
+        
+        // Verify the nonHookedPool has liquidity (from the initial mint in setUp)
+        uint128 nonHookedLiquidity = poolManager.getLiquidity(nonHookedPoolId);
+        assertGt(nonHookedLiquidity, 0, "NonHookedPool should have liquidity");
+        console.log("NonHookedPool liquidity:", nonHookedLiquidity);
     }
 
 

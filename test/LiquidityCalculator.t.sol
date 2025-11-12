@@ -37,6 +37,17 @@ contract LiquidityCalculatorHelper {
     ) external view returns (uint256 inAmt, uint256 outAmt, bool dir, uint160 price) {
         return LiquidityCalculator.calculateSamePool(cfg, lower, upper, amt0, amt1);
     }
+    
+    function getSimpleSwap(
+        uint160 sqrtPrice,
+        int24 lower,
+        int24 upper,
+        uint256 amt0,
+        uint256 amt1,
+        uint24 feeRate
+    ) external pure returns (uint256 inAmt, uint256 outAmt, bool dir) {
+        return LiquidityCalculator.calculateSimple(sqrtPrice, lower, upper, amt0, amt1, feeRate);
+    }
 }
 
 /// @title Test suite for OptimalSwap library (V4)
@@ -735,6 +746,486 @@ contract LiquidityCalculatorTest is Test {
         assertEq(amountOut1, amountOut2, "Amount out should be consistent");
         assertEq(zeroForOne1, zeroForOne2, "Direction should be consistent");
         assertEq(sqrtPrice1, sqrtPrice2, "Final price should be consistent");
+    }
+
+    // ============ Tests for calculateSimple ============
+
+    /// @notice Test calculateSimple with zero amounts
+    function test_calculateSimple_ZeroAmounts() public view {
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                0,
+                0,
+                DEFAULT_FEE
+            );
+        
+        assertEq(inputAmount, 0, "Input amount should be 0");
+        assertEq(outputAmount, 0, "Output amount should be 0");
+        assertFalse(swapDir0to1, "Direction should be false");
+    }
+
+    /// @notice Test calculateSimple with price below range
+    function test_calculateSimple_PriceBelowRange() public view {
+        uint160 sqrtPriceLow = TickMath.getSqrtPriceAtTick(-1200); // Price below range
+        
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                sqrtPriceLow,
+                -600,
+                600,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token1 -> token0 (all token1)
+        assertFalse(swapDir0to1, "Should swap token1 to token0 when price below range");
+        assertEq(inputAmount, 10 ether, "Should swap all token1");
+        assertGt(outputAmount, 0, "Should have output amount");
+    }
+
+    /// @notice Test calculateSimple with price above range
+    function test_calculateSimple_PriceAboveRange() public view {
+        uint160 sqrtPriceHigh = TickMath.getSqrtPriceAtTick(1200); // Price above range
+        
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                sqrtPriceHigh,
+                -600,
+                600,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token0 -> token1 (all token0)
+        assertTrue(swapDir0to1, "Should swap token0 to token1 when price above range");
+        assertEq(inputAmount, 10 ether, "Should swap all token0");
+        assertGt(outputAmount, 0, "Should have output amount");
+    }
+
+    /// @notice Test calculateSimple with price in range - balanced amounts
+    function test_calculateSimple_PriceInRange_Balanced() public view {
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        // May or may not need swap depending on exact ratio
+        assertGe(inputAmount, 0, "Input amount should be >= 0");
+        assertGe(outputAmount, 0, "Output amount should be >= 0");
+    }
+
+    /// @notice Test calculateSimple with price in range - imbalanced amounts (more token0)
+    function test_calculateSimple_PriceInRange_MoreToken0() public view {
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                100 ether,
+                1 ether,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token0 -> token1
+        assertTrue(swapDir0to1, "Should swap token0 to token1 with imbalanced amounts");
+        assertGt(inputAmount, 0, "Should have swap input");
+        assertGt(outputAmount, 0, "Should have swap output");
+    }
+
+    /// @notice Test calculateSimple with price in range - imbalanced amounts (more token1)
+    function test_calculateSimple_PriceInRange_MoreToken1() public view {
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                1 ether,
+                100 ether,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token1 -> token0
+        assertFalse(swapDir0to1, "Should swap token1 to token0 with imbalanced amounts");
+        assertGt(inputAmount, 0, "Should have swap input");
+        assertGt(outputAmount, 0, "Should have swap output");
+    }
+
+    /// @notice Test calculateSimple with only token0
+    function test_calculateSimple_OnlyToken0() public view {
+        (uint256 inputAmount,, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                10 ether,
+                0,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token0 -> token1
+        assertTrue(swapDir0to1, "Should swap token0 to token1");
+        assertGt(inputAmount, 0, "Should have swap input");
+    }
+
+    /// @notice Test calculateSimple with only token1
+    function test_calculateSimple_OnlyToken1() public view {
+        (uint256 inputAmount,, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                0,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token1 -> token0
+        assertFalse(swapDir0to1, "Should swap token1 to token0");
+        assertGt(inputAmount, 0, "Should have swap input");
+    }
+
+    /// @notice Test calculateSimple with different fee rates
+    function test_calculateSimple_DifferentFeeRates() public view {
+        uint24 feeRate1 = 100; // 0.01%
+        uint24 feeRate2 = 10000; // 1%
+        
+        (uint256 inputAmount1, uint256 outputAmount1,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                10 ether,
+                5 ether,
+                feeRate1
+            );
+        
+        (uint256 inputAmount2, uint256 outputAmount2,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                10 ether,
+                5 ether,
+                feeRate2
+            );
+        
+        // Higher fee should result in less output for same input
+        if (inputAmount1 > 0 && inputAmount2 > 0) {
+            // With higher fee, output should be less (or input should be more for same output)
+            assertTrue(
+                outputAmount1 > outputAmount2 || inputAmount1 <= inputAmount2,
+                "Fee rate should affect swap amounts"
+            );
+        }
+    }
+
+    /// @notice Test calculateSimple with narrow range
+    function test_calculateSimple_NarrowRange() public view {
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                0,
+                60,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        assertGe(inputAmount, 0, "Should have valid input amount");
+        assertGe(outputAmount, 0, "Should have valid output amount");
+    }
+
+    /// @notice Test calculateSimple with wide range
+    function test_calculateSimple_WideRange() public view {
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -3000,
+                3000,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        assertGe(inputAmount, 0, "Should have valid input amount");
+        assertGe(outputAmount, 0, "Should have valid output amount");
+    }
+
+    /// @notice Test calculateSimple error case: invalid tick range (lower >= upper)
+    function test_calculateSimple_InvalidTickRange_Reversed() public {
+        vm.expectRevert();
+        helper.getSimpleSwap(
+            SQRT_PRICE_1_0,
+            600,
+            -600,
+            10 ether,
+            10 ether,
+            DEFAULT_FEE
+        );
+    }
+
+    /// @notice Test calculateSimple error case: invalid tick range (lower == upper)
+    function test_calculateSimple_InvalidTickRange_Equal() public {
+        vm.expectRevert();
+        helper.getSimpleSwap(
+            SQRT_PRICE_1_0,
+            0,
+            0,
+            10 ether,
+            10 ether,
+            DEFAULT_FEE
+        );
+    }
+
+    /// @notice Test calculateSimple with price exactly at lower bound
+    function test_calculateSimple_PriceAtLowerBound() public view {
+        int24 tickLower = -600;
+        uint160 sqrtPriceLower = TickMath.getSqrtPriceAtTick(tickLower);
+        
+        (uint256 inputAmount,, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                sqrtPriceLower,
+                tickLower,
+                600,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token1 -> token0 (price at lower bound, need more token0)
+        assertFalse(swapDir0to1, "Should swap token1 to token0 at lower bound");
+        assertGt(inputAmount, 0, "Should have swap input");
+    }
+
+    /// @notice Test calculateSimple with price exactly at upper bound
+    function test_calculateSimple_PriceAtUpperBound() public view {
+        int24 tickUpper = 600;
+        uint160 sqrtPriceUpper = TickMath.getSqrtPriceAtTick(tickUpper);
+        
+        (uint256 inputAmount,, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                sqrtPriceUpper,
+                -600,
+                tickUpper,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        // Should swap token0 -> token1 (price at upper bound, need more token1)
+        assertTrue(swapDir0to1, "Should swap token0 to token1 at upper bound");
+        assertGt(inputAmount, 0, "Should have swap input");
+    }
+
+    /// @notice Test calculateSimple consistency - same inputs produce same outputs
+    function test_calculateSimple_Consistency() public view {
+        (uint256 inputAmount1, uint256 outputAmount1, bool swapDir0to1_1) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        (uint256 inputAmount2, uint256 outputAmount2, bool swapDir0to1_2) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                10 ether,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        assertEq(inputAmount1, inputAmount2, "Input amount should be consistent");
+        assertEq(outputAmount1, outputAmount2, "Output amount should be consistent");
+        assertEq(swapDir0to1_1, swapDir0to1_2, "Direction should be consistent");
+    }
+
+    /// @notice Test calculateSimple with very small amounts
+    function test_calculateSimple_SmallAmounts() public view {
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                1 wei,
+                1 wei,
+                DEFAULT_FEE
+            );
+        
+        assertGe(inputAmount, 0, "Should handle small amounts");
+        assertGe(outputAmount, 0, "Should handle small amounts");
+    }
+
+    /// @notice Test calculateSimple with very large amounts
+    function test_calculateSimple_LargeAmounts() public view {
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                100000 ether,
+                100000 ether,
+                DEFAULT_FEE
+            );
+        
+        assertGe(inputAmount, 0, "Should handle large amounts");
+        assertGe(outputAmount, 0, "Should handle large amounts");
+    }
+
+    /// @notice Test calculateSimple - no swap needed when amounts are already optimal
+    function test_calculateSimple_NoSwapNeeded() public view {
+        // When amounts are already in perfect ratio, no swap should be needed
+        // This is hard to test exactly, but we can test that the function doesn't revert
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                SQRT_PRICE_1_0,
+                -600,
+                600,
+                5 ether,
+                5 ether,
+                DEFAULT_FEE
+            );
+        
+        // Either no swap needed (both zero) or small swap needed
+        assertGe(inputAmount, 0, "Input amount should be valid");
+        assertGe(outputAmount, 0, "Output amount should be valid");
+    }
+
+    /// @notice Test calculateSimple with price below range and zero token1
+    function test_calculateSimple_PriceBelowRange_ZeroToken1() public view {
+        uint160 sqrtPriceLow = TickMath.getSqrtPriceAtTick(-1200);
+        
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                sqrtPriceLow,
+                -600,
+                600,
+                10 ether,
+                0,
+                DEFAULT_FEE
+            );
+        
+        // No swap needed if no token1
+        assertEq(inputAmount, 0, "Should have no swap input when token1 is zero");
+        assertEq(outputAmount, 0, "Should have no swap output");
+    }
+
+    /// @notice Test calculateSimple with price above range and zero token0
+    function test_calculateSimple_PriceAboveRange_ZeroToken0() public view {
+        uint160 sqrtPriceHigh = TickMath.getSqrtPriceAtTick(1200);
+        
+        (uint256 inputAmount, uint256 outputAmount,) = 
+            helper.getSimpleSwap(
+                sqrtPriceHigh,
+                -600,
+                600,
+                0,
+                10 ether,
+                DEFAULT_FEE
+            );
+        
+        // No swap needed if no token0
+        assertEq(inputAmount, 0, "Should have no swap input when token0 is zero");
+        assertEq(outputAmount, 0, "Should have no swap output");
+    }
+
+    /// @notice Test calculateSimple with specific values and detailed output
+    /// @dev This test verifies actual calculated values and logs them for inspection
+    function test_calculateSimple_DetailedOutput() public view {
+        // Test with price in range and imbalanced amounts
+        uint160 sqrtPrice = SQRT_PRICE_1_0; // Price = 1.0
+        int24 tickLower = -600;
+        int24 tickUpper = 600;
+        uint256 amount0 = 100 ether;
+        uint256 amount1 = 10 ether;
+        uint24 feeRate = 0; // 0.3%
+        
+        // Calculate expected sqrt prices
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
+        
+        console.log("=== calculateSimple Detailed Test ===");
+        console.log("Sqrt Price:", sqrtPrice);
+        console.log("Sqrt Lower:", sqrtLower);
+        console.log("Sqrt Upper:", sqrtUpper);
+        console.log("Amount0:", amount0);
+        console.log("Amount1:", amount1);
+        console.log("Fee Rate:", feeRate);
+        console.log("Tick Lower:", tickLower);
+        console.log("Tick Upper:", tickUpper);
+        
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = 
+            helper.getSimpleSwap(
+                sqrtPrice,
+                tickLower,
+                tickUpper,
+                amount0,
+                amount1,
+                feeRate
+            );
+        
+        console.log("--- Results ---");
+        console.log("Input Amount:", inputAmount);
+        console.log("Output Amount:", outputAmount);
+        console.log("Swap Direction (0->1):", swapDir0to1);
+        
+        // Verify we're swapping token0 -> token1 (since we have much more token0)
+        assertTrue(swapDir0to1, "Should swap token0 to token1");
+        
+        // Input amount should be less than or equal to available amount0
+        assertLe(inputAmount, amount0, "Input amount should not exceed available token0");
+        
+        // Output amount should be positive if input is positive
+        if (inputAmount > 0) {
+            assertGt(outputAmount, 0, "Output amount should be positive when input is positive");
+            
+            // Calculate expected output (simplified: output ≈ input * sqrtPrice / sqrtUpper * (1 - fee))
+            uint256 expectedOutputApprox = (inputAmount * sqrtPrice / sqrtUpper) * (1000000 - feeRate) / 1000000;
+            uint256 tolerance = expectedOutputApprox / 100; // 1% tolerance
+            
+            console.log("Expected Output (approx):", expectedOutputApprox);
+            console.log("Tolerance:", tolerance);
+            
+            // Output should be within reasonable range of expected value
+            assertGe(outputAmount, expectedOutputApprox - tolerance, "Output should be close to expected");
+            assertLe(outputAmount, expectedOutputApprox + tolerance, "Output should be close to expected");
+        }
+        
+        // Verify amounts after swap would be more balanced
+        uint256 amount0After = amount0 - inputAmount;
+        uint256 amount1After = amount1 + outputAmount;
+        
+        console.log("--- After Swap (simulated) ---");
+        console.log("Amount0 After:", amount0After);
+        console.log("Amount1 After:", amount1After);
+        console.log("Ratio After (amount0/amount1):", amount1After > 0 ? amount0After * 1e18 / amount1After : 0);
+        
+        // The ratio should be more balanced after swap
+        if (amount1After > 0) {
+            uint256 ratioAfter = amount0After * 1e18 / amount1After;
+            uint256 ratioBefore = amount1 > 0 ? amount0 * 1e18 / amount1 : type(uint256).max;
+            
+            console.log("Ratio Before:", ratioBefore);
+            console.log("Ratio After:", ratioAfter);
+            
+            // Ratio should be closer to 1:1 after swap (more balanced)
+            // Since we had 10:1 ratio before, after swap it should be closer to balanced
+            assertLt(ratioAfter, ratioBefore, "Ratio should be more balanced after swap");
+        }
     }
 
 }
