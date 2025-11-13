@@ -46,7 +46,7 @@ abstract contract Swapper is Constants {
     address public immutable zeroxAllowanceHolder;
 
     /// @notice Tracks tokens that have been approved to Permit2
-    mapping(address => bool) private _permit2Approved;
+    mapping(address => bool) private permit2Approved;
 
     /// @notice Constructor
     /// @param _positionManager Uniswap v4 position manager
@@ -174,9 +174,9 @@ abstract contract Swapper is Constants {
     function _handleApproval(IPermit2 permit2, Currency token, uint256 amount) internal {
         if (amount != 0 && !token.isAddressZero()) {
             address tokenAddr = Currency.unwrap(token);
-            if (!_permit2Approved[tokenAddr]) {
+            if (!permit2Approved[tokenAddr]) {
                 SafeERC20.forceApprove(IERC20(tokenAddr), address(permit2), type(uint256).max);
-                _permit2Approved[tokenAddr] = true;
+                permit2Approved[tokenAddr] = true;
             }
             permit2.approve(tokenAddr, address(positionManager), uint160(amount), uint48(block.timestamp));
         }
@@ -226,8 +226,8 @@ abstract contract Swapper is Constants {
         uint128 liquidityRemove, 
         uint256 amount0Min,
         uint256 amount1Min,
-        bytes memory decreaseLiquidityHookData,
-        uint256 deadline
+        uint256 deadline,
+        bytes memory decreaseLiquidityHookData
     ) internal returns (uint256 amount0, uint256 amount1) {
         // Get position info to determine currencies for TAKE_PAIR
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);

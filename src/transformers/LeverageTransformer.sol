@@ -65,7 +65,7 @@ contract LeverageTransformer is Transformer, Swapper {
         _validateCaller(positionManager, params.tokenId);
 
         // collect fees before
-        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(params.tokenId, 0, 0, 0, params.decreaseLiquidityHookData, params.deadline);
+        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
 
         uint256 amount = params.borrowAmount;
         IVault(msg.sender).borrow(params.tokenId, amount);
