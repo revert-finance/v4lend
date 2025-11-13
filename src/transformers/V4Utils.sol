@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -186,16 +185,17 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     }
 
     /// @notice Execute instruction accessing approved NFT instead of direct safeTransferFrom call from owner
-    /// @param tokenId Token to process
-    /// @param instructions Instructions to execute
-    /// @return newTokenId Id of position (if a new one was created)
+    /// @dev This function can only be called by the position manager after NFT approval.
+    ///      It decreases liquidity, collects fees, and executes the requested action (compound fees, change range, or withdraw and swap).
+    /// @param tokenId The token ID of the Uniswap V4 position NFT to process
+    /// @param instructions The instructions struct containing all parameters for the operation
+    /// @return newTokenId The ID of the newly created position (only set if whatToDo is CHANGE_RANGE, otherwise 0)
     function execute(uint256 tokenId, Instructions memory instructions) public returns (uint256 newTokenId) {
-        
         _validateCaller(positionManager, tokenId);
 
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        
+
         // Decrease liquidity and collect fees/tokens
         (uint256 amount0, uint256 amount1) = _decreaseLiquidity(
             tokenId,
@@ -232,7 +232,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         Instructions memory instructions
     ) internal {
         uint128 liquidity;
-Currency targetToken = instructions.targetToken;
+        Currency targetToken = instructions.targetToken;
         if (targetToken == poolKey.currency0) {
             // Swap token1 to token0 and increase liquidity
             (liquidity, amount0, amount1) = _swapAndIncrease(
@@ -306,7 +306,7 @@ Currency targetToken = instructions.targetToken;
                 poolKey.currency1
             );
         }
-        
+
         emit CompoundFees(tokenId, liquidity, amount0, amount1);
     }
 
@@ -324,7 +324,7 @@ Currency targetToken = instructions.targetToken;
 
         if (targetToken == poolKey.currency0) {
             // Swap token1 to token0 and mint new position
-            (newTokenId,liquidity,amount0,amount1) = _swapAndMint(
+            (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
                 SwapAndMintParams(
                     poolKey.currency0,
                     poolKey.currency1,
@@ -353,7 +353,7 @@ Currency targetToken = instructions.targetToken;
             );
         } else if (targetToken == poolKey.currency1) {
             // Swap token0 to token1 and mint new position
-            (newTokenId,liquidity,amount0,amount1) = _swapAndMint(
+            (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
                 SwapAndMintParams(
                     poolKey.currency0,
                     poolKey.currency1,
@@ -382,7 +382,7 @@ Currency targetToken = instructions.targetToken;
             );
         } else {
             // No swap - mint new position with both tokens
-            (newTokenId,liquidity,amount0,amount1) = _swapAndMint(
+            (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
                 SwapAndMintParams(
                     poolKey.currency0,
                     poolKey.currency1,
@@ -410,7 +410,7 @@ Currency targetToken = instructions.targetToken;
                 )
             );
         }
-        
+
         emit ChangeRange(tokenId, newTokenId, liquidity, amount0, amount1);
     }
 
@@ -474,7 +474,12 @@ Currency targetToken = instructions.targetToken;
     }
 
     /// @notice ERC721 callback function. Called on safeTransferFrom and does manipulation as configured in encoded Instructions parameter.
-    /// At the end the NFT (and any newly minted NFT) is returned to sender. The leftover tokens are sent to instructions.recipient.
+    /// @dev At the end the NFT (and any newly minted NFT) is returned to sender. The leftover tokens are sent to instructions.recipient.
+    ///      Only accepts NFTs from the position manager contract.
+    /// @param from The address which previously owned the token
+    /// @param tokenId The token ID being transferred
+    /// @param data Encoded Instructions struct containing operation parameters
+    /// @return The function selector to confirm successful receipt
     function onERC721Received(address, /*operator*/ address from, uint256 tokenId, bytes calldata data)
         external
         override
@@ -500,16 +505,17 @@ Currency targetToken = instructions.targetToken;
     }
 
     /// @notice Swaps amountIn of tokenIn for tokenOut - returning at least minAmountOut
-    /// @param params Swap configuration
-    /// @return amountOut Output amount of tokenOut
-    /// If tokenIn is wrapped native token - both the token or the wrapped token can be sent (the sum of both must be equal to amountIn)
-    /// Optionally unwraps any wrapped native token and returns native token instead
+    /// @dev Any leftover tokenIn that wasn't swapped is returned to the recipient.
+    /// @param params Swap configuration containing tokenIn, tokenOut, amountIn, minAmountOut, recipient, and swapData
+    /// @return amountOut The output amount of tokenOut received from the swap
     function swap(SwapParamsV4 calldata params) external payable returns (uint256 amountOut) {
         if (params.tokenIn == params.tokenOut) {
             revert SameToken();
         }
 
-         _prepareAddApproved(params.tokenIn, CurrencyLibrary.ADDRESS_ZERO, CurrencyLibrary.ADDRESS_ZERO, params.amountIn, 0, 0);
+        _prepareAddApproved(
+            params.tokenIn, CurrencyLibrary.ADDRESS_ZERO, CurrencyLibrary.ADDRESS_ZERO, params.amountIn, 0, 0
+        );
 
         uint256 amountInDelta;
         (amountInDelta, amountOut) = _routerSwap(
@@ -530,12 +536,14 @@ Currency targetToken = instructions.targetToken;
         }
     }
 
-    /// @notice Does 1 or 2 swaps from swapSourceToken to token0 and token1 and adds as much as possible liquidity to a newly minted position. Newly minted NFT and leftover tokens are returned to recipient.
-    /// @param params Swap and mint configuration
+    /// @notice Does 1 or 2 swaps from swapSourceToken to token0 and token1 and adds as much as possible liquidity to a newly minted position
+    /// @dev Newly minted NFT is sent to recipientNFT and leftover tokens are sent to recipient.
+    ///      The swapSourceToken can be token0, token1, or a third token. If it's a third token, two swaps are performed.
+    /// @param params Swap and mint configuration containing pool parameters, amounts, swap parameters, and recipient addresses
     /// @return tokenId The ID of the token that represents the minted position
-    /// @return liquidity The amount of liquidity for this position
-    /// @return amount0 The amount of token0
-    /// @return amount1 The amount of token1
+    /// @return liquidity The amount of liquidity added to the position
+    /// @return amount0 The amount of token0 actually added to the position
+    /// @return amount1 The amount of token1 actually added to the position
     function swapAndMint(SwapAndMintParams calldata params)
         external
         payable
@@ -557,31 +565,33 @@ Currency targetToken = instructions.targetToken;
         (tokenId, liquidity, amount0, amount1) = _swapAndMint(params);
     }
 
-    /// @notice Does 1 or 2 swaps from swapSourceToken to token0 and token1 and adds as much as possible liquidity to any existing position (no need to be position owner). Sends any leftover tokens to recipient.
-    /// @param params Swap and increase liquidity configuration
-    /// @return liquidity The amount of liquidity added
-    /// @return amount0 The amount of token0 added
-    /// @return amount1 The amount of token1 added
+    /// @notice Does 1 or 2 swaps from swapSourceToken to token0 and token1 and adds as much as possible liquidity
+    /// @dev First collects fees from the position, then performs swaps and adds liquidity.
+    ///      Sends any leftover tokens to recipient. The swapSourceToken can be token0, token1, or a third token.
+    /// @param params Swap and increase liquidity configuration containing tokenId, amounts, swap parameters, and recipient
+    /// @return liquidity The amount of liquidity added to the position
+    /// @return amount0 The amount of token0 actually added to the position
+    /// @return amount1 The amount of token1 actually added to the position
     function swapAndIncreaseLiquidity(SwapAndIncreaseLiquidityParams memory params)
         external
         payable
         returns (uint128 liquidity, uint256 amount0, uint256 amount1)
     {
-
         // first fees must be removed
-        (uint256 fees0, uint256 fees1) = _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
-        
+        (uint256 fees0, uint256 fees1) =
+            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
+
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
-        
+
         _prepareAddApproved(
-                poolKey.currency0,
-                poolKey.currency1,
-                params.swapSourceToken,
-                params.amount0,
-                params.amount1,
-                params.amountIn0 + params.amountIn1
-            );
+            poolKey.currency0,
+            poolKey.currency1,
+            params.swapSourceToken,
+            params.amount0,
+            params.amount1,
+            params.amountIn0 + params.amountIn1
+        );
 
         // if native token special handling - see _decreaseLiquidity()
         params.amount0 = params.amount0 + fees0;
@@ -609,10 +619,10 @@ Currency targetToken = instructions.targetToken;
 
     function _prepareAddApprovedToken(Currency token, uint256 amount) internal {
         if (amount == 0) return;
-        
+
         if (!token.isAddressZero()) {
             SafeERC20.safeTransferFrom(IERC20(Currency.unwrap(token)), msg.sender, address(this), amount);
-        } else { 
+        } else {
             if (msg.value != amount) {
                 revert IncorrectNativeBalance();
             }
@@ -635,25 +645,16 @@ Currency targetToken = instructions.targetToken;
             hooks: IHooks(params.hook) // Use hook from params
         });
 
-        (bytes memory actions, bytes[] memory params_array) = _buildActionsForIncreasingLiquidity(
-            uint8(Actions.MINT_POSITION),
-            params.token0, 
-            params.token1
-        );
+        (bytes memory actions, bytes[] memory params_array) =
+            _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), params.token0, params.token1);
 
         // Calculate liquidity from amounts
-        liquidity = _calculateLiquidity(
-            params.tickLower,
-            params.tickUpper,
-            poolKey,
-            total0,
-            total1
-        );
+        liquidity = _calculateLiquidity(params.tickLower, params.tickUpper, poolKey, total0, total1);
 
         params_array[0] = abi.encode(
-            poolKey, 
-            params.tickLower, 
-            params.tickUpper, 
+            poolKey,
+            params.tickLower,
+            params.tickUpper,
             liquidity, // liquidity
             total0, // amount0Max
             total1, // amount1Max
@@ -661,14 +662,18 @@ Currency targetToken = instructions.targetToken;
             bytes("") // hookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), params.deadline);
-        
+        positionManager.modifyLiquidities{value: address(this).balance}(
+            abi.encode(actions, params_array), params.deadline
+        );
+
         // Get the newly minted token ID
         tokenId = positionManager.nextTokenId() - 1;
-        
+
         // Transfer NFT to recipient (with optional return data)
-        IERC721(address(positionManager)).safeTransferFrom(address(this), params.recipientNFT, tokenId, params.returnData);
-        
+        IERC721(address(positionManager)).safeTransferFrom(
+            address(this), params.recipientNFT, tokenId, params.returnData
+        );
+
         // Calculate consumption and return leftovers
         {
             uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
@@ -735,37 +740,26 @@ Currency targetToken = instructions.targetToken;
         (PoolKey memory poolKey, PositionInfo info) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
         // Build actions for native ETH if needed
-        (bytes memory actions, bytes[] memory params_array) = _buildActionsForIncreasingLiquidity(
-            uint8(Actions.INCREASE_LIQUIDITY),
-            poolKey.currency0,
-            poolKey.currency1
-        );
+        (bytes memory actions, bytes[] memory params_array) =
+            _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), poolKey.currency0, poolKey.currency1);
 
         // Calculate liquidity from amounts
-        liquidity = _calculateLiquidity(
-            info.tickLower(),
-            info.tickUpper(),
-            poolKey,
-            total0,
-            total1
-        );
-        
-        params_array[0] = abi.encode(
-            params.tokenId,
-            liquidity,
-            uint128(total0),
-            uint128(total1),
-            params.increaseLiquidityHookData
-        );
+        liquidity = _calculateLiquidity(info.tickLower(), info.tickUpper(), poolKey, total0, total1);
+
+        params_array[0] =
+            abi.encode(params.tokenId, liquidity, uint128(total0), uint128(total1), params.increaseLiquidityHookData);
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-       
-        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), params.deadline);
+
+        positionManager.modifyLiquidities{value: address(this).balance}(
+            abi.encode(actions, params_array), params.deadline
+        );
 
         // Calculate consumption and return leftovers
         {
             uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
             uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
-            
+
+            // Calculate amounts actually added
             added0 = total0 - finalBalance0;
             added1 = total1 - finalBalance1;
 
@@ -794,7 +788,6 @@ Currency targetToken = instructions.targetToken;
         internal
         returns (uint256 total0, uint256 total1)
     {
-
         Currency swapSource = params.swapSourceToken;
         if (swapSource == params.token0) {
             if (params.amount0 < params.amountIn1) {
