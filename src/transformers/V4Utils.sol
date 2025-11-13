@@ -747,7 +747,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         liquidity = _calculateLiquidity(info.tickLower(), info.tickUpper(), poolKey, total0, total1);
 
         params_array[0] =
-            abi.encode(params.tokenId, liquidity, uint128(total0), uint128(total1), params.increaseLiquidityHookData);
+            abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
 
         positionManager.modifyLiquidities{value: address(this).balance}(

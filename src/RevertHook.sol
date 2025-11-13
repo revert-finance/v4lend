@@ -648,7 +648,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         // INCREASE_LIQUIDITY params: (tokenId, liquidity, amount0Max, amount1Max, hookData)
         params_array[0] = abi.encode(
             tokenId,
-            uint256(liquidity),
+            liquidity,
             available0,
             available1,
             bytes("") // hookData
@@ -721,7 +721,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
             poolKey,
             tickLower,
             tickUpper,
-            uint256(liquidity),
+            liquidity,
             available0,
             available1,
             recipient,
@@ -777,9 +777,9 @@ contract RevertHook is BaseHook, IUnlockCallback {
         // DECREASE_LIQUIDITY params: (tokenId, liquidity, amount0Min, amount1Min, hookData)
         params_array[0] = abi.encode(
             tokenId,
-            uint256(liquidity), // Remove all liquidity
-            uint128(0), // amount0Min - no slippage protection needed
-            uint128(0), // amount1Min
+            liquidity, // Remove all liquidity
+            0, // amount0Min - no slippage protection needed
+            0, // amount1Min
             bytes("") // hookData
         );
 

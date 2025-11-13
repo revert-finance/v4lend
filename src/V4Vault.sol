@@ -640,8 +640,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             params.liquidity,
             params.amount0Min,
             params.amount1Min,
-            params.decreaseLiquidityHookData,
             params.deadline,
+            params.decreaseLiquidityHookData,
             params.recipient
         );
 
@@ -1082,8 +1082,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             liquidity,
             0,
             0,
-            params.decreaseLiquidityHookData,
             params.deadline,
+            params.decreaseLiquidityHookData,
             (liquidationValue <= feeValue) ? address(this) : params.recipient // if all fees are taken - send directly to recipient
         );
 
@@ -1133,8 +1133,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint128 liquidityRemove, 
         uint256 amount0Min,
         uint256 amount1Min,
-        bytes memory decreaseLiquidityHookData,
         uint256 deadline,
+        bytes memory decreaseLiquidityHookData,
         address recipient
     ) internal returns (uint256 amount0, uint256 amount1) {
         // Get position info to determine currencies for TAKE_PAIR
@@ -1154,9 +1154,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         bytes[] memory params_array = new bytes[](2);
         params_array[0] = abi.encode(
             tokenId,
-            uint256(liquidityRemove),
-            uint128(amount0Min),
-            uint128(amount1Min),
+            liquidityRemove,
+            amount0Min,
+            amount1Min,
             decreaseLiquidityHookData
         );
         params_array[1] = abi.encode(currency0, currency1, recipient);
