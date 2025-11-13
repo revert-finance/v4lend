@@ -449,6 +449,78 @@ contract RevertHookTest is BaseTest {
     }
 
 
+    function testSwapAllLiquidityNarrowRange() public {
+        // Create a new pool with a different fee to ensure it's separate
+        PoolKey memory newPoolKey = PoolKey(currency0, currency1, 0, 10, IHooks(address(0)));
+        PoolId newPoolId = newPoolKey.toId();
+        
+        // Initialize the new pool
+        poolManager.initialize(newPoolKey, Constants.SQRT_PRICE_1_1);
+        
+        // Get initial tick
+        int24 initialTick = TickMath.getTickAtSqrtPrice(Constants.SQRT_PRICE_1_1);
+        console.log("Initial tick:", initialTick);
+        
+        // Calculate liquidity amounts for the narrow range
+        uint128 liquidityAmount = 50e18;
+        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
+            Constants.SQRT_PRICE_1_1,
+            TickMath.getSqrtPriceAtTick(-10),
+            TickMath.getSqrtPriceAtTick(10),
+            liquidityAmount
+        );
+        
+        console.log("Amount0 for liquidity:", amount0Expected);
+        console.log("Amount1 for liquidity:", amount1Expected);
+        
+        // Mint the narrow range position
+        (uint256 newTokenId,) = positionManager.mint(
+            newPoolKey,
+            -10,
+            10,
+            liquidityAmount,
+            amount0Expected + 1,
+            amount1Expected + 1,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        
+        console.log("Minted position tokenId:", newTokenId);
+        
+        // Get initial pool state
+        (uint160 sqrtPriceBefore, int24 tickBefore,,) = StateLibrary.getSlot0(poolManager, newPoolId);
+        console.log("Pool sqrtPrice before swaps:", sqrtPriceBefore);
+        console.log("Pool tick before swaps:", tickBefore);
+        
+        BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
+                amountIn: amount0Expected * 101 / 100,
+                amountOutMin: 0,
+                zeroForOne: true,
+                poolKey: newPoolKey,
+                hookData: Constants.ZERO_BYTES,
+                receiver: address(this),
+                deadline: block.timestamp + 1
+            });
+        
+        console.log("swapDelta.amount0()", swapDelta.amount0());
+        console.log("swapDelta.amount1()", swapDelta.amount1());
+        
+        // Get final pool state
+        (uint160 sqrtPriceAfter, int24 tickAfter,,) = StateLibrary.getSlot0(poolManager, newPoolId);
+        console.log("Final sqrtPrice:", sqrtPriceAfter);
+        console.log("Final tick:", tickAfter);
+        
+        // Verify the tick changed
+        assertTrue(tickAfter != tickBefore, "Tick should have changed after swapping");
+        
+        // Verify we moved in the expected direction (swapping token0 -> token1 decreases price/tick)
+        assertTrue(tickAfter < tickBefore, "Tick should have decreased after swapping token0 -> token1");
+        
+        // Verify we're at or below the lower bound of the range
+        assertTrue(tickAfter <= tickLower, "Final tick should be at or below the lower bound of the range");
+    }
+
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
         int24 compressed = tick / tickSpacing;
         if (tick < 0 && tick % tickSpacing != 0) compressed--;

@@ -6,22 +6,20 @@ import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
-
 import "@uniswap/v4-core/src/interfaces/IHooks.sol";
-
-import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
-import "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import "@uniswap/v4-core/src/types/PoolKey.sol";
 import "@uniswap/v4-core/src/types/Currency.sol";
 import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-
-import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import "@uniswap/v4-core/src/libraries/TickMath.sol";
-import "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
-import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import "@uniswap/v4-core/src/types/PoolId.sol";
+import "@uniswap/v4-core/src/libraries/TickMath.sol";
+import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+
+import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
+import "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
 import "../utils/Swapper.sol";
 import "../interfaces/IVault.sol";
@@ -39,7 +37,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
 
     // events
     event CompoundFees(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
-    event ChangeRange(uint256 indexed tokenId, uint256 newTokenId);
+    event ChangeRange(uint256 indexed tokenId, uint256 newTokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
     event WithdrawAndCollectAndSwap(uint256 indexed tokenId, address token, uint256 amount);
     event SwapAndMint(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
     event SwapAndIncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
@@ -322,9 +320,11 @@ Currency targetToken = instructions.targetToken;
     ) internal returns (uint256 newTokenId) {
         Currency targetToken = instructions.targetToken;
 
+        uint128 liquidity;
+
         if (targetToken == poolKey.currency0) {
             // Swap token1 to token0 and mint new position
-            (newTokenId,,,) = _swapAndMint(
+            (newTokenId,liquidity,amount0,amount1) = _swapAndMint(
                 SwapAndMintParams(
                     poolKey.currency0,
                     poolKey.currency1,
@@ -353,7 +353,7 @@ Currency targetToken = instructions.targetToken;
             );
         } else if (targetToken == poolKey.currency1) {
             // Swap token0 to token1 and mint new position
-            (newTokenId,,,) = _swapAndMint(
+            (newTokenId,liquidity,amount0,amount1) = _swapAndMint(
                 SwapAndMintParams(
                     poolKey.currency0,
                     poolKey.currency1,
@@ -382,7 +382,7 @@ Currency targetToken = instructions.targetToken;
             );
         } else {
             // No swap - mint new position with both tokens
-            (newTokenId,,,) = _swapAndMint(
+            (newTokenId,liquidity,amount0,amount1) = _swapAndMint(
                 SwapAndMintParams(
                     poolKey.currency0,
                     poolKey.currency1,
@@ -411,7 +411,7 @@ Currency targetToken = instructions.targetToken;
             );
         }
         
-        emit ChangeRange(tokenId, newTokenId);
+        emit ChangeRange(tokenId, newTokenId, liquidity, amount0, amount1);
     }
 
     /// @notice Execute withdraw, collect and swap operation
@@ -602,7 +602,7 @@ Currency targetToken = instructions.targetToken;
         // Process each token
         _prepareAddApprovedToken(token0, amount0);
         _prepareAddApprovedToken(token1, amount1);
-        if (Currency.unwrap(otherToken) != Currency.unwrap(token0) && Currency.unwrap(otherToken) != Currency.unwrap(token1)) {
+        if (!(otherToken == token0) && !(otherToken == token1)) {
             _prepareAddApprovedToken(otherToken, amountOther);
         }
     }
