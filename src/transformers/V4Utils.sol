@@ -61,12 +61,12 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         uint256 amountIn0;
         // if token0 needs to be swapped to targetToken - set values
         uint256 amountOut0Min;
-        bytes swapData0; // encoded data from 0x api call (address,bytes) - allowanceTarget,data
+        bytes swapData0; // encoded data for swap (0x or universal router)
         // amountIn1 is used for swap and also as minAmount1 for decreased liquidity + collected fees
         uint256 amountIn1;
         // if token1 needs to be swapped to targetToken - set values
         uint256 amountOut1Min;
-        bytes swapData1; // encoded data from 0x api call (address,bytes) - allowanceTarget,data
+        bytes swapData1; // encoded data for swap (0x or universal router)
         // for creating new positions with CHANGE_RANGE
         uint24 fee;
         int24 tickSpacing;
@@ -126,11 +126,11 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         // if swapSourceToken needs to be swapped to token0 - set values
         uint256 amountIn0;
         uint256 amountOut0Min;
-        bytes swapData0;
+        bytes swapData0; // encoded data for swap (0x or universal router)
         // if swapSourceToken needs to be swapped to token1 - set values
         uint256 amountIn1;
         uint256 amountOut1Min;
-        bytes swapData1;
+        bytes swapData1; // encoded data for swap (0x or universal router)
         // min amount to be added after swap
         uint256 amountAddMin0;
         uint256 amountAddMin1;
@@ -156,11 +156,11 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         // if swapSourceToken needs to be swapped to token0 - set values
         uint256 amountIn0;
         uint256 amountOut0Min;
-        bytes swapData0;
+        bytes swapData0; // encoded data for swap (0x or universal router)
         // if swapSourceToken needs to be swapped to token1 - set values
         uint256 amountIn1;
         uint256 amountOut1Min;
-        bytes swapData1;
+        bytes swapData1; // encoded data for swap (0x or universal router)
         // min amount to be added after swap
         uint256 amountAddMin0;
         uint256 amountAddMin1;
@@ -233,79 +233,31 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     ) internal {
         uint128 liquidity;
         Currency targetToken = instructions.targetToken;
-        if (targetToken == poolKey.currency0) {
-            // Swap token1 to token0 and increase liquidity
-            (liquidity, amount0, amount1) = _swapAndIncrease(
-                SwapAndIncreaseLiquidityParams(
-                    tokenId,
-                    amount0,
-                    amount1,
-                    instructions.recipient,
-                    instructions.deadline,
-                    poolKey.currency1,
-                    instructions.amountIn1,
-                    instructions.amountOut1Min,
-                    instructions.swapData1,
-                    0,
-                    0,
-                    "",
-                    instructions.amountAddMin0,
-                    instructions.amountAddMin1,
-                    "",
-                    instructions.increaseLiquidityHookData
-                ),
-                poolKey.currency0,
-                poolKey.currency1
-            );
-        } else if (targetToken == poolKey.currency1) {
-            // Swap token0 to token1 and increase liquidity
-            (liquidity, amount0, amount1) = _swapAndIncrease(
-                SwapAndIncreaseLiquidityParams(
-                    tokenId,
-                    amount0,
-                    amount1,
-                    instructions.recipient,
-                    instructions.deadline,
-                    poolKey.currency0,
-                    0,
-                    0,
-                    "",
-                    instructions.amountIn0,
-                    instructions.amountOut0Min,
-                    instructions.swapData0,
-                    instructions.amountAddMin0,
-                    instructions.amountAddMin1,
-                    "",
-                    instructions.increaseLiquidityHookData
-                ),
-                poolKey.currency0,
-                poolKey.currency1
-            );
-        } else {
-            // No swap - increase liquidity with both tokens
-            (liquidity, amount0, amount1) = _swapAndIncrease(
-                SwapAndIncreaseLiquidityParams(
-                    tokenId,
-                    amount0,
-                    amount1,
-                    instructions.recipient,
-                    instructions.deadline,
-                    CurrencyLibrary.ADDRESS_ZERO,
-                    0,
-                    0,
-                    "",
-                    0,
-                    0,
-                    "",
-                    instructions.amountAddMin0,
-                    instructions.amountAddMin1,
-                    "",
-                    instructions.increaseLiquidityHookData
-                ),
-                poolKey.currency0,
-                poolKey.currency1
-            );
-        }
+
+        (liquidity, amount0, amount1) = _swapAndIncrease(
+            SwapAndIncreaseLiquidityParams(
+                tokenId,
+                amount0,
+                amount1,
+                instructions.recipient,
+                instructions.deadline,
+                targetToken == poolKey.currency0
+                    ? poolKey.currency1
+                    : (targetToken == poolKey.currency1 ? poolKey.currency0 : CurrencyLibrary.ADDRESS_ZERO),
+                targetToken == poolKey.currency0 ? instructions.amountIn1 : 0,
+                targetToken == poolKey.currency0 ? instructions.amountOut1Min : 0,
+                targetToken == poolKey.currency0 ? instructions.swapData1 : bytes(""),
+                targetToken == poolKey.currency1 ? instructions.amountIn0 : 0,
+                targetToken == poolKey.currency1 ? instructions.amountOut0Min : 0,
+                targetToken == poolKey.currency1 ? instructions.swapData0 : bytes(""),
+                instructions.amountAddMin0,
+                instructions.amountAddMin1,
+                "",
+                instructions.increaseLiquidityHookData
+            ),
+            poolKey.currency0,
+            poolKey.currency1
+        );
 
         emit CompoundFees(tokenId, liquidity, amount0, amount1);
     }
@@ -319,97 +271,36 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         Instructions memory instructions
     ) internal returns (uint256 newTokenId) {
         Currency targetToken = instructions.targetToken;
-
         uint128 liquidity;
-
-        if (targetToken == poolKey.currency0) {
-            // Swap token1 to token0 and mint new position
-            (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
-                SwapAndMintParams(
-                    poolKey.currency0,
-                    poolKey.currency1,
-                    instructions.fee,
-                    instructions.tickSpacing,
-                    instructions.tickLower,
-                    instructions.tickUpper,
-                    amount0,
-                    amount1,
-                    instructions.recipient,
-                    instructions.recipientNFT,
-                    instructions.deadline,
-                    poolKey.currency1,
-                    instructions.amountIn1,
-                    instructions.amountOut1Min,
-                    instructions.swapData1,
-                    0,
-                    0,
-                    "",
-                    instructions.amountAddMin0,
-                    instructions.amountAddMin1,
-                    instructions.swapAndMintReturnData,
-                    instructions.hook,
-                    instructions.increaseLiquidityHookData
-                )
-            );
-        } else if (targetToken == poolKey.currency1) {
-            // Swap token0 to token1 and mint new position
-            (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
-                SwapAndMintParams(
-                    poolKey.currency0,
-                    poolKey.currency1,
-                    instructions.fee,
-                    instructions.tickSpacing,
-                    instructions.tickLower,
-                    instructions.tickUpper,
-                    amount0,
-                    amount1,
-                    instructions.recipient,
-                    instructions.recipientNFT,
-                    instructions.deadline,
-                    poolKey.currency0,
-                    0,
-                    0,
-                    "",
-                    instructions.amountIn0,
-                    instructions.amountOut0Min,
-                    instructions.swapData0,
-                    instructions.amountAddMin0,
-                    instructions.amountAddMin1,
-                    instructions.swapAndMintReturnData,
-                    instructions.hook,
-                    instructions.increaseLiquidityHookData
-                )
-            );
-        } else {
-            // No swap - mint new position with both tokens
-            (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
-                SwapAndMintParams(
-                    poolKey.currency0,
-                    poolKey.currency1,
-                    instructions.fee,
-                    instructions.tickSpacing,
-                    instructions.tickLower,
-                    instructions.tickUpper,
-                    amount0,
-                    amount1,
-                    instructions.recipient,
-                    instructions.recipientNFT,
-                    instructions.deadline,
-                    CurrencyLibrary.ADDRESS_ZERO,
-                    0,
-                    0,
-                    "",
-                    0,
-                    0,
-                    "",
-                    instructions.amountAddMin0,
-                    instructions.amountAddMin1,
-                    instructions.swapAndMintReturnData,
-                    instructions.hook,
-                    instructions.increaseLiquidityHookData
-                )
-            );
-        }
+        (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
+            SwapAndMintParams(
+                poolKey.currency0,
+                poolKey.currency1,
+                instructions.fee,
+                instructions.tickSpacing,
+                instructions.tickLower,
+                instructions.tickUpper,
+                amount0,
+                amount1,
+                instructions.recipient,
+                instructions.recipientNFT,
+                instructions.deadline,
+                targetToken == poolKey.currency0
+                    ? poolKey.currency1
+                    : (targetToken == poolKey.currency1 ? poolKey.currency0 : CurrencyLibrary.ADDRESS_ZERO),
+                targetToken == poolKey.currency0 ? instructions.amountIn1 : 0,
+                targetToken == poolKey.currency0 ? instructions.amountOut1Min : 0,
+                targetToken == poolKey.currency0 ? instructions.swapData1 : bytes(""),
+                targetToken == poolKey.currency1 ? instructions.amountIn0 : 0,
+                targetToken == poolKey.currency1 ? instructions.amountOut0Min : 0,
+                targetToken == poolKey.currency1 ? instructions.swapData0 : bytes(""),
+                instructions.amountAddMin0,
+                instructions.amountAddMin1,
+                instructions.swapAndMintReturnData,
+                instructions.hook,
+                instructions.increaseLiquidityHookData
+            )
+        );
 
         emit ChangeRange(tokenId, newTokenId, liquidity, amount0, amount1);
     }
@@ -704,6 +595,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     }
 
     // swap and increase logic
+    // this method needs that fees are already removed from the position
     function _swapAndIncrease(SwapAndIncreaseLiquidityParams memory params, Currency token0, Currency token1)
         internal
         returns (uint128 liquidity, uint256 added0, uint256 added1)
@@ -746,8 +638,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         // Calculate liquidity from amounts
         liquidity = _calculateLiquidity(info.tickLower(), info.tickUpper(), poolKey, total0, total1);
 
-        params_array[0] =
-            abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
+        params_array[0] = abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
         params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
 
         positionManager.modifyLiquidities{value: address(this).balance}(
