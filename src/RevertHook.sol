@@ -35,6 +35,7 @@ import {console} from "forge-std/console.sol";
 import {LiquidityCalculator} from "./LiquidityCalculator.sol";
 
 error Unauthorized();
+error InvalidConfig();
 
 /// @title RevertHook
 /// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting and auto-ranging of positions
@@ -51,10 +52,8 @@ contract RevertHook is BaseHook, IUnlockCallback {
     event SendLeftoverTokens(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
     event SendFees(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1, address recipient);
 
-    // special event for swap failures
+    // special events for swap failures / modifyLiquidities failures
     event SwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
-    
-    // special event for modifyLiquidities failures
     event ModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
 
     IPermit2 public immutable permit2;
@@ -114,6 +113,9 @@ contract RevertHook is BaseHook, IUnlockCallback {
         uint24 swapPoolFee;
         int24 swapPoolTickSpacing;
         IHooks swapPoolHooks;
+
+        // TODO full range liquidity owned by this position (is returned at the end - when withdrawn)
+        //int128 fullRangeLiquidity;
     }
 
     // lastprocessed timestamp
@@ -130,31 +132,24 @@ contract RevertHook is BaseHook, IUnlockCallback {
             revert Unauthorized();
         }
 
-        // basic validation
-        require(
-            positionConfig.autoExitTickLower % poolKey.tickSpacing == 0,
-            "autoExitTickLower must be divisible by tickSpacing"
-        );
-        require(
-            positionConfig.autoExitTickUpper % poolKey.tickSpacing == 0,
-            "autoExitTickUpper must be divisible by tickSpacing"
-        );
-        require(
-            positionConfig.autoRangeLowerLimit % poolKey.tickSpacing == 0,
-            "autoRangeLowerLimit must be divisible by tickSpacing"
-        );
-        require(
-            positionConfig.autoRangeUpperLimit % poolKey.tickSpacing == 0,
-            "autoRangeUpperLimit must be divisible by tickSpacing"
-        );
-        require(
-            positionConfig.autoRangeLowerDelta % poolKey.tickSpacing == 0,
-            "autoRangeLowerDelta must be divisible by tickSpacing"
-        );
-        require(
-            positionConfig.autoRangeUpperDelta % poolKey.tickSpacing == 0,
-            "autoRangeUpperDelta must be divisible by tickSpacing"
-        );
+        if (positionConfig.autoExitTickLower % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
+        if (positionConfig.autoExitTickUpper % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
+        if (positionConfig.autoRangeLowerLimit % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
+        if (positionConfig.autoRangeUpperLimit % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
+        if (positionConfig.autoRangeLowerDelta % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
+        if (positionConfig.autoRangeUpperDelta % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
 
         // update tick mappings
         _updatePositionTickMappings(tokenId, posInfo.tickLower(), posInfo.tickUpper(), poolKey, positionConfig);
@@ -180,8 +175,8 @@ contract RevertHook is BaseHook, IUnlockCallback {
             afterDonate: false,
             beforeSwapReturnDelta: false,
             afterSwapReturnDelta: false,
-            afterAddLiquidityReturnDelta: false,
-            afterRemoveLiquidityReturnDelta: false
+            afterAddLiquidityReturnDelta: true,
+            afterRemoveLiquidityReturnDelta: true
         });
     }
 
@@ -293,8 +288,8 @@ contract RevertHook is BaseHook, IUnlockCallback {
         override
         returns (bytes4)
     {        
-        // only allow positions created via PositionManager
-        if (sender != address(positionManager)) {
+        // only allow positions created via PositionManager or the hook itself
+        if (sender != address(positionManager) && sender != address(this)) {
             revert Unauthorized();
         }
            
@@ -302,15 +297,44 @@ contract RevertHook is BaseHook, IUnlockCallback {
     }
 
     function _afterAddLiquidity(
-        address,
+        address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
-        BalanceDelta,
+        BalanceDelta delta,
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta balanceDelta) {
+
+        // if the hook itself is adding liquidity, don't take fees and dont configure anything
+        if (sender == address(this)) {
+            return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        }
+
         uint256 tokenId = uint256(params.salt);
         _updatePositionTickMappings(tokenId, params.tickLower, params.tickUpper, key, positionConfigs[tokenId]);
+
+        // positive values - take from the added position
+        int128 fee0 = int128(-delta.amount0() / 100);  // 1%
+        int128 fee1 = int128(-delta.amount1() / 100);  // 1%
+
+        console.log("fee0", fee0);
+        console.log("fee1", fee1);
+
+        balanceDelta = toBalanceDelta(fee0, fee1);
+
+        // TODO add full range liquidity - certain percentage of the added liquidity is added to the full range position
+
+        // just take it for now.. later will be added to the full range position
+        poolManager.take(key.currency0, address(this), uint256(uint128(fee0)));
+        poolManager.take(key.currency1, address(this), uint256(uint128(fee1)));
+
+        console.log("balance0", key.currency0.balanceOfSelf());
+        console.log("balance1", key.currency1.balanceOfSelf());
+
+        // burn tokens
+        key.currency0.transfer(address(0), uint256(uint128(fee0)));
+        key.currency1.transfer(address(0), uint256(uint128(fee1)));
+
         return (BaseHook.afterAddLiquidity.selector, balanceDelta);
     }
 
@@ -324,6 +348,11 @@ contract RevertHook is BaseHook, IUnlockCallback {
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
         _updatePositionTickMappings(tokenId, params.tickLower, params.tickUpper, key, positionConfigs[tokenId]);
+
+
+        // TODO remove full range liquidity owned to the position from the hook
+        // TODO what to do with the fees?
+        
         return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 

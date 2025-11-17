@@ -62,7 +62,8 @@ contract RevertHookTest is BaseTest {
         // Deploy the hook to an address with the correct flags
         address flags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | 
+                Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
         bytes memory constructorArgs = abi.encode(positionManager, poolManager, address(this), permit2); // Add all the necessary constructor arguments from the hook
@@ -111,12 +112,14 @@ contract RevertHookTest is BaseTest {
             tickLower,
             tickUpper,
             liquidityAmount,
-            amount0Expected + 1,
-            amount1Expected + 1,
+            type(uint256).max,
+            type(uint256).max,
             address(this),
             block.timestamp,
             Constants.ZERO_BYTES
         );
+
+        console.log("tokenId liquidity", positionManager.getPositionLiquidity(tokenId));
 
         tickLower2 = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
         tickUpper2 = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
@@ -127,8 +130,8 @@ contract RevertHookTest is BaseTest {
             tickLower2,
             tickUpper2,
             liquidityAmount,
-            amount0Expected + 1,
-            amount1Expected + 1,
+            type(uint256).max,
+            type(uint256).max,
             address(this),
             block.timestamp,
             Constants.ZERO_BYTES
@@ -143,8 +146,8 @@ contract RevertHookTest is BaseTest {
             tickLower3,
             tickUpper3,
             liquidityAmount / 10,
-            amount0Expected + 1,
-            amount1Expected + 1,
+            type(uint256).max,
+            type(uint256).max,
             address(this),
             block.timestamp,
             Constants.ZERO_BYTES
