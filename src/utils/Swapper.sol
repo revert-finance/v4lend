@@ -197,7 +197,7 @@ abstract contract Swapper is Constants {
             actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR));
             params_array = new bytes[](2);
         }
-        params_array[1] = abi.encode(token0, token1, address(this));
+        params_array[1] = abi.encode(token0, token1);
     }
 
 

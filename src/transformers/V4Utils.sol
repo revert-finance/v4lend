@@ -252,7 +252,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
                 targetToken == poolKey.currency1 ? instructions.swapData0 : bytes(""),
                 instructions.amountAddMin0,
                 instructions.amountAddMin1,
-                "",
+                bytes(""),
                 instructions.increaseLiquidityHookData
             ),
             poolKey.currency0,
@@ -536,6 +536,58 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             hooks: IHooks(params.hook) // Use hook from params
         });
 
+        (tokenId, liquidity) = _mintPosition(
+            poolKey,
+            params,
+            total0,
+            total1
+        );
+
+        // Transfer NFT to recipient (with optional return data)
+        IERC721(address(positionManager)).safeTransferFrom(
+            address(this), params.recipientNFT, tokenId, params.returnData
+        );
+
+        // Calculate consumption and return leftovers
+        uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
+        uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
+
+        // Calculate amounts actually added
+        added0 = total0 - finalBalance0;
+        added1 = total1 - finalBalance1;
+
+        // Check minimum amounts were added
+        if (added0 < params.amountAddMin0) {
+            revert InsufficientAmountAdded();
+        }
+        if (added1 < params.amountAddMin1) {
+            revert InsufficientAmountAdded();
+        }
+
+        emit SwapAndMint(tokenId, liquidity, added0, added1);
+
+        // Return leftover tokens
+        if (finalBalance0 != 0) {
+            params.token0.transfer(params.recipient, finalBalance0);
+        }
+        if (finalBalance1 != 0) {
+            params.token1.transfer(params.recipient, finalBalance1);
+        }
+    }
+
+    /// @notice Mints a new position with the specified parameters
+    /// @param poolKey The pool key for the position
+    /// @param params The parameters for the minting
+    /// @param total0 The amount of token0 to add
+    /// @param total1 The amount of token1 to add
+    /// @return tokenId The ID of the newly minted position
+    /// @return liquidity The amount of liquidity added
+    function _mintPosition(
+        PoolKey memory poolKey,
+        SwapAndMintParams memory params,
+        uint256 total0,
+        uint256 total1
+    ) internal returns (uint256 tokenId, uint128 liquidity) {
         (bytes memory actions, bytes[] memory params_array) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), params.token0, params.token1);
 
@@ -550,7 +602,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             total0, // amount0Max
             total1, // amount1Max
             address(this), // recipient
-            bytes("") // hookData
+            params.mintHookData // hookData
         );
 
         positionManager.modifyLiquidities{value: address(this).balance}(
@@ -559,39 +611,6 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
 
         // Get the newly minted token ID
         tokenId = positionManager.nextTokenId() - 1;
-
-        // Transfer NFT to recipient (with optional return data)
-        IERC721(address(positionManager)).safeTransferFrom(
-            address(this), params.recipientNFT, tokenId, params.returnData
-        );
-
-        // Calculate consumption and return leftovers
-        {
-            uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
-            uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
-
-            // Calculate amounts actually added
-            added0 = total0 - finalBalance0;
-            added1 = total1 - finalBalance1;
-
-            // Check minimum amounts were added
-            if (added0 < params.amountAddMin0) {
-                revert InsufficientAmountAdded();
-            }
-            if (added1 < params.amountAddMin1) {
-                revert InsufficientAmountAdded();
-            }
-
-            emit SwapAndMint(tokenId, liquidity, added0, added1);
-
-            // Return leftover tokens
-            if (finalBalance0 != 0) {
-                params.token0.transfer(params.recipient, finalBalance0);
-            }
-            if (finalBalance1 != 0) {
-                params.token1.transfer(params.recipient, finalBalance1);
-            }
-        }
     }
 
     // swap and increase logic
@@ -622,9 +641,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
                 params.swapData1,
                 params.amountAddMin0,
                 params.amountAddMin1,
-                "",
-                address(0), // No hook for increase liquidity
-                ""
+                bytes(""),
+                address(0),
+                bytes("")
             )
         );
 
@@ -639,7 +658,6 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         liquidity = _calculateLiquidity(info.tickLower(), info.tickUpper(), poolKey, total0, total1);
 
         params_array[0] = abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
-        params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
 
         positionManager.modifyLiquidities{value: address(this).balance}(
             abi.encode(actions, params_array), params.deadline
