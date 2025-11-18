@@ -506,6 +506,10 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         if (!(otherToken == token0) && !(otherToken == token1)) {
             _prepareAddApprovedToken(otherToken, amountOther);
         }
+        // if msg.value > 0, then one of the tokens must be ether with amount > 0
+        if (msg.value != 0 && !(token0.isAddressZero() && amount0 > 0) && !(token1.isAddressZero() && amount1 > 0) && !(otherToken.isAddressZero() && amountOther > 0)) {
+            revert NoEtherToken();
+        }
     }
 
     function _prepareAddApprovedToken(Currency token, uint256 amount) internal {
