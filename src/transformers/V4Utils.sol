@@ -619,7 +619,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         internal
         returns (uint128 liquidity, uint256 added0, uint256 added1)
     {
-        (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(
+         (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(
             SwapAndMintParams(
                 token0,
                 token1,
@@ -702,38 +702,32 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             if (params.amount0 < params.amountIn1) {
                 revert AmountError();
             }
-            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+            _routerSwap(
                 Swapper.RouterSwapParams(
                     params.token0, params.token1, params.amountIn1, params.amountOut1Min, params.swapData1
                 )
             );
-            total0 = params.amount0 - amountInDelta;
-            total1 = params.amount1 + amountOutDelta;
         } else if (swapSource == params.token1) {
             if (params.amount1 < params.amountIn0) {
                 revert AmountError();
             }
 
-            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+            _routerSwap(
                 Swapper.RouterSwapParams(
                     params.token1, params.token0, params.amountIn0, params.amountOut0Min, params.swapData0
                 )
             );
-            total1 = params.amount1 - amountInDelta;
-            total0 = params.amount0 + amountOutDelta;
         } else {
-            (uint256 amountInDelta0, uint256 amountOutDelta0) = _routerSwap(
+            (uint256 amountInDelta0,) = _routerSwap(
                 Swapper.RouterSwapParams(
                     swapSource, params.token0, params.amountIn0, params.amountOut0Min, params.swapData0
                 )
             );
-            (uint256 amountInDelta1, uint256 amountOutDelta1) = _routerSwap(
+            (uint256 amountInDelta1,) = _routerSwap(
                 Swapper.RouterSwapParams(
                     swapSource, params.token1, params.amountIn1, params.amountOut1Min, params.swapData1
                 )
             );
-            total0 = params.amount0 + amountOutDelta0;
-            total1 = params.amount1 + amountOutDelta1;
 
             // return third token leftover if any
             uint256 leftOver = params.amountIn0 + params.amountIn1 - amountInDelta0 - amountInDelta1;
@@ -742,6 +736,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
                 swapSource.transfer(params.recipient, leftOver);
             }
         }
+
+        total0 = params.token0.balanceOfSelf();
+        total1 = params.token1.balanceOfSelf();
 
         _handleApproval(permit2, params.token0, total0);
         _handleApproval(permit2, params.token1, total1);
