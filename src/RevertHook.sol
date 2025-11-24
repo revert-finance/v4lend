@@ -5,6 +5,7 @@ import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
@@ -33,13 +34,15 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {console} from "forge-std/console.sol";
 
 import {LiquidityCalculator} from "./LiquidityCalculator.sol";
+import {Transformer} from "./transformers/Transformer.sol";
+import {IVault} from "./interfaces/IVault.sol";
 
 error Unauthorized();
 error InvalidConfig();
 
 /// @title RevertHook
 /// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting and auto-ranging of positions
-contract RevertHook is BaseHook, IUnlockCallback {
+contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
 
     // events for auto actions
@@ -53,8 +56,8 @@ contract RevertHook is BaseHook, IUnlockCallback {
     event SendFees(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1, address recipient);
 
     // special events for swap failures / modifyLiquidities failures
-    event SwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
-    event ModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
+    event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
+    event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
 
     IPermit2 public immutable permit2;
     mapping(address => bool) private permit2Approved;
@@ -84,7 +87,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
         IPoolManager _poolManager,
         address protocolFeeRecipient_,
         IPermit2 _permit2
-    ) BaseHook(_poolManager) {
+    ) BaseHook(_poolManager) Ownable(msg.sender)  {
         positionManager = positionManager_;
         protocolFeeRecipient = protocolFeeRecipient_;
         permit2 = _permit2;
@@ -180,24 +183,6 @@ contract RevertHook is BaseHook, IUnlockCallback {
         });
     }
 
-    // anyone can compound - needs to choose tokenids (based on offchain logic)
-    // gets fees from compounded positions sent to his address
-    function autoCompound(uint256[] calldata tokenIds) external {
-        poolManager.unlock(abi.encode(tokenIds));
-    }
-
-    function unlockCallback(bytes calldata data) external returns (bytes memory) {
-        // disallow arbitrary caller
-        if (msg.sender != address(poolManager)) {
-            revert Unauthorized();
-        }
-        uint256[] memory tokenIds = abi.decode(data, (uint256[]));
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            _autoCompound(tokenIds[i]);
-        }
-        return "";
-    }
-
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
         int24 tickLower = _getTickLower(tick, key.tickSpacing);
         tickLowerLasts[key.toId()] = tickLower;
@@ -228,6 +213,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
             if (length > 0) {
                 uint256 tokenId = tokenIds[length - 1];
                 tokenIds.pop();
+
                 _handleTokenId(key, poolId, tokenId, tick < tickEnd, tick);
 
                 // tickEnd may have changed after the processing of the tokenId
@@ -250,34 +236,37 @@ contract RevertHook is BaseHook, IUnlockCallback {
     function _handleTokenId(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger, int24 baseTick)
         internal
     {
-        // token must be approved for this hook to be executed
-        address approved = IERC721(address(positionManager)).getApproved(tokenId);
-        if (approved != address(this)) {
-            return;
-        }
-
         PositionConfig memory config = positionConfigs[tokenId];
 
-        // check conditions again - there may be leftover triggers which are not valid anymore
-        bool executeAutoExitLower = config.doAutoExit && !isUpperTrigger
-            && baseTick == config.autoExitTickLower;
-        bool executeAutoExitUpper = config.doAutoExit && isUpperTrigger
-            && baseTick == config.autoExitTickUpper;
+        bool ownedByVault = vaults[_getOwner(tokenId)];
 
         // there may only be one action configured for a tokenid/tick - auto exit takes priority over auto range
-        if (executeAutoExitLower) {
-            _autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
-        } else if (executeAutoExitUpper) {
-            _autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper);
+        if (config.doAutoExit && !isUpperTrigger
+            && baseTick == config.autoExitTickLower) {
+            if (ownedByVault) {
+                IVault(msg.sender).transform(tokenId, address(this), abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower)));
+            } else {
+                autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
+            }
+        } else if (config.doAutoExit && isUpperTrigger
+            && baseTick == config.autoExitTickUpper) {
+            if (ownedByVault) {
+                IVault(msg.sender).transform(tokenId, address(this), abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper)));
+            } else {
+                autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper);
+            }
         } else {
-            bool executeAutoRange = config.doAutoRange;
-            if (executeAutoRange) {
+            if (config.doAutoRange) {
                 (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
                 int24 tickLower = posInfo.tickLower();
                 int24 tickUpper = posInfo.tickUpper();
                 if (baseTick == tickLower - config.autoRangeLowerLimit && !isUpperTrigger || 
                     baseTick == tickUpper + config.autoRangeUpperLimit && isUpperTrigger) {
-                    _autoRange(poolKey, poolId, tokenId, baseTick);
+                    if (ownedByVault) {
+                        IVault(msg.sender).transform(tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId, baseTick)));
+                    } else {
+                        autoRange(poolKey, poolId, tokenId, baseTick);
+                    }
                 }
             }
         }
@@ -320,20 +309,20 @@ contract RevertHook is BaseHook, IUnlockCallback {
         console.log("fee0", fee0);
         console.log("fee1", fee1);
 
-        balanceDelta = toBalanceDelta(fee0, fee1);
+        //balanceDelta = toBalanceDelta(fee0, fee1);
 
         // TODO add full range liquidity - certain percentage of the added liquidity is added to the full range position
 
         // just take it for now.. later will be added to the full range position
-        poolManager.take(key.currency0, address(this), uint256(uint128(fee0)));
-        poolManager.take(key.currency1, address(this), uint256(uint128(fee1)));
+        //poolManager.take(key.currency0, address(this), uint256(uint128(fee0)));
+        //poolManager.take(key.currency1, address(this), uint256(uint128(fee1)));
 
         console.log("balance0", key.currency0.balanceOfSelf());
         console.log("balance1", key.currency1.balanceOfSelf());
 
         // burn tokens
-        key.currency0.transfer(address(0), uint256(uint128(fee0)));
-        key.currency1.transfer(address(0), uint256(uint128(fee1)));
+        //key.currency0.transfer(address(0), uint256(uint128(fee0)));
+        //key.currency1.transfer(address(0), uint256(uint128(fee1)));
 
         return (BaseHook.afterAddLiquidity.selector, balanceDelta);
     }
@@ -491,7 +480,17 @@ contract RevertHook is BaseHook, IUnlockCallback {
         });
     }
 
-    function _autoExit(PoolKey memory poolKey, PoolId /* poolId */, uint256 tokenId, bool isUpper, bool doSwap) internal {
+    function autoExit(PoolKey memory poolKey, PoolId /* poolId */, uint256 tokenId, bool isUpper, bool doSwap) public {
+
+        // validate caller (can be vault or poolmanager)
+        if (msg.sender != address(poolManager)) {
+            if (vaults[msg.sender]) {
+                _validateCaller(positionManager, tokenId);
+            } else {
+                revert Unauthorized();
+            }
+        }
+
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
         if (doSwap) {
@@ -506,7 +505,17 @@ contract RevertHook is BaseHook, IUnlockCallback {
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
     }
 
-    function _autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, int24 baseTick) internal {
+    function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, int24 baseTick) public {
+
+        // validate caller (can be vault or poolmanager)
+        if (msg.sender != address(poolManager)) {
+            if (vaults[msg.sender]) {
+                _validateCaller(positionManager, tokenId);
+            } else {
+                revert Unauthorized();
+            }
+        }
+
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
         int24 tickLower = baseTick + positionConfigs[tokenId].autoRangeLowerDelta;
@@ -537,19 +546,60 @@ contract RevertHook is BaseHook, IUnlockCallback {
         emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
     }
 
-    /// @notice Auto-compounds fees from a position
+    /// @notice Auto-compounds fees from positions (this can be called by anyone)
     /// @dev Collects fees, swaps to achieve proportions (offchain optimized calculation), and adds liquidity back via PositionManager
     ///      Fees are based on actual added amounts to incentivize optimal swapping
-    /// @param tokenId The token ID
-    function _autoCompound(uint256 tokenId) internal {
+    /// @param tokenIds Array of token IDs to compound
+    function autoCompound(uint256[] memory tokenIds) external {
+        uint256 length = tokenIds.length;
+        for (uint256 i = 0; i < length; i++) {
+            uint256 tokenId = tokenIds[i];
+            // check if position is in vault, if yes call transform on behalf of owner
+            address owner = _getOwner(tokenId);
+            if (vaults[owner]) {
+                IVault(owner).transform(tokenId, address(this), abi.encodeCall(this.autoCompoundForVault, (tokenId, msg.sender)));
+            } else {
+                poolManager.unlock(abi.encode(tokenId, msg.sender));
+            }
+        }
+    }
+
+    /// @notice Auto-compounds callback function which is called during transform
+    function autoCompoundForVault(uint256 tokenId, address caller) external {
+        // check if caller is vault, if yes call transform on behalf of owner
+        if (!vaults[msg.sender]) {
+            revert Unauthorized();
+        }
+        _validateCaller(positionManager, tokenId);
+        poolManager.unlock(abi.encode(tokenId, caller));
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        // disallow arbitrary caller
+        if (msg.sender != address(poolManager)) {
+            revert Unauthorized();
+        }
+        (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
+
         // Step 0: Check if auto compound is enabled
         if (!positionConfigs[tokenId].doAutoCompound) {
-            return;
+            return bytes("");
         }
 
+
+        _executeAutoCompound(tokenId, caller);
+        return bytes("");
+    }
+
+    /// @notice Internal function that executes the auto-compound logic
+    /// @dev Collects fees, swaps to achieve proportions, and adds liquidity back via PositionManager
+    ///      Fees are based on actual added amounts to incentivize optimal swapping
+    /// @param tokenId The token ID to compound
+    /// @param caller The address that initiated the auto-compound (for reward distribution)
+    function _executeAutoCompound(uint256 tokenId, address caller) internal {
+       
         // Step 1: Get position info
         (PoolKey memory poolKey, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        PoolId poolId = poolKey.toId();
 
         // Step 2: Collect fees only (don't remove liquidity)
         (,, uint256 fees0, uint256 fees1) = _decreaseLiquidity(tokenId, true);
@@ -560,29 +610,29 @@ contract RevertHook is BaseHook, IUnlockCallback {
 
         // Step 3: Swap to optimal range
         (fees0, fees1) =
-            _swapToOptimalRange(tokenId, poolKey, poolId, posInfo.tickLower(), posInfo.tickUpper(), fees0, fees1);
+            _swapToOptimalRange(tokenId, poolKey, poolKey.toId(), posInfo.tickLower(), posInfo.tickUpper(), fees0, fees1);
 
         // Step 4: Add liquidity
-        uint128 maxAddable0 = uint128(fees0 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * fees0 / 10000);
-        uint128 maxAddable1 = uint128(fees1 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * fees1 / 10000);
+        uint256 maxAddable0 = fees0 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * fees0 / 10000;
+        uint256 maxAddable1 = fees1 - (autoCompoundProtocolFeeBps + autoCompoundRewardBps) * fees1 / 10000;
 
         _handleApproval(poolKey.currency0, maxAddable0);
         _handleApproval(poolKey.currency1, maxAddable1);
 
-        (uint256 amount0Added, uint256 amount1Added) =
-            _increaseLiquidity(tokenId, poolKey, posInfo, maxAddable0, maxAddable1);
+        (maxAddable0, maxAddable1) =
+            _increaseLiquidity(tokenId, poolKey, posInfo, uint128(maxAddable0), uint128(maxAddable1));
 
         // Step 5: Send protocol fees and reward based on actual amounts added
         _sendFees(
             tokenId,
             poolKey.currency0,
             poolKey.currency1,
-            amount0Added,
-            amount1Added,
+            maxAddable0,
+            maxAddable1,
             autoCompoundProtocolFeeBps,
             protocolFeeRecipient
         );
-        _sendFees(tokenId, poolKey.currency0, poolKey.currency1, amount0Added, amount1Added, autoCompoundRewardBps, msg.sender);
+        _sendFees(tokenId, poolKey.currency0, poolKey.currency1, maxAddable0, maxAddable1, autoCompoundRewardBps, caller);
 
         // Step 6: Send leftover tokens to owner
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId));
@@ -693,7 +743,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
             amount1Added -= currency1.balanceOfSelf();
         } catch (bytes memory reason) {
             // emit event
-            emit ModifyLiquiditiesFailed(actions, params_array, reason);
+            emit HookModifyLiquiditiesFailed(actions, params_array, reason);
             // Return zero amounts on failure
             amount0Added = 0;
             amount1Added = 0;
@@ -767,7 +817,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
             amount1Added -= uint128(currency1.balanceOfSelf());
         } catch (bytes memory reason) {
             // emit event
-            emit ModifyLiquiditiesFailed(actions, params_array, reason);
+            emit HookModifyLiquiditiesFailed(actions, params_array, reason);
             // Return zero amounts on failure
             amount0Added = 0;
             amount1Added = 0;
@@ -821,7 +871,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
             amount1 = currency1.balanceOfSelf();
         } catch (bytes memory reason) {
             // emit event
-            emit ModifyLiquiditiesFailed(actions, params_array, reason);
+            emit HookModifyLiquiditiesFailed(actions, params_array, reason);
         }
     }
 
@@ -886,8 +936,7 @@ contract RevertHook is BaseHook, IUnlockCallback {
             // Handle swap deltas - settle what we owe, take what we receive
         } catch (bytes memory reason) {
             // emit event
-            emit SwapFailed(poolKey, swapParams, reason);
-
+            emit HookSwapFailed(poolKey, swapParams, reason);
             // return the swap delta which is 0, 0
         }
     }

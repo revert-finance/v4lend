@@ -23,7 +23,6 @@ abstract contract Constants {
     error SwapAmountTooLarge();
 
     error ExceedsMaxReward();
-    error InvalidPool();
     error ChainlinkPriceError();
     error PriceDifferenceExceeded();
     error SequencerDown();
