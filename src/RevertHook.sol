@@ -11,6 +11,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
+
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager, SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -22,11 +23,11 @@ import {Position} from "@uniswap/v4-core/src/libraries/Position.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {LiquidityAmounts} from "@uniswap/v4-periphery/lib/v4-core/test/utils/LiquidityAmounts.sol";
 import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -36,6 +37,7 @@ import {console} from "forge-std/console.sol";
 import {LiquidityCalculator} from "./LiquidityCalculator.sol";
 import {Transformer} from "./transformers/Transformer.sol";
 import {IVault} from "./interfaces/IVault.sol";
+import {V4Oracle} from "./V4Oracle.sol";
 
 error Unauthorized();
 error InvalidConfig();
@@ -63,6 +65,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     mapping(address => bool) private permit2Approved;
 
     IPositionManager public immutable positionManager;
+    V4Oracle public immutable v4Oracle;
 
     // manages ticks where actions are triggered (can be multiple entries per tokenid)
     mapping(PoolId poolId => mapping(int24 tickLower => uint256[] tokenIds)) public lowerTrigger;
@@ -83,14 +86,14 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     address public protocolFeeRecipient;
 
     constructor(
-        IPositionManager positionManager_,
-        IPoolManager _poolManager,
         address protocolFeeRecipient_,
-        IPermit2 _permit2
-    ) BaseHook(_poolManager) Ownable(msg.sender)  {
-        positionManager = positionManager_;
+        IPermit2 _permit2,
+        V4Oracle _v4Oracle
+    ) BaseHook(_v4Oracle.poolManager()) Ownable(msg.sender)  {
+        positionManager = _v4Oracle.positionManager();
         protocolFeeRecipient = protocolFeeRecipient_;
         permit2 = _permit2;
+        v4Oracle = _v4Oracle;
     }
 
     mapping(uint256 tokenId => PositionConfig positionConfig) public positionConfigs;
@@ -99,6 +102,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         bool doAutoCompound;
         bool doAutoRange;
         bool doAutoExit;
+        // bool doAutoLend;
 
         // auto exit config
         int24 autoExitTickLower;
@@ -116,10 +120,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         uint24 swapPoolFee;
         int24 swapPoolTickSpacing;
         IHooks swapPoolHooks;
-
-        // TODO full range liquidity owned by this position (is returned at the end - when withdrawn)
-        //int128 fullRangeLiquidity;
     }
+
 
     // lastprocessed timestamp
     // relative liquidity
@@ -178,8 +180,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             afterDonate: false,
             beforeSwapReturnDelta: false,
             afterSwapReturnDelta: false,
-            afterAddLiquidityReturnDelta: true,
-            afterRemoveLiquidityReturnDelta: true
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
         });
     }
 
@@ -292,7 +294,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         BalanceDelta delta,
         BalanceDelta,
         bytes calldata
-    ) internal override returns (bytes4, BalanceDelta balanceDelta) {
+    ) internal override returns (bytes4, BalanceDelta) {
 
         // if the hook itself is adding liquidity, don't take fees and dont configure anything
         if (sender == address(this)) {
@@ -302,29 +304,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         uint256 tokenId = uint256(params.salt);
         _updatePositionTickMappings(tokenId, params.tickLower, params.tickUpper, key, positionConfigs[tokenId]);
 
-        // positive values - take from the added position
-        int128 fee0 = int128(-delta.amount0() / 100);  // 1%
-        int128 fee1 = int128(-delta.amount1() / 100);  // 1%
-
-        console.log("fee0", fee0);
-        console.log("fee1", fee1);
-
-        //balanceDelta = toBalanceDelta(fee0, fee1);
-
-        // TODO add full range liquidity - certain percentage of the added liquidity is added to the full range position
-
-        // just take it for now.. later will be added to the full range position
-        //poolManager.take(key.currency0, address(this), uint256(uint128(fee0)));
-        //poolManager.take(key.currency1, address(this), uint256(uint128(fee1)));
-
-        console.log("balance0", key.currency0.balanceOfSelf());
-        console.log("balance1", key.currency1.balanceOfSelf());
-
-        // burn tokens
-        //key.currency0.transfer(address(0), uint256(uint128(fee0)));
-        //key.currency1.transfer(address(0), uint256(uint128(fee1)));
-
-        return (BaseHook.afterAddLiquidity.selector, balanceDelta);
+        return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
     function _afterRemoveLiquidity(
@@ -335,15 +315,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
+
         uint256 tokenId = uint256(params.salt);
         _updatePositionTickMappings(tokenId, params.tickLower, params.tickUpper, key, positionConfigs[tokenId]);
-
-
-        // TODO remove full range liquidity owned to the position from the hook
-        // TODO what to do with the fees?
         
         return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
-    }
+    }   
 
     /// @notice Updates position tick mappings based on liquidity changes / config changes
     /// @param tokenId The tokenId of the position
@@ -364,7 +341,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         bytes32 positionId =
             Position.calculatePositionKey(address(positionManager), tickLower, tickUpper, bytes32(tokenId));
 
-        // Check current liquidity after the operation
+        // Check current liquidity
         (uint128 liquidity,,) = StateLibrary.getPositionInfo(poolManager, poolId, positionId);
 
         // Get current config - to check if changed
@@ -997,119 +974,5 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             }
             permit2.approve(tokenAddr, address(positionManager), uint160(amount), uint48(block.timestamp));
         }
-    }
-
-    /// @notice Performs arbitrage between hooked pool and swap pool to equalize prices
-    /// @dev Swaps in both pools directly via poolManager to profit from price differences
-    ///      Only positive deltas (profits) are taken at the end
-    /// @param tokenId The position token ID to get pool configuration
-    /// @return profit0 Profit in token0
-    /// @return profit1 Profit in token1
-    function arbitrage(uint256 tokenId)
-        external
-        returns (uint256 profit0, uint256 profit1)
-    {
-        // Get position info to determine pools
-        (PoolKey memory hookedPoolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        PoolKey memory swapPoolKey = _getSwapPoolKey(tokenId, hookedPoolKey);
-        
-        // Get prices from both pools
-        PoolId hookedPoolId = hookedPoolKey.toId();
-        PoolId swapPoolId = swapPoolKey.toId();
-        
-        (uint160 sqrtPriceHooked,,,) = StateLibrary.getSlot0(poolManager, hookedPoolId);
-        (uint160 sqrtPriceSwap,,,) = StateLibrary.getSlot0(poolManager, swapPoolId);
-        
-        Currency currency0 = hookedPoolKey.currency0;
-        Currency currency1 = hookedPoolKey.currency1;
-        
-
-
-        /*
-
-        // TODO implement resonable logic - maybe using LiquidityCalculator.sol
-        // Prepare swap params
-        uint160 sqrtPriceLimitX96;
-        BalanceDelta totalDelta = BalanceDeltaLibrary.ZERO_DELTA;
-        
-        // Determine arbitrage direction
-        if (sqrtPriceHooked > sqrtPriceSwap) {
-            // Hooked pool has higher price: buy in swap pool (token0->token1), sell in hooked pool (token1->token0)
-            sqrtPriceLimitX96 = sqrtPriceHooked;
-            
-            // First swap: token0 -> token1 in swap pool (buy cheap)
-            SwapParams memory swapParams1 = SwapParams({
-                zeroForOne: true,
-                amountSpecified: -int256(maxAmountIn),
-                sqrtPriceLimitX96: sqrtPriceLimitX96
-            });
-            
-            BalanceDelta delta1 = poolManager.swap(swapPoolKey, swapParams1, "");
-            totalDelta = totalDelta + delta1;
-            
-            // Calculate how much token1 we received from first swap
-            // delta1.amount1() is negative (we pay token1), so -delta1.amount1() is positive (we receive)
-            int128 token1Received = -delta1.amount1();
-            
-            if (token1Received > 0) {
-                // Second swap: token1 -> token0 in hooked pool (sell expensive)
-                sqrtPriceLimitX96 = TickMath.MAX_SQRT_PRICE - 1;
-                SwapParams memory swapParams2 = SwapParams({
-                    zeroForOne: false,
-                    amountSpecified: -int256(int256(token1Received)), // Negative for exact input
-                    sqrtPriceLimitX96: sqrtPriceLimitX96
-                });
-                
-                BalanceDelta delta2 = poolManager.swap(hookedPoolKey, swapParams2, "");
-                totalDelta = totalDelta + delta2;
-            }
-        } else {
-            // Swap pool has higher price: buy in hooked pool (token0->token1), sell in swap pool (token1->token0)
-            sqrtPriceLimitX96 = TickMath.MIN_SQRT_PRICE + 1;
-            
-            // First swap: token0 -> token1 in hooked pool (buy cheap)
-            SwapParams memory swapParams1 = SwapParams({
-                zeroForOne: true,
-                amountSpecified: -int256(maxAmountIn),
-                sqrtPriceLimitX96: sqrtPriceLimitX96
-            });
-            
-            BalanceDelta delta1 = poolManager.swap(hookedPoolKey, swapParams1, "");
-            totalDelta = totalDelta + delta1;
-            
-            // Calculate how much token1 we received from first swap
-            // delta1.amount1() is negative (we pay token1), so -delta1.amount1() is positive (we receive)
-            int128 token1Received = -delta1.amount1();
-            
-            if (token1Received > 0) {
-                // Second swap: token1 -> token0 in swap pool (sell expensive)
-                sqrtPriceLimitX96 = TickMath.MAX_SQRT_PRICE - 1;
-                SwapParams memory swapParams2 = SwapParams({
-                    zeroForOne: false,
-                    amountSpecified: -int256(int256(token1Received)), // Negative for exact input
-                    sqrtPriceLimitX96: sqrtPriceLimitX96
-                });
-                
-                BalanceDelta delta2 = poolManager.swap(swapPoolKey, swapParams2, "");
-                totalDelta = totalDelta + delta2;
-            }
-        }
-        
-        // there maybe no debt
-        if (totalDelta.amount0() < 0 || totalDelta.amount1() < 0) {
-            revert("No profit");
-        }
-
-        // Take positive deltas (profits) and transfer to caller
-        if (totalDelta.amount0() > 0) {
-            profit0 = uint256(int256(totalDelta.amount0()));
-            poolManager.take(currency0, msg.sender, profit0);
-        }
-        
-        if (totalDelta.amount1() > 0) {
-            profit1 = uint256(int256(totalDelta.amount1()));
-            poolManager.take(currency1, msg.sender, profit1);
-        }
-        */
     }
 }

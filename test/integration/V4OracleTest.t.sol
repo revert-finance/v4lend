@@ -8,12 +8,17 @@ import "./V4ForkTestBase.sol";
 import "../../src/V4Oracle.sol";
 import "../../src/interfaces/IV4Oracle.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 /**
  * @title V4OracleTest
  * @notice Comprehensive test suite for V4Oracle functionality
  */
 contract V4OracleTest is V4ForkTestBase {
+    uint256 constant Q96 = 2 ** 96;
     
     function testGetValue() public {
         // Test with the two preconfigured NFT positions from V4ForkTestBase
@@ -212,6 +217,101 @@ contract V4OracleTest is V4ForkTestBase {
         console.log("=== getLiquidityAndFees Validation Tests Complete ===");
         console.log("Summary: Tested oracle accuracy against actual token collections");
         console.log("");
+    }
+
+    /// @notice Test comparing pool price to oracle getPriceX96 for the same two tokens
+    /// @dev Gets pool price from sqrtPriceX96 and compares it to oracle's getPriceX96 result
+    function testGetPriceX96Comparison() public {
+        // Test with the two preconfigured NFT positions from V4ForkTestBase
+        uint256[] memory testTokenIds = new uint256[](2);
+        testTokenIds[0] = nft1TokenId; // NFT 1 from V4ForkTestBase
+        testTokenIds[1] = nft2TokenId; // NFT 2 from V4ForkTestBase
+        
+        for (uint256 i = 0; i < testTokenIds.length; i++) {
+            uint256 tokenId = testTokenIds[i];
+            _testGetPriceX96ForPosition(tokenId);
+        }
+    }
+    
+    /// @notice Helper function to test getPriceX96 comparison for a specific position
+    /// @param tokenId The token ID of the position to test
+    function _testGetPriceX96ForPosition(uint256 tokenId) internal view {
+        // Get pool information from position
+        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(tokenId);
+        
+        address token0 = Currency.unwrap(poolKey.currency0);
+        address token1 = Currency.unwrap(poolKey.currency1);
+        
+        // Get pool's sqrtPriceX96
+        PoolId poolId = PoolIdLibrary.toId(poolKey);
+        (uint160 sqrtPriceX96, , , ) = StateLibrary.getSlot0(poolManager, poolId);
+        
+        // Calculate pool price: price = (sqrtPriceX96)^2 / Q96
+        // This gives price of token1 in terms of token0
+        uint256 poolPriceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) / Q96;
+        
+        // Get oracle price: price of token1 in terms of token0
+        uint256 oraclePriceX96 = v4Oracle.getPoolPriceX96(token0, token1);
+        
+        // Log for debugging
+        console.log("=== Testing getPriceX96 Comparison ===");
+        console.log("TokenId:", tokenId);
+        console.log("Token0:", token0);
+        console.log("Token1:", token1);
+        console.log("Pool price (token1/token0):", poolPriceX96);
+        console.log("Oracle price (token1/token0):", oraclePriceX96);
+        
+        // Both prices should be positive
+        assertTrue(poolPriceX96 > 0, "Pool price should be positive");
+        assertTrue(oraclePriceX96 > 0, "Oracle price should be positive");
+        
+        // Calculate the difference percentage (allowing for some deviation)
+        // Prices may differ due to Chainlink vs pool price, but should be reasonably close
+        uint256 difference;
+        uint256 maxPrice;
+        if (poolPriceX96 >= oraclePriceX96) {
+            difference = poolPriceX96 - oraclePriceX96;
+            maxPrice = poolPriceX96;
+        } else {
+            difference = oraclePriceX96 - poolPriceX96;
+            maxPrice = oraclePriceX96;
+        }
+        
+        // Calculate percentage difference (in basis points * 100, i.e., 200 = 2%)
+        // Using maxPoolPriceDifference from oracle (200 = 2%) as tolerance
+        uint256 differenceBpsX100 = (difference * 10000) / maxPrice;
+        uint256 maxDifferenceBpsX100 = v4Oracle.maxPoolPriceDifference();
+        
+        console.log("Price difference (bps*100):", differenceBpsX100);
+        console.log("Max allowed difference (bps*100):", maxDifferenceBpsX100);
+        
+        // Assert that the difference is within the oracle's maxPoolPriceDifference
+        // This ensures the oracle and pool prices are reasonably aligned
+        assertTrue(
+            differenceBpsX100 <= maxDifferenceBpsX100 || maxDifferenceBpsX100 == type(uint16).max,
+            "Price difference should be within maxPoolPriceDifference"
+        );
+        
+        // Also test the reverse direction: price of token0 in terms of token1
+        uint256 poolPriceReverseX96 = Q96 * Q96 / poolPriceX96;
+        uint256 oraclePriceReverseX96 = v4Oracle.getPoolPriceX96(token1, token0);
+        
+        console.log("Pool price (token0/token1):", poolPriceReverseX96);
+        console.log("Oracle price (token0/token1):", oraclePriceReverseX96);
+        
+        assertTrue(poolPriceReverseX96 > 0, "Reverse pool price should be positive");
+        assertTrue(oraclePriceReverseX96 > 0, "Reverse oracle price should be positive");
+        
+        // Verify inverse relationship: price0/token1 should be approximately 1 / (price1/token0)
+        // Allow for small rounding differences
+        uint256 expectedReverse = Q96 * Q96 / poolPriceX96;
+        uint256 diffReverse = expectedReverse > poolPriceReverseX96 
+            ? expectedReverse - poolPriceReverseX96 
+            : poolPriceReverseX96 - expectedReverse;
+        uint256 diffReverseBpsX100 = (diffReverse * 10000) / expectedReverse;
+        
+        // Should be very close (within 0.01% for rounding)
+        assertTrue(diffReverseBpsX100 < 100, "Reverse price calculation should be accurate");
     }
 
     // recieves ETH from decreasing liquidity

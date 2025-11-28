@@ -21,6 +21,7 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
+import {V4Oracle} from "../src/V4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
@@ -63,10 +64,19 @@ contract RevertHookTest is BaseTest {
         address flags = address(
             uint160(
                 Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | 
-                Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
+                Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
-        bytes memory constructorArgs = abi.encode(positionManager, poolManager, address(this), permit2); // Add all the necessary constructor arguments from the hook
+
+
+        // Deploy V4Oracle
+        V4Oracle v4Oracle = new V4Oracle(
+            positionManager,
+            Currency.unwrap(currency0),
+            0x000000000000000000000000000000000000dEaD
+        );
+
+        bytes memory constructorArgs = abi.encode(address(this), permit2, v4Oracle); // Add all the necessary constructor arguments from the hook
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
