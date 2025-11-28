@@ -63,7 +63,7 @@ contract RevertHookTest is BaseTest {
         // Deploy the hook to an address with the correct flags
         address flags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | 
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | 
                 Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
@@ -167,6 +167,7 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoRange() public {
         hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
             doAutoCompound: false,
+            doAutoLend: false,
             doAutoRange: true,
             doAutoExit: false,
             autoExitTickLower: 0,
@@ -258,6 +259,7 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             doAutoCompound: true,
+            doAutoLend: false,
             doAutoRange: false,
             doAutoExit: false,
             autoExitTickLower: 0,
@@ -299,6 +301,15 @@ contract RevertHookTest is BaseTest {
             receiver: address(this),
             deadline: block.timestamp
         });
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
         // ------------------- //
 
         uint256[] memory params = new uint256[](1);
@@ -318,6 +329,7 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             doAutoCompound: false,
+            doAutoLend: false,
             doAutoRange: false,
             doAutoExit: true,
             autoExitTickLower: tickLower2,
@@ -375,6 +387,7 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             doAutoCompound: false,
+            doAutoLend: false,
             doAutoRange: false,
             doAutoExit: true,
             autoExitTickLower: tickLower2,

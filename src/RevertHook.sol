@@ -6,6 +6,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
@@ -39,6 +40,7 @@ import {Transformer} from "./transformers/Transformer.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {V4Oracle} from "./V4Oracle.sol";
 
+
 error Unauthorized();
 error InvalidConfig();
 
@@ -51,6 +53,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     event AutoCompound(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
     event AutoExit(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
     event AutoRange(uint256 indexed tokenId, uint256 newTokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
+    event AutoLendDeposit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
+    event AutoLendWithdraw(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
 
     // events for other actions
     event SetPositionConfig(uint256 indexed tokenId, PositionConfig positionConfig);
@@ -61,15 +65,22 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
     event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
 
+    // max amount of ticks which can be processed
+    uint32 public constant MAX_PROCESSED_TICK_RANGES_PER_SWAP = 100;
+
     IPermit2 public immutable permit2;
     mapping(address => bool) private permit2Approved;
 
     IPositionManager public immutable positionManager;
     V4Oracle public immutable v4Oracle;
 
+
     // manages ticks where actions are triggered (can be multiple entries per tokenid)
     mapping(PoolId poolId => mapping(int24 tickLower => uint256[] tokenIds)) public lowerTrigger;
     mapping(PoolId poolId => mapping(int24 tickUpper => uint256[] tokenIds)) public upperTrigger;
+
+    // configured vaults for auto lend
+    mapping(address token => IERC4626 vault) public autoLendVaults;
 
     // last tick
     mapping(PoolId => int24) public tickLowerLasts;
@@ -79,6 +90,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     uint16 autoCompoundRewardBps = 100;
 
     // protocol fees for auto exit and auto range (taken from the final amount)
+    uint16 autoLendProtocolFeeBps = 100;
     uint16 autoExitProtocolFeeBps = 100;
     uint16 autoRangeProtocolFeeBps = 100;
 
@@ -97,12 +109,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     mapping(uint256 tokenId => PositionConfig positionConfig) public positionConfigs;
+    mapping(uint256 tokenId => uint256 autoLendShares) public autoLendShares;
 
     struct PositionConfig {
         bool doAutoCompound;
         bool doAutoRange;
         bool doAutoExit;
-        // bool doAutoLend;
+        bool doAutoLend;
 
         // auto exit config
         int24 autoExitTickLower;
@@ -174,7 +187,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             afterAddLiquidity: true,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: true,
-            beforeSwap: false,
+            beforeSwap: true,
             afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
@@ -192,6 +205,28 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         return BaseHook.afterInitialize.selector;
     }
 
+    function _beforeSwap(address caller, PoolKey calldata key, SwapParams calldata params, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        LiquidityCalculator.V4PoolInfo memory pool = LiquidityCalculator.V4PoolInfo({
+            poolMgr: poolManager,
+            poolIdentifier: key.toId(),
+            tickSpacing: key.tickSpacing
+        });
+
+        int24 minTick = params.zeroForOne ? TickMath.minUsableTick(key.tickSpacing) : TickMath.maxUsableTick(key.tickSpacing) - key.tickSpacing;
+        int24 maxTick = params.zeroForOne ? TickMath.minUsableTick(key.tickSpacing) + key.tickSpacing : TickMath.maxUsableTick(key.tickSpacing);
+
+        (,,,uint160 sqrtPriceX96) = LiquidityCalculator.calculateSamePool(pool, minTick, maxTick, params.zeroForOne ? uint256(-params.amountSpecified) : 0, params.zeroForOne ? 0 : uint256(-params.amountSpecified));
+
+        _getTickLower(TickMath.getTickAtSqrtPrice(sqrtPriceX96), key.tickSpacing);
+
+
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
     function _afterSwap(address caller, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
         internal
         override
@@ -206,6 +241,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
         int24 tick = tickLowerLasts[poolId];
+
+        // TODO add check for max tickspacings - if exceeds, revert
 
         // if tick changed - process all triggers, each processing may change the tick again
         // this must work all until the end - otherwise swap is not allowed and hook will not be executed
@@ -242,8 +279,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         bool ownedByVault = vaults[_getOwner(tokenId)];
 
-        // there may only be one action configured for a tokenid/tick - auto exit takes priority over auto range
-        if (config.doAutoExit && !isUpperTrigger
+        // there may only be one action configured for a tokenid/tick - auto lend takes priority over auto exit takes priority over auto range
+        if (config.doAutoLend) { // TODO add complete autolend condition
+            if (!ownedByVault) {
+                autoLend(poolKey, poolId, tokenId, isUpperTrigger);
+            }
+        } else if (config.doAutoExit && !isUpperTrigger
             && baseTick == config.autoExitTickLower) {
             if (ownedByVault) {
                 IVault(msg.sender).transform(tokenId, address(this), abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower)));
@@ -456,6 +497,66 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             hooks: positionConfigs[tokenId].swapPoolHooks
         });
     }
+
+    function autoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) public {
+
+        if (msg.sender != address(poolManager)) {
+            revert Unauthorized();
+        }
+
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+    
+        Currency currency = isUpper ? currency1 : currency0;
+        address currencyAddr = Currency.unwrap(currency);
+        uint256 amount = isUpper ? amount1 : amount0;
+        amount -= amount * autoLendProtocolFeeBps / 10000;
+
+        SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), amount);
+
+        // TODO try catch if deposit fails - log as event
+        autoLendShares[tokenId] = autoLendVaults[currencyAddr].deposit(amount, address(this));
+        SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), 0);
+
+        _sendFees(tokenId, currency0, currency1, !isUpper ? amount : 0, isUpper ? amount : 0, autoLendProtocolFeeBps, protocolFeeRecipient);
+        
+        address owner = _getOwner(tokenId);
+        _sendLeftoverTokens(tokenId, currency0, currency1, owner);
+
+        emit AutoLendDeposit(tokenId, currency, amount, shares);
+    }
+
+    function autoLendWithdraw(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) public {
+
+        if (msg.sender != address(poolManager)) {
+            revert Unauthorized();
+        }
+
+        uint256 shares = autoLendShares[tokenId];
+        autoLendVaults[currencyAddr].redeem(shares, address(this), address(this));
+        autoLendShares[tokenId] = 0;
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        _increaseLiquidity(tokenId, poolKey, posInfo, isUpper ?, uint128(maxAddable1));
+
+        emit AutoLendWithdraw(tokenId, currency, amount, shares);
+    }
+
+    // TODO add auto lend force exit function (if it fails to withdraw automatically, call this function to exit)
+    function autoLendForceExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) external {
+
+        address owner = _getOwner(tokenId);        
+        if (msg.sender != owner) {
+            revert Unauthorized();
+        }
+
+        address currencyAddr = Currency.unwrap(poolKey.currency0);
+        uint256 shares = autoLendShares[tokenId];
+        autoLendVaults[currencyAddr].redeem(shares, address(this), address(this));
+        autoLendShares[tokenId] = 0;
+        
+    }
+
 
     function autoExit(PoolKey memory poolKey, PoolId /* poolId */, uint256 tokenId, bool isUpper, bool doSwap) public {
 
@@ -927,8 +1028,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         uint16 feeBps,
         address recipient
     ) internal {
-        currency0.transfer(recipient, amount0 * feeBps / 10000);
-        currency1.transfer(recipient, amount1 * feeBps / 10000);
+        if (amount0 != 0) { // send protocol fee
+            currency0.transfer(recipient, amount0 * feeBps / 10000);
+        }
+        if (amount1 != 0) { // send protocol fee
+            currency1.transfer(recipient, amount1 * feeBps / 10000);
+        }
 
         emit SendFees(tokenId, currency0, currency1, amount0, amount1, recipient);
     }
