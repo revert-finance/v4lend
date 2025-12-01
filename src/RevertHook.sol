@@ -130,11 +130,16 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     mapping(uint256 tokenId => uint256 autoLendShares) public autoLendShares;
     mapping(uint256 tokenId => address autoLendToken) public autoLendTokens;
 
+    enum PositionMode {
+        INITIAL,
+        AUTO_COMPOUND,
+        AUTO_RANGE,
+        AUTO_EXIT,
+        AUTO_LEND
+    }
+
     struct PositionConfig {
-        bool doAutoCompound;
-        bool doAutoRange;
-        bool doAutoExit;
-        bool doAutoLend;
+        PositionMode mode;
 
         // auto exit config
         int24 autoExitTickLower;
@@ -158,6 +163,14 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     // relative liquidity
     // in range status (only these must be compounded)
     // slipagge config / swap config
+
+    /// @notice Sets the ERC4626 vault for a given token address
+    /// @dev Can only be called by the owner. This vault will be used for autolend functionality.
+    /// @param token The token address to set the vault for
+    /// @param vault The ERC4626 vault address (can be address(0) to remove)
+    function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
+        autoLendVaults[token] = vault;
+    }
 
     function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external {
         if (_getOwner(tokenId) != msg.sender) {
@@ -232,23 +245,25 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 tickEnd = _simulateSwap(key, params);
         int24 tick = tickLowerLasts[key.toId()];
 
+        console.log("tick", tick);
+        console.log("tickEnd", tickEnd);
+
         // process all triggers, triggers are not removed here because autolend can happen again later at the same position
         while (tick != tickEnd) {
             uint256[] storage tokenIds =
                 tick < tickEnd ? upperTriggerBeforeSwap[key.toId()][tick] : lowerTriggerBeforeSwap[key.toId()][tick];
             uint256 length = tokenIds.length;
-            if (length > 0) {
-                for (uint256 i = 0; i < length; i++) {
-                    uint256 tokenId = tokenIds[i];
-                    _handleTokenIdBeforeSwap(key, key.toId(), tokenId, tick < tickEnd, tick);
-                }
+            
+            for (uint256 i = 0; i < length; i++) {
+                uint256 tokenId = tokenIds[i];
+                _handleTokenIdBeforeSwap(key, key.toId(), tokenId, tick < tickEnd, tick);
+            }
+            
+            // move to next tick
+            if (tick < tickEnd) {
+                tick += key.tickSpacing;
             } else {
-                // move to next tick
-                if (tick < tickEnd) {
-                    tick += key.tickSpacing;
-                } else {
-                    tick -= key.tickSpacing;
-                }
+                tick -= key.tickSpacing;
             }
         }
 
@@ -329,15 +344,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 baseTick
     ) internal {
         PositionConfig memory config = positionConfigs[tokenId];
-        if (config.doAutoLend) {
-            // if collateralized, auto lend is not allowed
-            bool ownedByVault = vaults[_getOwner(tokenId)];
-            if (!ownedByVault) {
-                if (autoLendShares[tokenId] == 0) {
-                    autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger);
-                } else {
-                    autoLendWithdraw(poolKey, poolId, tokenId, isUpperTrigger);
-                }
+        if (config.mode == PositionMode.AUTO_LEND) {
+            console.log("AUTO_LEND trigger", tokenId);
+            console.log("@Tick", baseTick);
+            if (autoLendShares[tokenId] != 0) {
+                console.log("AUTO_LEND withdraw", tokenId);
+                autoLendWithdraw(poolKey, poolId, tokenId, isUpperTrigger);
             }
         }
     }
@@ -354,7 +366,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         bool ownedByVault = vaults[_getOwner(tokenId)];
 
-        if (config.doAutoExit && !isUpperTrigger && baseTick == config.autoExitTickLower) {
+        if (config.mode == PositionMode.AUTO_LEND) {
+            if (autoLendShares[tokenId] == 0) {
+                console.log("AUTO_LEND deposit", tokenId);
+                autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger);
+            }
+        } else if (config.mode == PositionMode.AUTO_EXIT && !isUpperTrigger && baseTick == config.autoExitTickLower) {
             if (ownedByVault) {
                 IVault(msg.sender)
                     .transform(
@@ -367,7 +384,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             } else {
                 autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
             }
-        } else if (config.doAutoExit && isUpperTrigger && baseTick == config.autoExitTickUpper) {
+        } else if (config.mode == PositionMode.AUTO_EXIT && isUpperTrigger && baseTick == config.autoExitTickUpper) {
             if (ownedByVault) {
                 IVault(msg.sender)
                     .transform(
@@ -381,7 +398,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper);
             }
         } else {
-            if (config.doAutoRange) {
+            if (config.mode == PositionMode.AUTO_RANGE) {
                 (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
                 int24 tickLower = posInfo.tickLower();
                 int24 tickUpper = posInfo.tickUpper();
@@ -479,7 +496,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         // TODO optimize this by checking if changed - remove only when needed
         if (liquidity > 0) {
-            if (currentConfig.doAutoRange) {
+            if (currentConfig.mode == PositionMode.AUTO_RANGE) {
                 _removeFromTickMapping(
                     lowerTriggerAfterSwap[poolId][tickLower - currentConfig.autoRangeLowerLimit], tokenId
                 );
@@ -487,20 +504,20 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                     upperTriggerAfterSwap[poolId][tickUpper + currentConfig.autoRangeUpperLimit], tokenId
                 );
             }
-            if (newConfig.doAutoRange) {
+            if (newConfig.mode == PositionMode.AUTO_RANGE) {
                 _addToTickMapping(lowerTriggerAfterSwap[poolId][tickLower - newConfig.autoRangeLowerLimit], tokenId);
                 _addToTickMapping(upperTriggerAfterSwap[poolId][tickUpper + newConfig.autoRangeUpperLimit], tokenId);
             }
-            if (currentConfig.doAutoExit) {
+            if (currentConfig.mode == PositionMode.AUTO_EXIT) {
                 _removeFromTickMapping(lowerTriggerAfterSwap[poolId][currentConfig.autoExitTickLower], tokenId);
                 _removeFromTickMapping(upperTriggerAfterSwap[poolId][currentConfig.autoExitTickUpper], tokenId);
             }
-            if (newConfig.doAutoExit) {
+            if (newConfig.mode == PositionMode.AUTO_EXIT) {
                 _addToTickMapping(lowerTriggerAfterSwap[poolId][newConfig.autoExitTickLower], tokenId);
                 _addToTickMapping(upperTriggerAfterSwap[poolId][newConfig.autoExitTickUpper], tokenId);
             }
         } else {
-            if (currentConfig.doAutoRange) {
+            if (currentConfig.mode == PositionMode.AUTO_RANGE) {
                 _removeFromTickMapping(
                     lowerTriggerAfterSwap[poolId][tickLower - currentConfig.autoRangeLowerLimit], tokenId
                 );
@@ -508,19 +525,19 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                     upperTriggerAfterSwap[poolId][tickUpper + currentConfig.autoRangeUpperLimit], tokenId
                 );
             }
-            if (currentConfig.doAutoExit) {
+            if (currentConfig.mode == PositionMode.AUTO_EXIT) {
                 _removeFromTickMapping(lowerTriggerAfterSwap[poolId][currentConfig.autoExitTickLower], tokenId);
                 _removeFromTickMapping(upperTriggerAfterSwap[poolId][currentConfig.autoExitTickUpper], tokenId);
             }
         }
 
         // autolend configuration changes handling
-        if (newConfig.doAutoLend) {
+        if (newConfig.mode == PositionMode.AUTO_LEND) {
             _addToTickMapping(lowerTriggerBeforeSwap[poolId][tickLower - 2 * key.tickSpacing], tokenId); // <- trigger to move liquidity to lend
             _addToTickMapping(lowerTriggerBeforeSwap[poolId][tickUpper], tokenId); // <- trigger to readd liquidity to position
             _addToTickMapping(upperTriggerBeforeSwap[poolId][tickLower - 1 * key.tickSpacing], tokenId); // -> trigger to readd liquidity to position
             _addToTickMapping(upperTriggerBeforeSwap[poolId][tickUpper + key.tickSpacing], tokenId); // -> trigger to move liquidity to lend
-        } else if (currentConfig.doAutoLend && !newConfig.doAutoLend) {
+        } else if (currentConfig.mode == PositionMode.AUTO_LEND && newConfig.mode != PositionMode.AUTO_LEND) {
             _removeFromTickMapping(lowerTriggerBeforeSwap[poolId][tickLower - 2 * key.tickSpacing], tokenId);
             _removeFromTickMapping(lowerTriggerBeforeSwap[poolId][tickUpper], tokenId);
             _removeFromTickMapping(upperTriggerBeforeSwap[poolId][tickLower - 1 * key.tickSpacing], tokenId);
@@ -625,7 +642,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
             SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), amount);
 
-            // TODO try catch if deposit fails - log as event
             try autoLendVaults[currencyAddr].deposit(amount, address(this)) returns (uint256 shares) {
                 autoLendShares[tokenId] = shares;
                 autoLendTokens[tokenId] = currencyAddr;
@@ -662,6 +678,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         if (shares > 0) {
             try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
+
                 autoLendShares[tokenId] = 0;
                 autoLendTokens[tokenId] = address(0);
 
@@ -670,6 +687,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 amount -= amount * autoLendProtocolFeeBps / 10000;
 
                 bool isToken0 = token == Currency.unwrap(poolKey.currency0);
+
+                console.log("AUTO_LEND withdraw amount", amount);
+                console.log("AUTO_LEND isToken0", isToken0);
+
+                _handleApproval(Currency.wrap(token), amount);
 
                 // add out of range liquidity
                 (uint256 amount0, uint256 amount1) = _increaseLiquidity(
@@ -830,7 +852,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
 
         // Step 0: Check if auto compound is enabled
-        if (!positionConfigs[tokenId].doAutoCompound) {
+        if (positionConfigs[tokenId].mode != PositionMode.AUTO_COMPOUND) {
             return bytes("");
         }
 

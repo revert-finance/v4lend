@@ -24,6 +24,9 @@ import {RevertHook} from "../src/RevertHook.sol";
 import {V4Oracle} from "../src/V4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {MockERC4626Vault} from "./utils/MockERC4626Vault.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract RevertHookTest is BaseTest {
     using EasyPosm for IPositionManager;
@@ -39,6 +42,9 @@ contract RevertHookTest is BaseTest {
 
     RevertHook hook;
     PoolId poolId;
+
+    MockERC4626Vault vault0;
+    MockERC4626Vault vault1;
 
     uint256 tokenId;
     int24 tickLower;
@@ -79,6 +85,26 @@ contract RevertHookTest is BaseTest {
         bytes memory constructorArgs = abi.encode(address(this), permit2, v4Oracle); // Add all the necessary constructor arguments from the hook
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
+
+        // Deploy MockERC4626Vault for both currencies
+        vault0 = new MockERC4626Vault(
+            IERC20(Currency.unwrap(currency0)),
+            "Vault Token0",
+            "vT0"
+        );
+        vault1 = new MockERC4626Vault(
+            IERC20(Currency.unwrap(currency1)),
+            "Vault Token1",
+            "vT1"
+        );
+
+        // Set vaults in hook using the setter function
+        hook.setAutoLendVault(Currency.unwrap(currency0), vault0);
+        hook.setAutoLendVault(Currency.unwrap(currency1), vault1);
+        
+        // Verify vaults are set correctly
+        assertEq(address(hook.autoLendVaults(Currency.unwrap(currency0))), address(vault0), "Vault0 should be set");
+        assertEq(address(hook.autoLendVaults(Currency.unwrap(currency1))), address(vault1), "Vault1 should be set");
 
         // Create the pool
         nonHookedPoolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
@@ -166,10 +192,7 @@ contract RevertHookTest is BaseTest {
 
     function testBasicAutoRange() public {
         hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
-            doAutoCompound: false,
-            doAutoLend: false,
-            doAutoRange: true,
-            doAutoExit: false,
+            mode: RevertHook.PositionMode.AUTO_RANGE,
             autoExitTickLower: 0,
             autoExitTickUpper: 0,
             autoExitSwapLower: false,
@@ -180,7 +203,7 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperDelta: 60,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook)
+            swapPoolHooks: IHooks(address(0))
         }));
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
@@ -258,10 +281,7 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoCompound() public {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            doAutoCompound: true,
-            doAutoLend: false,
-            doAutoRange: false,
-            doAutoExit: false,
+            mode: RevertHook.PositionMode.AUTO_COMPOUND,
             autoExitTickLower: 0,
             autoExitTickUpper: 0,
             autoExitSwapLower: false,
@@ -328,10 +348,7 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoExit() public {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            doAutoCompound: false,
-            doAutoLend: false,
-            doAutoRange: false,
-            doAutoExit: true,
+            mode: RevertHook.PositionMode.AUTO_EXIT,
             autoExitTickLower: tickLower2,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: false,
@@ -386,10 +403,7 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoExit_NonHookedPool() public {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            doAutoCompound: false,
-            doAutoLend: false,
-            doAutoRange: false,
-            doAutoExit: true,
+            mode: RevertHook.PositionMode.AUTO_EXIT,
             autoExitTickLower: tickLower2,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: true, // Enable swap when exiting at lower bound
@@ -545,6 +559,155 @@ contract RevertHookTest is BaseTest {
         
         // Verify we're at or below the lower bound of the range
         assertTrue(tickAfter <= tickLower, "Final tick should be at or below the lower bound of the range");
+    }
+
+    function testBasicAutoLend() public {
+        // Create a new position for autolend testing
+        int24 testTickLower = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
+        int24 testTickUpper = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
+        
+        uint128 liquidityAmount = 50e18;
+        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
+            Constants.SQRT_PRICE_1_1,
+            TickMath.getSqrtPriceAtTick(testTickLower),
+            TickMath.getSqrtPriceAtTick(testTickUpper),
+            liquidityAmount
+        );
+
+        // Mint a new position
+        (uint256 autolendTokenId,) = positionManager.mint(
+            poolKey,
+            testTickLower,
+            testTickUpper,
+            liquidityAmount,
+            amount0Expected + 1,
+            amount1Expected + 1,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        // Configure autolend for this position
+        hook.setPositionConfig(autolendTokenId, RevertHook.PositionConfig({
+            mode: RevertHook.PositionMode.AUTO_LEND,
+            autoExitTickLower: 0,
+            autoExitTickUpper: 0,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(address(0))
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), autolendTokenId);
+
+        // Verify initial state
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(autolendTokenId);
+        assertGt(initialLiquidity, 0, "Position should have liquidity initially");
+        assertEq(hook.autoLendShares(autolendTokenId), 0, "Should have no autolend shares initially");
+        assertEq(address(hook.autoLendTokens(autolendTokenId)), address(0), "Should have no autolend token initially");
+
+        // Get initial vault balances
+        uint256 vault0BalanceBefore = vault0.totalAssets();
+        uint256 vault1BalanceBefore = vault1.totalAssets();
+
+        // ===== Test 1: Currency0 Deposit (swap down) =====
+        console.log("=== Test 1: Currency0 Deposit ===");
+        uint256 swapAmount = 20e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: swapAmount,
+            amountOutMin: 0,
+            zeroForOne: true, // Swap token0 -> token1 (price goes down)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Verify currency0 deposit was triggered
+        assertGt(hook.autoLendShares(autolendTokenId), 0, "Should have autolend shares after currency0 deposit");
+        assertEq(address(hook.autoLendTokens(autolendTokenId)), Currency.unwrap(currency0), "Should have currency0 as autolend token");
+        assertGt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have received assets");
+        
+        uint128 liquidityAfterCurrency0Deposit = positionManager.getPositionLiquidity(autolendTokenId);
+        assertLt(liquidityAfterCurrency0Deposit, initialLiquidity, "Position liquidity should decrease after currency0 deposit");
+
+        // ===== Test 2: Currency0 Withdraw (swap back up) =====
+        console.log("=== Test 2: Currency0 Withdraw ===");
+        uint256 vault0BalanceBeforeWithdraw = vault0.totalAssets();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: swapAmount,
+            amountOutMin: 0,
+            zeroForOne: false, // Swap token1 -> token0 (price goes up)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Verify currency0 withdraw was triggered
+        assertEq(hook.autoLendShares(autolendTokenId), 0, "Should have no autolend shares after currency0 withdraw");
+        assertEq(address(hook.autoLendTokens(autolendTokenId)), address(0), "Should have no autolend token after withdraw");
+        assertLt(vault0.totalAssets(), vault0BalanceBeforeWithdraw, "Vault0 should have less assets after withdraw");
+        
+        uint128 liquidityAfterCurrency0Withdraw = positionManager.getPositionLiquidity(autolendTokenId);
+        assertGt(liquidityAfterCurrency0Withdraw, liquidityAfterCurrency0Deposit, 
+            "Position liquidity should increase after currency0 withdraw");
+
+        // ===== Test 3: Currency1 Deposit (swap up more) =====
+        console.log("=== Test 3: Currency1 Deposit ===");
+        swapRouter.swapExactTokensForTokens({
+            amountIn: swapAmount * 2,
+            amountOutMin: 0,
+            zeroForOne: false, // Swap token1 -> token0 (price goes up)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // log current tick
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap", currentTick);
+
+        // Verify currency1 deposit was triggered
+        assertGt(hook.autoLendShares(autolendTokenId), 0, "Should have autolend shares after currency1 deposit");
+        assertEq(address(hook.autoLendTokens(autolendTokenId)), Currency.unwrap(currency1), "Should have currency1 as autolend token");
+        assertGt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have received assets");
+        
+        uint128 liquidityAfterCurrency1Deposit = positionManager.getPositionLiquidity(autolendTokenId);
+        assertLt(liquidityAfterCurrency1Deposit, liquidityAfterCurrency0Withdraw, 
+            "Position liquidity should decrease after currency1 deposit");
+
+        // ===== Test 4: Currency1 Withdraw (swap back down) =====
+        console.log("=== Test 4: Currency1 Withdraw ===");
+        uint256 vault1BalanceBeforeWithdraw = vault1.totalAssets();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: swapAmount,
+            amountOutMin: 0,
+            zeroForOne: true, // Swap token0 -> token1 (price goes down)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Verify currency1 withdraw was triggered
+        assertEq(hook.autoLendShares(autolendTokenId), 0, "Should have no autolend shares after currency1 withdraw");
+        assertEq(address(hook.autoLendTokens(autolendTokenId)), address(0), "Should have no autolend token after withdraw");
+        assertLt(vault1.totalAssets(), vault1BalanceBeforeWithdraw, "Vault1 should have less assets after withdraw");
+        
+        uint128 liquidityAfterCurrency1Withdraw = positionManager.getPositionLiquidity(autolendTokenId);
+        assertGt(liquidityAfterCurrency1Withdraw, liquidityAfterCurrency1Deposit, 
+            "Position liquidity should increase after currency1 withdraw");
+
+        // Final verification: hook contract has no leftover token balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
     }
 
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
