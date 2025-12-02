@@ -634,7 +634,7 @@ contract RevertHookTest is BaseTest {
         assertGt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have received assets");
         
         uint128 liquidityAfterCurrency0Deposit = positionManager.getPositionLiquidity(autolendTokenId);
-        assertLt(liquidityAfterCurrency0Deposit, initialLiquidity, "Position liquidity should decrease after currency0 deposit");
+        assertEq(liquidityAfterCurrency0Deposit, 0, "Position liquidity should be 0 after currency0 deposit");
 
         // ===== Test 2: Currency0 Withdraw (swap back up) =====
         console.log("=== Test 2: Currency0 Withdraw ===");
@@ -661,7 +661,7 @@ contract RevertHookTest is BaseTest {
         // ===== Test 3: Currency1 Deposit (swap up more) =====
         console.log("=== Test 3: Currency1 Deposit ===");
         swapRouter.swapExactTokensForTokens({
-            amountIn: swapAmount * 2,
+            amountIn: swapAmount,
             amountOutMin: 0,
             zeroForOne: false, // Swap token1 -> token0 (price goes up)
             poolKey: poolKey,
@@ -680,8 +680,8 @@ contract RevertHookTest is BaseTest {
         assertGt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have received assets");
         
         uint128 liquidityAfterCurrency1Deposit = positionManager.getPositionLiquidity(autolendTokenId);
-        assertLt(liquidityAfterCurrency1Deposit, liquidityAfterCurrency0Withdraw, 
-            "Position liquidity should decrease after currency1 deposit");
+        assertEq(liquidityAfterCurrency1Deposit, 0, 
+            "Position liquidity be 0 after currency1 deposit");
 
         // ===== Test 4: Currency1 Withdraw (swap back down) =====
         console.log("=== Test 4: Currency1 Withdraw ===");
@@ -704,6 +704,28 @@ contract RevertHookTest is BaseTest {
         uint128 liquidityAfterCurrency1Withdraw = positionManager.getPositionLiquidity(autolendTokenId);
         assertGt(liquidityAfterCurrency1Withdraw, liquidityAfterCurrency1Deposit, 
             "Position liquidity should increase after currency1 withdraw");
+
+        // ===== Test 5: Currency0 Deposit Second Time (swap down again) =====
+        console.log("=== Test 5: Currency0 Deposit Second Time ===");
+        uint256 vault0BalanceBeforeSecondDeposit = vault0.totalAssets();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: swapAmount,
+            amountOutMin: 0,
+            zeroForOne: true, // Swap token0 -> token1 (price goes down)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Verify currency0 deposit was triggered again
+        assertGt(hook.autoLendShares(autolendTokenId), 0, "Should have autolend shares after second currency0 deposit");
+        assertEq(address(hook.autoLendTokens(autolendTokenId)), Currency.unwrap(currency0), "Should have currency0 as autolend token again");
+        assertGt(vault0.totalAssets(), vault0BalanceBeforeSecondDeposit, "Vault0 should have received assets in second deposit");
+        
+        uint128 liquidityAfterSecondCurrency0Deposit = positionManager.getPositionLiquidity(autolendTokenId);
+        assertEq(liquidityAfterSecondCurrency0Deposit, 0, 
+            "Position liquidity be 0 after second currency0 deposit");
 
         // Final verification: hook contract has no leftover token balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
