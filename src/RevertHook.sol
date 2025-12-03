@@ -240,19 +240,27 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        console.log("beforeSwap");
+        PoolId poolId = key.toId();
+
         // simulate swap to see which tick range is affected
         int24 tickEnd = _simulateSwap(key, params);
         int24 tick = tickLowerLasts[key.toId()];
 
+        console.log("tick", tick);
+        console.log("tickEnd", tickEnd);
+
+        
+
         // process all triggers, triggers are not removed here because autolend can happen again later at the same position
         while (tick != tickEnd) {
             uint256[] storage tokenIds =
-                tick < tickEnd ? upperTriggerBeforeSwap[key.toId()][tick] : lowerTriggerBeforeSwap[key.toId()][tick];
+                tick < tickEnd ? upperTriggerBeforeSwap[poolId][tick] : lowerTriggerBeforeSwap[poolId][tick];
             uint256 length = tokenIds.length;
 
             for (uint256 i = 0; i < length; i++) {
                 uint256 tokenId = tokenIds[i];
-                _handleTokenIdBeforeSwap(key, key.toId(), tokenId, tick < tickEnd, tick);
+                _handleTokenIdBeforeSwap(key, poolId, tokenId, tick < tickEnd, tick);
             }
 
             // move to next tick
@@ -277,6 +285,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 maxTick = params.zeroForOne
             ? TickMath.minUsableTick(poolKey.tickSpacing) + poolKey.tickSpacing
             : TickMath.maxUsableTick(poolKey.tickSpacing);
+        
+
+        console.log("minTick", minTick);
+        console.log("maxTick", maxTick);
+        console.log("amount0", params.zeroForOne ? uint256(-params.amountSpecified) : 0);
+        console.log("amount1", params.zeroForOne ? 0 : uint256(-params.amountSpecified));
+
         (,,, uint160 sqrtPriceX96) = LiquidityCalculator.calculateSamePool(
             pool,
             minTick,
@@ -301,6 +316,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
         int24 tick = tickLowerLasts[poolId];
+
+        console.log("afterSwap");
+        console.log("tick", tick);
+        console.log("tickEnd", tickEnd);
 
         // TODO add check for max tickspacings - if exceeds, revert
 

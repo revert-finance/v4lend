@@ -10,6 +10,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import "permit2/src/interfaces/ISignatureTransfer.sol";
 import "permit2/src/interfaces/IPermit2.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 // base contracts
 import {V4Vault} from "../../src/V4Vault.sol";
@@ -27,7 +29,6 @@ import {Constants} from "../../src/utils/Constants.sol";
 import {Swapper} from "../../src/utils/Swapper.sol";
 
 import {V4ForkTestBase} from "./V4ForkTestBase.sol";
-
 
 contract V4VaultTest is V4ForkTestBase {
     uint256 constant Q32 = 2 ** 32;
@@ -1459,5 +1460,6 @@ contract V4VaultTest is V4ForkTestBase {
 
         vm.stopPrank();
     }
+
 
 }
