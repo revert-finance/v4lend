@@ -489,6 +489,7 @@ library LiquidityCalculator {
         // Start searching from cached position or current position
         int16 searchWordPosition = params.wordPosition == type(int16).min ? currentWordPosition : params.wordPosition;
         uint256 tickBitmap = params.tickBitmap;
+        bool firstIteration = true;
         while (true) {
             if (searchLeft) {
                 // Search left (decreasing ticks)
@@ -500,8 +501,9 @@ library LiquidityCalculator {
                     return result;
                 }
                 // Load bitmap word if needed
-                if (searchWordPosition == currentWordPosition && tickBitmap == 0) {
+                if (searchWordPosition == currentWordPosition && firstIteration && tickBitmap == 0) {
                     tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition);
+                    firstIteration = false;
                 } else if (searchWordPosition < currentWordPosition) {
                     searchWordPosition--;
                     tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition);
@@ -631,6 +633,13 @@ library LiquidityCalculator {
             nextTick = result.nextTick;
             wordPosition = result.wordPosition;
             tickBitmap = result.tickBitmap;
+
+            if (nextTick < TickMath.MIN_TICK) {
+                nextTick = TickMath.MIN_TICK;
+            } else if (nextTick > TickMath.MAX_TICK) {
+                nextTick = TickMath.MAX_TICK;
+            }
+
             uint160 sqrtPriceNext = TickMath.getSqrtPriceAtTick(nextTick);
             uint256 amount0Target;
             uint256 amount1Target;

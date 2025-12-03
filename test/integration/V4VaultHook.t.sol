@@ -220,8 +220,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
 
-        _swapExactInputSingle(hookedPoolKey, true, 10e4, 0);
-        //_swapExactInputSingle(hookedPoolKey, false, 10e15, 0);
+        _swapExactInputSingle(hookedPoolKey, true, 10e6, 0);
+        _swapExactInputSingle(hookedPoolKey, false, 10e15, 0);
 
         console.log("Swaps completed, fees should have accumulated");
     }
@@ -280,8 +280,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 poolKey: key, zeroForOne: zeroForOne, amountIn: amountIn, amountOutMinimum: minAmountOut, hookData: bytes("")
             })
         );
-        params[1] = abi.encode(zeroForOne ? key.currency0 : key.currency1, type(uint256).max);
-        params[2] = abi.encode(zeroForOne ? key.currency1 : key.currency0, 0);
+        params[1] = abi.encode(zeroForOne ? key.currency0 : key.currency1, amountIn);
+        params[2] = abi.encode(zeroForOne ? key.currency1 : key.currency0, minAmountOut);
 
         // Combine actions and params into inputs
         inputs[0] = abi.encode(actions, params);
