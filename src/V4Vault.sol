@@ -429,6 +429,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         IERC721(address(positionManager)).safeTransferFrom(msg.sender, address(this), tokenId, abi.encode(recipient));
     }
 
+    /// @notice Handles special case when a token is received by the vault from a hook contract
+    function notifyERC721Received(uint256 tokenId, address recipient) external override {
+
+        if (!transformerAllowList[msg.sender]) {
+            revert Unauthorized();
+        }
+        _handleERC721Received(tokenId, recipient);
+    }
+
     /// @notice Whenever a token is recieved it either creates a new loan, or modifies an existing one when in transform mode.
     /// @inheritdoc IERC721Receiver
     function onERC721Received(address, /*operator*/ address from, uint256 tokenId, bytes calldata data)
@@ -441,15 +450,25 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert WrongContract();
         }
 
+        address owner = from;
+        if (data.length != 0) {
+            owner = abi.decode(data, (address));
+        }
+
+        _handleERC721Received(tokenId, owner);
+
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
+    /// @notice Internal function to handle ERC721 token receipt logic
+    /// @param tokenId The token ID received
+    /// @param owner The owner address for the new loan
+    function _handleERC721Received(uint256 tokenId, address owner) internal {
         (uint256 debtExchangeRateX96, uint256 lendExchangeRateX96) = _updateGlobalInterest();
 
         uint256 oldTokenId = transformedTokenId;
 
         if (oldTokenId == 0) {
-            address owner = from;
-            if (data.length != 0) {
-                owner = abi.decode(data, (address));
-            }
             loans[tokenId] = Loan(0);
 
             _checkHookAllowed(tokenId);
@@ -459,7 +478,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             // if in transform mode - and a new position is sent - current position is replaced and returned
             if (tokenId != oldTokenId) {
 
-                address owner = tokenOwner[oldTokenId];
+                address owner_ = tokenOwner[oldTokenId];
 
                 // set transformed token to new one
                 transformedTokenId = tokenId;
@@ -470,8 +489,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 loans[tokenId] = Loan(debtShares);
 
                 _checkHookAllowed(tokenId);
-                _addTokenToOwner(owner, tokenId);
-                emit Add(tokenId, owner, oldTokenId);
+                _addTokenToOwner(owner_, tokenId);
+                emit Add(tokenId, owner_, oldTokenId);
 
                 // remove debt from old loan
                 _cleanupLoan(oldTokenId, debtExchangeRateX96, lendExchangeRateX96);
@@ -482,8 +501,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 );
             }
         }
-
-        return IERC721Receiver.onERC721Received.selector;
     }
 
     /// @notice Allows another address to call transform on behalf of owner (on a given token)

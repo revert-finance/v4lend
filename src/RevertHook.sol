@@ -1106,6 +1106,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             // Calculate actual amounts added by comparing balances before and after
             amount0Added -= uint128(currency0.balanceOfSelf());
             amount1Added -= uint128(currency1.balanceOfSelf());
+
+            // mint doesn't call onERC721Received, so we need to notify the vault manually
+            if (vaults[recipient]) {
+                IVault(recipient).notifyERC721Received(newTokenId, recipient);
+            }
         } catch (bytes memory reason) {
             // emit event
             emit HookModifyLiquiditiesFailed(actions, params_array, reason);

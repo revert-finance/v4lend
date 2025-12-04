@@ -100,8 +100,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256 hookedTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
         _configurePositionForAutoRange(hookedTokenId, hookedPoolKey);
         (uint256 collateralValue, int24 initialTickLower, int24 initialTickUpper) = _setupCollateralizedPositionForAutoRange(hookedTokenId, hookedPoolKey);
+        (uint256 initialDebt,,,,) = vault.loanInfo(hookedTokenId);
         _triggerAutoRange(hookedPoolKey, initialTickLower, initialTickUpper);
-        _executeAndVerifyAutoRange(hookedTokenId, collateralValue, initialTickLower, initialTickUpper);
+        _executeAndVerifyAutoRange(hookedTokenId, collateralValue, initialTickLower, initialTickUpper, initialDebt);
     }
 
     function _createHookedPool() internal returns (PoolKey memory hookedPoolKey) {
@@ -474,47 +475,103 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256 originalTokenId,
         uint256 collateralValue,
         int24 initialTickLower,
-        int24 initialTickUpper
+        int24 initialTickUpper,
+        uint256 initialDebt
     ) internal {
-        // Verify original position no longer exists or has zero liquidity
+        
+        _verifyOriginalPositionAfterAutoRange(originalTokenId);
+        uint256 newTokenId = _getAndVerifyNewPosition(originalTokenId);
+        _verifyNewPositionRange(newTokenId, initialTickLower, initialTickUpper);
+        _verifyNewPositionOwnership(newTokenId);
+        _verifyCurrentTickInRange(newTokenId);
+        _verifyLoanTransfer(originalTokenId, newTokenId, initialDebt);
+        _verifyOriginalPositionCleanup(originalTokenId);
+        _verifyNewPositionPoolKey(newTokenId);
+        
+        console.log("AutoRange verification completed successfully");
+    }
+
+    function _verifyOriginalPositionAfterAutoRange(uint256 originalTokenId) internal {
         uint128 originalLiquidity = positionManager.getPositionLiquidity(originalTokenId);
+        assertEq(originalLiquidity, 0, "Original position should have zero liquidity after autorange");
         console.log("Original position liquidity:", originalLiquidity);
+    }
+
+    function _getAndVerifyNewPosition(uint256 originalTokenId) internal returns (uint256 newTokenId) {
+        newTokenId = positionManager.nextTokenId() - 1;
+        assertGt(newTokenId, originalTokenId, "New tokenId should be greater than original");
+        console.log("New position tokenId:", newTokenId);
         
-        // Autorange should have created a new position
-        // The new tokenId should be the next one after the original
-        // But we need to find it - it might be owned by the vault now
+        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertGt(newLiquidity, 0, "New position should have liquidity");
+        console.log("New position liquidity:", newLiquidity);
+    }
+
+    function _verifyNewPositionRange(uint256 newTokenId, int24 initialTickLower, int24 initialTickUpper) internal {
+        (, PositionInfo newPosInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
+        int24 newTickLower = newPosInfo.tickLower();
+        int24 newTickUpper = newPosInfo.tickUpper();
+        console.log("New position tickLower:", newTickLower);
+        console.log("New position tickUpper:", newTickUpper);
         
-        // Check if vault owns a position with different range
-        // We can check by looking at the vault's positions or by checking the AutoRange event
+        assertTrue(newTickLower <= initialTickLower, "New tickLower should be <= initial tickLower (range moved down)");
+        assertTrue(newTickUpper <= initialTickUpper, "New tickUpper should be <= initial tickUpper (range moved down)");
+    }
+
+    function _verifyNewPositionOwnership(uint256 newTokenId) internal {
+        address newPositionOwner = IERC721(address(positionManager)).ownerOf(newTokenId);
+        assertEq(newPositionOwner, address(vault), "New position should be owned by vault");
+        console.log("New position owner:", newPositionOwner);
+    }
+
+    function _verifyCurrentTickInRange(uint256 newTokenId) internal {
+        PoolKey memory poolKey = _getHookedPoolKey();
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+        console.log("Current tick after swap:", currentTick);
         
-        // Get current pool state
-        PoolKey memory poolKey = PoolKey({
+        (, PositionInfo newPosInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
+        int24 newTickLower = newPosInfo.tickLower();
+        int24 newTickUpper = newPosInfo.tickUpper();
+        
+        assertTrue(currentTick >= newTickLower, "Current tick should be >= new tickLower");
+        assertTrue(currentTick <= newTickUpper, "Current tick should be <= new tickUpper");
+    }
+
+    function _verifyLoanTransfer(uint256 originalTokenId, uint256 newTokenId, uint256 initialDebt) internal {
+        (uint256 newDebt, uint256 newFullValue, uint256 newCollateralValue,,) = vault.loanInfo(newTokenId);
+        console.log("New position debt:", newDebt);
+        console.log("New position full value:", newFullValue);
+        console.log("New position collateral value:", newCollateralValue);
+        
+        assertEq(newDebt, initialDebt, "Debt should be unchanged after autorange");
+        assertTrue(newCollateralValue > newDebt, "Loan should remain healthy after autorange");
+        console.log("Loan health ratio:", (newCollateralValue * 100) / newDebt, "%");
+    }
+
+    function _verifyOriginalPositionCleanup(uint256 originalTokenId) internal {
+        (uint256 oldDebt, uint256 oldFullValue, uint256 oldCollateralValue,,) = vault.loanInfo(originalTokenId);
+        assertEq(oldDebt, 0, "Original position should have zero debt");
+        assertEq(oldFullValue, 0, "Original position should have zero full value");
+        assertEq(oldCollateralValue, 0, "Original position should have zero collateral value");
+    }
+
+    function _verifyNewPositionPoolKey(uint256 newTokenId) internal {
+        PoolKey memory poolKey = _getHookedPoolKey();
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        assertEq(Currency.unwrap(newPoolKey.currency0), Currency.unwrap(poolKey.currency0), "New position should have same currency0");
+        assertEq(Currency.unwrap(newPoolKey.currency1), Currency.unwrap(poolKey.currency1), "New position should have same currency1");
+        assertEq(newPoolKey.fee, poolKey.fee, "New position should have same fee");
+        assertEq(newPoolKey.tickSpacing, poolKey.tickSpacing, "New position should have same tickSpacing");
+    }
+
+    function _getHookedPoolKey() internal view returns (PoolKey memory) {
+        return PoolKey({
             currency0: Currency.wrap(address(usdc)),
             currency1: Currency.wrap(address(weth)),
             fee: 3000,
             tickSpacing: 60,
             hooks: IHooks(address(revertHook))
         });
-        
-        // Verify the position range has changed
-        // Since autorange creates a new position, we need to find it
-        // For now, verify that the original position has been modified or a new one exists
-        
-        // Check if original position still exists (it should have zero liquidity after autorange)
-        if (originalLiquidity == 0) {
-            console.log("Original position has zero liquidity - autorange likely succeeded");
-        }
-        
-        // Verify collateral value is maintained or increased
-        // Note: We need to find the new tokenId to check this properly
-        // For a complete test, we'd need to track the AutoRange event or query vault positions
-        
-        // Basic verification: check that autorange was triggered
-        // The hook should have called vault.transform which creates a new position
-        assertTrue(originalLiquidity == 0, "Original position should have zero liquidity after autorange");
-        
-        console.log("AutoRange verification completed");
-        console.log("Note: Full verification requires tracking the new tokenId from AutoRange event");
     }
 }
 
