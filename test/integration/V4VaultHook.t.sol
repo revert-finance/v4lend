@@ -96,6 +96,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
     function test_CollateralizedPositionWithAutoRange() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 fullRangeHookedTokenId = _createPositionInHookedPool(hookedPoolKey);
         uint256 hookedTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
         _configurePositionForAutoRange(hookedTokenId, hookedPoolKey);
         (uint256 collateralValue, int24 initialTickLower, int24 initialTickUpper) = _setupCollateralizedPositionForAutoRange(hookedTokenId, hookedPoolKey);
@@ -429,7 +430,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         // Borrow some USDC
         vm.prank(WHALE_ACCOUNT);
-        vault.borrow(hookedTokenId, 200000000);
+        vault.borrow(hookedTokenId, 20000000); // borrow 20 usdc
 
         // Verify position is collateralized
         (uint256 debt, uint256 fullValue, uint256 collateralValue_,,) = vault.loanInfo(hookedTokenId);
@@ -454,7 +455,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         
         // Perform a large swap to move price below the trigger tick
         // Swap USDC for WETH (zeroForOne = true) to move price down
-        uint256 swapAmount = 50e6; // 50 USDC - large enough to move price significantly
+        uint256 swapAmount = 100e6; // 100 USDC - large enough to move price significantly
         
         vm.prank(WHALE_ACCOUNT);
         permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);

@@ -250,8 +250,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         console.log("tick", tick);
         console.log("tickEnd", tickEnd);
 
-        
-
         // process all triggers, triggers are not removed here because autolend can happen again later at the same position
         while (tick != tickEnd) {
             uint256[] storage tokenIds =
@@ -377,7 +375,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         if (config.mode == PositionMode.AUTO_EXIT && !isUpperTrigger && baseTick == config.autoExitTickLower) {
             if (ownedByVault) {
-                IVault(msg.sender)
+                IVault(_getOwner(tokenId))
                     .transform(
                         tokenId,
                         address(this),
@@ -390,7 +388,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             }
         } else if (config.mode == PositionMode.AUTO_EXIT && isUpperTrigger && baseTick == config.autoExitTickUpper) {
             if (ownedByVault) {
-                IVault(msg.sender)
+                IVault(_getOwner(tokenId))
                     .transform(
                         tokenId,
                         address(this),
@@ -419,7 +417,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                             && isUpperTrigger)
                 ) {
                     if (ownedByVault) {
-                        IVault(msg.sender)
+                        IVault(_getOwner(tokenId))
                             .transform(
                                 tokenId,
                                 address(this),
