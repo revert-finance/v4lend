@@ -9,6 +9,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 // base contracts
 import {V4Vault} from "../../src/V4Vault.sol";
@@ -91,6 +92,15 @@ contract V4VaultHookTest is V4ForkTestBase {
         (uint256 collateralValue, uint128 initialLiquidity) = _setupCollateralizedPosition(hookedTokenId);
         _generateFees(hookedPoolKey);
         _executeAndVerifyAutoCompound(hookedTokenId, collateralValue, initialLiquidity);
+    }
+
+    function test_CollateralizedPositionWithAutoRange() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 hookedTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _configurePositionForAutoRange(hookedTokenId, hookedPoolKey);
+        (uint256 collateralValue, int24 initialTickLower, int24 initialTickUpper) = _setupCollateralizedPositionForAutoRange(hookedTokenId, hookedPoolKey);
+        _triggerAutoRange(hookedPoolKey, initialTickLower, initialTickUpper);
+        _executeAndVerifyAutoRange(hookedTokenId, collateralValue, initialTickLower, initialTickUpper);
     }
 
     function _createHookedPool() internal returns (PoolKey memory hookedPoolKey) {
@@ -193,6 +203,12 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         vault.create(hookedTokenId, WHALE_ACCOUNT);
 
+        // Log collateral value after adding position to vault
+        (uint256 debtAfterCreate, uint256 fullValueAfterCreate, uint256 collateralValueAfterCreate,,) = vault.loanInfo(hookedTokenId);
+        console.log("Collateral value after adding position to vault:", collateralValueAfterCreate);
+        console.log("Full value after adding position to vault:", fullValueAfterCreate);
+        console.log("Debt after adding position to vault:", debtAfterCreate);
+
         vm.prank(WHALE_ACCOUNT);
         vault.approveTransform(hookedTokenId, address(revertHook), true);
 
@@ -289,6 +305,215 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Execute the swap
         vm.prank(WHALE_ACCOUNT);
         IUniversalRouter(address(swapRouter)).execute(commands, inputs, block.timestamp);
+    }
+
+    function _createPositionInHookedPoolForAutoRange(PoolKey memory hookedPoolKey) internal returns (uint256 hookedTokenId) {
+        // Get current tick to create a narrow range around it
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        
+        // Create a narrow range around current price (e.g., ±120 ticks = ±2 tick spacings)
+        int24 tickSpacing = hookedPoolKey.tickSpacing;
+        int24 tickLower = (currentTick / tickSpacing - 2) * tickSpacing; // 2 tick spacings below
+        int24 tickUpper = (currentTick / tickSpacing + 2) * tickSpacing; // 2 tick spacings above
+        
+        console.log("Current tick:", currentTick);
+        console.log("Position tickLower:", tickLower);
+        console.log("Position tickUpper:", tickUpper);
+        
+        vm.prank(WHALE_ACCOUNT);
+        usdc.approve(address(permit2), type(uint256).max);
+        vm.prank(WHALE_ACCOUNT);
+        weth.approve(address(permit2), type(uint256).max);
+
+        // Approve tokens for position manager
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(positionManager), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(positionManager), type(uint160).max, type(uint48).max);
+
+        // Use MINT_POSITION and SETTLE_PAIR actions
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory params_array = new bytes[](2);
+
+        uint128 liquidity = 1e14;
+
+        // MINT_POSITION params: (poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, owner, hookData)
+        params_array[0] = abi.encode(
+            hookedPoolKey,
+            tickLower,
+            tickUpper,
+            liquidity,
+            type(uint256).max,
+            type(uint256).max,
+            WHALE_ACCOUNT,
+            bytes("") // hookData
+        );
+        params_array[1] = abi.encode(hookedPoolKey.currency0, hookedPoolKey.currency1, WHALE_ACCOUNT);
+
+        vm.prank(WHALE_ACCOUNT);
+        positionManager.modifyLiquidities(abi.encode(actions, params_array), block.timestamp);
+
+        hookedTokenId = positionManager.nextTokenId() - 1;
+
+        console.log("Created position with tokenId:", hookedTokenId);
+        console.log("Position owner:", IERC721(address(positionManager)).ownerOf(hookedTokenId));
+    }
+
+    function _configurePositionForAutoRange(uint256 hookedTokenId, PoolKey memory hookedPoolKey) internal {
+        // Get current position info
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(hookedTokenId);
+        int24 tickLower = posInfo.tickLower();
+        int24 tickUpper = posInfo.tickUpper();
+        int24 tickSpacing = hookedPoolKey.tickSpacing;
+        
+        // Configure autorange:
+        // - Trigger when price moves 1 tick spacing outside the range
+        // - Move range by 2 tick spacings in the direction of price movement
+        int24 autoRangeLowerLimit = 0;
+        int24 autoRangeUpperLimit = 0;
+        int24 autoRangeLowerDelta = -tickSpacing; // Move lower bound down by 1 tick spacings
+        int24 autoRangeUpperDelta = tickSpacing; // Move upper bound up by 1 tick spacings
+        
+        console.log("AutoRange config:");
+        console.log("  Lower limit:", autoRangeLowerLimit);
+        console.log("  Upper limit:", autoRangeUpperLimit);
+        console.log("  Lower delta:", autoRangeLowerDelta);
+        console.log("  Upper delta:", autoRangeUpperDelta);
+        
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(
+            hookedTokenId,
+            RevertHook.PositionConfig({
+                mode: RevertHook.PositionMode.AUTO_RANGE,
+                autoExitTickLower: 0,
+                autoExitTickUpper: 0,
+                autoExitSwapLower: false,
+                autoExitSwapUpper: false,
+                autoRangeLowerLimit: autoRangeLowerLimit,
+                autoRangeUpperLimit: autoRangeUpperLimit,
+                autoRangeLowerDelta: autoRangeLowerDelta,
+                autoRangeUpperDelta: autoRangeUpperDelta,
+                swapPoolFee: 3000,
+                swapPoolTickSpacing: 60,
+                swapPoolHooks: IHooks(address(revertHook))
+            })
+        );
+    }
+
+    function _setupCollateralizedPositionForAutoRange(uint256 hookedTokenId, PoolKey memory hookedPoolKey)
+        internal
+        returns (uint256 collateralValue, int24 initialTickLower, int24 initialTickUpper)
+    {
+        // Get initial position range
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(hookedTokenId);
+        initialTickLower = posInfo.tickLower();
+        initialTickUpper = posInfo.tickUpper();
+        
+        // Lend USDC to vault
+        _deposit(200000000, WHALE_ACCOUNT);
+
+        // Add position as collateral to vault
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(vault), hookedTokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.create(hookedTokenId, WHALE_ACCOUNT);
+
+        // Log collateral value after adding position to vault
+        (uint256 debtAfterCreate, uint256 fullValueAfterCreate, uint256 collateralValueAfterCreate,,) = vault.loanInfo(hookedTokenId);
+        console.log("Collateral value after adding position to vault:", collateralValueAfterCreate);
+        console.log("Full value after adding position to vault:", fullValueAfterCreate);
+        console.log("Debt after adding position to vault:", debtAfterCreate);
+
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(hookedTokenId, address(revertHook), true);
+
+        // Borrow some USDC
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(hookedTokenId, 200000000);
+
+        // Verify position is collateralized
+        (uint256 debt, uint256 fullValue, uint256 collateralValue_,,) = vault.loanInfo(hookedTokenId);
+        collateralValue = collateralValue_;
+        assertGt(collateralValue, 0, "Position should have collateral value");
+        console.log("Initial debt:", debt);
+        console.log("Initial full value:", fullValue);
+        console.log("Initial collateral value:", collateralValue);
+        console.log("Initial tickLower:", initialTickLower);
+        console.log("Initial tickUpper:", initialTickUpper);
+    }
+
+    function _triggerAutoRange(PoolKey memory hookedPoolKey, int24 initialTickLower, int24 initialTickUpper) internal {
+        // Get current tick
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        console.log("Current tick before swap:", currentTick);
+        
+        // Calculate trigger tick (need to move price below tickLower - autoRangeLowerLimit)
+        // autoRangeLowerLimit = tickSpacing, so trigger at tickLower - tickSpacing
+        int24 triggerTick = initialTickLower - hookedPoolKey.tickSpacing;
+        console.log("Trigger tick (lower):", triggerTick);
+        
+        // Perform a large swap to move price below the trigger tick
+        // Swap USDC for WETH (zeroForOne = true) to move price down
+        uint256 swapAmount = 50e6; // 50 USDC - large enough to move price significantly
+        
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+        
+        _swapExactInputSingle(hookedPoolKey, true, uint128(swapAmount), 0);
+        
+        // Check if autorange was triggered
+        (, int24 newTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        console.log("Current tick after swap:", newTick);
+        console.log("AutoRange should have been triggered if tick <=", triggerTick);
+    }
+
+    function _executeAndVerifyAutoRange(
+        uint256 originalTokenId,
+        uint256 collateralValue,
+        int24 initialTickLower,
+        int24 initialTickUpper
+    ) internal {
+        // Verify original position no longer exists or has zero liquidity
+        uint128 originalLiquidity = positionManager.getPositionLiquidity(originalTokenId);
+        console.log("Original position liquidity:", originalLiquidity);
+        
+        // Autorange should have created a new position
+        // The new tokenId should be the next one after the original
+        // But we need to find it - it might be owned by the vault now
+        
+        // Check if vault owns a position with different range
+        // We can check by looking at the vault's positions or by checking the AutoRange event
+        
+        // Get current pool state
+        PoolKey memory poolKey = PoolKey({
+            currency0: Currency.wrap(address(usdc)),
+            currency1: Currency.wrap(address(weth)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(revertHook))
+        });
+        
+        // Verify the position range has changed
+        // Since autorange creates a new position, we need to find it
+        // For now, verify that the original position has been modified or a new one exists
+        
+        // Check if original position still exists (it should have zero liquidity after autorange)
+        if (originalLiquidity == 0) {
+            console.log("Original position has zero liquidity - autorange likely succeeded");
+        }
+        
+        // Verify collateral value is maintained or increased
+        // Note: We need to find the new tokenId to check this properly
+        // For a complete test, we'd need to track the AutoRange event or query vault positions
+        
+        // Basic verification: check that autorange was triggered
+        // The hook should have called vault.transform which creates a new position
+        assertTrue(originalLiquidity == 0, "Original position should have zero liquidity after autorange");
+        
+        console.log("AutoRange verification completed");
+        console.log("Note: Full verification requires tracking the new tokenId from AutoRange event");
     }
 }
 
