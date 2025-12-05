@@ -432,9 +432,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @notice Handles special case when a token is received by the vault from a hook contract
     function notifyERC721Received(uint256 tokenId, address recipient) external override {
 
-        if (!transformerAllowList[msg.sender]) {
+        // must be called from a transformer contract, be in transform mode and the token must not be owned by anyone else
+        if (!transformerAllowList[msg.sender] || transformedTokenId == 0 || tokenOwner[tokenId] != address(0)) {
             revert Unauthorized();
         }
+
         _handleERC721Received(tokenId, recipient);
     }
 
