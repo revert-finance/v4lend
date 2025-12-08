@@ -38,6 +38,7 @@ import {LiquidityCalculator} from "./LiquidityCalculator.sol";
 import {Transformer} from "./transformers/Transformer.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {V4Oracle} from "./V4Oracle.sol";
+import {TickLinkedList} from "./lib/TickLinkedList.sol";
 
 error Unauthorized();
 error InvalidConfig();
@@ -46,7 +47,7 @@ error InvalidConfig();
 /// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting and auto-ranging of positions
 contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
-
+    using TickLinkedList for TickLinkedList.List;
     // events for auto actions
     event AutoCompound(
         uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1
@@ -81,7 +82,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     // special events for swap failures / modifyLiquidities failures
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
     event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
-    event HookAutoLendFailed(bytes reason);
+    event HookAutoLendFailed(address vault, Currency currency, bytes reason);
 
     IPermit2 public immutable permit2;
     mapping(address => bool) private permit2Approved;
@@ -89,19 +90,17 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     IPositionManager public immutable positionManager;
     V4Oracle public immutable v4Oracle;
 
-    // TODO add linked list(s) for performance improvement which manages ticks where actions are triggered - so swap logic is more efficient
+    // last processed tick for pool in _afterSwap 
+    mapping(PoolId => int24) public tickLowerLasts;
 
     // manages ticks where actions are triggered (can be multiple entries per tokenid)
-    mapping(PoolId poolId => mapping(int24 tickLower => uint256[] tokenIds)) public lowerTriggerBeforeSwap;
-    mapping(PoolId poolId => mapping(int24 tickUpper => uint256[] tokenIds)) public upperTriggerBeforeSwap;
-    mapping(PoolId poolId => mapping(int24 tickLower => uint256[] tokenIds)) public lowerTriggerAfterSwap;
-    mapping(PoolId poolId => mapping(int24 tickUpper => uint256[] tokenIds)) public upperTriggerAfterSwap;
+    mapping(PoolId poolId => TickLinkedList.List) public lowerTriggerBeforeSwap;
+    mapping(PoolId poolId => TickLinkedList.List) public upperTriggerBeforeSwap;
+    mapping(PoolId poolId => TickLinkedList.List) public lowerTriggerAfterSwap;
+    mapping(PoolId poolId => TickLinkedList.List) public upperTriggerAfterSwap;
 
     // configured vaults for auto lend
     mapping(address token => IERC4626 vault) public autoLendVaults;
-
-    // last tick
-    mapping(PoolId => int24) public tickLowerLasts;
 
     // fees for auto compound 1% protocol fee / 1% reward
     uint16 autoCompoundProtocolFeeBps = 100;
@@ -168,7 +167,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     /// @param token The token address to set the vault for
     /// @param vault The ERC4626 vault address (can be address(0) to remove)
     function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
-        autoLendVaults[token] = vault;
+        // can only be set once - otherwise could brake existing positions
+        if (address(autoLendVaults[token]) == address(0)) {
+            autoLendVaults[token] = vault;
+        }
     }
 
     function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external {
@@ -243,30 +245,35 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         console.log("beforeSwap");
         PoolId poolId = key.toId();
 
-        // simulate swap to see which tick range is affected
+        // simulate swap to see which tick range is (probably) affected - changes after liquidity changes
         int24 tickEnd = _simulateSwap(key, params);
         int24 tick = tickLowerLasts[key.toId()];
+        if (tick == tickEnd) {
+            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
 
         console.log("tick", tick);
         console.log("tickEnd", tickEnd);
 
+        TickLinkedList.List storage list = tick < tickEnd ? upperTriggerBeforeSwap[poolId] : lowerTriggerBeforeSwap[poolId];
+       
         // process all triggers, triggers are not removed here because autolend can happen again later at the same position
-        while (tick != tickEnd) {
-            uint256[] storage tokenIds =
-                tick < tickEnd ? upperTriggerBeforeSwap[poolId][tick] : lowerTriggerBeforeSwap[poolId][tick];
-            uint256 length = tokenIds.length;
+        bool exists; 
+        (exists, tick) = list.getFirstAfter(tick);
+
+        while (true) {
+            if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
+                break;
+            }
+
+            uint256 length = list.tokenIds[tick].length;
 
             for (uint256 i = 0; i < length; i++) {
-                uint256 tokenId = tokenIds[i];
-                _handleTokenIdBeforeSwap(key, poolId, tokenId, tick < tickEnd, tick);
+                uint256 tokenId = list.tokenIds[tick][i];
+                _handleTokenIdBeforeSwap(key, poolId, tokenId, list.increasing, tick);
             }
 
-            // move to next tick
-            if (tick < tickEnd) {
-                tick += key.tickSpacing;
-            } else {
-                tick -= key.tickSpacing;
-            }
+            (exists, tick) = list.getNext(tick);
         }
 
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
@@ -314,33 +321,43 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
         int24 tick = tickLowerLasts[poolId];
+        if (tick == tickEnd) {
+            return (this.afterSwap.selector, 0);
+        }
 
         console.log("afterSwap");
         console.log("tick", tick);
         console.log("tickEnd", tickEnd);
 
-        // TODO add check for max tickspacings - if exceeds, revert
+        TickLinkedList.List storage list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
 
         // if tick changed - process all triggers, each processing may change the tick again
         // this must work all until the end - otherwise swap is not allowed and hook will not be executed
-        while (tick != tickEnd) {
-            uint256[] storage tokenIds = tick < tickEnd ? upperTriggerAfterSwap[poolId][tick] : lowerTriggerAfterSwap[poolId][tick];
-            uint256 length = tokenIds.length;
-            if (length > 0) {
-                uint256 tokenId = tokenIds[length - 1];
-                tokenIds.pop();
 
-                _handleTokenIdAfterSwap(key, poolId, tokenId, tick < tickEnd, tick);
+        bool exists; 
+        (exists, tick) = list.getFirstAfter(tick);
 
-                // tickEnd may have changed after the processing of the tokenId
-                tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
+        while (true) {
+            if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
+                break;
+            }
+
+            // execute all triggers at this tick
+            uint256 length = list.tokenIds[tick].length;
+            for (uint256 i = 0; i < length; i++) {
+                uint256 tokenId = list.tokenIds[tick][i];
+                _handleTokenIdAfterSwap(key, poolId, tokenId, list.increasing, tick);
+            }
+
+            // tickEnd may have changed after the processing of the tokenId
+            tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
+
+            // if direction changed - switch to the other list
+            if (tickEnd > tick && !list.increasing || tickEnd < tick && list.increasing) {
+                list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+                (exists, tick) = list.getFirstAfter(tick);
             } else {
-                // move to next tick
-                if (tick < tickEnd) {
-                    tick += key.tickSpacing;
-                } else {
-                    tick -= key.tickSpacing;
-                }
+                (exists, tick) = list.getNext(tick);
             }
         }
 
@@ -507,79 +524,43 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         // TODO optimize this by checking if changed - remove only when needed
         if (liquidity > 0) {
             if (currentConfig.mode == PositionMode.AUTO_RANGE) {
-                _removeFromTickMapping(
-                    lowerTriggerAfterSwap[poolId][tickLower - currentConfig.autoRangeLowerLimit], tokenId
-                );
-                _removeFromTickMapping(
-                    upperTriggerAfterSwap[poolId][tickUpper + currentConfig.autoRangeUpperLimit], tokenId
-                );
+                lowerTriggerAfterSwap[poolId].remove(tickLower - currentConfig.autoRangeLowerLimit, tokenId);
+                upperTriggerAfterSwap[poolId].remove(tickUpper + currentConfig.autoRangeUpperLimit, tokenId);
             }
             if (newConfig.mode == PositionMode.AUTO_RANGE) {
-                _addToTickMapping(lowerTriggerAfterSwap[poolId][tickLower - newConfig.autoRangeLowerLimit], tokenId);
-                _addToTickMapping(upperTriggerAfterSwap[poolId][tickUpper + newConfig.autoRangeUpperLimit], tokenId);
+                lowerTriggerAfterSwap[poolId].insert(tickLower - currentConfig.autoRangeLowerLimit, tokenId);
+                upperTriggerAfterSwap[poolId].insert(tickUpper + currentConfig.autoRangeUpperLimit, tokenId);
             }
             if (currentConfig.mode == PositionMode.AUTO_EXIT) {
-                _removeFromTickMapping(lowerTriggerAfterSwap[poolId][currentConfig.autoExitTickLower], tokenId);
-                _removeFromTickMapping(upperTriggerAfterSwap[poolId][currentConfig.autoExitTickUpper], tokenId);
+                lowerTriggerAfterSwap[poolId].remove(currentConfig.autoExitTickLower, tokenId);
+                upperTriggerAfterSwap[poolId].remove(currentConfig.autoExitTickUpper, tokenId);
             }
             if (newConfig.mode == PositionMode.AUTO_EXIT) {
-                _addToTickMapping(lowerTriggerAfterSwap[poolId][newConfig.autoExitTickLower], tokenId);
-                _addToTickMapping(upperTriggerAfterSwap[poolId][newConfig.autoExitTickUpper], tokenId);
+                lowerTriggerAfterSwap[poolId].insert(currentConfig.autoExitTickLower, tokenId);
+                upperTriggerAfterSwap[poolId].insert(currentConfig.autoExitTickUpper, tokenId);
             }
         } else {
             if (currentConfig.mode == PositionMode.AUTO_RANGE) {
-                _removeFromTickMapping(
-                    lowerTriggerAfterSwap[poolId][tickLower - currentConfig.autoRangeLowerLimit], tokenId
-                );
-                _removeFromTickMapping(
-                    upperTriggerAfterSwap[poolId][tickUpper + currentConfig.autoRangeUpperLimit], tokenId
-                );
+                lowerTriggerAfterSwap[poolId].remove(tickLower - currentConfig.autoRangeLowerLimit, tokenId);
+                upperTriggerAfterSwap[poolId].remove(tickUpper + currentConfig.autoRangeUpperLimit, tokenId);
             }
             if (currentConfig.mode == PositionMode.AUTO_EXIT) {
-                _removeFromTickMapping(lowerTriggerAfterSwap[poolId][currentConfig.autoExitTickLower], tokenId);
-                _removeFromTickMapping(upperTriggerAfterSwap[poolId][currentConfig.autoExitTickUpper], tokenId);
+                lowerTriggerAfterSwap[poolId].remove(currentConfig.autoExitTickLower, tokenId);
+                upperTriggerAfterSwap[poolId].remove(currentConfig.autoExitTickUpper, tokenId);
             }
         }
 
         // autolend configuration changes handling
         if (newConfig.mode == PositionMode.AUTO_LEND) {
-            _addToTickMapping(lowerTriggerAfterSwap[poolId][tickLower - 2 * key.tickSpacing], tokenId); // <- trigger to move liquidity to lend
-            _addToTickMapping(lowerTriggerBeforeSwap[poolId][tickUpper], tokenId); // <- trigger to readd liquidity to position
-            _addToTickMapping(upperTriggerBeforeSwap[poolId][tickLower - 1 * key.tickSpacing], tokenId); // -> trigger to readd liquidity to position
-            _addToTickMapping(upperTriggerAfterSwap[poolId][tickUpper + key.tickSpacing], tokenId); // -> trigger to move liquidity to lend
+            lowerTriggerAfterSwap[poolId].insert(tickLower - 2 * key.tickSpacing, tokenId); // <- trigger to move liquidity to lend
+            lowerTriggerBeforeSwap[poolId].insert(tickUpper, tokenId); // <- trigger to readd liquidity to position
+            upperTriggerBeforeSwap[poolId].insert(tickLower - 1 * key.tickSpacing, tokenId); // -> trigger to readd liquidity to position
+            upperTriggerAfterSwap[poolId].insert(tickUpper + key.tickSpacing, tokenId); // -> trigger to move liquidity to lend
         } else if (currentConfig.mode == PositionMode.AUTO_LEND && newConfig.mode != PositionMode.AUTO_LEND) {
-            _removeFromTickMapping(lowerTriggerAfterSwap[poolId][tickLower - 2 * key.tickSpacing], tokenId);
-            _removeFromTickMapping(lowerTriggerBeforeSwap[poolId][tickUpper], tokenId);
-            _removeFromTickMapping(upperTriggerBeforeSwap[poolId][tickLower - 1 * key.tickSpacing], tokenId);
-            _removeFromTickMapping(upperTriggerAfterSwap[poolId][tickUpper + key.tickSpacing], tokenId);
-        }
-    }
-
-    /// @notice Adds a tokenId to a tick mapping array if not already present
-    /// @param tickPositions The storage array reference
-    /// @param tokenId The tokenId to add
-    function _addToTickMapping(uint256[] storage tickPositions, uint256 tokenId) internal {
-        // Check if already in the array
-        for (uint256 i = 0; i < tickPositions.length; i++) {
-            if (tickPositions[i] == tokenId) {
-                return; // Already present
-            }
-        }
-        // Add to array
-        tickPositions.push(tokenId);
-    }
-
-    /// @notice Removes a tokenId from a tick mapping array
-    /// @param tickPositions The storage array reference
-    /// @param tokenId The tokenId to remove
-    function _removeFromTickMapping(uint256[] storage tickPositions, uint256 tokenId) internal {
-        for (uint256 i = 0; i < tickPositions.length; i++) {
-            if (tickPositions[i] == tokenId) {
-                // Swap with last element and pop
-                tickPositions[i] = tickPositions[tickPositions.length - 1];
-                tickPositions.pop();
-                return;
-            }
+            lowerTriggerAfterSwap[poolId].remove(tickLower - 2 * key.tickSpacing, tokenId);
+            lowerTriggerBeforeSwap[poolId].remove(tickUpper, tokenId);
+            upperTriggerBeforeSwap[poolId].remove(tickLower - 1 * key.tickSpacing, tokenId);
+            upperTriggerAfterSwap[poolId].remove(tickUpper + key.tickSpacing, tokenId);
         }
     }
 
@@ -671,7 +652,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
                 emit AutoLendDeposit(tokenId, currency, amount, shares);
             } catch (bytes memory reason) {
-                emit HookAutoLendFailed(reason);
+                emit HookAutoLendFailed(address(autoLendVaults[currencyAddr]), currency, reason);
             }
 
             SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), 0);
@@ -721,11 +702,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
 
                 // add triggers for deposit again
-                _addToTickMapping(lowerTriggerAfterSwap[poolId][posInfo.tickLower() - 2 * poolKey.tickSpacing], tokenId);
-                _addToTickMapping(upperTriggerAfterSwap[poolId][posInfo.tickUpper() + poolKey.tickSpacing], tokenId);
+                lowerTriggerAfterSwap[poolId].insert(posInfo.tickLower() - 2 * poolKey.tickSpacing, tokenId);
+                upperTriggerAfterSwap[poolId].insert(posInfo.tickUpper() + poolKey.tickSpacing, tokenId);
                 
             } catch (bytes memory reason) {
-                emit HookAutoLendFailed(reason);
+                emit HookAutoLendFailed(address(autoLendVaults[token]), Currency.wrap(token), reason);
             }
         }
     }

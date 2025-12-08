@@ -28,6 +28,61 @@ library TickLinkedList {
     }
 
     /**
+     * @dev Gets the first tick after the given tick.
+     * @param self Stored linked list from contract.
+     * @param tick The tick value to search from.
+     * @return bool True if a tick exists after the given tick, false otherwise.
+     * @return int24 The first tick after the given tick, or 0 if none exists.
+     */
+    function getFirstAfter(List storage self, int24 tick) internal view returns (bool, int24) {
+        if (self.size == 0) {
+            return (false, 0);
+        }
+
+        int24 current = self.head;
+        uint32 count = self.size;
+
+        if (self.increasing) {
+            // Ascending order: find first tick >= tick
+            while (current <= tick && count > 0) {
+                current = self.next[current];
+                count--;
+            }
+        } else {
+            // Descending order: find first tick <= tick
+            while (current >= tick && count > 0) {
+                current = self.next[current];
+                count--;
+            }
+        }
+
+        // If we've traversed the entire list without finding a match
+        if (count == 0) {
+            return (false, 0);
+        }
+
+        return (true, current);
+    }
+
+    /**
+     * @dev Gets the next initialized tick after the given tick (which is known to exist)
+     * @param self Stored linked list from contract.
+     * @param tick The tick value to search from.
+     * @return bool True if a next tick exists, false otherwise.
+     * @return int24 The next tick value, or 0 if none exists.
+     */
+    function getNext(List storage self, int24 tick) internal view returns (bool, int24) {
+
+        int24 nextTick = self.next[tick];
+        
+        if (self.tokenIds[nextTick].length == 0) {
+            return (false, 0);
+        }
+
+        return (true, nextTick);
+    }
+
+    /**
      * @dev Inserts a tick value into the list in sorted order based on increasing field.
      * @param self Stored linked list from contract.
      * @param _tick The tick value to insert.
@@ -59,31 +114,30 @@ library TickLinkedList {
 
         // Find the correct position to insert (maintain sorted order based on increasing)
         int24 insertAfter;
-        uint32 count = 0;
+        uint32 count = self.size;
     
         // Traverse to find insertion point
         if (self.increasing) {
             // Ascending order: find first tick >= _tick
-            while (current < _tick && count < self.size) {
+            while (current < _tick && count > 0) {
                 insertAfter = current;
                 current = self.next[current];
-                count++;
+                count--;
             }
         } else {
             // Descending order: find first tick <= _tick
-            while (current > _tick && count < self.size) {
+            while (current > _tick && count > 0) {
                 insertAfter = current;
                 current = self.next[current];
-                count++;
+                count--;
             }
         }
 
-        bool endReached = count == self.size;
-
         // tick does not exist or end reached
-        if (current != _tick || endReached) {
+        if (current != _tick || count == 0) {
             self.next[insertAfter] = _tick;
-            if (!endReached) {
+            // insert inbetween
+            if (count != 0) {
                 self.next[_tick] = current;
             }
             self.size++;
@@ -97,7 +151,7 @@ library TickLinkedList {
      * @param self Stored linked list from contract.
      * @param _tick The tick value.
      * @param _tokenId The tokenId to remove.
-     * @return bool True if success, false if tick doesn't exist.
+     * @return bool True if success, false if tokenid or tick doesn't exist.
      */
     function remove(List storage self, int24 _tick, uint256 _tokenId) internal returns (bool) {
 
@@ -130,14 +184,14 @@ library TickLinkedList {
             }
 
             // Find the previous node by traversing
-            int24 prevTick = 0;
+            int24 prevTick;
             int24 current = self.head;
-            uint32 count = 0;
+            uint32 count = self.size;
      
-            while (current != _tick && count < self.size) {
+            while (current != _tick && count > 0) {
                 prevTick = current;
                 current = self.next[current];
-                count++;
+                count--;
             }
 
             if (current != _tick) {
