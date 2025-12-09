@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -488,6 +489,74 @@ contract RevertHookTest is BaseTest {
         console.log("NonHookedPool liquidity:", nonHookedLiquidity);
     }
 
+    function testAutoExit_NotApproved() public {
+        // Set up autoExit config for token2Id
+        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
+            mode: RevertHook.PositionMode.AUTO_EXIT,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook)
+        }));
+
+        // DO NOT approve the position to the hook - this is the key difference
+        // IERC721(address(positionManager)).approve(address(hook), token2Id); // COMMENTED OUT
+
+        // Assert that token2Id position has > 0 liquidity before swap
+        uint128 token2LiquidityBefore = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2LiquidityBefore, 0, "token2Id should have > 0 liquidity before swap");
+
+        // Record logs to check for HookModifyLiquiditiesFailed event
+        vm.recordLogs();
+
+        // Perform a swap to trigger auto exit attempt
+        uint256 amountIn = 7e17;
+        BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        assertEq(int256(swapDelta.amount0()), -int256(amountIn));
+
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        assertTrue(currentTick < tickLower2, "token2Id position should be out of range (currentTick < tickLower2)");
+
+        // Verify that the position still has liquidity (autoExit failed due to lack of approval)
+        uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2LiquidityAfter, 0, "token2Id should still have liquidity because autoExit failed without approval");
+        assertEq(token2LiquidityAfter, token2LiquidityBefore, "Liquidity should remain unchanged since autoExit failed");
+
+        // Verify hook contract has no leftover token balances (since autoExit didn't execute)
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+
+        // Check that HookModifyLiquiditiesFailed event was emitted
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool eventFound = false;
+        bytes32 eventSignature = keccak256("HookModifyLiquiditiesFailed(bytes,bytes[],bytes)");
+        
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == eventSignature && logs[i].emitter == address(hook)) {
+                eventFound = true;
+                break;
+            }
+        }
+        
+        assertTrue(eventFound, "HookModifyLiquiditiesFailed event should have been emitted");
+    }
 
     function testSwapAllLiquidityNarrowRange() public {
         // Create a new pool with a different fee to ensure it's separate
