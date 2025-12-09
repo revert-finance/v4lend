@@ -40,232 +40,232 @@ contract TickLinkedListTest is Test {
         assertEq(value, 50); // Should be smallest in increasing order
     }
 
-    // ============ getFirstAfter Tests ============
+    // ============ searchFirstAfter Tests ============
 
-    function test_getFirstAfter_EmptyList() public {
-        (bool exists, int24 value) = increasingList.getFirstAfter(100);
+    function test_searchFirstAfter_EmptyList() public {
+        (bool exists, int24 value) = increasingList.searchFirstAfter(100);
         assertFalse(exists);
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Increasing_SingleElement_Match() public {
+    function test_searchFirstAfter_Increasing_SingleElement_Match() public {
         assertTrue(increasingList.insert(100, 1));
-        (bool exists, int24 value) = increasingList.getFirstAfter(100);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(100);
         assertFalse(exists); // No tick after 100
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Increasing_SingleElement_Before() public {
+    function test_searchFirstAfter_Increasing_SingleElement_Before() public {
         assertTrue(increasingList.insert(100, 1));
-        (bool exists, int24 value) = increasingList.getFirstAfter(50);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(50);
         assertTrue(exists);
         assertEq(value, 100); // First tick > 50
     }
 
-    function test_getFirstAfter_Increasing_SingleElement_After() public {
+    function test_searchFirstAfter_Increasing_SingleElement_After() public {
         assertTrue(increasingList.insert(100, 1));
-        (bool exists, int24 value) = increasingList.getFirstAfter(150);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(150);
         assertFalse(exists);
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Increasing_MultipleElements_BeforeAll() public {
+    function test_searchFirstAfter_Increasing_MultipleElements_BeforeAll() public {
         assertTrue(increasingList.insert(100, 1));
         assertTrue(increasingList.insert(200, 2));
         assertTrue(increasingList.insert(150, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(50);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(50);
         assertTrue(exists);
         assertEq(value, 100); // First tick > 50
     }
 
-    function test_getFirstAfter_Increasing_MultipleElements_MatchesFirst() public {
+    function test_searchFirstAfter_Increasing_MultipleElements_MatchesFirst() public {
         assertTrue(increasingList.insert(100, 1));
         assertTrue(increasingList.insert(200, 2));
         assertTrue(increasingList.insert(150, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(100);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(100);
         assertTrue(exists);
         assertEq(value, 150); // First tick > 100
     }
 
-    function test_getFirstAfter_Increasing_MultipleElements_Between() public {
+    function test_searchFirstAfter_Increasing_MultipleElements_Between() public {
         assertTrue(increasingList.insert(100, 1));
         assertTrue(increasingList.insert(200, 2));
         assertTrue(increasingList.insert(150, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(120);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(120);
         assertTrue(exists);
         assertEq(value, 150); // First tick > 120
     }
 
-    function test_getFirstAfter_Increasing_MultipleElements_MatchesMiddle() public {
+    function test_searchFirstAfter_Increasing_MultipleElements_MatchesMiddle() public {
         assertTrue(increasingList.insert(100, 1));
         assertTrue(increasingList.insert(200, 2));
         assertTrue(increasingList.insert(150, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(150);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(150);
         assertTrue(exists);
         assertEq(value, 200); // First tick > 150
     }
 
-    function test_getFirstAfter_Increasing_MultipleElements_MatchesLast() public {
+    function test_searchFirstAfter_Increasing_MultipleElements_MatchesLast() public {
         assertTrue(increasingList.insert(100, 1));
         assertTrue(increasingList.insert(200, 2));
         assertTrue(increasingList.insert(150, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(200);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(200);
         assertFalse(exists); // No tick > 200
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Increasing_MultipleElements_AfterAll() public {
+    function test_searchFirstAfter_Increasing_MultipleElements_AfterAll() public {
         assertTrue(increasingList.insert(100, 1));
         assertTrue(increasingList.insert(200, 2));
         assertTrue(increasingList.insert(150, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(250);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(250);
         assertFalse(exists);
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Increasing_NegativeTicks() public {
+    function test_searchFirstAfter_Increasing_NegativeTicks() public {
         assertTrue(increasingList.insert(-100, 1));
         assertTrue(increasingList.insert(-200, 2));
         assertTrue(increasingList.insert(-150, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(-180);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(-180);
         assertTrue(exists);
         assertEq(value, -150); // First tick > -180
         
-        (exists, value) = increasingList.getFirstAfter(-100);
+        (exists, value) = increasingList.searchFirstAfter(-100);
         assertFalse(exists); // No tick > -100
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Increasing_MixedPositiveNegative() public {
+    function test_searchFirstAfter_Increasing_MixedPositiveNegative() public {
         assertTrue(increasingList.insert(100, 1));
         assertTrue(increasingList.insert(-100, 2));
         assertTrue(increasingList.insert(0, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(-50);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(-50);
         assertTrue(exists);
         assertEq(value, 0); // First tick > -50
         
-        (exists, value) = increasingList.getFirstAfter(50);
+        (exists, value) = increasingList.searchFirstAfter(50);
         assertTrue(exists);
         assertEq(value, 100); // First tick > 50
     }
 
-    function test_getFirstAfter_Decreasing_SingleElement_Match() public {
+    function test_searchFirstAfter_Decreasing_SingleElement_Match() public {
         assertTrue(decreasingList.insert(100, 1));
-        (bool exists, int24 value) = decreasingList.getFirstAfter(100);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(100);
         assertFalse(exists); // No tick < 100
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Decreasing_SingleElement_After() public {
+    function test_searchFirstAfter_Decreasing_SingleElement_After() public {
         assertTrue(decreasingList.insert(100, 1));
-        (bool exists, int24 value) = decreasingList.getFirstAfter(150);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(150);
         assertTrue(exists);
         assertEq(value, 100); // First tick < 150
     }
 
-    function test_getFirstAfter_Decreasing_SingleElement_Before() public {
+    function test_searchFirstAfter_Decreasing_SingleElement_Before() public {
         assertTrue(decreasingList.insert(100, 1));
-        (bool exists, int24 value) = decreasingList.getFirstAfter(50);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(50);
         assertFalse(exists); // No tick < 50
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Decreasing_MultipleElements_AfterAll() public {
+    function test_searchFirstAfter_Decreasing_MultipleElements_AfterAll() public {
         assertTrue(decreasingList.insert(100, 1));
         assertTrue(decreasingList.insert(200, 2));
         assertTrue(decreasingList.insert(150, 3));
         
-        (bool exists, int24 value) = decreasingList.getFirstAfter(250);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(250);
         assertTrue(exists);
         assertEq(value, 200); // First tick < 250
     }
 
-    function test_getFirstAfter_Decreasing_MultipleElements_MatchesFirst() public {
+    function test_searchFirstAfter_Decreasing_MultipleElements_MatchesFirst() public {
         assertTrue(decreasingList.insert(100, 1));
         assertTrue(decreasingList.insert(200, 2));
         assertTrue(decreasingList.insert(150, 3));
         
-        (bool exists, int24 value) = decreasingList.getFirstAfter(200);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(200);
         assertTrue(exists);
         assertEq(value, 150); // First tick < 200
     }
 
-    function test_getFirstAfter_Decreasing_MultipleElements_Between() public {
+    function test_searchFirstAfter_Decreasing_MultipleElements_Between() public {
         assertTrue(decreasingList.insert(100, 1));
         assertTrue(decreasingList.insert(200, 2));
         assertTrue(decreasingList.insert(150, 3));
         
-        (bool exists, int24 value) = decreasingList.getFirstAfter(180);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(180);
         assertTrue(exists);
         assertEq(value, 150); // First tick < 180
     }
 
-    function test_getFirstAfter_Decreasing_MultipleElements_MatchesMiddle() public {
+    function test_searchFirstAfter_Decreasing_MultipleElements_MatchesMiddle() public {
         assertTrue(decreasingList.insert(100, 1));
         assertTrue(decreasingList.insert(200, 2));
         assertTrue(decreasingList.insert(150, 3));
         
-        (bool exists, int24 value) = decreasingList.getFirstAfter(150);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(150);
         assertTrue(exists);
         assertEq(value, 100); // First tick < 150
     }
 
-    function test_getFirstAfter_Decreasing_MultipleElements_MatchesLast() public {
+    function test_searchFirstAfter_Decreasing_MultipleElements_MatchesLast() public {
         assertTrue(decreasingList.insert(100, 1));
         assertTrue(decreasingList.insert(200, 2));
         assertTrue(decreasingList.insert(150, 3));
         
-        (bool exists, int24 value) = decreasingList.getFirstAfter(100);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(100);
         assertFalse(exists); // No tick < 100
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_Decreasing_MultipleElements_BeforeAll() public {
+    function test_searchFirstAfter_Decreasing_MultipleElements_BeforeAll() public {
         assertTrue(decreasingList.insert(100, 1));
         assertTrue(decreasingList.insert(200, 2));
         assertTrue(decreasingList.insert(150, 3));
         
-        (bool exists, int24 value) = decreasingList.getFirstAfter(50);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(50);
         assertFalse(exists);
     }
 
-    function test_getFirstAfter_Decreasing_NegativeTicks() public {
+    function test_searchFirstAfter_Decreasing_NegativeTicks() public {
         assertTrue(decreasingList.insert(-100, 1));
         assertTrue(decreasingList.insert(-200, 2));
         assertTrue(decreasingList.insert(-150, 3));
         
-        (bool exists, int24 value) = decreasingList.getFirstAfter(-120);
+        (bool exists, int24 value) = decreasingList.searchFirstAfter(-120);
         assertTrue(exists);
         assertEq(value, -150); // First tick < -120
         
-        (exists, value) = decreasingList.getFirstAfter(-100);
+        (exists, value) = decreasingList.searchFirstAfter(-100);
         assertTrue(exists);
         assertEq(value, -150); // First tick < -100
     }
 
-    function test_getFirstAfter_EdgeCase_ZeroTick() public {
+    function test_searchFirstAfter_EdgeCase_ZeroTick() public {
         assertTrue(increasingList.insert(0, 1));
         assertTrue(increasingList.insert(100, 2));
         assertTrue(increasingList.insert(-100, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(0);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(0);
         assertTrue(exists);
         assertEq(value, 100); // First tick > 0
         
-        (exists, value) = increasingList.getFirstAfter(-50);
+        (exists, value) = increasingList.searchFirstAfter(-50);
         assertTrue(exists);
         assertEq(value, 0); // First tick > -50
     }
 
-    function test_getFirstAfter_EdgeCase_ExtremeValues() public {
+    function test_searchFirstAfter_EdgeCase_ExtremeValues() public {
         int24 minTick = type(int24).min;
         int24 maxTick = type(int24).max;
         
@@ -273,16 +273,16 @@ contract TickLinkedListTest is Test {
         assertTrue(increasingList.insert(maxTick, 2));
         assertTrue(increasingList.insert(minTick, 3));
         
-        (bool exists, int24 value) = increasingList.getFirstAfter(minTick);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(minTick);
         assertTrue(exists);
         assertEq(value, 0); // First tick > minTick
         
-        (exists, value) = increasingList.getFirstAfter(maxTick);
+        (exists, value) = increasingList.searchFirstAfter(maxTick);
         assertFalse(exists); // No tick > maxTick
         assertEq(value, 0);
     }
 
-    function test_getFirstAfter_ManyElements() public {
+    function test_searchFirstAfter_ManyElements() public {
         // Insert many ticks
         for (uint256 i = 0; i < 100; i++) {
             int24 tick = int24(int256(i * 10));
@@ -290,19 +290,19 @@ contract TickLinkedListTest is Test {
         }
         
         // Test various search points
-        (bool exists, int24 value) = increasingList.getFirstAfter(0);
+        (bool exists, int24 value) = increasingList.searchFirstAfter(0);
         assertTrue(exists);
         assertEq(value, 10); // First tick > 0
         
-        (exists, value) = increasingList.getFirstAfter(250);
+        (exists, value) = increasingList.searchFirstAfter(250);
         assertTrue(exists);
         assertEq(value, 260); // First tick > 250
         
-        (exists, value) = increasingList.getFirstAfter(255);
+        (exists, value) = increasingList.searchFirstAfter(255);
         assertTrue(exists);
         assertEq(value, 260); // First tick > 255
         
-        (exists, value) = increasingList.getFirstAfter(1000);
+        (exists, value) = increasingList.searchFirstAfter(1000);
         assertFalse(exists);
         assertEq(value, 0);
     }
@@ -611,6 +611,82 @@ contract TickLinkedListTest is Test {
         assertEq(increasingList.size, 0);
     }
 
+    function test_remove_AllTokenIds_SingleElement() public {
+        assertTrue(increasingList.insert(100, 1));
+        assertTrue(increasingList.remove(100, 0)); // Remove all tokenIds
+        
+        assertEq(increasingList.size, 0);
+        assertEq(increasingList.tokenIds[100].length, 0);
+        (bool exists, int24 value) = increasingList.getFirst();
+        assertFalse(exists);
+    }
+
+    function test_remove_AllTokenIds_MultipleTokenIds() public {
+        assertTrue(increasingList.insert(100, 1));
+        assertTrue(increasingList.insert(100, 2));
+        assertTrue(increasingList.insert(100, 3));
+        
+        assertEq(increasingList.size, 1);
+        assertEq(increasingList.tokenIds[100].length, 3);
+        
+        assertTrue(increasingList.remove(100, 0)); // Remove all tokenIds
+        
+        assertEq(increasingList.size, 0);
+        assertEq(increasingList.tokenIds[100].length, 0);
+    }
+
+    function test_remove_AllTokenIds_Head() public {
+        assertTrue(increasingList.insert(100, 1));
+        assertTrue(increasingList.insert(200, 2));
+        assertTrue(increasingList.insert(150, 3));
+        
+        assertTrue(increasingList.remove(100, 0)); // Remove all tokenIds at head
+        
+        assertEq(increasingList.size, 2);
+        (bool exists, int24 value) = increasingList.getFirst();
+        assertTrue(exists);
+        assertEq(value, 150); // New head
+        assertEq(increasingList.tokenIds[100].length, 0);
+    }
+
+    function test_remove_AllTokenIds_Middle() public {
+        assertTrue(increasingList.insert(100, 1));
+        assertTrue(increasingList.insert(200, 2));
+        assertTrue(increasingList.insert(150, 3));
+        assertTrue(increasingList.insert(150, 4)); // Multiple tokenIds at middle
+        
+        assertEq(increasingList.size, 3);
+        assertEq(increasingList.tokenIds[150].length, 2);
+        
+        assertTrue(increasingList.remove(150, 0)); // Remove all tokenIds at middle
+        
+        assertEq(increasingList.size, 2);
+        assertEq(increasingList.next[100], 200);
+        assertEq(increasingList.tokenIds[150].length, 0);
+    }
+
+    function test_remove_AllTokenIds_Tail() public {
+        assertTrue(increasingList.insert(100, 1));
+        assertTrue(increasingList.insert(200, 2));
+        assertTrue(increasingList.insert(150, 3));
+        assertTrue(increasingList.insert(200, 4)); // Multiple tokenIds at tail
+        
+        assertEq(increasingList.size, 3);
+        assertEq(increasingList.tokenIds[200].length, 2);
+        
+        assertTrue(increasingList.remove(200, 0)); // Remove all tokenIds at tail
+        
+        assertEq(increasingList.size, 2);
+        assertEq(increasingList.next[150], 0); // 150 is now tail
+        assertEq(increasingList.tokenIds[200].length, 0);
+    }
+
+    function test_remove_AllTokenIds_NonExistentTick() public {
+        assertTrue(increasingList.insert(100, 1));
+        assertFalse(increasingList.remove(200, 0)); // Tick doesn't exist
+        assertEq(increasingList.size, 1);
+    }
+
     // ============ Remove Tests - Decreasing ============
 
     function test_remove_DecreasingHead() public {
@@ -647,6 +723,22 @@ contract TickLinkedListTest is Test {
         
         assertEq(decreasingList.size, 2);
         assertEq(decreasingList.next[150], 0);
+    }
+
+    function test_remove_Decreasing_AllTokenIds() public {
+        assertTrue(decreasingList.insert(100, 1));
+        assertTrue(decreasingList.insert(200, 2));
+        assertTrue(decreasingList.insert(150, 3));
+        assertTrue(decreasingList.insert(150, 4)); // Multiple tokenIds
+        
+        assertEq(decreasingList.size, 3);
+        assertEq(decreasingList.tokenIds[150].length, 2);
+        
+        assertTrue(decreasingList.remove(150, 0)); // Remove all tokenIds at middle
+        
+        assertEq(decreasingList.size, 2);
+        assertEq(decreasingList.next[200], 100);
+        assertEq(decreasingList.tokenIds[150].length, 0);
     }
 
     // ============ Complex Scenarios ============

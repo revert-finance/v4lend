@@ -102,11 +102,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     // configured vaults for auto lend
     mapping(address token => IERC4626 vault) public autoLendVaults;
 
-    // fees for auto compound 1% protocol fee / 1% reward
-    uint16 autoCompoundProtocolFeeBps = 100;
+    // fees for auto compound execution 1% reward
     uint16 autoCompoundRewardBps = 100;
 
-    // protocol fees for auto exit and auto range (taken from the final amount)
+    // protocol fees (taken from the final amount)
+    uint16 autoCompoundProtocolFeeBps = 100;
     uint16 autoLendProtocolFeeBps = 100;
     uint16 autoExitProtocolFeeBps = 100;
     uint16 autoRangeProtocolFeeBps = 100;
@@ -156,11 +156,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 swapPoolTickSpacing;
         IHooks swapPoolHooks;
     }
-
-    // lastprocessed timestamp
-    // relative liquidity
-    // in range status (only these must be compounded)
-    // slipagge config / swap config
 
     /// @notice Sets the ERC4626 vault for a given token address
     /// @dev Can only be called by the owner. This vault will be used for autolend functionality.
@@ -231,9 +226,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
+        
+        // TODO check if tokens allowed?
+        
         int24 tickLower = _getTickLower(tick, key.tickSpacing);
         tickLowerLasts[key.toId()] = tickLower;
-
         return BaseHook.afterInitialize.selector;
     }
 
@@ -259,7 +256,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
        
         // process all triggers, triggers are not removed here because autolend can happen again later at the same position
         bool exists; 
-        (exists, tick) = list.getFirstAfter(tick);
+        (exists, tick) = list.searchFirstAfter(tick);
 
         while (true) {
             if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
@@ -335,18 +332,20 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         // this must work all until the end - otherwise swap is not allowed and hook will not be executed
 
         bool exists; 
-        (exists, tick) = list.getFirstAfter(tick);
+        (exists, tick) = list.searchFirstAfter(tick);
 
         while (true) {
             if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
                 break;
             }
 
+            // copy to memory
+            uint256[] memory tokenIds = list.tokenIds[tick];
+
             // execute all triggers at this tick
-            uint256 length = list.tokenIds[tick].length;
+            uint256 length = tokenIds.length;
             for (uint256 i = 0; i < length; i++) {
-                uint256 tokenId = list.tokenIds[tick][i];
-                _handleTokenIdAfterSwap(key, poolId, tokenId, list.increasing, tick);
+                _handleTokenIdAfterSwap(key, poolId, tokenIds[i], list.increasing, tick);
             }
 
             // tickEnd may have changed after the processing of the tokenId
@@ -355,10 +354,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             // if direction changed - switch to the other list
             if (tickEnd > tick && !list.increasing || tickEnd < tick && list.increasing) {
                 list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
-                (exists, tick) = list.getFirstAfter(tick);
+                (exists, tick) = list.searchFirstAfter(tick);
             } else {
                 (exists, tick) = list.getNext(tick);
             }
+
+            // remove all tokenIds at this tick
+            list.remove(tick, 0);
         }
 
         tickLowerLasts[poolId] = tickEnd;

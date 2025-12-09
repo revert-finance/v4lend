@@ -28,13 +28,13 @@ library TickLinkedList {
     }
 
     /**
-     * @dev Gets the first tick after the given tick.
+     * @dev Searches for the first initialized tick after the given tick.
      * @param self Stored linked list from contract.
      * @param tick The tick value to search from.
      * @return bool True if a tick exists after the given tick, false otherwise.
      * @return int24 The first tick after the given tick, or 0 if none exists.
      */
-    function getFirstAfter(List storage self, int24 tick) internal view returns (bool, int24) {
+    function searchFirstAfter(List storage self, int24 tick) internal view returns (bool, int24) {
         if (self.size == 0) {
             return (false, 0);
         }
@@ -43,13 +43,13 @@ library TickLinkedList {
         uint32 count = self.size;
 
         if (self.increasing) {
-            // Ascending order: find first tick >= tick
+            // Ascending order: find first tick > tick
             while (current <= tick && count > 0) {
                 current = self.next[current];
                 count--;
             }
         } else {
-            // Descending order: find first tick <= tick
+            // Descending order: find first tick < tick
             while (current >= tick && count > 0) {
                 current = self.next[current];
                 count--;
@@ -74,7 +74,13 @@ library TickLinkedList {
     function getNext(List storage self, int24 tick) internal view returns (bool, int24) {
 
         int24 nextTick = self.next[tick];
-        
+        bool increasing = self.increasing;
+
+        // handle special case where nextTick is not initialized and points to 0
+        if (increasing && nextTick <= tick || !increasing && nextTick >= tick) {
+            return (false, 0);
+        }
+
         if (self.tokenIds[nextTick].length == 0) {
             return (false, 0);
         }
@@ -150,7 +156,7 @@ library TickLinkedList {
      * @dev Removes a tokenId at a given tick value from the list. If the list is empty after removal, the tick is updated.
      * @param self Stored linked list from contract.
      * @param _tick The tick value.
-     * @param _tokenId The tokenId to remove.
+     * @param _tokenId The tokenId to remove (or 0 to remove all tokenIds at this tick)
      * @return bool True if success, false if tokenid or tick doesn't exist.
      */
     function remove(List storage self, int24 _tick, uint256 _tokenId) internal returns (bool) {
@@ -159,12 +165,20 @@ library TickLinkedList {
             return false;
         }
 
-        (bool removed, bool empty) = _removeFromTickMapping(self.tokenIds[_tick], _tokenId);
+        bool empty;
 
-        if (!removed) {
-            return false;
+        // special case to remove all tokenIds at this tick
+        if (_tokenId == 0) {
+            delete self.tokenIds[_tick];
+            empty = true;
+        } else {
+            bool removed;
+            (removed, empty) = _removeFromTickMapping(self.tokenIds[_tick], _tokenId);
+            if (!removed) {
+                return false;
+            }
         }
-
+        
         // If no more tokenIds at this tick, remove the tick from the list
         if (empty) {
             
