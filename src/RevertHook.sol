@@ -32,8 +32,6 @@ import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libra
 
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {console} from "forge-std/console.sol";
-
 import {LiquidityCalculator} from "./LiquidityCalculator.sol";
 import {Transformer} from "./transformers/Transformer.sol";
 import {IVault} from "./interfaces/IVault.sol";
@@ -239,7 +237,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        console.log("beforeSwap");
         PoolId poolId = key.toId();
 
         // simulate swap to see which tick range is (probably) affected - changes after liquidity changes
@@ -248,9 +245,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         if (tick == tickEnd) {
             return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
-
-        console.log("tick", tick);
-        console.log("tickEnd", tickEnd);
 
         TickLinkedList.List storage list = tick < tickEnd ? upperTriggerBeforeSwap[poolId] : lowerTriggerBeforeSwap[poolId];
        
@@ -314,10 +308,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         if (tick == tickEnd) {
             return (this.afterSwap.selector, 0);
         }
-
-        console.log("afterSwap");
-        console.log("tick", tick);
-        console.log("tickEnd", tickEnd);
 
         TickLinkedList.List storage list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
 
@@ -783,9 +773,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 tickLower = baseTick + positionConfigs[tokenId].autoRangeLowerDelta;
         int24 tickUpper = baseTick + positionConfigs[tokenId].autoRangeUpperDelta;
 
-        console.log("tickLower", tickLower);
-        console.log("tickUpper", tickUpper);
-
         (amount0, amount1) = _swapToOptimalRange(tokenId, poolKey, poolId, tickLower, tickUpper, amount0, amount1);
 
         amount0 = uint128(amount0 - autoRangeProtocolFeeBps * amount0 / 10000);
@@ -927,20 +914,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             swapPoolKey.hooks == poolKey.hooks && swapPoolKey.fee == poolKey.fee
                 && swapPoolKey.tickSpacing == poolKey.tickSpacing
         ) {
-            console.log("calculateSamePool");
             (inputAmount,, swapDir0to1,) =
                 LiquidityCalculator.calculateSamePool(poolInfo, tickLower, tickUpper, amount0, amount1);
         } else {
-            console.log("calculateSimple");
             (uint160 sqrtPrice,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
             (inputAmount,, swapDir0to1) =
                 LiquidityCalculator.calculateSimple(sqrtPrice, tickLower, tickUpper, amount0, amount1, swapPoolKey.fee);
         }
-
-        console.log("inputAmount", inputAmount);
-        console.log("swapDir0to1", swapDir0to1);
-        console.log("amount0", amount0);
-        console.log("amount1", amount1);
 
         if (inputAmount > 0) {
             BalanceDelta swapDelta = _swap(swapPoolKey, swapDir0to1, inputAmount);
