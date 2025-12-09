@@ -349,7 +349,7 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoExitTickLower: tickLower2,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: false,
             autoExitSwapUpper: false,
@@ -404,7 +404,7 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoExitTickLower: tickLower2,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: true, // Enable swap when exiting at lower bound
             autoExitSwapUpper: false,

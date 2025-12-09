@@ -264,7 +264,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             }
 
             uint256 length = list.tokenIds[tick].length;
-
             for (uint256 i = 0; i < length; i++) {
                 uint256 tokenId = list.tokenIds[tick][i];
                 _handleTokenIdBeforeSwap(key, poolId, tokenId, list.increasing, tick);
@@ -288,12 +287,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             ? TickMath.minUsableTick(poolKey.tickSpacing) + poolKey.tickSpacing
             : TickMath.maxUsableTick(poolKey.tickSpacing);
         
-
-        console.log("minTick", minTick);
-        console.log("maxTick", maxTick);
-        console.log("amount0", params.zeroForOne ? uint256(-params.amountSpecified) : 0);
-        console.log("amount1", params.zeroForOne ? 0 : uint256(-params.amountSpecified));
-
         (,,, uint160 sqrtPriceX96) = LiquidityCalculator.calculateSamePool(
             pool,
             minTick,
@@ -351,16 +344,17 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             // tickEnd may have changed after the processing of the tokenId
             tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
 
-            // if direction changed - switch to the other list
+            // there is a chance that the direction has changed since the last swap - if so, switch to the other list
             if (tickEnd > tick && !list.increasing || tickEnd < tick && list.increasing) {
+                list.remove(tick, 0);
                 list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
                 (exists, tick) = list.searchFirstAfter(tick);
             } else {
-                (exists, tick) = list.getNext(tick);
+                int24 nextTick;
+                (exists, nextTick) = list.getNext(tick);
+                list.remove(tick, 0);
+                tick = nextTick;
             }
-
-            // remove all tokenIds at this tick
-            list.remove(tick, 0);
         }
 
         tickLowerLasts[poolId] = tickEnd;
@@ -523,6 +517,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         // Get current config - to check if changed
         PositionConfig memory currentConfig = positionConfigs[tokenId];
 
+        // initialize the lists if they are not initialized
+        if (!upperTriggerBeforeSwap[poolId].increasing) {
+            upperTriggerBeforeSwap[poolId].increasing = true;
+            upperTriggerAfterSwap[poolId].increasing = true;
+        }
+
         // TODO optimize this by checking if changed - remove only when needed
         if (liquidity > 0) {
             if (currentConfig.mode == PositionMode.AUTO_RANGE) {
@@ -530,16 +530,16 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 upperTriggerAfterSwap[poolId].remove(tickUpper + currentConfig.autoRangeUpperLimit, tokenId);
             }
             if (newConfig.mode == PositionMode.AUTO_RANGE) {
-                lowerTriggerAfterSwap[poolId].insert(tickLower - currentConfig.autoRangeLowerLimit, tokenId);
-                upperTriggerAfterSwap[poolId].insert(tickUpper + currentConfig.autoRangeUpperLimit, tokenId);
+                lowerTriggerAfterSwap[poolId].insert(tickLower - newConfig.autoRangeLowerLimit, tokenId);
+                upperTriggerAfterSwap[poolId].insert(tickUpper + newConfig.autoRangeUpperLimit, tokenId);
             }
             if (currentConfig.mode == PositionMode.AUTO_EXIT) {
                 lowerTriggerAfterSwap[poolId].remove(currentConfig.autoExitTickLower, tokenId);
                 upperTriggerAfterSwap[poolId].remove(currentConfig.autoExitTickUpper, tokenId);
             }
             if (newConfig.mode == PositionMode.AUTO_EXIT) {
-                lowerTriggerAfterSwap[poolId].insert(currentConfig.autoExitTickLower, tokenId);
-                upperTriggerAfterSwap[poolId].insert(currentConfig.autoExitTickUpper, tokenId);
+                lowerTriggerAfterSwap[poolId].insert(newConfig.autoExitTickLower, tokenId);
+                upperTriggerAfterSwap[poolId].insert(newConfig.autoExitTickUpper, tokenId);
             }
         } else {
             if (currentConfig.mode == PositionMode.AUTO_RANGE) {
@@ -702,11 +702,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
                 emit AutoLendWithdraw(tokenId, Currency.wrap(token), amount, shares);
 
-
-                // add triggers for deposit again
                 lowerTriggerAfterSwap[poolId].insert(posInfo.tickLower() - 2 * poolKey.tickSpacing, tokenId);
                 upperTriggerAfterSwap[poolId].insert(posInfo.tickUpper() + poolKey.tickSpacing, tokenId);
-                
+
             } catch (bytes memory reason) {
                 emit HookAutoLendFailed(address(autoLendVaults[token]), Currency.wrap(token), reason);
             }

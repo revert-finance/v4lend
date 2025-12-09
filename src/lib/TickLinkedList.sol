@@ -169,8 +169,12 @@ library TickLinkedList {
 
         // special case to remove all tokenIds at this tick
         if (_tokenId == 0) {
-            delete self.tokenIds[_tick];
-            empty = true;
+            if (self.tokenIds[_tick].length > 0) {
+                delete self.tokenIds[_tick];
+                empty = true;
+            } else {
+                return false;
+            }
         } else {
             bool removed;
             (removed, empty) = _removeFromTickMapping(self.tokenIds[_tick], _tokenId);
