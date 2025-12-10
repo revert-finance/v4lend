@@ -101,13 +101,16 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     mapping(address token => IERC4626 vault) public autoLendVaults;
 
     // fees for auto compound execution 1% reward
-    uint16 autoCompoundRewardBps = 100;
+    uint16 public autoCompoundRewardBps = 100;
 
     // protocol fees (taken from the final amount)
-    uint16 autoCompoundProtocolFeeBps = 100;
-    uint16 autoLendProtocolFeeBps = 100;
-    uint16 autoExitProtocolFeeBps = 100;
-    uint16 autoRangeProtocolFeeBps = 100;
+    uint16 public autoCompoundProtocolFeeBps = 100;
+    uint16 public autoLendProtocolFeeBps = 100;
+    uint16 public autoExitProtocolFeeBps = 100;
+    uint16 public autoRangeProtocolFeeBps = 100;
+
+    // oracle price validation
+    uint16 public maxOraclePriceDifferenceBps = 100; // 1% default tolerance
 
     // recipient for protocol fees
     address public protocolFeeRecipient;
@@ -1145,17 +1148,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     {
         uint160 sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
 
-        /*
-        uint256 priceOracleX96 = v4Oracle.getPoolPriceX96(Currency.unwrap(poolKey.currency0), Currency.unwrap(poolKey.currency1));
-        (uint256 pricePoolX96, ,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-        pricePoolX96 = pricePoolX96 * pricePoolX96 / Q96;
-
-        // check if both prices are within 1% of each other (simple formula)
-        if (priceOracleX96 > pricePoolX96 * 101 / 100 || priceOracleX96 < pricePoolX96 * 99 / 100) {
-            revert();
-        }
-        */
-
         // Prepare swap params
         SwapParams memory swapParams = SwapParams({
             zeroForOne: zeroForOne,
@@ -1269,7 +1261,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             newAmount1 = amount1 + uint256(int256(balanceDelta.amount1()));
         }
     }
-
+    
     function _handleApproval(Currency token, uint256 amount) internal {
         if (amount != 0 && !token.isAddressZero()) {
             address tokenAddr = Currency.unwrap(token);

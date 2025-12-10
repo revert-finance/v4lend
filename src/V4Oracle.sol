@@ -88,14 +88,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @param token0 Token address to get price for (use address(0) for native ETH)
     /// @param token1 Token address to quote the price in (use address(0) for native ETH)
     /// @return priceX96 Price of token in quote token terms in X96
-    function getPoolPriceX96(address token0, address token1) external view returns (uint256 priceX96) {
+    function getPoolSqrtPriceX96(address token0, address token1) external view returns (uint160) {
         if (token0 == token1) {
-            return Q96;
+            return uint160(Q96);
         }
 
         (uint256 price0X96, uint256 chainlinkReferencePriceX96) = _getReferenceTokenPriceX96(token0, 0);
         (uint256 price1X96,) = _getReferenceTokenPriceX96(token1, chainlinkReferencePriceX96);
-        return price0X96 * Q96 / price1X96;
+        return SafeCast.toUint160(Math.sqrt(price0X96 * Q96 / price1X96) * (2 ** 48));
     }
 
     /// @notice Gets value of a V4 position in a specific token

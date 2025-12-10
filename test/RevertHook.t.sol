@@ -22,7 +22,7 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
-import {V4Oracle} from "../src/V4Oracle.sol";
+import {MockV4Oracle} from "./utils/MockV4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MockERC4626Vault} from "./utils/MockERC4626Vault.sol";
@@ -77,10 +77,8 @@ contract RevertHookTest is BaseTest {
 
 
         // Deploy V4Oracle
-        V4Oracle v4Oracle = new V4Oracle(
-            positionManager,
-            Currency.unwrap(currency0),
-            0x000000000000000000000000000000000000dEaD
+        MockV4Oracle v4Oracle = new MockV4Oracle(
+            positionManager
         );
 
         bytes memory constructorArgs = abi.encode(address(this), permit2, v4Oracle); // Add all the necessary constructor arguments from the hook
@@ -113,6 +111,9 @@ contract RevertHookTest is BaseTest {
         poolId = poolKey.toId();
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
         poolManager.initialize(nonHookedPoolKey, Constants.SQRT_PRICE_1_1);
+
+        // Set pool key for mock v4Oracle
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), poolKey);
 
         // Provide full-range liquidity to the pool
         tickLower = TickMath.minUsableTick(poolKey.tickSpacing);
