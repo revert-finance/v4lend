@@ -110,7 +110,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     uint16 public autoRangeProtocolFeeBps = 100;
 
     // oracle price validation
-    uint16 public maxOraclePriceDifferenceBps = 100; // 1% default tolerance
+    int24 public maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
 
     // recipient for protocol fees
     address public protocolFeeRecipient;
@@ -167,6 +167,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         if (address(autoLendVaults[token]) == address(0)) {
             autoLendVaults[token] = vault;
         }
+    }
+
+    function setMaxTicksFromOracle(int24 _maxTicksFromOracle) external onlyOwner {
+        maxTicksFromOracle = _maxTicksFromOracle;
     }
 
     function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external {
@@ -255,15 +259,24 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         bool exists; 
         (exists, tick) = list.searchFirstAfter(tick);
 
+        bool hasValidatedEndTick = false;
         while (true) {
             if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
                 break;
             }
 
+            // do end tick validation as lazy as possible - only if needed
+            if (!hasValidatedEndTick) {
+                tickEnd = _validateEndTickAgainstOracle(key, tickEnd, tick < tickEnd);
+                if (list.increasing ? tick > tickEnd : tick < tickEnd) {
+                    break;
+                }
+                hasValidatedEndTick = true;
+            }
+
             uint256 length = list.tokenIds[tick].length;
             for (uint256 i = 0; i < length; i++) {
-                uint256 tokenId = list.tokenIds[tick][i];
-                _handleTokenIdBeforeSwap(key, poolId, tokenId, list.increasing, tick);
+                _handleTokenIdBeforeSwap(key, poolId, list.tokenIds[tick][i], list.increasing, tick);
             }
 
             (exists, tick) = list.getNext(tick);
@@ -320,18 +333,25 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         bool exists; 
         (exists, tick) = list.searchFirstAfter(tick);
 
+        bool hasValidatedEndTick = false;
         while (true) {
             if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
                 break;
             }
 
-            // copy to memory
-            uint256[] memory tokenIds = list.tokenIds[tick];
+            // do end tick validation as lazy as possible - only if needed
+            if (!hasValidatedEndTick) {
+                tickEnd = _validateEndTickAgainstOracle(key, tickEnd, tick < tickEnd);
+                if (list.increasing ? tick > tickEnd : tick < tickEnd) {
+                    break;
+                }
+                hasValidatedEndTick = true;
+            }
 
             // execute all triggers at this tick
-            uint256 length = tokenIds.length;
+            uint256 length = list.tokenIds[tick].length;
             for (uint256 i = 0; i < length; i++) {
-                _handleTokenIdAfterSwap(key, poolId, tokenIds[i], list.increasing, tick);
+                _handleTokenIdAfterSwap(key, poolId, list.tokenIds[tick][i], list.increasing, tick);
             }
 
             // tickEnd may have changed after the processing of the tokenId
@@ -1262,6 +1282,40 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         }
     }
     
+    /// @notice Validates and caps the end tick based on oracle price
+    /// @param poolKey The pool key
+    /// @param endTick The proposed end tick from swap simulation
+    /// @param up True if swap moves price up (tick increasing), false if swap moves price down (tick decreasing)
+    /// @return validatedEndTick The validated end tick, capped if necessary to stay within reasonable range of oracle
+    function _validateEndTickAgainstOracle(PoolKey memory poolKey, int24 endTick, bool up) internal view returns (int24 validatedEndTick) {
+        uint160 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(
+            Currency.unwrap(poolKey.currency0),
+            Currency.unwrap(poolKey.currency1)
+        );
+        
+        int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), poolKey.tickSpacing);
+        
+        if (up) {
+            if (endTick < oracleTick) {
+                validatedEndTick = endTick;
+            } else {
+                validatedEndTick = (endTick - oracleTick) <= maxTicksFromOracle 
+                    ? endTick 
+                    : oracleTick + maxTicksFromOracle;
+            }
+        } else {
+            if (endTick > oracleTick) {
+                validatedEndTick = endTick;
+            } else {
+                validatedEndTick = (oracleTick - endTick) <= maxTicksFromOracle 
+                    ? endTick 
+                    : oracleTick - maxTicksFromOracle;
+            }
+        }
+        
+        return _getTickLower(validatedEndTick, poolKey.tickSpacing);
+    }
+
     function _handleApproval(Currency token, uint256 amount) internal {
         if (amount != 0 && !token.isAddressZero()) {
             address tokenAddr = Currency.unwrap(token);

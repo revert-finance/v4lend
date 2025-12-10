@@ -632,6 +632,10 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoLend() public {
+
+        // set higher max ticks (10%) for mock oracle to avoid testing oracle price validation issues
+        hook.setMaxTicksFromOracle(1000);
+
         // Create a new position for autolend testing
         int24 testTickLower = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
         int24 testTickUpper = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
