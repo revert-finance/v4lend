@@ -383,7 +383,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     ) internal {
         PositionConfig memory config = positionConfigs[tokenId];
         if (config.mode == PositionMode.AUTO_LEND) {
-            _autoLendWithdraw(poolKey, poolId, tokenId, isUpperTrigger);
+            _handleAutoLendBeforeSwap(poolKey, poolId, tokenId, isUpperTrigger);
         }
     }
 
@@ -397,62 +397,95 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     ) internal {
         PositionConfig memory config = positionConfigs[tokenId];
 
-        bool ownedByVault = vaults[_getOwner(tokenId)];
+        if (config.mode == PositionMode.AUTO_EXIT) {
+            _handleAutoExitAfterSwap(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
+        } else if (config.mode == PositionMode.AUTO_LEND) {
+            _handleAutoLendAfterSwap(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
+        } else if (config.mode == PositionMode.AUTO_RANGE) {
+            _handleAutoRangeAfterSwap(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
+        }
+    }
 
-        if (config.mode == PositionMode.AUTO_EXIT && !isUpperTrigger && baseTick == config.autoExitTickLower) {
+    function _handleAutoExitAfterSwap(
+        PoolKey memory poolKey,
+        PoolId poolId,
+        uint256 tokenId,
+        bool isUpperTrigger,
+        int24 baseTick,
+        PositionConfig memory config
+    ) internal {
+        bool ownedByVault = vaults[_getOwner(tokenId)];
+        address owner = _getOwner(tokenId);
+
+        if (!isUpperTrigger && baseTick == config.autoExitTickLower) {
             if (ownedByVault) {
-                IVault(_getOwner(tokenId))
-                    .transform(
-                        tokenId,
-                        address(this),
-                        abi.encodeCall(
-                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower)
-                        )
-                    );
+                IVault(owner).transform(
+                    tokenId,
+                    address(this),
+                    abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower))
+                );
             } else {
                 autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
             }
-        } else if (config.mode == PositionMode.AUTO_EXIT && isUpperTrigger && baseTick == config.autoExitTickUpper) {
+        } else if (isUpperTrigger && baseTick == config.autoExitTickUpper) {
             if (ownedByVault) {
-                IVault(_getOwner(tokenId))
-                    .transform(
-                        tokenId,
-                        address(this),
-                        abi.encodeCall(
-                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper)
-                        )
-                    );
+                IVault(owner).transform(
+                    tokenId,
+                    address(this),
+                    abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper))
+                );
             } else {
                 autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper);
             }
-        } else {
-            if (config.mode == PositionMode.AUTO_LEND || config.mode == PositionMode.AUTO_RANGE) {
-                (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-                int24 tickLower = posInfo.tickLower();
-                int24 tickUpper = posInfo.tickUpper();
+        }
+    }
 
-                if (config.mode == PositionMode.AUTO_LEND && baseTick == tickLower - 2 * poolKey.tickSpacing || baseTick == tickUpper + poolKey.tickSpacing) {
-                    if (!ownedByVault) {    
-                        _autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger);
-                    }
-                } else if (
-                    config.mode == PositionMode.AUTO_RANGE
-                        && (baseTick == tickLower - config.autoRangeLowerLimit
-                            && !isUpperTrigger
-                            || baseTick == tickUpper + config.autoRangeUpperLimit
-                            && isUpperTrigger)
-                ) {
-                    if (ownedByVault) {
-                        IVault(_getOwner(tokenId))
-                            .transform(
-                                tokenId,
-                                address(this),
-                                abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId, baseTick))
-                            );
-                    } else {
-                        autoRange(poolKey, poolId, tokenId, baseTick);
-                    }
-                }
+    function _handleAutoLendAfterSwap(
+        PoolKey memory poolKey,
+        PoolId poolId,
+        uint256 tokenId,
+        bool isUpperTrigger,
+        int24 baseTick,
+        PositionConfig memory config
+    ) internal {
+        bool ownedByVault = vaults[_getOwner(tokenId)];
+
+        if (ownedByVault) {
+            return;
+        }
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        int24 tickLower = posInfo.tickLower();
+        int24 tickUpper = posInfo.tickUpper();
+
+        if (baseTick == tickLower - poolKey.tickSpacing || baseTick == tickUpper) {
+            _autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger);
+        }
+    }
+
+    function _handleAutoRangeAfterSwap(
+        PoolKey memory poolKey,
+        PoolId poolId,
+        uint256 tokenId,
+        bool isUpperTrigger,
+        int24 baseTick,
+        PositionConfig memory config
+    ) internal {
+        bool ownedByVault = vaults[_getOwner(tokenId)];
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        int24 tickLower = posInfo.tickLower();
+        int24 tickUpper = posInfo.tickUpper();
+
+        if (baseTick == tickLower - config.autoRangeLowerLimit && !isUpperTrigger || baseTick == tickUpper + config.autoRangeUpperLimit && isUpperTrigger) {
+            if (ownedByVault) {
+                IVault(_getOwner(tokenId)).transform(
+                    tokenId,
+                    address(this),
+                    abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId, baseTick))
+                );
+            } else {
+                autoRange(poolKey, poolId, tokenId, baseTick);
             }
         }
     }
@@ -567,15 +600,15 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         // autolend configuration changes handling
         if (newConfig.mode == PositionMode.AUTO_LEND) {
-            lowerTriggerAfterSwap[poolId].insert(tickLower - 2 * key.tickSpacing, tokenId); // <- trigger to move liquidity to lend
+            lowerTriggerAfterSwap[poolId].insert(tickLower - key.tickSpacing, tokenId); // <- trigger to move liquidity to lend
             lowerTriggerBeforeSwap[poolId].insert(tickUpper, tokenId); // <- trigger to readd liquidity to position
-            upperTriggerBeforeSwap[poolId].insert(tickLower - 1 * key.tickSpacing, tokenId); // -> trigger to readd liquidity to position
-            upperTriggerAfterSwap[poolId].insert(tickUpper + key.tickSpacing, tokenId); // -> trigger to move liquidity to lend
+            upperTriggerBeforeSwap[poolId].insert(tickLower - key.tickSpacing, tokenId); // -> trigger to readd liquidity to position
+            upperTriggerAfterSwap[poolId].insert(tickUpper, tokenId); // -> trigger to move liquidity to lend
         } else if (currentConfig.mode == PositionMode.AUTO_LEND && newConfig.mode != PositionMode.AUTO_LEND) {
-            lowerTriggerAfterSwap[poolId].remove(tickLower - 2 * key.tickSpacing, tokenId);
+            lowerTriggerAfterSwap[poolId].remove(tickLower - key.tickSpacing, tokenId);
             lowerTriggerBeforeSwap[poolId].remove(tickUpper, tokenId);
-            upperTriggerBeforeSwap[poolId].remove(tickLower - 1 * key.tickSpacing, tokenId);
-            upperTriggerAfterSwap[poolId].remove(tickUpper + key.tickSpacing, tokenId);
+            upperTriggerBeforeSwap[poolId].remove(tickLower - key.tickSpacing, tokenId);
+            upperTriggerAfterSwap[poolId].remove(tickUpper, tokenId);
         }
     }
 
@@ -674,7 +707,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         }
     }
 
-    function _autoLendWithdraw(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
+    function _handleAutoLendBeforeSwap(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
         if (msg.sender != address(poolManager)) {
             revert Unauthorized();
         }
