@@ -414,9 +414,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 baseTick,
         PositionConfig memory config
     ) internal {
-        bool ownedByVault = vaults[_getOwner(tokenId)];
         address owner = _getOwner(tokenId);
-
+        bool ownedByVault = vaults[owner];
+        
         if (!isUpperTrigger && baseTick == config.autoExitTickLower) {
             if (ownedByVault) {
                 IVault(owner).transform(
@@ -471,15 +471,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 baseTick,
         PositionConfig memory config
     ) internal {
-        bool ownedByVault = vaults[_getOwner(tokenId)];
+        address owner = _getOwner(tokenId);
+        bool ownedByVault = vaults[owner];
 
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        int24 tickLower = posInfo.tickLower();
-        int24 tickUpper = posInfo.tickUpper();
-
-        if (baseTick == tickLower - config.autoRangeLowerLimit && !isUpperTrigger || baseTick == tickUpper + config.autoRangeUpperLimit && isUpperTrigger) {
+        if (baseTick == posInfo.tickLower() - config.autoRangeLowerLimit && !isUpperTrigger || baseTick == posInfo.tickUpper() + config.autoRangeUpperLimit && isUpperTrigger) {
             if (ownedByVault) {
-                IVault(_getOwner(tokenId)).transform(
+                IVault(owner).transform(
                     tokenId,
                     address(this),
                     abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId, baseTick))
