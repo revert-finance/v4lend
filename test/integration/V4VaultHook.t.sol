@@ -60,7 +60,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Deploy RevertHook
         address hookFlags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
                     | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
                     | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions

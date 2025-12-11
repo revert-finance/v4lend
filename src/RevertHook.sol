@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.30;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -37,6 +37,8 @@ import {Transformer} from "./transformers/Transformer.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {V4Oracle} from "./V4Oracle.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
+
+import "forge-std/console.sol";
 
 error Unauthorized();
 error InvalidConfig();
@@ -88,12 +90,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     IPositionManager public immutable positionManager;
     V4Oracle public immutable v4Oracle;
 
-    // last processed tick for pool in _afterSwap 
+    // last processed tick for pool in _afterSwap
     mapping(PoolId => int24) public tickLowerLasts;
 
     // manages ticks where actions are triggered (can be multiple entries per tokenid)
-    mapping(PoolId poolId => TickLinkedList.List) public lowerTriggerBeforeSwap;
-    mapping(PoolId poolId => TickLinkedList.List) public upperTriggerBeforeSwap;
     mapping(PoolId poolId => TickLinkedList.List) public lowerTriggerAfterSwap;
     mapping(PoolId poolId => TickLinkedList.List) public upperTriggerAfterSwap;
 
@@ -219,7 +219,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             afterAddLiquidity: true,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: true,
-            beforeSwap: true,
+            beforeSwap: false,
             afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
@@ -231,80 +231,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
-        
         // TODO check if tokens allowed?
-        
+
         int24 tickLower = _getTickLower(tick, key.tickSpacing);
         tickLowerLasts[key.toId()] = tickLower;
         return BaseHook.afterInitialize.selector;
-    }
-
-    function _beforeSwap(address caller, PoolKey calldata key, SwapParams calldata params, bytes calldata)
-        internal
-        override
-        returns (bytes4, BeforeSwapDelta, uint24)
-    {
-        PoolId poolId = key.toId();
-
-        // simulate swap to see which tick range is (probably) affected - changes after liquidity changes
-        int24 tickEnd = _simulateSwap(key, params);
-        int24 tick = tickLowerLasts[key.toId()];
-        if (tick == tickEnd) {
-            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
-
-        TickLinkedList.List storage list = tick < tickEnd ? upperTriggerBeforeSwap[poolId] : lowerTriggerBeforeSwap[poolId];
-       
-        // process all triggers, triggers are not removed here because autolend can happen again later at the same position
-        bool exists; 
-        (exists, tick) = list.searchFirstAfter(tick);
-
-        bool hasValidatedEndTick = false;
-        while (true) {
-            if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
-                break;
-            }
-
-            // do end tick validation as lazy as possible - only if needed
-            if (!hasValidatedEndTick) {
-                tickEnd = _validateEndTickAgainstOracle(key, tickEnd, tick < tickEnd);
-                if (list.increasing ? tick > tickEnd : tick < tickEnd) {
-                    break;
-                }
-                hasValidatedEndTick = true;
-            }
-
-            uint256 length = list.tokenIds[tick].length;
-            for (uint256 i = 0; i < length; i++) {
-                _handleTokenIdBeforeSwap(key, poolId, list.tokenIds[tick][i], list.increasing, tick);
-            }
-
-            (exists, tick) = list.getNext(tick);
-        }
-
-        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-    }
-
-    function _simulateSwap(PoolKey memory poolKey, SwapParams memory params) internal view returns (int24 tickEnd) {
-        LiquidityCalculator.V4PoolInfo memory pool = LiquidityCalculator.V4PoolInfo({
-            poolMgr: poolManager, poolIdentifier: poolKey.toId(), tickSpacing: poolKey.tickSpacing
-        });
-
-        int24 minTick = params.zeroForOne
-            ? TickMath.minUsableTick(poolKey.tickSpacing)
-            : TickMath.maxUsableTick(poolKey.tickSpacing) - poolKey.tickSpacing;
-        int24 maxTick = params.zeroForOne
-            ? TickMath.minUsableTick(poolKey.tickSpacing) + poolKey.tickSpacing
-            : TickMath.maxUsableTick(poolKey.tickSpacing);
-        
-        (,,, uint160 sqrtPriceX96) = LiquidityCalculator.calculateSamePool(
-            pool,
-            minTick,
-            maxTick,
-            params.zeroForOne ? uint256(-params.amountSpecified) : 0,
-            params.zeroForOne ? 0 : uint256(-params.amountSpecified)
-        );
-        return _getTickLower(TickMath.getTickAtSqrtPrice(sqrtPriceX96), poolKey.tickSpacing);
     }
 
     function _afterSwap(address caller, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
@@ -319,34 +250,38 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         PoolId poolId = key.toId();
 
-        int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
+        //int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
         int24 tick = tickLowerLasts[poolId];
+        int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
         if (tick == tickEnd) {
             return (this.afterSwap.selector, 0);
         }
 
-        TickLinkedList.List storage list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage list =
+            tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
 
         // if tick changed - process all triggers, each processing may change the tick again
         // this must work all until the end - otherwise swap is not allowed and hook will not be executed
 
-        bool exists; 
+        bool exists;
         (exists, tick) = list.searchFirstAfter(tick);
 
-        bool hasValidatedEndTick = false;
+        bool tickEndValidated = false;
+
         while (true) {
             if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
                 break;
             }
 
-            // do end tick validation as lazy as possible - only if needed
-            if (!hasValidatedEndTick) {
-                tickEnd = _validateEndTickAgainstOracle(key, tickEnd, tick < tickEnd);
+            if (!tickEndValidated) {
+                tickEnd = _validateEndTickAgainstOracle(key, tickEnd, list.increasing);
                 if (list.increasing ? tick > tickEnd : tick < tickEnd) {
                     break;
                 }
-                hasValidatedEndTick = true;
+                tickEndValidated = true;
             }
+
+            console.log("processing tick as", tick);
 
             // execute all triggers at this tick
             uint256 length = list.tokenIds[tick].length;
@@ -361,6 +296,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             if (tickEnd > tick && !list.increasing || tickEnd < tick && list.increasing) {
                 list.remove(tick, 0);
                 list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+                // TODO validate endtick considering direction change
                 (exists, tick) = list.searchFirstAfter(tick);
             } else {
                 int24 nextTick;
@@ -374,19 +310,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         return (this.afterSwap.selector, 0);
     }
 
-    function _handleTokenIdBeforeSwap(
-        PoolKey memory poolKey,
-        PoolId poolId,
-        uint256 tokenId,
-        bool isUpperTrigger,
-        int24 baseTick
-    ) internal {
-        PositionConfig memory config = positionConfigs[tokenId];
-        if (config.mode == PositionMode.AUTO_LEND) {
-            _handleAutoLendBeforeSwap(poolKey, poolId, tokenId, isUpperTrigger);
-        }
-    }
-
     // handle token id - when detected as triggered by a swap
     function _handleTokenIdAfterSwap(
         PoolKey memory poolKey,
@@ -396,17 +319,16 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 baseTick
     ) internal {
         PositionConfig memory config = positionConfigs[tokenId];
-
         if (config.mode == PositionMode.AUTO_EXIT) {
-            _handleAutoExitAfterSwap(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
+            _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
         } else if (config.mode == PositionMode.AUTO_LEND) {
-            _handleAutoLendAfterSwap(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
+            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
         } else if (config.mode == PositionMode.AUTO_RANGE) {
-            _handleAutoRangeAfterSwap(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
+            _handleAutoRange(poolKey, poolId, tokenId, isUpperTrigger, baseTick, config);
         }
     }
 
-    function _handleAutoExitAfterSwap(
+    function _handleAutoExit(
         PoolKey memory poolKey,
         PoolId poolId,
         uint256 tokenId,
@@ -416,31 +338,37 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     ) internal {
         address owner = _getOwner(tokenId);
         bool ownedByVault = vaults[owner];
-        
+
         if (!isUpperTrigger && baseTick == config.autoExitTickLower) {
             if (ownedByVault) {
-                IVault(owner).transform(
-                    tokenId,
-                    address(this),
-                    abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower))
-                );
+                IVault(owner)
+                    .transform(
+                        tokenId,
+                        address(this),
+                        abi.encodeCall(
+                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower)
+                        )
+                    );
             } else {
                 autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
             }
         } else if (isUpperTrigger && baseTick == config.autoExitTickUpper) {
             if (ownedByVault) {
-                IVault(owner).transform(
-                    tokenId,
-                    address(this),
-                    abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper))
-                );
+                IVault(owner)
+                    .transform(
+                        tokenId,
+                        address(this),
+                        abi.encodeCall(
+                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper)
+                        )
+                    );
             } else {
                 autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper);
             }
         }
     }
 
-    function _handleAutoLendAfterSwap(
+    function _handleAutoLend(
         PoolKey memory poolKey,
         PoolId poolId,
         uint256 tokenId,
@@ -448,22 +376,25 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 baseTick,
         PositionConfig memory config
     ) internal {
+        // no auto lend for collateral positions
         bool ownedByVault = vaults[_getOwner(tokenId)];
-
         if (ownedByVault) {
             return;
         }
 
+        uint256 shares = autoLendShares[tokenId];
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        int24 tickLower = posInfo.tickLower();
-        int24 tickUpper = posInfo.tickUpper();
-
-        if (baseTick == tickLower - poolKey.tickSpacing || baseTick == tickUpper) {
-            _autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger);
+        bool outOfRange = baseTick < posInfo.tickLower() || baseTick >= posInfo.tickUpper();
+        if (shares > 0) {
+            _autoLendWithdraw(poolKey, poolId, tokenId, isUpperTrigger, shares, baseTick);
+        } else {
+            if (outOfRange) {
+                _autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger, baseTick);
+            }
         }
     }
 
-    function _handleAutoRangeAfterSwap(
+    function _handleAutoRange(
         PoolKey memory poolKey,
         PoolId poolId,
         uint256 tokenId,
@@ -475,13 +406,15 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         bool ownedByVault = vaults[owner];
 
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        if (baseTick == posInfo.tickLower() - config.autoRangeLowerLimit && !isUpperTrigger || baseTick == posInfo.tickUpper() + config.autoRangeUpperLimit && isUpperTrigger) {
+        if (
+            baseTick == posInfo.tickLower() - config.autoRangeLowerLimit && !isUpperTrigger
+                || baseTick == posInfo.tickUpper() + config.autoRangeUpperLimit && isUpperTrigger
+        ) {
             if (ownedByVault) {
-                IVault(owner).transform(
-                    tokenId,
-                    address(this),
-                    abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId, baseTick))
-                );
+                IVault(owner)
+                    .transform(
+                        tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId, baseTick))
+                    );
             } else {
                 autoRange(poolKey, poolId, tokenId, baseTick);
             }
@@ -562,8 +495,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         PositionConfig memory currentConfig = positionConfigs[tokenId];
 
         // initialize the lists if they are not initialized
-        if (!upperTriggerBeforeSwap[poolId].increasing) {
-            upperTriggerBeforeSwap[poolId].increasing = true;
+        if (!upperTriggerAfterSwap[poolId].increasing) {
             upperTriggerAfterSwap[poolId].increasing = true;
         }
 
@@ -596,17 +528,24 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             }
         }
 
-        // autolend configuration changes handling
-        if (newConfig.mode == PositionMode.AUTO_LEND) {
-            lowerTriggerAfterSwap[poolId].insert(tickLower - key.tickSpacing, tokenId); // <- trigger to move liquidity to lend
-            lowerTriggerBeforeSwap[poolId].insert(tickUpper, tokenId); // <- trigger to readd liquidity to position
-            upperTriggerBeforeSwap[poolId].insert(tickLower - key.tickSpacing, tokenId); // -> trigger to readd liquidity to position
-            upperTriggerAfterSwap[poolId].insert(tickUpper, tokenId); // -> trigger to move liquidity to lend
+        // autolend configuration handling
+        if (currentConfig.mode != PositionMode.AUTO_LEND && newConfig.mode == PositionMode.AUTO_LEND) {
+            int24 baseTick = _getTickLower(_getTick(poolId), key.tickSpacing);
+            bool outOfRange = baseTick < tickLower || baseTick >= tickUpper;
+            if (outOfRange) {
+                _autoLendDeposit(key, poolId, tokenId, baseTick >= tickUpper, baseTick);
+            } else {
+                lowerTriggerAfterSwap[poolId].insert(tickLower - key.tickSpacing, tokenId); // <- trigger to move liquidity to lend
+                upperTriggerAfterSwap[poolId].insert(tickUpper, tokenId); // -> trigger to move liquidity to lend
+            }
         } else if (currentConfig.mode == PositionMode.AUTO_LEND && newConfig.mode != PositionMode.AUTO_LEND) {
-            lowerTriggerAfterSwap[poolId].remove(tickLower - key.tickSpacing, tokenId);
-            lowerTriggerBeforeSwap[poolId].remove(tickUpper, tokenId);
-            upperTriggerBeforeSwap[poolId].remove(tickLower - key.tickSpacing, tokenId);
-            upperTriggerAfterSwap[poolId].remove(tickUpper, tokenId);
+            int24 baseTick = _getTickLower(_getTick(poolId), key.tickSpacing);
+            if (autoLendShares[tokenId] > 0) {
+                _autoLendWithdraw(key, poolId, tokenId, baseTick >= tickUpper, autoLendShares[tokenId], baseTick);
+            } else {
+                lowerTriggerAfterSwap[poolId].remove(baseTick - key.tickSpacing, tokenId);
+                upperTriggerAfterSwap[poolId].remove(baseTick, tokenId);
+            }
         }
     }
 
@@ -662,15 +601,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         });
     }
 
-    function _autoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        if (msg.sender != address(poolManager)) {
-            revert Unauthorized();
-        }
+    function _autoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper, int24 baseTick) internal {
 
         // if not deposited yet, deposit
         if (autoLendShares[tokenId] == 0) {
-            (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
-                _decreaseLiquidity(tokenId, false);
+
+            (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
             Currency currency = isUpper ? currency1 : currency0;
             address currencyAddr = Currency.unwrap(currency);
@@ -696,6 +632,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 address owner = _getOwner(tokenId);
                 _sendLeftoverTokens(tokenId, currency0, currency1, owner);
 
+                // TODO add trigger to withdraw and create position again
+
                 emit AutoLendDeposit(tokenId, currency, amount, shares);
             } catch (bytes memory reason) {
                 emit HookAutoLendFailed(address(autoLendVaults[currencyAddr]), currency, reason);
@@ -705,53 +643,41 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         }
     }
 
-    function _handleAutoLendBeforeSwap(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        if (msg.sender != address(poolManager)) {
-            revert Unauthorized();
-        }
+    function _autoLendWithdraw(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper, uint256 shares, int24 baseTick) internal {
 
-        uint256 shares = autoLendShares[tokenId];
         address token = autoLendTokens[tokenId];
+        try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
+            autoLendShares[tokenId] = 0;
+            autoLendTokens[tokenId] = address(0);
 
-        if (shares > 0) {
-            try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
-                autoLendShares[tokenId] = 0;
-                autoLendTokens[tokenId] = address(0);
+            (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
-                (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+            amount -= amount * autoLendProtocolFeeBps / 10000;
 
-                amount -= amount * autoLendProtocolFeeBps / 10000;
+            _handleApproval(Currency.wrap(token), amount);
+        
+            uint256 amount0;
+            uint256 amount1;
 
-                bool isToken0 = token == Currency.unwrap(poolKey.currency0);
-
-                _handleApproval(Currency.wrap(token), amount);
-
-                // add out of range liquidity
-                (uint256 amount0, uint256 amount1) = _increaseLiquidity(
-                    tokenId, poolKey, posInfo, uint128(isToken0 ? amount : 0), uint128(isToken0 ? 0 : amount)
-                );
-
-                _sendFees(
-                    tokenId,
-                    poolKey.currency0,
-                    poolKey.currency1,
-                    amount0,
-                    amount1,
-                    autoLendProtocolFeeBps,
-                    protocolFeeRecipient
-                );
-
-                address owner = _getOwner(tokenId);
-                _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
-
-                emit AutoLendWithdraw(tokenId, Currency.wrap(token), amount, shares);
-
-                lowerTriggerAfterSwap[poolId].insert(posInfo.tickLower() - 2 * poolKey.tickSpacing, tokenId);
-                upperTriggerAfterSwap[poolId].insert(posInfo.tickUpper() + poolKey.tickSpacing, tokenId);
-
-            } catch (bytes memory reason) {
-                emit HookAutoLendFailed(address(autoLendVaults[token]), Currency.wrap(token), reason);
+            // depending on the available token - create correct position
+            if (token == Currency.unwrap(poolKey.currency0)) {
+                if (baseTick < posInfo.tickLower()) {
+                    (amount0, amount1) = _increaseLiquidity(tokenId, poolKey, posInfo, uint128(amount), 0);
+                } else {
+                    (tokenId, amount0, amount1) = _mintNewPosition(poolKey, baseTick + poolKey.tickSpacing, baseTick + poolKey.tickSpacing + (posInfo.tickUpper() - posInfo.tickLower()), uint128(amount), 0, _getOwner(tokenId));
+                }
+            } else {
+                if (baseTick >= posInfo.tickUpper()) {
+                    (amount0, amount1) = _increaseLiquidity(tokenId, poolKey, posInfo, 0, uint128(amount));
+                } else {
+                    (tokenId, amount0, amount1) = _mintNewPosition(poolKey, baseTick - (posInfo.tickUpper() - posInfo.tickLower()), baseTick, 0, uint128(amount), _getOwner(tokenId));
+                }
             }
+
+            // TODO add trigger to deposit again - remove from old position if new position is created
+
+        } catch (bytes memory reason) {
+            emit HookAutoLendFailed(address(autoLendVaults[token]), Currency.wrap(token), reason);
         }
     }
 
@@ -769,9 +695,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         if (shares > 0) {
             (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
 
-            uint256 amount = autoLendVaults[token].redeem(shares, address(this), address(this));
             autoLendShares[tokenId] = 0;
             autoLendTokens[tokenId] = address(0);
+
+            uint256 amount = autoLendVaults[token].redeem(shares, address(this), address(this));
 
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
 
@@ -1312,38 +1239,38 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             newAmount1 = amount1 + uint256(int256(balanceDelta.amount1()));
         }
     }
-    
+
     /// @notice Validates and caps the end tick based on oracle price
     /// @param poolKey The pool key
     /// @param endTick The proposed end tick from swap simulation
     /// @param up True if swap moves price up (tick increasing), false if swap moves price down (tick decreasing)
     /// @return validatedEndTick The validated end tick, capped if necessary to stay within reasonable range of oracle
-    function _validateEndTickAgainstOracle(PoolKey memory poolKey, int24 endTick, bool up) internal view returns (int24 validatedEndTick) {
-        uint160 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(
-            Currency.unwrap(poolKey.currency0),
-            Currency.unwrap(poolKey.currency1)
-        );
-        
+    function _validateEndTickAgainstOracle(PoolKey memory poolKey, int24 endTick, bool up)
+        internal
+        view
+        returns (int24 validatedEndTick)
+    {
+        uint160 oracleSqrtPriceX96 =
+            v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(poolKey.currency0), Currency.unwrap(poolKey.currency1));
+
         int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), poolKey.tickSpacing);
-        
+
         if (up) {
             if (endTick < oracleTick) {
                 validatedEndTick = endTick;
             } else {
-                validatedEndTick = (endTick - oracleTick) <= maxTicksFromOracle 
-                    ? endTick 
-                    : oracleTick + maxTicksFromOracle;
+                validatedEndTick =
+                    (endTick - oracleTick) <= maxTicksFromOracle ? endTick : oracleTick + maxTicksFromOracle;
             }
         } else {
             if (endTick > oracleTick) {
                 validatedEndTick = endTick;
             } else {
-                validatedEndTick = (oracleTick - endTick) <= maxTicksFromOracle 
-                    ? endTick 
-                    : oracleTick - maxTicksFromOracle;
+                validatedEndTick =
+                    (oracleTick - endTick) <= maxTicksFromOracle ? endTick : oracleTick - maxTicksFromOracle;
             }
         }
-        
+
         return _getTickLower(validatedEndTick, poolKey.tickSpacing);
     }
 
