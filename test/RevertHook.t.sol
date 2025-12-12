@@ -195,17 +195,16 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoRange() public {
         hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_RANGE,
-            autoExitTickLower: 0,
-            autoExitTickUpper: 0,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60,
+            doAutoCompound: false,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0))
+        }));
+        hook.setAutoRangeConfig(token3Id, RevertHook.AutoRangeConfig({
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: -60,
+            autoRangeUpperDelta: 60
         }));
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
@@ -283,15 +282,8 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoCompound() public {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_COMPOUND,
-            autoExitTickLower: 0,
-            autoExitTickUpper: 0,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
+            mode: RevertHook.PositionMode.NONE,
+            doAutoCompound: true,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
@@ -351,17 +343,16 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
+            doAutoCompound: false,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
+        }));
+        hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -406,17 +397,16 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoExitSwapLower: true, // Enable swap when exiting at lower bound
-            autoExitSwapUpper: false,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
+            doAutoCompound: false,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0)) // Use nonHookedPool for swapping
+        }));
+        hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoExitSwapLower: true, // Enable swap when exiting at lower bound
+            autoExitSwapUpper: false
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -494,17 +484,16 @@ contract RevertHookTest is BaseTest {
         // Set up autoExit config for token2Id
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
+            doAutoCompound: false,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
+        }));
+        hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false
         }));
 
         // DO NOT approve the position to the hook - this is the key difference
@@ -664,17 +653,15 @@ contract RevertHookTest is BaseTest {
         // Configure autolend for this position
         hook.setPositionConfig(autolendTokenId, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_LEND,
-            autoExitTickLower: 0,
-            autoExitTickUpper: 0,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
+            doAutoCompound: false,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0))
+        }));
+        hook.setAutoLendConfig(autolendTokenId, RevertHook.AutoLendConfig({
+            autoLendToleranceTick: 100,
+            autoLendToken: Currency.unwrap(currency0),
+            autoLendShares: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), autolendTokenId);
@@ -682,8 +669,9 @@ contract RevertHookTest is BaseTest {
         // Verify initial state
         uint128 initialLiquidity = positionManager.getPositionLiquidity(autolendTokenId);
         assertGt(initialLiquidity, 0, "Position should have liquidity initially");
-        assertEq(hook.autoLendShares(autolendTokenId), 0, "Should have no autolend shares initially");
-        assertEq(address(hook.autoLendTokens(autolendTokenId)), address(0), "Should have no autolend token initially");
+
+        assertEq(hook.autoLendConfigs(autolendTokenId).autoLendShares, 0, "Should have no autolend shares initially");
+        assertEq(address(hook.autoLendConfigs(autolendTokenId).autoLendToken), address(0), "Should have no autolend token initially");
 
         // Get initial vault balances
         uint256 vault0BalanceBefore = vault0.totalAssets();
