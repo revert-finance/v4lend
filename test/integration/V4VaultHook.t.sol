@@ -178,7 +178,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHook.PositionConfig({
                 mode: RevertHook.PositionMode.NONE,
-                doAutoCompound: true,
+                autoCompoundMode: RevertHook.AutoCompoundMode.AUTO_COMPOUND,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
                 swapPoolHooks: IHooks(address(revertHook))
@@ -381,7 +381,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHook.PositionConfig({
                 mode: RevertHook.PositionMode.AUTO_RANGE,
-                doAutoCompound: false,
+                autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
                 swapPoolHooks: IHooks(address(revertHook))

@@ -195,12 +195,12 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoRange() public {
         hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_RANGE,
-            doAutoCompound: false,
+            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0))
         }));
-        hook.setAutoRangeConfig(token3Id, RevertHook.AutoRangeConfig({
+        hook.setAutoRangeConfig(token3Id, RevertHook.AutoRangeCotestBasicAutoLendnfig({
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
@@ -283,7 +283,7 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.NONE,
-            doAutoCompound: true,
+            autoCompoundMode: RevertHook.AutoCompoundMode.AUTO_COMPOUND,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
@@ -343,12 +343,13 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            doAutoCompound: false,
+            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
         }));
         hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+            isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: false,
@@ -397,12 +398,13 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            doAutoCompound: false,
+            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0)) // Use nonHookedPool for swapping
         }));
         hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+            isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: true, // Enable swap when exiting at lower bound
@@ -484,12 +486,13 @@ contract RevertHookTest is BaseTest {
         // Set up autoExit config for token2Id
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_EXIT,
-            doAutoCompound: false,
+            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
         }));
         hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+            isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoExitSwapLower: false,
@@ -653,7 +656,7 @@ contract RevertHookTest is BaseTest {
         // Configure autolend for this position
         hook.setPositionConfig(autolendTokenId, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_LEND,
-            doAutoCompound: false,
+            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0))
