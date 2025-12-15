@@ -75,7 +75,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         vault.setTransformer(address(revertHook), true);
         vault.setHookAllowList(address(revertHook), true);
 
-        //v4Oracle.setMaxPoolPriceDifference(10000);
+        // create tolerant oracle for testing
+        v4Oracle.setMaxPoolPriceDifference(1000);
     }
 
     function _deposit(uint256 amount, address account) internal {
@@ -386,6 +387,7 @@ contract V4VaultHookTest is V4ForkTestBase {
                 swapPoolHooks: IHooks(address(revertHook))
             })
         );
+        vm.prank(WHALE_ACCOUNT);
         revertHook.setAutoRangeConfig(
             hookedTokenId,
             RevertHook.AutoRangeConfig({

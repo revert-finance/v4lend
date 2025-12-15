@@ -659,12 +659,14 @@ contract RevertHookTest is BaseTest {
             swapPoolHooks: IHooks(address(0))
         }));
         hook.setAutoLendConfig(autolendTokenId, RevertHook.AutoLendConfig({
-            autoLendToleranceTick: 100,
-            autoLendToken: Currency.unwrap(currency0),
+            autoLendToleranceTick: 60,
+            autoLendToken: address(0),
             autoLendShares: 0
         }));
 
-        IERC721(address(positionManager)).approve(address(hook), autolendTokenId);
+
+        // for auto lend where new positions may be created we need to approve all positions to the hook
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
 
         // Verify initial state
         uint128 initialLiquidity = positionManager.getPositionLiquidity(autolendTokenId);
@@ -714,6 +716,9 @@ contract RevertHookTest is BaseTest {
             deadline: block.timestamp
         });
 
+        // get the token id of the new position
+        autolendTokenId = positionManager.nextTokenId() - 1;
+
         // Verify currency0 withdraw was triggered
         (, autoLendToken, autoLendShares) = hook.autoLendConfigs(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency0 withdraw");
@@ -762,6 +767,9 @@ contract RevertHookTest is BaseTest {
             receiver: address(this),
             deadline: block.timestamp
         });
+
+        // get the token id of the new position
+        autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency1 withdraw was triggered
         (, autoLendToken, autoLendShares) = hook.autoLendConfigs(autolendTokenId);

@@ -167,7 +167,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         uint256 autoLendShares;
     }
 
-
     /// @notice Sets the ERC4626 vault for a given token address
     /// @dev Can only be called by the owner. This vault will be used for autolend functionality.
     /// @param token The token address to set the vault for
@@ -187,6 +186,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         if (_getOwner(tokenId) != msg.sender) {
             revert Unauthorized();
         }
+
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        _removePositionTriggers(tokenId, poolKey);
+        positionConfigs[tokenId] = positionConfig;
+        _addPositionTriggers(tokenId, poolKey);
 
         // emit event
         emit SetPositionConfig(tokenId, positionConfig);
@@ -209,9 +213,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             revert InvalidConfig();
         }
 
+        _removePositionTriggers(tokenId, poolKey);
         autoExitConfigs[tokenId] = config;
+        _addPositionTriggers(tokenId, poolKey);
     }
-    
+
     function setAutoRangeConfig(uint256 tokenId, AutoRangeConfig calldata config) external {
         if (_getOwner(tokenId) != msg.sender) {
             revert Unauthorized();
@@ -235,7 +241,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             revert InvalidConfig();
         }
 
+        _removePositionTriggers(tokenId, poolKey);
         autoRangeConfigs[tokenId] = config;
+        _addPositionTriggers(tokenId, poolKey);
     }
 
     function setAutoLendConfig(uint256 tokenId, AutoLendConfig calldata autoLendConfig) external {
@@ -252,9 +260,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             revert InvalidConfig();
         }
 
+        _removePositionTriggers(tokenId, poolKey);
         autoLendConfigs[tokenId] = autoLendConfig;
+        _addPositionTriggers(tokenId, poolKey);
     }
-       
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -296,16 +305,24 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         PoolId poolId = key.toId();
         int24 tick = tickLowerLasts[poolId];
         int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
+
+        console.log("tick", tick);
+        console.log("tickEnd", tickEnd);
+
         if (tick == tickEnd) {
             return (this.afterSwap.selector, 0);
         }
 
-        TickLinkedList.List storage list = tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage list =
+            tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
 
         int24 oracleMaxEndTick = type(int24).min;
 
         bool exists;
         (exists, tick) = list.searchFirstAfter(tick);
+
+        console.log("exists", exists);
+        console.log("tick", tick);
 
         while (true) {
             if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
@@ -316,7 +333,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             if (oracleMaxEndTick == type(int24).min) {
                 // only do processing until oracle validated end tick
                 oracleMaxEndTick = _getOracleMaxEndTick(key, list.increasing);
-                tickEnd = list.increasing ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd) : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
+                tickEnd = list.increasing
+                    ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd)
+                    : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
                 if (list.increasing ? tick > tickEnd : tick < tickEnd) {
                     break;
                 }
@@ -327,12 +346,14 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             // execute all triggers at this tick
             uint256 length = list.tokenIds[tick].length;
             for (uint256 i = 0; i < length; i++) {
-                _handleTokenIdAfterSwap(key, poolId, list.tokenIds[tick][i], list.increasing, tick);
+                _handleTokenIdAfterSwap(key, poolId, list.tokenIds[tick][i], list.increasing);
             }
 
             // tickEnd may have increased into list direction after the processing of the tokenId (because of swaps - autorange / autoexit will only do swaps in the same direcction)
             tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
-            tickEnd = list.increasing ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd) : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
+            tickEnd = list.increasing
+                ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd)
+                : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
 
             int24 nextTick;
             (exists, nextTick) = list.getNext(tick);
@@ -349,16 +370,15 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         PoolKey memory poolKey,
         PoolId poolId,
         uint256 tokenId,
-        bool isUpperTrigger,
-        int24 baseTick
+        bool isUpperTrigger
     ) internal {
         PositionMode mode = positionConfigs[tokenId].mode;
         if (mode == PositionMode.AUTO_EXIT) {
-            _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger, baseTick);
+            _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_LEND) {
-            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger, baseTick);
+            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_RANGE) {
-            _handleAutoRange(poolKey, poolId, tokenId, isUpperTrigger, baseTick);
+            _handleAutoRange(poolKey, poolId, tokenId, isUpperTrigger);
         }
     }
 
@@ -366,15 +386,14 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         PoolKey memory poolKey,
         PoolId poolId,
         uint256 tokenId,
-        bool isUpperTrigger,
-        int24 baseTick
+        bool isUpperTrigger
     ) internal {
         address owner = _getOwner(tokenId);
         bool ownedByVault = vaults[owner];
 
         AutoExitConfig memory config = autoExitConfigs[tokenId];
 
-        if (!isUpperTrigger && baseTick == config.autoExitTickLower) {
+        if (!isUpperTrigger) {
             if (ownedByVault) {
                 IVault(owner)
                     .transform(
@@ -387,7 +406,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             } else {
                 autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
             }
-        } else if (isUpperTrigger && baseTick == config.autoExitTickUpper) {
+        } else if (isUpperTrigger) {
             if (ownedByVault) {
                 IVault(owner)
                     .transform(
@@ -409,8 +428,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         PoolKey memory poolKey,
         PoolId poolId,
         uint256 tokenId,
-        bool isUpperTrigger,
-        int24 baseTick
+        bool isUpperTrigger
     ) internal {
         // no auto lend for collateral positions
         bool ownedByVault = vaults[_getOwner(tokenId)];
@@ -422,13 +440,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         uint256 shares = config.autoLendShares;
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        bool outOfRange = baseTick < posInfo.tickLower() || baseTick >= posInfo.tickUpper();
         if (shares > 0) {
-            _autoLendWithdraw(poolKey, tokenId, isUpperTrigger, shares, baseTick);
+            _autoLendWithdraw(poolKey, tokenId, shares);
         } else {
-            if (outOfRange) {
-                _autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger, baseTick);
-            }
+            _autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger);
         }
     }
 
@@ -436,27 +451,18 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         PoolKey memory poolKey,
         PoolId poolId,
         uint256 tokenId,
-        bool isUpperTrigger,
-        int24 baseTick
+        bool isUpperTrigger
     ) internal {
         address owner = _getOwner(tokenId);
         bool ownedByVault = vaults[owner];
 
-        AutoRangeConfig memory config = autoRangeConfigs[tokenId];
-
-        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        if (
-            baseTick == posInfo.tickLower() - config.autoRangeLowerLimit && !isUpperTrigger
-                || baseTick == posInfo.tickUpper() + config.autoRangeUpperLimit && isUpperTrigger
-        ) {
-            if (ownedByVault) {
-                IVault(owner)
-                    .transform(
-                        tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId, baseTick))
-                    );
-            } else {
-                autoRange(poolKey, poolId, tokenId, baseTick);
-            }
+        if (ownedByVault) {
+            IVault(owner)
+                .transform(
+                    tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId))
+                );
+        } else {
+            autoRange(poolKey, poolId, tokenId);
         }
     }
 
@@ -522,10 +528,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
-    function _removePositionTriggers(
-        uint256 tokenId,
-        PoolKey memory poolKey
-    ) internal {
+    function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
         PoolId poolId = poolKey.toId();
         PositionMode mode = positionConfigs[tokenId].mode;
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -541,43 +544,66 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         } else if (mode == PositionMode.AUTO_LEND) {
             if (autoLendConfigs[tokenId].autoLendShares > 0) {
                 if (Currency.unwrap(poolKey.currency0) == autoLendConfigs[tokenId].autoLendToken) {
-                    upperTriggerAfterSwap[poolId].remove(tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId); 
+                    upperTriggerAfterSwap[poolId].remove(
+                        tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
+                    );
                 } else {
-                    lowerTriggerAfterSwap[poolId].remove(tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick, tokenId);
+                    lowerTriggerAfterSwap[poolId].remove(
+                        tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick, tokenId
+                    );
                 }
             } else {
-                lowerTriggerAfterSwap[poolId].remove(tickLower - autoLendConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId);
-                upperTriggerAfterSwap[poolId].remove(tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick * 2, tokenId); 
+                lowerTriggerAfterSwap[poolId].remove(
+                    tickLower - autoLendConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
+                );
+                upperTriggerAfterSwap[poolId].remove(
+                    tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick * 2, tokenId
+                );
             }
         }
     }
 
-    function _addPositionTriggers(
-        uint256 tokenId,
-        PoolKey memory poolKey
-    ) internal {
+    function _addPositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
+
         PoolId poolId = poolKey.toId();
         PositionMode mode = positionConfigs[tokenId].mode;
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         int24 tickLower = posInfo.tickLower();
         int24 tickUpper = posInfo.tickUpper();
 
+        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
+
+        if (!upperList.increasing) {
+            upperList.increasing = true;
+        }
+
         if (mode == PositionMode.AUTO_RANGE) {
-            lowerTriggerAfterSwap[poolId].insert(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
-            upperTriggerAfterSwap[poolId].insert(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
+            lowerList.insert(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
+            upperList.insert(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
         } else if (mode == PositionMode.AUTO_EXIT) {
-            lowerTriggerAfterSwap[poolId].insert(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
-            upperTriggerAfterSwap[poolId].insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            lowerList.insert(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+            upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
         } else if (mode == PositionMode.AUTO_LEND) {
             if (autoLendConfigs[tokenId].autoLendShares > 0) {
                 if (Currency.unwrap(poolKey.currency0) == autoLendConfigs[tokenId].autoLendToken) {
-                    upperTriggerAfterSwap[poolId].insert(tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId); 
+                    console.log("inserting upper trigger", tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing);
+                    upperList.insert(
+                        tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
+                    );
                 } else {
-                    lowerTriggerAfterSwap[poolId].insert(tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick, tokenId);
+                    console.log("inserting lower trigger", tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick);
+                    lowerList.insert(
+                        tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick, tokenId
+                    );
                 }
             } else {
-                lowerTriggerAfterSwap[poolId].insert(tickLower - autoLendConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId);
-                upperTriggerAfterSwap[poolId].insert(tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick * 2, tokenId); 
+                lowerList.insert(
+                    tickLower - autoLendConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
+                );
+                upperList.insert(
+                    tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick * 2, tokenId
+                );
             }
         }
     }
@@ -634,53 +660,51 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         });
     }
 
-    function _autoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper, int24 baseTick) internal {
+    function _autoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper)
+        internal
+    {
+        // remove remaining triggers
+        _removePositionTriggers(tokenId, poolKey);
 
-        // if not deposited yet, deposit
-        if (autoLendConfigs[tokenId].autoLendShares == 0) {
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
-            // remove remaining triggers
-            _removePositionTriggers(tokenId, poolKey);
+        Currency currency = isUpper ? currency1 : currency0;
+        address currencyAddr = Currency.unwrap(currency);
+        uint256 amount = isUpper ? amount1 : amount0;
+        amount -= amount * autoLendProtocolFeeBps / 10000;
 
-            (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+        SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), amount);
 
-            Currency currency = isUpper ? currency1 : currency0;
-            address currencyAddr = Currency.unwrap(currency);
-            uint256 amount = isUpper ? amount1 : amount0;
-            amount -= amount * autoLendProtocolFeeBps / 10000;
+        try autoLendVaults[currencyAddr].deposit(amount, address(this)) returns (uint256 shares) {
+            autoLendConfigs[tokenId].autoLendShares = shares;
+            autoLendConfigs[tokenId].autoLendToken = currencyAddr;
 
-            SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), amount);
+            _sendFees(
+                tokenId,
+                currency0,
+                currency1,
+                !isUpper ? amount : 0,
+                isUpper ? amount : 0,
+                autoLendProtocolFeeBps,
+                protocolFeeRecipient
+            );
 
-            try autoLendVaults[currencyAddr].deposit(amount, address(this)) returns (uint256 shares) {
-                autoLendConfigs[tokenId].autoLendShares = shares;
-                autoLendConfigs[tokenId].autoLendToken = currencyAddr;
+            address owner = _getOwner(tokenId);
+            _sendLeftoverTokens(tokenId, currency0, currency1, owner);
 
-                _sendFees(
-                    tokenId,
-                    currency0,
-                    currency1,
-                    !isUpper ? amount : 0,
-                    isUpper ? amount : 0,
-                    autoLendProtocolFeeBps,
-                    protocolFeeRecipient
-                );
+            _addPositionTriggers(tokenId, poolKey);
 
-                address owner = _getOwner(tokenId);
-                _sendLeftoverTokens(tokenId, currency0, currency1, owner);
-
-                _addPositionTriggers(tokenId, poolKey);
-
-                emit AutoLendDeposit(tokenId, currency, amount, shares);
-            } catch (bytes memory reason) {
-                emit HookAutoLendFailed(address(autoLendVaults[currencyAddr]), currency, reason);
-            }
-
-            SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), 0);
+            emit AutoLendDeposit(tokenId, currency, amount, shares);
+        } catch (bytes memory reason) {
+            emit HookAutoLendFailed(address(autoLendVaults[currencyAddr]), currency, reason);
         }
+
+        SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), 0);
     }
 
-    function _autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, bool isUpper, uint256 shares, int24 baseTick) internal {
-
+    function _autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares)
+        internal
+    {
         address token = autoLendConfigs[tokenId].autoLendToken;
         try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
             autoLendConfigs[tokenId].autoLendShares = 0;
@@ -691,22 +715,37 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             amount -= amount * autoLendProtocolFeeBps / 10000;
 
             _handleApproval(Currency.wrap(token), amount);
-        
 
             uint256 newTokenId;
+
+            int24 baseTick = _getTickLower(_getTick(poolKey.toId()), poolKey.tickSpacing);
 
             // depending on the available token - create correct position
             if (token == Currency.unwrap(poolKey.currency0)) {
                 if (baseTick < posInfo.tickLower()) {
                     _increaseLiquidity(tokenId, poolKey, posInfo, uint128(amount), 0);
                 } else {
-                    (newTokenId,,) = _mintNewPosition(poolKey, baseTick + poolKey.tickSpacing, baseTick + poolKey.tickSpacing + (posInfo.tickUpper() - posInfo.tickLower()), uint128(amount), 0, _getOwner(tokenId));
+                    (newTokenId,,) = _mintNewPosition(
+                        poolKey,
+                        baseTick + poolKey.tickSpacing,
+                        baseTick + poolKey.tickSpacing + (posInfo.tickUpper() - posInfo.tickLower()),
+                        uint128(amount),
+                        0,
+                        _getOwner(tokenId)
+                    );
                 }
             } else {
                 if (baseTick >= posInfo.tickUpper()) {
-                     _increaseLiquidity(tokenId, poolKey, posInfo, 0, uint128(amount));
+                    _increaseLiquidity(tokenId, poolKey, posInfo, 0, uint128(amount));
                 } else {
-                    (newTokenId,,) = _mintNewPosition(poolKey, baseTick - (posInfo.tickUpper() - posInfo.tickLower()), baseTick, 0, uint128(amount), _getOwner(tokenId));
+                    (newTokenId,,) = _mintNewPosition(
+                        poolKey,
+                        baseTick - (posInfo.tickUpper() - posInfo.tickLower()),
+                        baseTick,
+                        0,
+                        uint128(amount),
+                        _getOwner(tokenId)
+                    );
                 }
             }
 
@@ -719,7 +758,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             }
 
             emit AutoLendWithdraw(tokenId, Currency.wrap(token), amount, shares);
-
         } catch (bytes memory reason) {
             emit HookAutoLendFailed(address(autoLendVaults[token]), Currency.wrap(token), reason);
         }
@@ -739,14 +777,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         uint256 shares = autoLendConfigs[tokenId].autoLendShares;
         address token = autoLendConfigs[tokenId].autoLendToken;
 
-        autoLendConfigs[tokenId] = AutoLendConfig({
-                autoLendToleranceTick: 0,
-                autoLendToken: address(0),
-                autoLendShares: 0
-            });
+        autoLendConfigs[tokenId] =
+            AutoLendConfig({autoLendToleranceTick: 0, autoLendToken: address(0), autoLendShares: 0});
 
         if (shares > 0) {
-
             uint256 amount = autoLendVaults[token].redeem(shares, address(this), address(this));
 
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
@@ -791,7 +825,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
     }
 
-    function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, int24 baseTick) public {
+    function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) public {
         // validate caller (can be vault or poolmanager)
         if (msg.sender != address(poolManager)) {
             if (vaults[msg.sender]) {
@@ -800,6 +834,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 revert Unauthorized();
             }
         }
+
+        int24 baseTick = _getTickLower(_getTick(poolId), poolKey.tickSpacing);
 
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
@@ -1299,12 +1335,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     /// @param poolKey The pool key
     /// @param up True if swap moves price up (tick increasing), false if swap moves price down (tick decreasing)
     /// @return maxEndTick The maximum end tick allowed based on maxTicksFromOracle
-    function _getOracleMaxEndTick(PoolKey memory poolKey, bool up)
-        internal
-        view
-        returns (int24 maxEndTick)
-    {
-        uint160 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(poolKey.currency0), Currency.unwrap(poolKey.currency1));
+    function _getOracleMaxEndTick(PoolKey memory poolKey, bool up) internal view returns (int24 maxEndTick) {
+        uint160 oracleSqrtPriceX96 =
+            v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(poolKey.currency0), Currency.unwrap(poolKey.currency1));
         int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), poolKey.tickSpacing);
 
         if (up) {
