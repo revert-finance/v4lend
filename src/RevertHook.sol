@@ -424,7 +424,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         bool outOfRange = baseTick < posInfo.tickLower() || baseTick >= posInfo.tickUpper();
         if (shares > 0) {
-            _autoLendWithdraw(poolKey, poolId, tokenId, isUpperTrigger, shares, baseTick);
+            _autoLendWithdraw(poolKey, tokenId, isUpperTrigger, shares, baseTick);
         } else {
             if (outOfRange) {
                 _autoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger, baseTick);
@@ -679,7 +679,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         }
     }
 
-    function _autoLendWithdraw(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper, uint256 shares, int24 baseTick) internal {
+    function _autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, bool isUpper, uint256 shares, int24 baseTick) internal {
 
         address token = autoLendConfigs[tokenId].autoLendToken;
         try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
@@ -692,22 +692,21 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
             _handleApproval(Currency.wrap(token), amount);
         
-            uint256 amount0;
-            uint256 amount1;
+
             uint256 newTokenId;
 
             // depending on the available token - create correct position
             if (token == Currency.unwrap(poolKey.currency0)) {
                 if (baseTick < posInfo.tickLower()) {
-                    (amount0, amount1) = _increaseLiquidity(tokenId, poolKey, posInfo, uint128(amount), 0);
+                    _increaseLiquidity(tokenId, poolKey, posInfo, uint128(amount), 0);
                 } else {
-                    (newTokenId, amount0, amount1) = _mintNewPosition(poolKey, baseTick + poolKey.tickSpacing, baseTick + poolKey.tickSpacing + (posInfo.tickUpper() - posInfo.tickLower()), uint128(amount), 0, _getOwner(tokenId));
+                    (newTokenId,,) = _mintNewPosition(poolKey, baseTick + poolKey.tickSpacing, baseTick + poolKey.tickSpacing + (posInfo.tickUpper() - posInfo.tickLower()), uint128(amount), 0, _getOwner(tokenId));
                 }
             } else {
                 if (baseTick >= posInfo.tickUpper()) {
-                    (amount0, amount1) = _increaseLiquidity(tokenId, poolKey, posInfo, 0, uint128(amount));
+                     _increaseLiquidity(tokenId, poolKey, posInfo, 0, uint128(amount));
                 } else {
-                    (newTokenId, amount0, amount1) = _mintNewPosition(poolKey, baseTick - (posInfo.tickUpper() - posInfo.tickLower()), baseTick, 0, uint128(amount), _getOwner(tokenId));
+                    (newTokenId,,) = _mintNewPosition(poolKey, baseTick - (posInfo.tickUpper() - posInfo.tickLower()), baseTick, 0, uint128(amount), _getOwner(tokenId));
                 }
             }
 
@@ -718,6 +717,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             } else {
                 _addPositionTriggers(tokenId, poolKey);
             }
+
+            emit AutoLendWithdraw(tokenId, Currency.wrap(token), amount, shares);
 
         } catch (bytes memory reason) {
             emit HookAutoLendFailed(address(autoLendVaults[token]), Currency.wrap(token), reason);

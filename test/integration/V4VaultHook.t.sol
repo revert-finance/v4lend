@@ -176,15 +176,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         revertHook.setPositionConfig(
             hookedTokenId,
             RevertHook.PositionConfig({
-                mode: RevertHook.PositionMode.AUTO_COMPOUND,
-                autoExitTickLower: 0,
-                autoExitTickUpper: 0,
-                autoExitSwapLower: false,
-                autoExitSwapUpper: false,
-                autoRangeLowerLimit: 0,
-                autoRangeUpperLimit: 0,
-                autoRangeLowerDelta: 0,
-                autoRangeUpperDelta: 0,
+                mode: RevertHook.PositionMode.NONE,
+                doAutoCompound: true,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
                 swapPoolHooks: IHooks(address(revertHook))
@@ -387,17 +380,19 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHook.PositionConfig({
                 mode: RevertHook.PositionMode.AUTO_RANGE,
-                autoExitTickLower: 0,
-                autoExitTickUpper: 0,
-                autoExitSwapLower: false,
-                autoExitSwapUpper: false,
-                autoRangeLowerLimit: autoRangeLowerLimit,
-                autoRangeUpperLimit: autoRangeUpperLimit,
-                autoRangeLowerDelta: autoRangeLowerDelta,
-                autoRangeUpperDelta: autoRangeUpperDelta,
+                doAutoCompound: false,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
                 swapPoolHooks: IHooks(address(revertHook))
+            })
+        );
+        revertHook.setAutoRangeConfig(
+            hookedTokenId,
+            RevertHook.AutoRangeConfig({
+                autoRangeLowerLimit: autoRangeLowerLimit,
+                autoRangeUpperLimit: autoRangeUpperLimit,
+                autoRangeLowerDelta: autoRangeLowerDelta,
+                autoRangeUpperDelta: autoRangeUpperDelta
             })
         );
     }
