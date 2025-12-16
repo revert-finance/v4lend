@@ -33,7 +33,7 @@ interface IVault is IERC4626 {
             uint256 liquidationValue
         );
 
-    function ownerOf(uint256 tokenId) external returns (address);
+    function ownerOf(uint256 tokenId) external view returns (address);
 
     // functions for iterating over owners loans
     function loanCount(address owner) external view returns (uint256);

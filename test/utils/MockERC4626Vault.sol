@@ -203,14 +203,6 @@ contract MockERC4626Vault is ERC20, IERC4626 {
         return _decimals;
     }
 
-    /// @notice Set exchange rate (for testing yield scenarios)
-    /// @dev Only for testing - in production this would be managed differently
-    function setExchangeRate(uint256 newRate) external {
-        uint256 oldRate = exchangeRate;
-        exchangeRate = newRate;
-        emit ExchangeRateUpdated(oldRate, newRate);
-    }
-
     /// @notice Simulate yield by increasing exchange rate
     /// @param yieldBps Yield in basis points (e.g., 100 = 1%)
     function simulateYield(uint256 yieldBps) external {

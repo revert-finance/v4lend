@@ -131,6 +131,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         NONE,
         AUTO_RANGE,
         AUTO_EXIT,
+        AUTO_EXIT_AND_AUTO_RANGE,
         AUTO_LEND
     }
 
@@ -150,13 +151,18 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 swapPoolTickSpacing;
         IHooks swapPoolHooks;
 
+        // TODO proportional fee handling - depending on the time the position is active, the fees are collected proportionally
+        //uint32 lastCollect;
+        //uint32 acumulatedActiveTime;
+        //uint32 lastActivated;
+
+
         // TODO implement max price impact checks for swaps
         //uint32 maxPriceImpact0; // swaps token 0 to token 1
         //uint32 maxPriceImpact1; // swaps token 1 to token 0
     }
 
     struct AutoExitConfig {
-        // TODO implement relative auto exit ticks handling - merge with auto range config (for both auto range and auto exit)
         bool isRelative; // if true, the auto exit tick is relative to the position limits, if false, the auto exit tick is absolute
         int24 autoExitTickLower;
         int24 autoExitTickUpper;
@@ -175,6 +181,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 autoLendToleranceTick;
         address autoLendToken;
         uint256 autoLendShares;
+        uint256 autoLendAmount;
     }
 
     /// @notice Sets the ERC4626 vault for a given token address
@@ -193,7 +200,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external {
-        if (_getOwner(tokenId) != msg.sender) {
+        if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
 
@@ -207,7 +214,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function setAutoExitConfig(uint256 tokenId, AutoExitConfig calldata config) external {
-        if (_getOwner(tokenId) != msg.sender) {
+        if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
 
@@ -229,7 +236,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function setAutoRangeConfig(uint256 tokenId, AutoRangeConfig calldata config) external {
-        if (_getOwner(tokenId) != msg.sender) {
+        if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
 
@@ -257,7 +264,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function setAutoLendConfig(uint256 tokenId, AutoLendConfig calldata autoLendConfig) external {
-        if (_getOwner(tokenId) != msg.sender) {
+        if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
 
@@ -289,8 +296,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             afterDonate: false,
             beforeSwapReturnDelta: false,
             afterSwapReturnDelta: false,
-            afterAddLiquidityReturnDelta: false,
-            afterRemoveLiquidityReturnDelta: false
+            afterAddLiquidityReturnDelta: true,
+            afterRemoveLiquidityReturnDelta: true
         });
     }
 
@@ -380,6 +387,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         PositionMode mode = positionConfigs[tokenId].mode;
         if (mode == PositionMode.AUTO_EXIT) {
             _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
+        } else if (mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
+            // TODO check which one is triggered
         } else if (mode == PositionMode.AUTO_LEND) {
             _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_RANGE) {
@@ -388,7 +397,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function _handleAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
-        address owner = _getOwner(tokenId);
+        address owner = _getOwner(tokenId, false);
         bool ownedByVault = vaults[owner];
 
         AutoExitConfig memory config = autoExitConfigs[tokenId];
@@ -426,7 +435,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
     function _handleAutoLend(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
         // no auto lend for collateral positions
-        bool ownedByVault = vaults[_getOwner(tokenId)];
+        bool ownedByVault = vaults[_getOwner(tokenId, false)];
         if (ownedByVault) {
             return;
         }
@@ -443,7 +452,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function _handleAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
-        address owner = _getOwner(tokenId);
+        address owner = _getOwner(tokenId, false);
         bool ownedByVault = vaults[owner];
 
         if (ownedByVault) {
@@ -471,13 +480,18 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
-        BalanceDelta delta,
         BalanceDelta,
+        BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
+
+        console.log("afterAddLiquidity");
+
+        feeDelta = _takeProtocolFees(key, feeDelta);
+
         // if the hook itself is adding liquidity, dont configure anything
         if (sender == address(this)) {
-            return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+            return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
 
         uint256 tokenId = uint256(params.salt);
@@ -488,20 +502,26 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             _addPositionTriggers(tokenId, key);
         }
 
-        return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        return (BaseHook.afterAddLiquidity.selector, feeDelta);
     }
 
+    /// @notice When liquidity is removed, the hook will take a percentage of the fees
     function _afterRemoveLiquidity(
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
         BalanceDelta,
-        BalanceDelta,
+        BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
+
+        console.log("afterRemoveLiquidity");
+
+        feeDelta = _takeProtocolFees(key, feeDelta);
+
         // if the hook itself is removing liquidity, dont configure anything
         if (sender == address(this)) {
-            return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+            return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
         }
 
         uint256 tokenId = uint256(params.salt);
@@ -512,7 +532,25 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             _removePositionTriggers(tokenId, key);
         }
 
-        return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
+    }
+
+    function _takeProtocolFees(PoolKey calldata key, BalanceDelta feeDelta) internal returns (BalanceDelta newFeeDelta) {
+        PoolId poolId = key.toId();
+
+        int128 protocolFee0 = feeDelta.amount0() * int16(protocolFeeBps) / 10000;
+        int128 protocolFee1 = feeDelta.amount1() * int16(protocolFeeBps) / 10000;
+
+        // take protocol fees
+        if (protocolFee0 > 0) {
+            console.log("protocolFee0", protocolFee0);
+            poolManager.take(key.currency0, protocolFeeRecipient, uint256(int256(protocolFee0)));
+        }
+        if (protocolFee1 > 0) {
+            console.log("protocolFee1", protocolFee1);
+            poolManager.take(key.currency1, protocolFeeRecipient, uint256(int256(protocolFee1)));
+        }
+        newFeeDelta = toBalanceDelta(protocolFee0, protocolFee1);
     }
 
     // add position triggers - called when a position is created or when a position is increased, or when config is changed
@@ -535,7 +573,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             lowerList.insert(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
             upperList.insert(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
         } else if (mode == PositionMode.AUTO_EXIT) {
-            lowerList.insert(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+            if (autoExitConfigs[tokenId].isRelative) {
+                lowerList.insert(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+                upperList.insert(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            } else {
+                lowerList.insert(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+                upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            }
             upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
         } else if (mode == PositionMode.AUTO_LEND) {
             if (autoLendConfigs[tokenId].autoLendShares > 0) {
@@ -571,8 +615,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             lowerTriggerAfterSwap[poolId].remove(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
             upperTriggerAfterSwap[poolId].remove(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
         } else if (mode == PositionMode.AUTO_EXIT) {
-            lowerTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
-            upperTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            if (autoExitConfigs[tokenId].isRelative) {
+                lowerTriggerAfterSwap[poolId].remove(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+                upperTriggerAfterSwap[poolId].remove(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            } else {
+                lowerTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+                upperTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            }
         } else if (mode == PositionMode.AUTO_LEND) {
             if (autoLendConfigs[tokenId].autoLendShares > 0) {
                 if (Currency.unwrap(poolKey.currency0) == autoLendConfigs[tokenId].autoLendToken) {
@@ -595,8 +644,18 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         }
     }
 
-    function _getOwner(uint256 tokenId) internal view returns (address) {
-        return IERC721(address(positionManager)).ownerOf(tokenId);
+    /// @notice Returns the owner of the position
+    /// @param tokenId The token ID of the position
+    /// @param isRealOwner If true, the real owner is returned, if false, the direct owner of the token is returned (maybe a vault)
+    /// @return The owner of the position
+    function _getOwner(uint256 tokenId, bool isRealOwner) internal view returns (address) {
+        address owner = IERC721(address(positionManager)).ownerOf(tokenId);
+
+        if (isRealOwner && vaults[owner]) {
+            return IVault(owner).ownerOf(tokenId);
+        } else {
+            return owner;
+        } 
     }
 
     function _getCrossedTicks(PoolId poolId, int24 tickSpacing)
@@ -662,8 +721,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         try autoLendVaults[currencyAddr].deposit(amount, address(this)) returns (uint256 shares) {
             autoLendConfigs[tokenId].autoLendShares = shares;
             autoLendConfigs[tokenId].autoLendToken = currencyAddr;
+            autoLendConfigs[tokenId].autoLendAmount = amount;
 
-            address owner = _getOwner(tokenId);
+            address owner = _getOwner(tokenId, true);
             _sendLeftoverTokens(tokenId, currency0, currency1, owner);
 
             _addPositionTriggers(tokenId, poolKey);
@@ -679,12 +739,20 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     function _autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) internal {
         address token = autoLendConfigs[tokenId].autoLendToken;
         try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
+
+            // send fees corresponding to the protocol fee on gains only
+            uint256 autoLendGain = amount > autoLendConfigs[tokenId].autoLendAmount ? amount - autoLendConfigs[tokenId].autoLendAmount : 0;
+            console.log("autoLendGain", autoLendGain);
+            if (autoLendGain > 0) {
+                bool isToken0 = Currency.unwrap(poolKey.currency0) == token;
+                _sendFees(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeBps, protocolFeeRecipient);
+            }
+
             autoLendConfigs[tokenId].autoLendShares = 0;
             autoLendConfigs[tokenId].autoLendToken = address(0);
+            autoLendConfigs[tokenId].autoLendAmount = 0;
 
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-
-            // TODO remove fees corresponding to the protocol fee on gains only
 
             _handleApproval(Currency.wrap(token), amount);
 
@@ -703,7 +771,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                         baseTick + poolKey.tickSpacing + (posInfo.tickUpper() - posInfo.tickLower()),
                         uint128(amount),
                         0,
-                        _getOwner(tokenId)
+                        _getOwner(tokenId, false)
                     );
                 }
             } else {
@@ -716,10 +784,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                         baseTick,
                         0,
                         uint128(amount),
-                        _getOwner(tokenId)
+                        _getOwner(tokenId, false)
                     );
                 }
             }
+
+            _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
 
             if (newTokenId > 0) {
                 positionConfigs[newTokenId] = positionConfigs[tokenId];
@@ -738,7 +808,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     /// @notice Forces the auto-lend position to exit (in cases when not executed via autoLendWithdraw or user wants to exit early)
     /// @param tokenId The tokenId of the position
     function autoLendForceExit(uint256 tokenId) external {
-        address owner = _getOwner(tokenId);
+        address owner = _getOwner(tokenId, true);
         if (msg.sender != owner) {
             revert Unauthorized();
         }
@@ -748,15 +818,19 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         uint256 shares = autoLendConfigs[tokenId].autoLendShares;
         address token = autoLendConfigs[tokenId].autoLendToken;
+        uint256 autoLendAmount = autoLendConfigs[tokenId].autoLendAmount;
 
-        autoLendConfigs[tokenId] =
-            AutoLendConfig({autoLendToleranceTick: 0, autoLendToken: address(0), autoLendShares: 0});
+        autoLendConfigs[tokenId] = AutoLendConfig({autoLendToleranceTick: 0, autoLendToken: address(0), autoLendShares: 0, autoLendAmount: 0});
 
         if (shares > 0) {
             uint256 amount = autoLendVaults[token].redeem(shares, address(this), address(this));
 
-            // TODO remove fees corresponding to the protocol fee on gains only
-
+            // send fees corresponding to the protocol fee on gains only
+            uint256 autoLendGain = amount > autoLendAmount ? amount - autoLendAmount : 0;
+            if (autoLendGain > 0) {
+                bool isToken0 = Currency.unwrap(poolKey.currency0) == token;
+                _sendFees(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeBps, protocolFeeRecipient);
+            }
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
 
             emit AutoLendForceExit(tokenId, Currency.wrap(token), amount, shares);
@@ -791,7 +865,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
         }
 
-        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId));
+        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
         _removePositionTriggers(tokenId, poolKey);
 
@@ -817,17 +891,15 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         (amount0, amount1) = _swapToOptimalRange(tokenId, poolKey, poolId, tickLower, tickUpper, amount0, amount1);
 
-        address owner = _getOwner(tokenId);
-
         _handleApproval(currency0, amount0);
         _handleApproval(currency1, amount1);
 
         uint256 newTokenId;
 
         (newTokenId, amount0, amount1) =
-            _mintNewPosition(poolKey, tickLower, tickUpper, uint128(amount0), uint128(amount1), owner);
+            _mintNewPosition(poolKey, tickLower, tickUpper, uint128(amount0), uint128(amount1), _getOwner(tokenId, false));
 
-        _sendLeftoverTokens(tokenId, currency0, currency1, owner);
+        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
         // configure new position
         positionConfigs[newTokenId] = positionConfigs[tokenId];
@@ -848,7 +920,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         for (uint256 i = 0; i < length; i++) {
             uint256 tokenId = tokenIds[i];
             // check if position is in vault, if yes call transform on behalf of owner
-            address owner = _getOwner(tokenId);
+            address owner = _getOwner(tokenId, false);
             if (vaults[owner]) {
                 IVault(owner)
                     .transform(tokenId, address(this), abi.encodeCall(this.autoCompoundForVault, (tokenId, msg.sender)));
@@ -896,6 +968,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         // Step 2: Collect fees only (don't remove liquidity)
         (,, uint256 fees0, uint256 fees1) = _decreaseLiquidity(tokenId, true);
 
+        console.log("fees0", fees0);
+        console.log("fees1", fees1);
+
+
         if (fees0 == 0 && fees1 == 0) {
             return; // No fees to compound
         }
@@ -928,9 +1004,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         // Step 5: Send rewards based on actual amounts added / available
         _sendFees(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, autoCompoundRewardBps, caller);
 
-
         // Step 6: Send leftover tokens (or harvested tokens) to owner 
-        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId));
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
     }
 
     /// @notice Swaps to optimal range using LiquidityCalculator
@@ -1021,8 +1096,8 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         params_array[0] = abi.encode(
             tokenId,
             liquidity,
-            available0,
-            available1,
+            type(uint128).max, // limited by liquidity
+            type(uint128).max, // limited by liquidity
             bytes("") // hookData
         );
 
@@ -1141,22 +1216,17 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         currency0 = poolKey.currency0;
         currency1 = poolKey.currency1;
 
-        // If only collecting fees and no liquidity, we still want to collect fees (DECREASE_LIQUIDITY with 0 liquidity collects fees)
-        if (!onlyFees && liquidity == 0) {
-            return (currency0, currency1, 0, 0);
-        }
-
         // Step 2: Decrease all liquidity using PositionManager
-        // Use DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        // 0 liqudity removal only works with INCREASE_LIQUIDITY (because of fee handling in hook)
+        bytes memory actions = abi.encodePacked(onlyFees ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
         bytes[] memory params_array = new bytes[](2);
 
-        // DECREASE_LIQUIDITY params: (tokenId, liquidity, amount0Min, amount1Min, hookData)
+        // INCREASE_LIQUIDITY/DECREASE_LIQUIDITY params: (tokenId, liquidity, amount0Min, amount1Min, hookData)
         params_array[0] = abi.encode(
             tokenId,
-            liquidity, // Remove all liquidity
-            0, // amount0Min - no slippage protection needed
-            0, // amount1Min
+            liquidity, // Remove non or all liquidity
+            onlyFees ? type(uint128).max : 0,
+            onlyFees ? type(uint128).max : 0,
             bytes("") // hookData
         );
 
@@ -1168,7 +1238,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             amount0 = currency0.balanceOfSelf();
             amount1 = currency1.balanceOfSelf();
         } catch (bytes memory reason) {
-            // emit event
+            // emit eventx
             emit HookModifyLiquiditiesFailed(actions, params_array, reason);
         }
     }
