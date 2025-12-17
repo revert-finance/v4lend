@@ -69,9 +69,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     // events for other actions
     event SetPositionConfig(uint256 indexed tokenId, PositionConfig positionConfig);
     event SendLeftoverTokens(
-        uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1
+        uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1, address recipient
     );
-    event SendFees(
+    event SendRewards(
         uint256 indexed tokenId,
         Currency currency0,
         Currency currency1,
@@ -79,6 +79,12 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         uint256 amount1,
         address recipient
     );
+    event SendProtocolFee(uint256 indexed tokenId,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1,
+        address recipient);
 
     // special events for swap failures / modifyLiquidities failures
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
@@ -578,6 +584,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
     function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta) internal returns (BalanceDelta newFeeDelta) {
 
+        address feeRecipient = protocolFeeRecipient;
         uint32 accumulatedActiveTime = positionStates[tokenId].acumulatedActiveTime;
         uint32 lastActivated = positionStates[tokenId].lastActivated;
         if (lastActivated > 0) {
@@ -604,13 +611,14 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         // take protocol fees
         if (protocolFee0 > 0) {
-            console.log("protocolFee0", protocolFee0);
-            poolManager.take(key.currency0, protocolFeeRecipient, uint256(int256(protocolFee0)));
+            poolManager.take(key.currency0, feeRecipient, uint256(int256(protocolFee0)));
         }
         if (protocolFee1 > 0) {
-            console.log("protocolFee1", protocolFee1);
-            poolManager.take(key.currency1, protocolFeeRecipient, uint256(int256(protocolFee1)));
+            poolManager.take(key.currency1, feeRecipient, uint256(int256(protocolFee1)));
         }
+
+        emit SendProtocolFee(tokenId, key.currency0, key.currency1, uint256(int256(protocolFee0)), uint256(int256(protocolFee1)), feeRecipient);
+
         newFeeDelta = toBalanceDelta(protocolFee0, protocolFee1);
     }
 
@@ -815,22 +823,22 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     /// @notice Handles autolend gain calculation and fee distribution
     /// @param tokenId The token ID of the position
     /// @param poolKey The pool key
-    /// @param token The token address that was lent
+    /// @param currency The currency that was lent
     /// @param amount The amount received from the vault
     /// @param autoLendAmount The original amount that was lent
     function _handleAutoLendGain(
         uint256 tokenId,
         PoolKey memory poolKey,
-        address token,
+        Currency currency,
         uint256 amount,
         uint256 autoLendAmount
     ) internal {
         // send fees corresponding to the protocol fee on gains only
         uint256 autoLendGain = amount > autoLendAmount ? amount - autoLendAmount : 0;
-        console.log("autoLendGain", autoLendGain);
         if (autoLendGain > 0) {
-            bool isToken0 = Currency.unwrap(poolKey.currency0) == token;
-            _sendFees(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeBps, protocolFeeRecipient);
+            bool isToken0 = poolKey.currency0 == currency;
+            currency.transfer(protocolFeeRecipient, autoLendGain * protocolFeeBps / 10000);
+            emit SendProtocolFee(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeRecipient);
         }
     }
 
@@ -846,7 +854,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         address token = positionStates[tokenId].autoLendToken;
         try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
 
-            _handleAutoLendGain(tokenId, poolKey, token, amount, positionStates[tokenId].autoLendAmount);
+            _handleAutoLendGain(tokenId, poolKey, Currency.wrap(token), amount, positionStates[tokenId].autoLendAmount);
             
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
@@ -920,7 +928,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             uint256 autoLendAmount = positionStates[tokenId].autoLendAmount;
             uint256 amount = autoLendVaults[token].redeem(shares, address(this), address(this));
 
-            _handleAutoLendGain(tokenId, poolKey, token, amount, autoLendAmount);
+            _handleAutoLendGain(tokenId, poolKey, Currency.wrap(token), amount, autoLendAmount);
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
 
             emit AutoLendForceExit(tokenId, Currency.wrap(token), amount, shares);
@@ -1075,13 +1083,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             (fees0, fees1) = _applyBalanceDelta(swapDelta, fees0, fees1);
         }
 
-        console.log("fees0 after swap", fees0);
-        console.log("fees1 after swap", fees1);
-
-        (fees0, fees1) = _sendFees(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, autoCompoundRewardBps, caller);
-
-        console.log("fees0 after send fees", fees0);
-        console.log("fees1 after send fees", fees1);
+        (fees0, fees1) = _sendRewards(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, autoCompoundRewardBps, caller);
 
         _handleApproval(poolKey.currency0, fees0);
         _handleApproval(poolKey.currency1, fees1);
@@ -1404,7 +1406,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         }
     }
 
-    function _sendFees(
+    function _sendRewards(
         uint256 tokenId,
         Currency currency0,
         Currency currency1,
@@ -1426,10 +1428,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             currency1.transfer(recipient, fee1);
         }
 
-        emit SendFees(tokenId, currency0, currency1, fee0, fee1, recipient);
-
         newAmount0 = amount0 - fee0;
         newAmount1 = amount1 - fee1;
+
+        emit SendRewards(tokenId, currency0, currency1, fee0, fee1, recipient);
     }
 
     function _sendLeftoverTokens(uint256 tokenId, Currency currency0, Currency currency1, address recipient) internal {
@@ -1442,7 +1444,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             currency1.transfer(recipient, amount1);
         }
 
-        emit SendLeftoverTokens(tokenId, currency0, currency1, amount0, amount1);
+        emit SendLeftoverTokens(tokenId, currency0, currency1, amount0, amount1, recipient);
     }
 
     function _applyBalanceDelta(BalanceDelta balanceDelta, uint256 amount0, uint256 amount1)

@@ -348,15 +348,15 @@ contract RevertHookTest is BaseTest {
     /// @return snapshot The balance snapshot
     function _recordBalancesBeforeAutoCompound() internal view returns (BalanceSnapshot memory snapshot) {
         address executor = address(this);
-        address protocolFeeRecipient = hook.protocolFeeRecipient();
+        address feeRecipient = hook.protocolFeeRecipient();
         address owner = address(this);
         
         snapshot.executorBalance0 = currency0.balanceOf(executor);
         snapshot.executorBalance1 = currency1.balanceOf(executor);
         snapshot.ownerBalance0 = currency0.balanceOf(owner);
         snapshot.ownerBalance1 = currency1.balanceOf(owner);
-        snapshot.protocolFeeRecipientBalance0 = currency0.balanceOf(protocolFeeRecipient);
-        snapshot.protocolFeeRecipientBalance1 = currency1.balanceOf(protocolFeeRecipient);
+        snapshot.protocolFeeRecipientBalance0 = currency0.balanceOf(feeRecipient);
+        snapshot.protocolFeeRecipientBalance1 = currency1.balanceOf(feeRecipient);
     }
 
     /// @notice Helper function to verify hook has no leftover balances
@@ -386,9 +386,9 @@ contract RevertHookTest is BaseTest {
         assertGt(executorFee0 + executorFee1, 0, "Executor should have received fees");
 
         // Verify protocolFeeRecipient received fees
-        address protocolFeeRecipient = hook.protocolFeeRecipient();
-        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(protocolFeeRecipient);
-        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(protocolFeeRecipient);
+        address feeRecipient = hook.protocolFeeRecipient();
+        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
+        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
         uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
         assertGt(protocolFee0 + protocolFee1, 0, "ProtocolFeeRecipient should have received fees");
@@ -425,9 +425,9 @@ contract RevertHookTest is BaseTest {
         assertEq(ownerReceived1, 0, "Owner should not have received token1 (all swapped to token0)");
 
         // Verify protocolFeeRecipient received fees in token0
-        address protocolFeeRecipient = hook.protocolFeeRecipient();
-        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(protocolFeeRecipient);
-        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(protocolFeeRecipient);
+        address feeRecipient = hook.protocolFeeRecipient();
+        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
+        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
         uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
         assertGt(protocolFee0, 0, "ProtocolFeeRecipient should have received fees in token0");
@@ -465,9 +465,9 @@ contract RevertHookTest is BaseTest {
         assertEq(ownerReceived0, 0, "Owner should not have received token0 (all swapped to token1)");
 
         // Verify protocolFeeRecipient received fees in token1
-        address protocolFeeRecipient = hook.protocolFeeRecipient();
-        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(protocolFeeRecipient);
-        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(protocolFeeRecipient);
+        address feeRecipient = hook.protocolFeeRecipient();
+        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
+        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
         uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
         assertGt(protocolFee0, 0, "ProtocolFeeRecipient should have received fees in token0");
