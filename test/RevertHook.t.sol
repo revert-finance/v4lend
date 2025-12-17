@@ -282,7 +282,7 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoCompound() public {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.NONE,
+            mode: RevertHook.PositionMode.AUTO_COMPOUND_ONLY,
             autoCompoundMode: RevertHook.AutoCompoundMode.AUTO_COMPOUND,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
@@ -324,6 +324,9 @@ contract RevertHookTest is BaseTest {
             receiver: address(this),
             deadline: block.timestamp
         });
+
+
+        vm.warp(block.timestamp + 600);
         // ------------------- //
 
         // Record balances before autoCompound for fee verification
@@ -685,10 +688,7 @@ contract RevertHookTest is BaseTest {
             swapPoolHooks: IHooks(address(0))
         }));
         hook.setAutoLendConfig(autolendTokenId, RevertHook.AutoLendConfig({
-            autoLendToleranceTick: 60,
-            autoLendToken: address(0),
-            autoLendShares: 0,
-            autoLendAmount: 0
+            autoLendToleranceTick: 60
         }));
 
 
@@ -699,7 +699,7 @@ contract RevertHookTest is BaseTest {
         uint128 initialLiquidity = positionManager.getPositionLiquidity(autolendTokenId);
         assertGt(initialLiquidity, 0, "Position should have liquidity initially");
 
-        (, address autoLendToken, uint256 autoLendShares,) = hook.autoLendConfigs(autolendTokenId);
+        (,,, address autoLendToken, uint256 autoLendShares,) = hook.positionStates(autolendTokenId);
 
         assertEq(autoLendShares, 0, "Should have no autolend shares initially");
         assertEq(autoLendToken, address(0), "Should have no autolend token initially");
@@ -722,7 +722,7 @@ contract RevertHookTest is BaseTest {
         });
 
         // Verify currency0 deposit was triggered
-        (, autoLendToken, autoLendShares,) = hook.autoLendConfigs(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency0 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency0), "Should have currency0 as autolend token");
         assertGt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have received assets");
@@ -747,7 +747,7 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency0 withdraw was triggered
-        (, autoLendToken, autoLendShares,) = hook.autoLendConfigs(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency0 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have less assets after withdraw");
@@ -773,7 +773,7 @@ contract RevertHookTest is BaseTest {
         console.log("currentTick after swap", currentTick);
 
         // Verify currency1 deposit was triggered
-        (, autoLendToken, autoLendShares,) = hook.autoLendConfigs(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency1 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency1), "Should have currency1 as autolend token");
         assertGt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have received assets");
@@ -801,7 +801,7 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency1 withdraw was triggered
-        (, autoLendToken, autoLendShares,) = hook.autoLendConfigs(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency1 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have less assets after withdraw");
@@ -822,7 +822,7 @@ contract RevertHookTest is BaseTest {
             deadline: block.timestamp
         });
 
-        (, autoLendToken, autoLendShares,) = hook.autoLendConfigs(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
 
         // Verify currency0 deposit was triggered again
         assertGt(autoLendShares, 0, "Should have autolend shares after second currency0 deposit");

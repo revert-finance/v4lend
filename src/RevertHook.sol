@@ -44,7 +44,7 @@ error Unauthorized();
 error InvalidConfig();
 
 /// @title RevertHook
-/// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting and auto-ranging of positions
+/// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting, auto-ranging and auto-lending of positions
 /// @dev Positions are not owned by the hook - they are owned by users directly or the vault with the correct permissions
 contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
@@ -122,13 +122,15 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     mapping(uint256 tokenId => PositionConfig positionConfig) public positionConfigs;
-
     mapping(uint256 tokenId => AutoRangeConfig autoRangeConfig) public autoRangeConfigs;
     mapping(uint256 tokenId => AutoExitConfig autoExitConfig) public autoExitConfigs;
     mapping(uint256 tokenId => AutoLendConfig autoLendConfig) public autoLendConfigs;
 
+    mapping(uint256 tokenId => PositionState positionState) public positionStates;
+
     enum PositionMode {
         NONE,
+        AUTO_COMPOUND_ONLY,
         AUTO_RANGE,
         AUTO_EXIT,
         AUTO_EXIT_AND_AUTO_RANGE,
@@ -142,6 +144,16 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         HARVEST_TOKEN_1
     }
 
+    struct PositionState {
+        uint32 lastCollect;
+        uint32 acumulatedActiveTime;
+        uint32 lastActivated;
+
+        address autoLendToken;
+        uint256 autoLendShares;
+        uint256 autoLendAmount;
+    }
+
     struct PositionConfig {
         PositionMode mode;
         AutoCompoundMode autoCompoundMode;
@@ -152,9 +164,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         IHooks swapPoolHooks;
 
         // TODO proportional fee handling - depending on the time the position is active, the fees are collected proportionally
-        //uint32 lastCollect;
-        //uint32 acumulatedActiveTime;
-        //uint32 lastActivated;
 
 
         // TODO implement max price impact checks for swaps
@@ -179,9 +188,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
     struct AutoLendConfig {
         int24 autoLendToleranceTick;
-        address autoLendToken;
-        uint256 autoLendShares;
-        uint256 autoLendAmount;
     }
 
     /// @notice Sets the ERC4626 vault for a given token address
@@ -204,6 +210,34 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             revert Unauthorized();
         }
 
+        _setPositionConfig(tokenId, positionConfig);
+    }
+
+    function _disablePosition(uint256 tokenId) internal {
+        _setPositionConfig(tokenId, PositionConfig({
+            mode: PositionMode.NONE,
+            autoCompoundMode: AutoCompoundMode.NONE,
+            swapPoolFee: 0,
+            swapPoolTickSpacing: 0,
+            swapPoolHooks: IHooks(address(0))
+        }));
+    }
+
+    function _setPositionConfig(uint256 tokenId, PositionConfig memory positionConfig) internal {
+         // handle activation and deactivation
+        PositionMode previousMode = positionConfigs[tokenId].mode;
+        bool activated = previousMode == PositionMode.NONE && positionConfig.mode != PositionMode.NONE;
+        if (activated) {
+            positionStates[tokenId].lastActivated = uint32(block.timestamp);
+        } else {
+            bool deactivated = previousMode != PositionMode.NONE && positionConfig.mode == PositionMode.NONE;
+            if (deactivated) {
+                positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - positionStates[tokenId].lastActivated;
+            }
+            positionStates[tokenId].lastActivated = 0; // mark as deactivated
+        }
+
+        // update position config
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         _removePositionTriggers(tokenId, poolKey);
         positionConfigs[tokenId] = positionConfig;
@@ -361,7 +395,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             // execute all triggers at this tick
             uint256 length = list.tokenIds[tick].length;
             for (uint256 i = 0; i < length; i++) {
-                _handleTokenIdAfterSwap(key, poolId, list.tokenIds[tick][i], list.increasing);
+                _handleTokenIdAfterSwap(key, poolId, list.tokenIds[tick][i], list.increasing, tick);
             }
 
             // tickEnd may have increased into list direction after the processing of the tokenId (because of swaps - autorange / autoexit will only do swaps in the same direcction)
@@ -381,14 +415,21 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     // handle token id - when detected as triggered by a swap
-    function _handleTokenIdAfterSwap(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger)
+    function _handleTokenIdAfterSwap(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger, int24 tick)
         internal
     {
         PositionMode mode = positionConfigs[tokenId].mode;
         if (mode == PositionMode.AUTO_EXIT) {
             _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            // TODO check which one is triggered
+            // only works with absolute auto exit ticks
+            AutoExitConfig memory config = autoExitConfigs[tokenId];
+            bool isAutoExitTriggered = isUpperTrigger && tick == config.autoExitTickUpper || !isUpperTrigger && tick == config.autoExitTickLower;            
+            if (isAutoExitTriggered) {
+                _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
+            } else {
+                _handleAutoRange(poolKey, poolId, tokenId, isUpperTrigger);
+            }
         } else if (mode == PositionMode.AUTO_LEND) {
             _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_RANGE) {
@@ -440,9 +481,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             return;
         }
 
-        AutoLendConfig memory config = autoLendConfigs[tokenId];
-
-        uint256 shares = config.autoLendShares;
+        uint256 shares = positionStates[tokenId].autoLendShares;
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         if (shares > 0) {
             _autoLendWithdraw(poolKey, tokenId, shares);
@@ -487,14 +526,15 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         console.log("afterAddLiquidity");
 
-        feeDelta = _takeProtocolFees(key, feeDelta);
+        uint256 tokenId = uint256(params.salt);
+
+        feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
 
         // if the hook itself is adding liquidity, dont configure anything
         if (sender == address(this)) {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
-
-        uint256 tokenId = uint256(params.salt);
+        
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
 
         // if adding from 0
@@ -517,14 +557,15 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         console.log("afterRemoveLiquidity");
 
-        feeDelta = _takeProtocolFees(key, feeDelta);
+        uint256 tokenId = uint256(params.salt);
+        feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
 
         // if the hook itself is removing liquidity, dont configure anything
         if (sender == address(this)) {
             return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
         }
 
-        uint256 tokenId = uint256(params.salt);
+       
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
 
         // remove the position from the lists
@@ -535,11 +576,31 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
     }
 
-    function _takeProtocolFees(PoolKey calldata key, BalanceDelta feeDelta) internal returns (BalanceDelta newFeeDelta) {
+    function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta) internal returns (BalanceDelta newFeeDelta) {
+
+        uint32 accumulatedActiveTime = positionStates[tokenId].acumulatedActiveTime;
+        uint32 lastActivated = positionStates[tokenId].lastActivated;
+        if (lastActivated > 0) {
+            accumulatedActiveTime += uint32(block.timestamp) - lastActivated;
+            positionStates[tokenId].lastActivated = uint32(block.timestamp);
+        }
+        uint32 lastCollect = positionStates[tokenId].lastCollect;
+        uint32 feeTime = lastCollect == 0 ? 0 : uint32(block.timestamp) - lastCollect;
+
+        console.log("accumulatedActiveTime", accumulatedActiveTime);
+        console.log("feeTime", feeTime);
+
+        positionStates[tokenId].lastCollect = uint32(block.timestamp);
+
+        // if no time has passed, or no active time has been accumulated, return 0 fees
+        if (feeTime == 0 || accumulatedActiveTime == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+
         PoolId poolId = key.toId();
 
-        int128 protocolFee0 = feeDelta.amount0() * int16(protocolFeeBps) / 10000;
-        int128 protocolFee1 = feeDelta.amount1() * int16(protocolFeeBps) / 10000;
+        int128 protocolFee0 = int32(accumulatedActiveTime) * feeDelta.amount0() * int16(protocolFeeBps) / (10000 * int32(feeTime));
+        int128 protocolFee1 = int32(accumulatedActiveTime) * feeDelta.amount1() * int16(protocolFeeBps) / (10000 * int32(feeTime));
 
         // take protocol fees
         if (protocolFee0 > 0) {
@@ -555,8 +616,14 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
     // add position triggers - called when a position is created or when a position is increased, or when config is changed
     function _addPositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PoolId poolId = poolKey.toId();
+
         PositionMode mode = positionConfigs[tokenId].mode;
+        if (mode == PositionMode.NONE || mode == PositionMode.AUTO_COMPOUND_ONLY) {
+            return;
+        }
+
+        PoolId poolId = poolKey.toId();
+
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         int24 tickLower = posInfo.tickLower();
         int24 tickUpper = posInfo.tickUpper();
@@ -569,10 +636,11 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             upperList.increasing = true;
         }
 
-        if (mode == PositionMode.AUTO_RANGE) {
+        if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             lowerList.insert(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
             upperList.insert(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
-        } else if (mode == PositionMode.AUTO_EXIT) {
+        } 
+        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             if (autoExitConfigs[tokenId].isRelative) {
                 lowerList.insert(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
                 upperList.insert(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
@@ -581,9 +649,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
             }
             upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
-        } else if (mode == PositionMode.AUTO_LEND) {
-            if (autoLendConfigs[tokenId].autoLendShares > 0) {
-                if (Currency.unwrap(poolKey.currency0) == autoLendConfigs[tokenId].autoLendToken) {
+        }
+        if (mode == PositionMode.AUTO_LEND) {
+            if (positionStates[tokenId].autoLendShares > 0) {
+                if (Currency.unwrap(poolKey.currency0) == positionStates[tokenId].autoLendToken) {
                     console.log(
                         "inserting upper trigger",
                         tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing
@@ -605,16 +674,22 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     }
 
     function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PoolId poolId = poolKey.toId();
         PositionMode mode = positionConfigs[tokenId].mode;
+
+        if (mode == PositionMode.NONE || mode == PositionMode.AUTO_COMPOUND_ONLY) {
+            return;
+        }
+
+        PoolId poolId = poolKey.toId();
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         int24 tickLower = posInfo.tickLower();
         int24 tickUpper = posInfo.tickUpper();
 
-        if (mode == PositionMode.AUTO_RANGE) {
+        if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             lowerTriggerAfterSwap[poolId].remove(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
             upperTriggerAfterSwap[poolId].remove(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
-        } else if (mode == PositionMode.AUTO_EXIT) {
+        } 
+        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             if (autoExitConfigs[tokenId].isRelative) {
                 lowerTriggerAfterSwap[poolId].remove(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
                 upperTriggerAfterSwap[poolId].remove(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
@@ -622,9 +697,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 lowerTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
                 upperTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
             }
-        } else if (mode == PositionMode.AUTO_LEND) {
-            if (autoLendConfigs[tokenId].autoLendShares > 0) {
-                if (Currency.unwrap(poolKey.currency0) == autoLendConfigs[tokenId].autoLendToken) {
+        }
+        if (mode == PositionMode.AUTO_LEND) {
+            if (positionStates[tokenId].autoLendShares > 0) {
+                if (Currency.unwrap(poolKey.currency0) == positionStates[tokenId].autoLendToken) {
                     upperTriggerAfterSwap[poolId].remove(
                         tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
                     );
@@ -719,9 +795,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), amount);
 
         try autoLendVaults[currencyAddr].deposit(amount, address(this)) returns (uint256 shares) {
-            autoLendConfigs[tokenId].autoLendShares = shares;
-            autoLendConfigs[tokenId].autoLendToken = currencyAddr;
-            autoLendConfigs[tokenId].autoLendAmount = amount;
+            positionStates[tokenId].autoLendShares = shares;
+            positionStates[tokenId].autoLendToken = currencyAddr;
+            positionStates[tokenId].autoLendAmount = amount;
 
             address owner = _getOwner(tokenId, true);
             _sendLeftoverTokens(tokenId, currency0, currency1, owner);
@@ -736,22 +812,42 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         SafeERC20.forceApprove(IERC20(currencyAddr), address(autoLendVaults[currencyAddr]), 0);
     }
 
+    /// @notice Handles autolend gain calculation and fee distribution
+    /// @param tokenId The token ID of the position
+    /// @param poolKey The pool key
+    /// @param token The token address that was lent
+    /// @param amount The amount received from the vault
+    /// @param autoLendAmount The original amount that was lent
+    function _handleAutoLendGain(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        address token,
+        uint256 amount,
+        uint256 autoLendAmount
+    ) internal {
+        // send fees corresponding to the protocol fee on gains only
+        uint256 autoLendGain = amount > autoLendAmount ? amount - autoLendAmount : 0;
+        console.log("autoLendGain", autoLendGain);
+        if (autoLendGain > 0) {
+            bool isToken0 = Currency.unwrap(poolKey.currency0) == token;
+            _sendFees(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeBps, protocolFeeRecipient);
+        }
+    }
+
+    /// @notice Resets the auto lend state for a given token ID
+    /// @param tokenId The token ID of the position
+    function _resetAutoLend(uint256 tokenId) internal {
+        positionStates[tokenId].autoLendShares = 0;
+        positionStates[tokenId].autoLendToken = address(0);
+        positionStates[tokenId].autoLendAmount = 0;
+    }
+
     function _autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) internal {
-        address token = autoLendConfigs[tokenId].autoLendToken;
+        address token = positionStates[tokenId].autoLendToken;
         try autoLendVaults[token].redeem(shares, address(this), address(this)) returns (uint256 amount) {
 
-            // send fees corresponding to the protocol fee on gains only
-            uint256 autoLendGain = amount > autoLendConfigs[tokenId].autoLendAmount ? amount - autoLendConfigs[tokenId].autoLendAmount : 0;
-            console.log("autoLendGain", autoLendGain);
-            if (autoLendGain > 0) {
-                bool isToken0 = Currency.unwrap(poolKey.currency0) == token;
-                _sendFees(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeBps, protocolFeeRecipient);
-            }
-
-            autoLendConfigs[tokenId].autoLendShares = 0;
-            autoLendConfigs[tokenId].autoLendToken = address(0);
-            autoLendConfigs[tokenId].autoLendAmount = 0;
-
+            _handleAutoLendGain(tokenId, poolKey, token, amount, positionStates[tokenId].autoLendAmount);
+            
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
             _handleApproval(Currency.wrap(token), amount);
@@ -789,12 +885,13 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
                 }
             }
 
+            _resetAutoLend(tokenId);
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
 
             if (newTokenId > 0) {
-                positionConfigs[newTokenId] = positionConfigs[tokenId];
                 autoLendConfigs[newTokenId] = autoLendConfigs[tokenId];
-                _addPositionTriggers(newTokenId, poolKey);
+                _setPositionConfig(newTokenId, positionConfigs[tokenId]);
+                _disablePosition(tokenId);
             } else {
                 _addPositionTriggers(tokenId, poolKey);
             }
@@ -816,25 +913,21 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         _removePositionTriggers(tokenId, poolKey);
 
-        uint256 shares = autoLendConfigs[tokenId].autoLendShares;
-        address token = autoLendConfigs[tokenId].autoLendToken;
-        uint256 autoLendAmount = autoLendConfigs[tokenId].autoLendAmount;
-
-        autoLendConfigs[tokenId] = AutoLendConfig({autoLendToleranceTick: 0, autoLendToken: address(0), autoLendShares: 0, autoLendAmount: 0});
-
+        uint256 shares = positionStates[tokenId].autoLendShares;
+       
         if (shares > 0) {
+            address token = positionStates[tokenId].autoLendToken;
+            uint256 autoLendAmount = positionStates[tokenId].autoLendAmount;
             uint256 amount = autoLendVaults[token].redeem(shares, address(this), address(this));
 
-            // send fees corresponding to the protocol fee on gains only
-            uint256 autoLendGain = amount > autoLendAmount ? amount - autoLendAmount : 0;
-            if (autoLendGain > 0) {
-                bool isToken0 = Currency.unwrap(poolKey.currency0) == token;
-                _sendFees(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeBps, protocolFeeRecipient);
-            }
+            _handleAutoLendGain(tokenId, poolKey, token, amount, autoLendAmount);
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
 
             emit AutoLendForceExit(tokenId, Currency.wrap(token), amount, shares);
         }
+
+        _resetAutoLend(tokenId);
+        _disablePosition(tokenId);
     }
 
     function autoExit(
@@ -867,7 +960,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
-        _removePositionTriggers(tokenId, poolKey);
+        _disablePosition(tokenId);
 
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
     }
@@ -902,11 +995,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
         // configure new position
-        positionConfigs[newTokenId] = positionConfigs[tokenId];
         autoRangeConfigs[newTokenId] = autoRangeConfigs[tokenId];
-
-        _removePositionTriggers(tokenId, poolKey);
-        _addPositionTriggers(newTokenId, poolKey);
+        _setPositionConfig(newTokenId, positionConfigs[tokenId]);
+        _disablePosition(tokenId);
 
         emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
     }
@@ -946,9 +1037,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             revert Unauthorized();
         }
         (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
-
-        AutoCompoundMode mode = positionConfigs[tokenId].autoCompoundMode;
-        _executeAutoCompound(tokenId, caller, mode);
+        _executeAutoCompound(tokenId, caller);
         return bytes("");
     }
 
@@ -957,8 +1046,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
     ///      Fees are based on actual added amounts to incentivize optimal swapping
     /// @param tokenId The token ID to compound
     /// @param caller The address that initiated the auto-compound (for reward distribution)
-    function _executeAutoCompound(uint256 tokenId, address caller, AutoCompoundMode mode) internal {
-        if (mode == AutoCompoundMode.NONE) {
+    function _executeAutoCompound(uint256 tokenId, address caller) internal {
+
+        AutoCompoundMode mode = positionConfigs[tokenId].autoCompoundMode;
+        if (mode == AutoCompoundMode.NONE || positionConfigs[tokenId].mode == PositionMode.NONE) {
             return;
         }
 
@@ -1217,7 +1308,7 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         currency1 = poolKey.currency1;
 
         // Step 2: Decrease all liquidity using PositionManager
-        // 0 liqudity removal only works with INCREASE_LIQUIDITY (because of fee handling in hook)
+        // 0 liquidity removal only works with INCREASE_LIQUIDITY (because of fee handling in hook - buggy implementation in positionmanager)
         bytes memory actions = abi.encodePacked(onlyFees ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
         bytes[] memory params_array = new bytes[](2);
 
