@@ -1043,7 +1043,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
     /// @notice Internal function that executes the auto-compound logic
     /// @dev Collects fees, swaps to achieve proportions, and adds liquidity back via PositionManager
-    ///      Fees are based on actual added amounts to incentivize optimal swapping
     /// @param tokenId The token ID to compound
     /// @param caller The address that initiated the auto-compound (for reward distribution)
     function _executeAutoCompound(uint256 tokenId, address caller) internal {
@@ -1058,10 +1057,6 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         // Step 2: Collect fees only (don't remove liquidity)
         (,, uint256 fees0, uint256 fees1) = _decreaseLiquidity(tokenId, true);
-
-        console.log("fees0", fees0);
-        console.log("fees1", fees1);
-
 
         if (fees0 == 0 && fees1 == 0) {
             return; // No fees to compound
@@ -1080,22 +1075,23 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             (fees0, fees1) = _applyBalanceDelta(swapDelta, fees0, fees1);
         }
 
-        fees0 = fees0 - autoCompoundRewardBps * fees0 / 10000;
-        fees1 = fees1 - autoCompoundRewardBps * fees1 / 10000;
+        console.log("fees0 after swap", fees0);
+        console.log("fees1 after swap", fees1);
+
+        (fees0, fees1) = _sendFees(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, autoCompoundRewardBps, caller);
+
+        console.log("fees0 after send fees", fees0);
+        console.log("fees1 after send fees", fees1);
 
         _handleApproval(poolKey.currency0, fees0);
         _handleApproval(poolKey.currency1, fees1);
 
         if (mode == AutoCompoundMode.AUTO_COMPOUND) {
             // Step 4: Add liquidity
-            (fees0, fees1) =
-                _increaseLiquidity(tokenId, poolKey, posInfo, uint128(fees0), uint128(fees1));
+            (fees0, fees1) = _increaseLiquidity(tokenId, poolKey, posInfo, uint128(fees0), uint128(fees1));
         }
 
-        // Step 5: Send rewards based on actual amounts added / available
-        _sendFees(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, autoCompoundRewardBps, caller);
-
-        // Step 6: Send leftover tokens (or harvested tokens) to owner 
+        // Step 5: Send leftover tokens (or harvested tokens) to owner 
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
     }
 
@@ -1416,17 +1412,24 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         uint256 amount1,
         uint16 feeBps,
         address recipient
-    ) internal {
-        if (amount0 != 0) {
+    ) internal returns (uint256 newAmount0, uint256 newAmount1) {
+
+        uint256 fee0 = amount0 * feeBps / 10000;
+        uint256 fee1 = amount1 * feeBps / 10000;
+
+        if (fee0 != 0) {
             // send protocol fee
-            currency0.transfer(recipient, amount0 * feeBps / 10000);
+            currency0.transfer(recipient, fee0);
         }
-        if (amount1 != 0) {
+        if (fee1 != 0) {
             // send protocol fee
-            currency1.transfer(recipient, amount1 * feeBps / 10000);
+            currency1.transfer(recipient, fee1);
         }
 
-        emit SendFees(tokenId, currency0, currency1, amount0, amount1, recipient);
+        emit SendFees(tokenId, currency0, currency1, fee0, fee1, recipient);
+
+        newAmount0 = amount0 - fee0;
+        newAmount1 = amount1 - fee1;
     }
 
     function _sendLeftoverTokens(uint256 tokenId, Currency currency0, Currency currency1, address recipient) internal {

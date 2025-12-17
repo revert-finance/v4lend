@@ -177,7 +177,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         revertHook.setPositionConfig(
             hookedTokenId,
             RevertHook.PositionConfig({
-                mode: RevertHook.PositionMode.NONE,
+                mode: RevertHook.PositionMode.AUTO_COMPOUND_ONLY,
                 autoCompoundMode: RevertHook.AutoCompoundMode.AUTO_COMPOUND,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,

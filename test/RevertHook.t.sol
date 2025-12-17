@@ -61,6 +61,8 @@ contract RevertHookTest is BaseTest {
 
     int24 tickStart;
 
+    address protocolFeeRecipient;
+
     function setUp() public {
         // Deploys all required artifacts.
         deployArtifactsAndLabel();
@@ -81,7 +83,9 @@ contract RevertHookTest is BaseTest {
             positionManager
         );
 
-        bytes memory constructorArgs = abi.encode(address(this), permit2, v4Oracle); // Add all the necessary constructor arguments from the hook
+        protocolFeeRecipient = makeAddr("protocolFeeRecipient");
+
+        bytes memory constructorArgs = abi.encode(protocolFeeRecipient, permit2, v4Oracle); // Add all the necessary constructor arguments from the hook
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
@@ -279,11 +283,13 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-range");
     }
 
-    function testBasicAutoCompound() public {
-
+    /// @notice Helper function to set up auto compound test: configures position, generates fees
+    /// @param autoCompoundMode The auto compound mode to test
+    /// @return token2Liquidity The initial liquidity of the position
+    function _setupAutoCompoundTest(RevertHook.AutoCompoundMode autoCompoundMode) internal returns (uint128 token2Liquidity) {
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
             mode: RevertHook.PositionMode.AUTO_COMPOUND_ONLY,
-            autoCompoundMode: RevertHook.AutoCompoundMode.AUTO_COMPOUND,
+            autoCompoundMode: autoCompoundMode,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
@@ -291,8 +297,8 @@ contract RevertHookTest is BaseTest {
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
-        // Assert that token2Id position has > 0 liquidity after swap (out of range)
-        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        // Assert that token2Id position has > 0 liquidity
+        token2Liquidity = positionManager.getPositionLiquidity(token2Id);
         assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
 
         // Perform swaps (in both directions) to generate some fees
@@ -325,44 +331,147 @@ contract RevertHookTest is BaseTest {
             deadline: block.timestamp
         });
 
-
         vm.warp(block.timestamp + 600);
-        // ------------------- //
+    }
 
-        // Record balances before autoCompound for fee verification
-        address executor = address(this); // The caller of autoCompound
+    /// @notice Helper struct to hold balance snapshots before autoCompound
+    struct BalanceSnapshot {
+        uint256 executorBalance0;
+        uint256 executorBalance1;
+        uint256 ownerBalance0;
+        uint256 ownerBalance1;
+        uint256 protocolFeeRecipientBalance0;
+        uint256 protocolFeeRecipientBalance1;
+    }
+
+    /// @notice Helper function to record balances before autoCompound
+    /// @return snapshot The balance snapshot
+    function _recordBalancesBeforeAutoCompound() internal view returns (BalanceSnapshot memory snapshot) {
+        address executor = address(this);
         address protocolFeeRecipient = hook.protocolFeeRecipient();
+        address owner = address(this);
         
-        uint256 executorBalance0Before = currency0.balanceOf(executor);
-        uint256 executorBalance1Before = currency1.balanceOf(executor);
-        uint256 protocolFeeRecipientBalance0Before = currency0.balanceOf(protocolFeeRecipient);
-        uint256 protocolFeeRecipientBalance1Before = currency1.balanceOf(protocolFeeRecipient);
+        snapshot.executorBalance0 = currency0.balanceOf(executor);
+        snapshot.executorBalance1 = currency1.balanceOf(executor);
+        snapshot.ownerBalance0 = currency0.balanceOf(owner);
+        snapshot.ownerBalance1 = currency1.balanceOf(owner);
+        snapshot.protocolFeeRecipientBalance0 = currency0.balanceOf(protocolFeeRecipient);
+        snapshot.protocolFeeRecipientBalance1 = currency1.balanceOf(protocolFeeRecipient);
+    }
+
+    /// @notice Helper function to verify hook has no leftover balances
+    function _verifyNoLeftoverBalances(string memory context) internal view {
+        assertEq(currency0.balanceOf(address(hook)), 0, string.concat("Hook should have 0 balance of currency0 after ", context));
+        assertEq(currency1.balanceOf(address(hook)), 0, string.concat("Hook should have 0 balance of currency1 after ", context));
+    }
+
+    function testBasicAutoCompound() public {
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHook.AutoCompoundMode.AUTO_COMPOUND);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCompound();
 
         uint256[] memory params = new uint256[](1);
         params[0] = token2Id;
-
         hook.autoCompound(params);
    
         uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
         assertGt(token2LiquidityAfter, token2Liquidity, "token2Id should have more liquidity");
 
-        // Verify hook contract has no leftover token balances
-        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-compound");
-        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-compound");
+        _verifyNoLeftoverBalances("auto-compound");
 
         // Verify executor received fees
-        uint256 executorBalance0After = currency0.balanceOf(executor);
-        uint256 executorBalance1After = currency1.balanceOf(executor);
-        uint256 executorFee0 = executorBalance0After - executorBalance0Before;
-        uint256 executorFee1 = executorBalance1After - executorBalance1Before;
+        uint256 executorBalance0After = currency0.balanceOf(address(this));
+        uint256 executorBalance1After = currency1.balanceOf(address(this));
+        uint256 executorFee0 = executorBalance0After - before.executorBalance0;
+        uint256 executorFee1 = executorBalance1After - before.executorBalance1;
         assertGt(executorFee0 + executorFee1, 0, "Executor should have received fees");
 
         // Verify protocolFeeRecipient received fees
+        address protocolFeeRecipient = hook.protocolFeeRecipient();
         uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(protocolFeeRecipient);
         uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(protocolFeeRecipient);
-        uint256 protocolFee0 = protocolFeeRecipientBalance0After - protocolFeeRecipientBalance0Before;
-        uint256 protocolFee1 = protocolFeeRecipientBalance1After - protocolFeeRecipientBalance1Before;
+        uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
+        uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
         assertGt(protocolFee0 + protocolFee1, 0, "ProtocolFeeRecipient should have received fees");
+    }
+
+    function testBasicAutoHarvestToken0() public {
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHook.AutoCompoundMode.HARVEST_TOKEN_0);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCompound();
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+        hook.autoCompound(params);
+   
+        uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
+        // Position liquidity should NOT increase (unlike auto-compound)
+        assertEq(token2LiquidityAfter, token2Liquidity, "token2Id liquidity should remain the same after harvest");
+
+        _verifyNoLeftoverBalances("harvest");
+
+        // Verify executor received fees in token0 (reward for harvesting)
+        uint256 executorBalance0After = currency0.balanceOf(address(this));
+        uint256 executorBalance1After = currency1.balanceOf(address(this));
+        uint256 executorFee0 = executorBalance0After - before.executorBalance0;
+        uint256 executorFee1 = executorBalance1After - before.executorBalance1;
+        assertGt(executorFee0, 0, "Executor should have received fees in token0");
+        assertEq(executorFee1, 0, "Executor should not have received fees in token1 (harvested to token0)");
+
+        // Verify owner received harvested token0 (after fees)
+        uint256 ownerBalance0After = currency0.balanceOf(address(this));
+        uint256 ownerBalance1After = currency1.balanceOf(address(this));
+        uint256 ownerReceived0 = ownerBalance0After - before.ownerBalance0;
+        uint256 ownerReceived1 = ownerBalance1After - before.ownerBalance1;
+        assertGt(ownerReceived0, 0, "Owner should have received harvested token0");
+        assertEq(ownerReceived1, 0, "Owner should not have received token1 (all swapped to token0)");
+
+        // Verify protocolFeeRecipient received fees in token0
+        address protocolFeeRecipient = hook.protocolFeeRecipient();
+        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(protocolFeeRecipient);
+        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(protocolFeeRecipient);
+        uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
+        uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
+        assertGt(protocolFee0, 0, "ProtocolFeeRecipient should have received fees in token0");
+        assertGt(protocolFee1, 0, "ProtocolFeeRecipient should have received fees in token1");
+    }
+
+    function testBasicAutoHarvestToken1() public {
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHook.AutoCompoundMode.HARVEST_TOKEN_1);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCompound();
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+        hook.autoCompound(params);
+   
+        uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
+        // Position liquidity should NOT increase (unlike auto-compound)
+        assertEq(token2LiquidityAfter, token2Liquidity, "token2Id liquidity should remain the same after harvest");
+
+        _verifyNoLeftoverBalances("harvest");
+
+        // Verify executor received fees in token1 (reward for harvesting)
+        uint256 executorBalance0After = currency0.balanceOf(address(this));
+        uint256 executorBalance1After = currency1.balanceOf(address(this));
+        uint256 executorFee0 = executorBalance0After - before.executorBalance0;
+        uint256 executorFee1 = executorBalance1After - before.executorBalance1;
+        assertGt(executorFee1, 0, "Executor should have received fees in token1");
+        assertEq(executorFee0, 0, "Executor should not have received fees in token0 (harvested to token1)");
+
+        // Verify owner received harvested token1 (after fees)
+        uint256 ownerBalance0After = currency0.balanceOf(address(this));
+        uint256 ownerBalance1After = currency1.balanceOf(address(this));
+        uint256 ownerReceived0 = ownerBalance0After - before.ownerBalance0;
+        uint256 ownerReceived1 = ownerBalance1After - before.ownerBalance1;
+        assertGt(ownerReceived1, 0, "Owner should have received harvested token1");
+        assertEq(ownerReceived0, 0, "Owner should not have received token0 (all swapped to token1)");
+
+        // Verify protocolFeeRecipient received fees in token1
+        address protocolFeeRecipient = hook.protocolFeeRecipient();
+        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(protocolFeeRecipient);
+        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(protocolFeeRecipient);
+        uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
+        uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
+        assertGt(protocolFee0, 0, "ProtocolFeeRecipient should have received fees in token0");
+        assertGt(protocolFee1, 0, "ProtocolFeeRecipient should have received fees in token1");
     }
 
     function testBasicAutoExit() public {
