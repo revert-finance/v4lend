@@ -529,6 +529,129 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
     }
 
+    function testAutoExitAndAutoRange() public {
+       
+        // Configure auto range: triggers when price moves 1 tick away from position bounds
+        hook.setAutoRangeConfig(token3Id, RevertHook.AutoRangeConfig({
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: -60,
+            autoRangeUpperDelta: 60
+        }));
+
+        // Configure auto exit with absolute ticks on the upper side only
+        // Set exit tick to be well above the initial upper bound
+        hook.setAutoExitConfig(token3Id, RevertHook.AutoExitConfig({
+            isRelative: false, // Use absolute ticks
+            autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
+            autoExitTickUpper: tickUpper3 + poolKey.tickSpacing * 3,
+            autoExitSwapLower: false,
+            autoExitSwapUpper: false
+        }));
+
+        // Configure AUTO_EXIT_AND_AUTO_RANGE mode
+        hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
+            mode: RevertHook.PositionMode.AUTO_EXIT_AND_AUTO_RANGE,
+            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook)
+        }));
+
+        // approve all positions to the hook
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        // Verify initial state
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(token3Id);
+        assertGt(initialLiquidity, 0, "Position should have liquidity initially");
+
+        // Get initial position info
+        (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token3Id);
+        int24 initialTickLower = posInfoBefore.tickLower();
+        int24 initialTickUpper = posInfoBefore.tickUpper();
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        // ===== Test 1: Trigger Auto Range (should NOT trigger auto exit) =====
+        console.log("=== Test 1: Trigger Auto Range ===");
+        
+        // Swap down to trigger auto range on lower side (but not hit exit tick)
+        uint256 amountIn = 2e17;
+        BalanceDelta swapDelta1 = swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true, // Swap token0 -> token1 (price goes down)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        assertEq(int256(swapDelta1.amount0()), -int256(amountIn), "Swap should consume amountIn token0");
+
+        // Get current tick after swap
+        (, int24 currentTickAfterRange,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after range swap", currentTickAfterRange);
+
+        // Verify auto range happened: old position has 0 liquidity, new position was created
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Old position should have 0 liquidity after auto-range");
+        
+        uint256 nextTokenIdAfter = positionManager.nextTokenId();
+        assertEq(nextTokenIdAfter, nextTokenIdBefore + 1, "A new position should be minted after auto-range");
+
+        // Get the new position info
+        uint256 newTokenId = nextTokenIdBefore;
+        (, PositionInfo posInfoNew) = positionManager.getPoolAndPositionInfo(newTokenId);
+        int24 newTickLower = posInfoNew.tickLower();
+        int24 newTickUpper = posInfoNew.tickUpper();
+
+        // Verify new position has different range
+        assertTrue(newTickLower != initialTickLower || newTickUpper != initialTickUpper, 
+            "New position should have a different range than the old position");
+        
+        // Verify new position has liquidity
+        assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "New position should have liquidity > 0");
+
+        // Verify current tick is within the new position's range
+        assertTrue(currentTickAfterRange >= newTickLower && currentTickAfterRange <= newTickUpper, 
+            "Current tick should be within the new position's range");
+
+        // Verify hook has no leftover balances
+        _verifyNoLeftoverBalances("auto-range");
+
+        // ===== Test 2: Trigger Auto Exit (should hit the absolute exit tick) =====
+        console.log("=== Test 2: Trigger Auto Exit ===");
+        
+        // Swap up to hit the absolute exit tick on the upper side
+        // We need to swap enough to reach the exit tick
+        uint256 exitAmountIn = 10e17;
+        BalanceDelta swapDelta2 = swapRouter.swapExactTokensForTokens({
+            amountIn: exitAmountIn,
+            amountOutMin: 0,
+            zeroForOne: false, // Swap token1 -> token0 (price goes up)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Get current tick after swap
+        (, int24 currentTickAfterExit,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after exit swap", currentTickAfterExit);
+        //console.log("autoExitTickUpper", autoExitTickUpper);
+        console.log("newTickUpper", newTickUpper);
+
+        // Verify auto exit happened: position should have 0 liquidity
+        // The exit triggers when the price crosses the exit tick during the swap
+        uint128 finalLiquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertEq(finalLiquidity, 0, "Position should have 0 liquidity after auto-exit");
+        
+        // Verify we crossed the exit tick (current tick should be at or above it)
+        //assertTrue(currentTickAfterExit >= autoExitTickUpper, "Current tick should be at or above the exit tick after swap");
+
+        // Verify hook has no leftover balances
+        _verifyNoLeftoverBalances("auto-exit");
+    }
+
     function testBasicAutoExit_NonHookedPool() public {
 
         hook.setPositionConfig(token2Id, RevertHook.PositionConfig({

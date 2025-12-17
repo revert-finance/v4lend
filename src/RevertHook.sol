@@ -263,10 +263,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             revert Unauthorized();
         }
 
-        if (config.autoExitTickLower % poolKey.tickSpacing != 0) {
+        if (config.autoExitTickLower % poolKey.tickSpacing != 0 && config.autoExitTickLower != type(int24).min) {
             revert InvalidConfig();
         }
-        if (config.autoExitTickUpper % poolKey.tickSpacing != 0) {
+        if (config.autoExitTickUpper % poolKey.tickSpacing != 0 && config.autoExitTickUpper != type(int24).max) {
             revert InvalidConfig();
         }
 
@@ -285,10 +285,10 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
             revert Unauthorized();
         }
 
-        if (config.autoRangeLowerLimit % poolKey.tickSpacing != 0) {
+        if (config.autoRangeLowerLimit % poolKey.tickSpacing != 0 && config.autoRangeLowerLimit != type(int24).min) {
             revert InvalidConfig();
         }
-        if (config.autoRangeUpperLimit % poolKey.tickSpacing != 0) {
+        if (config.autoRangeUpperLimit % poolKey.tickSpacing != 0 && config.autoRangeUpperLimit != type(int24).max) {
             revert InvalidConfig();
         }
         if (config.autoRangeLowerDelta % poolKey.tickSpacing != 0) {
@@ -645,31 +645,37 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         }
 
         if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            lowerList.insert(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
-            upperList.insert(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
+            if (autoRangeConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
+                lowerList.insert(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
+            }
+            if (autoRangeConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
+                upperList.insert(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
+            }
         } 
         if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             if (autoExitConfigs[tokenId].isRelative) {
-                lowerList.insert(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
-                upperList.insert(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
+                    lowerList.insert(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+                }
+                if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                    upperList.insert(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                }
             } else {
-                lowerList.insert(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
-                upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
+                    lowerList.insert(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+                }
+                if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                    upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                }
             }
-            upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
         }
         if (mode == PositionMode.AUTO_LEND) {
             if (positionStates[tokenId].autoLendShares > 0) {
                 if (Currency.unwrap(poolKey.currency0) == positionStates[tokenId].autoLendToken) {
-                    console.log(
-                        "inserting upper trigger",
-                        tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing
-                    );
                     upperList.insert(
                         tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
                     );
                 } else {
-                    console.log("inserting lower trigger", tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick);
                     lowerList.insert(tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick, tokenId);
                 }
             } else {
@@ -694,16 +700,28 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
         int24 tickUpper = posInfo.tickUpper();
 
         if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            lowerTriggerAfterSwap[poolId].remove(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
-            upperTriggerAfterSwap[poolId].remove(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
+            if (autoRangeConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
+                lowerTriggerAfterSwap[poolId].remove(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
+            }
+            if (autoRangeConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
+                upperTriggerAfterSwap[poolId].remove(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
+            }
         } 
         if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             if (autoExitConfigs[tokenId].isRelative) {
+                if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
                 lowerTriggerAfterSwap[poolId].remove(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
-                upperTriggerAfterSwap[poolId].remove(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                }
+                if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                    upperTriggerAfterSwap[poolId].remove(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                }
             } else {
-                lowerTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
-                upperTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
+                    lowerTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+                }
+                if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                    upperTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+                }
             }
         }
         if (mode == PositionMode.AUTO_LEND) {
@@ -1004,6 +1022,9 @@ contract RevertHook is Transformer, BaseHook, IUnlockCallback {
 
         // configure new position
         autoRangeConfigs[newTokenId] = autoRangeConfigs[tokenId];
+        if (positionConfigs[tokenId].mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
+            autoExitConfigs[newTokenId] = autoExitConfigs[tokenId];
+        }
         _setPositionConfig(newTokenId, positionConfigs[tokenId]);
         _disablePosition(tokenId);
 
