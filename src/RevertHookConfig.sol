@@ -10,10 +10,6 @@ import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {Transformer} from "./transformers/Transformer.sol";
 
-
-error Unauthorized();
-error InvalidConfig();
-
 /// @title RevertHookConfig
 /// @notice Base class containing all configuration-related structures, storage, and functions
 /// @dev This class handles position configuration management
@@ -97,9 +93,9 @@ abstract contract RevertHookConfig is Transformer {
         int24 swapPoolTickSpacing;
         IHooks swapPoolHooks;
 
-        // TODO implement max price impact checks for swaps
-        //uint32 maxPriceImpact0; // swaps token 0 to token 1
-        //uint32 maxPriceImpact1; // swaps token 1 to token 0
+        // max price impact in basis points (bps) for swaps
+        uint32 maxPriceImpact0; // swaps token 0 to token 1
+        uint32 maxPriceImpact1; // swaps token 1 to token 0
     }
 
     struct AutoExitConfig {
@@ -233,7 +229,7 @@ abstract contract RevertHookConfig is Transformer {
             revert Unauthorized();
         }
 
-        (PoolKey memory poolKey, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
+        (PoolKey memory poolKey, ) = _getPoolAndPositionInfo(tokenId);
         if (address(poolKey.hooks) != address(this)) {
             revert Unauthorized();
         }
@@ -257,7 +253,9 @@ abstract contract RevertHookConfig is Transformer {
             autoCompoundMode: AutoCompoundMode.NONE,
             swapPoolFee: 0,
             swapPoolTickSpacing: 0,
-            swapPoolHooks: IHooks(address(0))
+            swapPoolHooks: IHooks(address(0)),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
     }
 

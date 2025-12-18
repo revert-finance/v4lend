@@ -21,6 +21,7 @@ abstract contract Constants {
     error SlippageError();
     error MissingSwapData();
     error SwapAmountTooLarge();
+    error PriceImpactExceeded();
 
     error ExceedsMaxReward();
     error ChainlinkPriceError();

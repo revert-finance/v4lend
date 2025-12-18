@@ -182,7 +182,9 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
-                swapPoolHooks: IHooks(address(revertHook))
+                swapPoolHooks: IHooks(address(revertHook)),
+                maxPriceImpact0: 0,
+                maxPriceImpact1: 0
             })
         );
     }
@@ -385,7 +387,9 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
-                swapPoolHooks: IHooks(address(revertHook))
+                swapPoolHooks: IHooks(address(revertHook)),
+                maxPriceImpact0: 0,
+                maxPriceImpact1: 0
             })
         );
         vm.prank(WHALE_ACCOUNT);

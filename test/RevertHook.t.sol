@@ -203,7 +203,9 @@ contract RevertHookTest is BaseTest {
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(address(0))
+            swapPoolHooks: IHooks(address(0)),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
         hook.setAutoRangeConfig(token3Id, RevertHookConfig.AutoRangeConfig({
             autoRangeLowerLimit: 0,
@@ -293,7 +295,9 @@ contract RevertHookTest is BaseTest {
             autoCompoundMode: autoCompoundMode,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook)
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -482,7 +486,9 @@ contract RevertHookTest is BaseTest {
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook)
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
         hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
@@ -556,7 +562,9 @@ contract RevertHookTest is BaseTest {
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook)
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
 
         // approve all positions to the hook
@@ -660,7 +668,9 @@ contract RevertHookTest is BaseTest {
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(address(0)) // Use nonHookedPool for swapping
+            swapPoolHooks: IHooks(address(0)), // Use nonHookedPool for swapping
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
         hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
@@ -748,7 +758,9 @@ contract RevertHookTest is BaseTest {
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook)
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
         hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
@@ -918,7 +930,9 @@ contract RevertHookTest is BaseTest {
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(address(0))
+            swapPoolHooks: IHooks(address(0)),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
         }));
         hook.setAutoLendConfig(autolendTokenId, RevertHookConfig.AutoLendConfig({
             autoLendToleranceTick: 60

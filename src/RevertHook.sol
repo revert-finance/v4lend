@@ -67,7 +67,12 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
     // events for token transfers
     event SendLeftoverTokens(
-        uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1, address recipient
+        uint256 indexed tokenId,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1,
+        address recipient
     );
     event SendRewards(
         uint256 indexed tokenId,
@@ -77,12 +82,14 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         uint256 amount1,
         address recipient
     );
-    event SendProtocolFee(uint256 indexed tokenId,
+    event SendProtocolFee(
+        uint256 indexed tokenId,
         Currency currency0,
         Currency currency1,
         uint256 amount0,
         uint256 amount1,
-        address recipient);
+        address recipient
+    );
 
     // special events for swap failures / modifyLiquidities failures
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
@@ -96,7 +103,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     V4Oracle public immutable v4Oracle;
 
     constructor(address protocolFeeRecipient_, IPermit2 _permit2, V4Oracle _v4Oracle)
-        BaseHook(_v4Oracle.poolManager()) Ownable(msg.sender)
+        BaseHook(_v4Oracle.poolManager())
+        Ownable(msg.sender)
     {
         positionManager = _v4Oracle.positionManager();
         protocolFeeRecipient = protocolFeeRecipient_;
@@ -207,16 +215,21 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     }
 
     // handle token id - when detected as triggered by a swap
-    function _handleTokenIdAfterSwap(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger, int24 tick)
-        internal
-    {
+    function _handleTokenIdAfterSwap(
+        PoolKey memory poolKey,
+        PoolId poolId,
+        uint256 tokenId,
+        bool isUpperTrigger,
+        int24 tick
+    ) internal {
         PositionMode mode = positionConfigs[tokenId].mode;
         if (mode == PositionMode.AUTO_EXIT) {
             _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             // only works with absolute auto exit ticks
             AutoExitConfig memory config = autoExitConfigs[tokenId];
-            bool isAutoExitTriggered = isUpperTrigger && tick == config.autoExitTickUpper || !isUpperTrigger && tick == config.autoExitTickLower;            
+            bool isAutoExitTriggered = isUpperTrigger && tick == config.autoExitTickUpper || !isUpperTrigger
+                && tick == config.autoExitTickLower;
             if (isAutoExitTriggered) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
             } else {
@@ -315,7 +328,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
-
         console.log("afterAddLiquidity");
 
         uint256 tokenId = uint256(params.salt);
@@ -326,7 +338,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         if (sender == address(this)) {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
-        
+
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
 
         // if adding from 0
@@ -346,7 +358,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
-
         console.log("afterRemoveLiquidity");
 
         uint256 tokenId = uint256(params.salt);
@@ -357,7 +368,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
         }
 
-       
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
 
         // remove the position from the lists
@@ -368,8 +378,10 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
     }
 
-    function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta) internal returns (BalanceDelta newFeeDelta) {
-
+    function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta)
+        internal
+        returns (BalanceDelta newFeeDelta)
+    {
         address feeRecipient = protocolFeeRecipient;
         uint32 accumulatedActiveTime = positionStates[tokenId].acumulatedActiveTime;
         uint32 lastActivated = positionStates[tokenId].lastActivated;
@@ -392,8 +404,10 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         PoolId poolId = key.toId();
 
-        int128 protocolFee0 = int32(accumulatedActiveTime) * feeDelta.amount0() * int16(protocolFeeBps) / (10000 * int32(feeTime));
-        int128 protocolFee1 = int32(accumulatedActiveTime) * feeDelta.amount1() * int16(protocolFeeBps) / (10000 * int32(feeTime));
+        int128 protocolFee0 =
+            int32(accumulatedActiveTime) * feeDelta.amount0() * int16(protocolFeeBps) / (10000 * int32(feeTime));
+        int128 protocolFee1 =
+            int32(accumulatedActiveTime) * feeDelta.amount1() * int16(protocolFeeBps) / (10000 * int32(feeTime));
 
         // take protocol fees
         if (protocolFee0 > 0) {
@@ -403,11 +417,17 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             poolManager.take(key.currency1, feeRecipient, uint256(int256(protocolFee1)));
         }
 
-        emit SendProtocolFee(tokenId, key.currency0, key.currency1, uint256(int256(protocolFee0)), uint256(int256(protocolFee1)), feeRecipient);
+        emit SendProtocolFee(
+            tokenId,
+            key.currency0,
+            key.currency1,
+            uint256(int256(protocolFee0)),
+            uint256(int256(protocolFee1)),
+            feeRecipient
+        );
 
         newFeeDelta = toBalanceDelta(protocolFee0, protocolFee1);
     }
-
 
     /// @notice Returns the owner of the position
     /// @param tokenId The token ID of the position
@@ -420,7 +440,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             return IVault(owner).ownerOf(tokenId);
         } else {
             return owner;
-        } 
+        }
     }
 
     function _getCrossedTicks(PoolId poolId, int24 tickSpacing)
@@ -472,7 +492,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     }
 
     function _autoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        
         // remove remaining triggers
         _removePositionTriggers(tokenId, poolKey);
 
@@ -526,7 +545,14 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         if (autoLendGain > 0) {
             bool isToken0 = poolKey.currency0 == currency;
             currency.transfer(protocolFeeRecipient, autoLendGain * protocolFeeBps / 10000);
-            emit SendProtocolFee(tokenId, poolKey.currency0, poolKey.currency1, isToken0 ? autoLendGain : 0, isToken0 ? 0 : autoLendGain, protocolFeeRecipient);
+            emit SendProtocolFee(
+                tokenId,
+                poolKey.currency0,
+                poolKey.currency1,
+                isToken0 ? autoLendGain : 0,
+                isToken0 ? 0 : autoLendGain,
+                protocolFeeRecipient
+            );
         }
     }
 
@@ -543,9 +569,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         address token = positionStates[tokenId].autoLendToken;
         IERC4626 vault = IERC4626(positionStates[tokenId].autoLendVault);
         try vault.redeem(shares, address(this), address(this)) returns (uint256 amount) {
-
             _handleAutoLendGain(tokenId, poolKey, Currency.wrap(token), amount, positionStates[tokenId].autoLendAmount);
-            
+
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
             _handleApproval(Currency.wrap(token), amount);
@@ -612,7 +637,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         _removePositionTriggers(tokenId, poolKey);
 
         uint256 shares = positionStates[tokenId].autoLendShares;
-       
+
         if (shares > 0) {
             address token = positionStates[tokenId].autoLendToken;
             uint256 autoLendAmount = positionStates[tokenId].autoLendAmount;
@@ -653,7 +678,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         if (doSwap) {
             uint256 swapAmount = !isUpper ? amount0 : amount1;
             PoolKey memory swapPoolKey = _getSwapPoolKey(tokenId, poolKey);
-            BalanceDelta swapDelta = _swap(swapPoolKey, !isUpper, swapAmount);
+            BalanceDelta swapDelta = _swap(swapPoolKey, !isUpper, swapAmount, tokenId);
             (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
         }
 
@@ -681,15 +706,16 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         int24 tickLower = baseTick + autoRangeConfigs[tokenId].autoRangeLowerDelta;
         int24 tickUpper = baseTick + autoRangeConfigs[tokenId].autoRangeUpperDelta;
 
-        (amount0, amount1) = _swapToOptimalRange(tokenId, poolKey, poolId, tickLower, tickUpper, amount0, amount1);
+        (amount0, amount1) = _swapToOptimalRange(tokenId, poolKey, tickLower, tickUpper, amount0, amount1);
 
         _handleApproval(currency0, amount0);
         _handleApproval(currency1, amount1);
 
         uint256 newTokenId;
 
-        (newTokenId, amount0, amount1) =
-            _mintNewPosition(poolKey, tickLower, tickUpper, uint128(amount0), uint128(amount1), _getOwner(tokenId, false));
+        (newTokenId, amount0, amount1) = _mintNewPosition(
+            poolKey, tickLower, tickUpper, uint128(amount0), uint128(amount1), _getOwner(tokenId, false)
+        );
 
         _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
@@ -748,7 +774,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @param tokenId The token ID to compound
     /// @param caller The address that initiated the auto-compound (for reward distribution)
     function _executeAutoCompound(uint256 tokenId, address caller) internal {
-
         AutoCompoundMode mode = positionConfigs[tokenId].autoCompoundMode;
         if (mode == AutoCompoundMode.NONE || positionConfigs[tokenId].mode == PositionMode.NONE) {
             return;
@@ -766,18 +791,18 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         if (mode == AutoCompoundMode.AUTO_COMPOUND) {
             // Step 3: Swap to optimal range
-            (fees0, fees1) = _swapToOptimalRange(
-                tokenId, poolKey, poolKey.toId(), posInfo.tickLower(), posInfo.tickUpper(), fees0, fees1
-            );
+            (fees0, fees1) =
+                _swapToOptimalRange(tokenId, poolKey, posInfo.tickLower(), posInfo.tickUpper(), fees0, fees1);
         } else if (mode == AutoCompoundMode.HARVEST_TOKEN_0) {
-            BalanceDelta swapDelta = _swap(poolKey, false, fees1);
+            BalanceDelta swapDelta = _swap(poolKey, false, fees1, tokenId);
             (fees0, fees1) = _applyBalanceDelta(swapDelta, fees0, fees1);
         } else if (mode == AutoCompoundMode.HARVEST_TOKEN_1) {
-            BalanceDelta swapDelta = _swap(poolKey, true, fees0);
+            BalanceDelta swapDelta = _swap(poolKey, true, fees0, tokenId);
             (fees0, fees1) = _applyBalanceDelta(swapDelta, fees0, fees1);
         }
 
-        (fees0, fees1) = _sendRewards(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, autoCompoundRewardBps, caller);
+        (fees0, fees1) =
+            _sendRewards(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, autoCompoundRewardBps, caller);
 
         _handleApproval(poolKey.currency0, fees0);
         _handleApproval(poolKey.currency1, fees1);
@@ -787,7 +812,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             (fees0, fees1) = _increaseLiquidity(tokenId, poolKey, posInfo, uint128(fees0), uint128(fees1));
         }
 
-        // Step 5: Send leftover tokens (or harvested tokens) to owner 
+        // Step 5: Send leftover tokens (or harvested tokens) to owner
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
     }
 
@@ -795,16 +820,11 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     function _swapToOptimalRange(
         uint256 tokenId,
         PoolKey memory poolKey,
-        PoolId poolId,
         int24 tickLower,
         int24 tickUpper,
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256, uint256) {
-        LiquidityCalculator.V4PoolInfo memory poolInfo = LiquidityCalculator.V4PoolInfo({
-            poolMgr: poolManager, poolIdentifier: poolId, tickSpacing: poolKey.tickSpacing
-        });
-
         PoolKey memory swapPoolKey = _getSwapPoolKey(tokenId, poolKey);
 
         uint256 inputAmount;
@@ -813,8 +833,15 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             swapPoolKey.hooks == poolKey.hooks && swapPoolKey.fee == poolKey.fee
                 && swapPoolKey.tickSpacing == poolKey.tickSpacing
         ) {
-            (inputAmount,, swapDir0to1,) =
-                LiquidityCalculator.calculateSamePool(poolInfo, tickLower, tickUpper, amount0, amount1);
+            (inputAmount,, swapDir0to1,) = LiquidityCalculator.calculateSamePool(
+                LiquidityCalculator.V4PoolInfo({
+                    poolMgr: poolManager, poolIdentifier: poolKey.toId(), tickSpacing: poolKey.tickSpacing
+                }),
+                tickLower,
+                tickUpper,
+                amount0,
+                amount1
+            );
         } else {
             (uint160 sqrtPrice,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
             (inputAmount,, swapDir0to1) =
@@ -822,7 +849,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         }
 
         if (inputAmount > 0) {
-            BalanceDelta swapDelta = _swap(swapPoolKey, swapDir0to1, inputAmount);
+            BalanceDelta swapDelta = _swap(swapPoolKey, swapDir0to1, inputAmount, tokenId);
             (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
         }
 
@@ -1001,7 +1028,9 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         // Step 2: Decrease all liquidity using PositionManager
         // 0 liquidity removal only works with INCREASE_LIQUIDITY (because of fee handling in hook - buggy implementation in positionmanager)
-        bytes memory actions = abi.encodePacked(onlyFees ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes memory actions = abi.encodePacked(
+            onlyFees ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)
+        );
         bytes[] memory params_array = new bytes[](2);
 
         // INCREASE_LIQUIDITY/DECREASE_LIQUIDITY params: (tokenId, liquidity, amount0Min, amount1Min, hookData)
@@ -1032,28 +1061,116 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @param poolKey The pool key
     /// @param zeroForOne True if swapping token0 for token1, false otherwise
     /// @param swapAmount The amount to swap (in the source token)
+    /// @param tokenId The token ID for price impact checking (0 if not applicable)
     /// @return swapDelta The balance delta of the swap
-    function _swap(PoolKey memory poolKey, bool zeroForOne, uint256 swapAmount)
+    function _swap(PoolKey memory poolKey, bool zeroForOne, uint256 swapAmount, uint256 tokenId)
         internal
         returns (BalanceDelta swapDelta)
     {
-        uint160 sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
+        uint32 maxPriceImpact = zeroForOne ? positionConfigs[tokenId].maxPriceImpact0 : positionConfigs[tokenId].maxPriceImpact1;
+        uint160 sqrtPriceBeforeX96;
+        if (maxPriceImpact > 0) {
+            // Get price before swap for price impact calculation
+            (sqrtPriceBeforeX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
+        }
 
         // Prepare swap params
         SwapParams memory swapParams = SwapParams({
             zeroForOne: zeroForOne,
             amountSpecified: -int256(swapAmount), // exact in
-            sqrtPriceLimitX96: sqrtPriceLimitX96
+            sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
         // Execute swap via poolManager - if the swap fails
         try poolManager.swap(poolKey, swapParams, "") returns (BalanceDelta result) {
             swapDelta = result;
+            _checkPriceImpact(zeroForOne, swapAmount, swapDelta, sqrtPriceBeforeX96, maxPriceImpact);
             _handleSwapDeltas(poolKey, swapDelta);
         } catch (bytes memory reason) {
             // emit event
             emit HookSwapFailed(poolKey, swapParams, reason);
             // return the swap delta which is 0, 0
+        }
+    }
+
+    /// @notice Checks if the swap price impact exceeds the maximum allowed
+    /// @param zeroForOne True if swapping token0 for token1, false otherwise
+    /// @param swapAmount The amount swapped (input)
+    /// @param swapDelta The balance delta from the swap
+    /// @param sqrtPriceBeforeX96 The sqrt price before the swap
+    /// @param maxPriceImpact The maximum price impact allowed
+    function _checkPriceImpact(
+        bool zeroForOne,
+        uint256 swapAmount,
+        BalanceDelta swapDelta,
+        uint160 sqrtPriceBeforeX96,
+        uint32 maxPriceImpact
+    ) internal view {
+        // If max price impact is 0, skip check (unlimited)
+        if (maxPriceImpact == 0) {
+            return;
+        }
+
+        // Get actual output amount from swap delta
+        int256 delta0 = swapDelta.amount0();
+        int256 delta1 = swapDelta.amount1();
+
+        uint256 amountOut;
+        if (zeroForOne) {
+            // Swapping token0 -> token1, we receive token1
+            if (delta1 <= 0) {
+                return; // No output or we owe token1, skip check
+            }
+            amountOut = uint256(delta1);
+        } else {
+            // Swapping token1 -> token0, we receive token0
+            if (delta0 <= 0) {
+                return; // No output or we owe token0, skip check
+            }
+            amountOut = uint256(delta0);
+        }
+
+        // Calculate expected output based on spot price before swap
+        // For zeroForOne: spot price = sqrtPrice^2 / Q96^2 (token1 per token0)
+        // Expected output = swapAmount * spot price = swapAmount * sqrtPrice^2 / Q96^2
+        // For oneForZero: spot price = Q96^2 / sqrtPrice^2 (token0 per token1)
+        // Expected output = swapAmount * spot price = swapAmount * Q96^2 / sqrtPrice^2
+
+        uint256 expectedOutput;
+        if (zeroForOne) {
+            // price = sqrtPrice^2 / Q96^2 (token1 per token0)
+            expectedOutput = FullMath.mulDiv(
+                swapAmount,
+                uint256(sqrtPriceBeforeX96) * uint256(sqrtPriceBeforeX96),
+                FixedPoint96.Q96 * FixedPoint96.Q96
+            );
+        } else {
+            // price = Q96^2 / sqrtPrice^2 (token0 per token1)
+            expectedOutput = FullMath.mulDiv(
+                swapAmount,
+                FixedPoint96.Q96 * FixedPoint96.Q96,
+                uint256(sqrtPriceBeforeX96) * uint256(sqrtPriceBeforeX96)
+            );
+        }
+
+        // If expected output is 0, skip check
+        if (expectedOutput == 0) {
+            return;
+        }
+
+        // Calculate price impact in basis points
+        // Price impact = (expectedOutput - actualOutput) / expectedOutput * 10000
+        uint256 priceImpactBps;
+        if (amountOut < expectedOutput) {
+            priceImpactBps = FullMath.mulDiv(expectedOutput - amountOut, 10000, expectedOutput);
+        } else {
+            // If we got more than expected (shouldn't happen but handle gracefully)
+            return;
+        }
+
+        // Check if price impact exceeds maximum
+        if (priceImpactBps > maxPriceImpact) {
+            revert PriceImpactExceeded();
         }
     }
 
@@ -1109,7 +1226,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         uint16 feeBps,
         address recipient
     ) internal returns (uint256 newAmount0, uint256 newAmount1) {
-
         uint256 fee0 = amount0 * feeBps / 10000;
         uint256 fee1 = amount1 * feeBps / 10000;
 
