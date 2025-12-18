@@ -17,6 +17,7 @@ import {V4Oracle} from "../../src/V4Oracle.sol";
 import {InterestRateModel} from "../../src/InterestRateModel.sol";
 
 import {RevertHook} from "../../src/RevertHook.sol";
+import {RevertHookConfig} from "../../src/RevertHookConfig.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
@@ -176,9 +177,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHook.PositionConfig({
-                mode: RevertHook.PositionMode.AUTO_COMPOUND_ONLY,
-                autoCompoundMode: RevertHook.AutoCompoundMode.AUTO_COMPOUND,
+            RevertHookConfig.PositionConfig({
+                mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+                autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
                 swapPoolHooks: IHooks(address(revertHook))
@@ -379,9 +380,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHook.PositionConfig({
-                mode: RevertHook.PositionMode.AUTO_RANGE,
-                autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+            RevertHookConfig.PositionConfig({
+                mode: RevertHookConfig.PositionMode.AUTO_RANGE,
+                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
                 swapPoolFee: 3000,
                 swapPoolTickSpacing: 60,
                 swapPoolHooks: IHooks(address(revertHook))
@@ -390,7 +391,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setAutoRangeConfig(
             hookedTokenId,
-            RevertHook.AutoRangeConfig({
+            RevertHookConfig.AutoRangeConfig({
                 autoRangeLowerLimit: autoRangeLowerLimit,
                 autoRangeUpperLimit: autoRangeUpperLimit,
                 autoRangeLowerDelta: autoRangeLowerDelta,

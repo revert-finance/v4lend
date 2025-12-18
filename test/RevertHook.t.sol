@@ -22,6 +22,7 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
+import {RevertHookConfig} from "../src/RevertHookConfig.sol";
 import {MockV4Oracle} from "./utils/MockV4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -197,14 +198,14 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoRange() public {
-        hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_RANGE,
-            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+        hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_RANGE,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0))
         }));
-        hook.setAutoRangeConfig(token3Id, RevertHook.AutoRangeConfig({
+        hook.setAutoRangeConfig(token3Id, RevertHookConfig.AutoRangeConfig({
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
@@ -287,8 +288,8 @@ contract RevertHookTest is BaseTest {
     /// @param autoCompoundMode The auto compound mode to test
     /// @return token2Liquidity The initial liquidity of the position
     function _setupAutoCompoundTest(RevertHook.AutoCompoundMode autoCompoundMode) internal returns (uint128 token2Liquidity) {
-        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_COMPOUND_ONLY,
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
             autoCompoundMode: autoCompoundMode,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
@@ -366,7 +367,7 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoCompound() public {
-        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHook.AutoCompoundMode.AUTO_COMPOUND);
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND);
         BalanceSnapshot memory before = _recordBalancesBeforeAutoCompound();
 
         uint256[] memory params = new uint256[](1);
@@ -395,7 +396,7 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoHarvestToken0() public {
-        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHook.AutoCompoundMode.HARVEST_TOKEN_0);
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHookConfig.AutoCompoundMode.HARVEST_TOKEN_0);
         BalanceSnapshot memory before = _recordBalancesBeforeAutoCompound();
 
         uint256[] memory params = new uint256[](1);
@@ -435,7 +436,7 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoHarvestToken1() public {
-        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHook.AutoCompoundMode.HARVEST_TOKEN_1);
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHookConfig.AutoCompoundMode.HARVEST_TOKEN_1);
         BalanceSnapshot memory before = _recordBalancesBeforeAutoCompound();
 
         uint256[] memory params = new uint256[](1);
@@ -476,14 +477,14 @@ contract RevertHookTest is BaseTest {
 
     function testBasicAutoExit() public {
 
-        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
         }));
-        hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+        hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
@@ -532,7 +533,7 @@ contract RevertHookTest is BaseTest {
     function testAutoExitAndAutoRange() public {
        
         // Configure auto range: triggers when price moves 1 tick away from position bounds
-        hook.setAutoRangeConfig(token3Id, RevertHook.AutoRangeConfig({
+        hook.setAutoRangeConfig(token3Id, RevertHookConfig.AutoRangeConfig({
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
@@ -541,7 +542,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure auto exit with absolute ticks on the upper side only
         // Set exit tick to be well above the initial upper bound
-        hook.setAutoExitConfig(token3Id, RevertHook.AutoExitConfig({
+        hook.setAutoExitConfig(token3Id, RevertHookConfig.AutoExitConfig({
             isRelative: false, // Use absolute ticks
             autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
             autoExitTickUpper: tickUpper3 + poolKey.tickSpacing * 3,
@@ -550,9 +551,9 @@ contract RevertHookTest is BaseTest {
         }));
 
         // Configure AUTO_EXIT_AND_AUTO_RANGE mode
-        hook.setPositionConfig(token3Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_EXIT_AND_AUTO_RANGE,
-            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+        hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT_AND_AUTO_RANGE,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
@@ -654,14 +655,14 @@ contract RevertHookTest is BaseTest {
 
     function testBasicAutoExit_NonHookedPool() public {
 
-        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0)) // Use nonHookedPool for swapping
         }));
-        hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+        hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
@@ -742,14 +743,14 @@ contract RevertHookTest is BaseTest {
 
     function testAutoExit_NotApproved() public {
         // Set up autoExit config for token2Id
-        hook.setPositionConfig(token2Id, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_EXIT,
-            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(hook)
         }));
-        hook.setAutoExitConfig(token2Id, RevertHook.AutoExitConfig({
+        hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
@@ -912,14 +913,14 @@ contract RevertHookTest is BaseTest {
         );
 
         // Configure autolend for this position
-        hook.setPositionConfig(autolendTokenId, RevertHook.PositionConfig({
-            mode: RevertHook.PositionMode.AUTO_LEND,
-            autoCompoundMode: RevertHook.AutoCompoundMode.NONE,
+        hook.setPositionConfig(autolendTokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_LEND,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
             swapPoolFee: 3000,
             swapPoolTickSpacing: 60,
             swapPoolHooks: IHooks(address(0))
         }));
-        hook.setAutoLendConfig(autolendTokenId, RevertHook.AutoLendConfig({
+        hook.setAutoLendConfig(autolendTokenId, RevertHookConfig.AutoLendConfig({
             autoLendToleranceTick: 60
         }));
 
@@ -931,7 +932,7 @@ contract RevertHookTest is BaseTest {
         uint128 initialLiquidity = positionManager.getPositionLiquidity(autolendTokenId);
         assertGt(initialLiquidity, 0, "Position should have liquidity initially");
 
-        (,,, address autoLendToken, uint256 autoLendShares,) = hook.positionStates(autolendTokenId);
+        (,,, address autoLendToken, uint256 autoLendShares,,) = hook.positionStates(autolendTokenId);
 
         assertEq(autoLendShares, 0, "Should have no autolend shares initially");
         assertEq(autoLendToken, address(0), "Should have no autolend token initially");
@@ -954,7 +955,7 @@ contract RevertHookTest is BaseTest {
         });
 
         // Verify currency0 deposit was triggered
-        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency0 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency0), "Should have currency0 as autolend token");
         assertGt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have received assets");
@@ -979,7 +980,7 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency0 withdraw was triggered
-        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency0 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have less assets after withdraw");
@@ -1005,7 +1006,7 @@ contract RevertHookTest is BaseTest {
         console.log("currentTick after swap", currentTick);
 
         // Verify currency1 deposit was triggered
-        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency1 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency1), "Should have currency1 as autolend token");
         assertGt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have received assets");
@@ -1033,7 +1034,7 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency1 withdraw was triggered
-        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency1 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have less assets after withdraw");
@@ -1054,7 +1055,7 @@ contract RevertHookTest is BaseTest {
             deadline: block.timestamp
         });
 
-        (,,,autoLendToken, autoLendShares,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
 
         // Verify currency0 deposit was triggered again
         assertGt(autoLendShares, 0, "Should have autolend shares after second currency0 deposit");
