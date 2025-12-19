@@ -20,9 +20,8 @@ abstract contract RevertHookConfig is Transformer {
 
     // Configuration storage
     mapping(uint256 tokenId => PositionConfig positionConfig) public positionConfigs;
-    mapping(uint256 tokenId => AutoRangeConfig autoRangeConfig) public autoRangeConfigs;
-    mapping(uint256 tokenId => AutoExitConfig autoExitConfig) public autoExitConfigs;
-    mapping(uint256 tokenId => AutoLendConfig autoLendConfig) public autoLendConfigs;
+    mapping(uint256 tokenId => GeneralConfig generalConfig) public generalConfigs;
+
     mapping(uint256 tokenId => PositionState positionState) public positionStates;
 
     // configured vaults for auto lend
@@ -49,12 +48,9 @@ abstract contract RevertHookConfig is Transformer {
     event SetProtocolFeeBps(uint16 protocolFeeBps);
     event SetProtocolFeeRecipient(address protocolFeeRecipient);
 
+    event SetGeneralConfig(uint256 indexed tokenId, GeneralConfig generalConfig);
     event SetPositionConfig(uint256 indexed tokenId, PositionConfig positionConfig);
-    event SetAutoLendConfig(uint256 indexed tokenId, AutoLendConfig autoLendConfig);
-    event SetAutoExitConfig(uint256 indexed tokenId, AutoExitConfig autoExitConfig);
-    event SetAutoRangeConfig(uint256 indexed tokenId, AutoRangeConfig autoRangeConfig);
     
-
     // Enums
     enum PositionMode {
         NONE,
@@ -84,10 +80,7 @@ abstract contract RevertHookConfig is Transformer {
         address autoLendVault;
     }
 
-    struct PositionConfig {
-        PositionMode mode;
-        AutoCompoundMode autoCompoundMode;
-
+    struct GeneralConfig {
         // reference pool key data for swaps (can be the same pool or different pool)
         uint24 swapPoolFee;
         int24 swapPoolTickSpacing;
@@ -98,24 +91,22 @@ abstract contract RevertHookConfig is Transformer {
         uint32 maxPriceImpact1; // swaps token 1 to token 0
     }
 
-    struct AutoExitConfig {
+    struct PositionConfig {
+        PositionMode mode;
+        AutoCompoundMode autoCompoundMode;
+
         bool isRelative; // if true, the auto exit tick is relative to the position limits, if false, the auto exit tick is absolute
         int24 autoExitTickLower;
         int24 autoExitTickUpper;
-        bool autoExitSwapLower;
-        bool autoExitSwapUpper;
-    }
 
-    struct AutoRangeConfig {
         int24 autoRangeLowerLimit;
         int24 autoRangeUpperLimit;
         int24 autoRangeLowerDelta;
         int24 autoRangeUpperDelta;
-    }
 
-    struct AutoLendConfig {
         int24 autoLendToleranceTick;
     }
+
 
     /// @notice Sets the ERC4626 vault for a given token address
     /// @dev Can only be called by the owner. This vault will be used for autolend functionality.
@@ -161,45 +152,41 @@ abstract contract RevertHookConfig is Transformer {
         _setPositionConfig(tokenId, positionConfig);
     }
 
-    /// @notice Sets the auto exit configuration for a given token ID
-    /// @param tokenId The token ID of the position
-    /// @param config The auto exit configuration to set
-    function setAutoExitConfig(uint256 tokenId, AutoExitConfig calldata config) external virtual {
-        if (_getOwner(tokenId, true) != msg.sender) {
-            revert Unauthorized();
-        }
-
-        (PoolKey memory poolKey, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
-        if (address(poolKey.hooks) != address(this)) {
-            revert Unauthorized();
-        }
-
-        if (config.autoExitTickLower % poolKey.tickSpacing != 0 && config.autoExitTickLower != type(int24).min) {
-            revert InvalidConfig();
-        }
-        if (config.autoExitTickUpper % poolKey.tickSpacing != 0 && config.autoExitTickUpper != type(int24).max) {
-            revert InvalidConfig();
-        }
-
-        _removePositionTriggers(tokenId, poolKey);
-        autoExitConfigs[tokenId] = config;
-        _addPositionTriggers(tokenId, poolKey);
-
-        emit SetAutoExitConfig(tokenId, config);
+    /// @notice Disables a position by setting its config to NONE
+    /// @param tokenId The token ID of the position to disable
+    function _disablePosition(uint256 tokenId) internal {
+        _setPositionConfig(tokenId, PositionConfig({
+            mode: PositionMode.NONE,
+            autoCompoundMode: AutoCompoundMode.NONE,
+            isRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
     }
 
-    /// @notice Sets the auto range configuration for a given token ID
+    /// @notice Internal function to set position configuration
     /// @param tokenId The token ID of the position
-    /// @param config The auto range configuration to set
-    function setAutoRangeConfig(uint256 tokenId, AutoRangeConfig calldata config) external virtual {
-        if (_getOwner(tokenId, true) != msg.sender) {
-            revert Unauthorized();
+    /// @param config The position configuration to set
+    function _setPositionConfig(uint256 tokenId, PositionConfig memory config) internal {
+        // handle activation and deactivation
+        PositionMode previousMode = positionConfigs[tokenId].mode;
+        bool activated = previousMode == PositionMode.NONE && config.mode != PositionMode.NONE;
+        if (activated) {
+            positionStates[tokenId].lastActivated = uint32(block.timestamp);
+        } else {
+            bool deactivated = previousMode != PositionMode.NONE && config.mode == PositionMode.NONE;
+            if (deactivated) {
+                positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - positionStates[tokenId].lastActivated;
+            }
+            positionStates[tokenId].lastActivated = 0; // mark as deactivated
         }
 
-        (PoolKey memory poolKey, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
-        if (address(poolKey.hooks) != address(this)) {
-            revert Unauthorized();
-        }
+        (PoolKey memory poolKey,) = _getPoolAndPositionInfo(tokenId);
 
         if (config.autoRangeLowerLimit % poolKey.tickSpacing != 0 && config.autoRangeLowerLimit != type(int24).min) {
             revert InvalidConfig();
@@ -213,77 +200,16 @@ abstract contract RevertHookConfig is Transformer {
         if (config.autoRangeUpperDelta % poolKey.tickSpacing != 0) {
             revert InvalidConfig();
         }
-
-        _removePositionTriggers(tokenId, poolKey);
-        autoRangeConfigs[tokenId] = config;
-        _addPositionTriggers(tokenId, poolKey);
-
-        emit SetAutoRangeConfig(tokenId, config);
-    }
-
-    /// @notice Sets the auto lend configuration for a given token ID
-    /// @param tokenId The token ID of the position
-    /// @param autoLendConfig The auto lend configuration to set
-    function setAutoLendConfig(uint256 tokenId, AutoLendConfig calldata autoLendConfig) external virtual {
-        if (_getOwner(tokenId, true) != msg.sender) {
-            revert Unauthorized();
-        }
-
-        (PoolKey memory poolKey, ) = _getPoolAndPositionInfo(tokenId);
-        if (address(poolKey.hooks) != address(this)) {
-            revert Unauthorized();
-        }
-
-        if (autoLendConfig.autoLendToleranceTick % poolKey.tickSpacing != 0) {
+        if (config.autoLendToleranceTick % poolKey.tickSpacing != 0) {
             revert InvalidConfig();
         }
 
         _removePositionTriggers(tokenId, poolKey);
-        autoLendConfigs[tokenId] = autoLendConfig;
-        _addPositionTriggers(tokenId, poolKey);
-
-        emit SetAutoLendConfig(tokenId, autoLendConfig);
-    }
-
-    /// @notice Disables a position by setting its config to NONE
-    /// @param tokenId The token ID of the position to disable
-    function _disablePosition(uint256 tokenId) internal {
-        _setPositionConfig(tokenId, PositionConfig({
-            mode: PositionMode.NONE,
-            autoCompoundMode: AutoCompoundMode.NONE,
-            swapPoolFee: 0,
-            swapPoolTickSpacing: 0,
-            swapPoolHooks: IHooks(address(0)),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
-        }));
-    }
-
-    /// @notice Internal function to set position configuration
-    /// @param tokenId The token ID of the position
-    /// @param positionConfig The position configuration to set
-    function _setPositionConfig(uint256 tokenId, PositionConfig memory positionConfig) internal {
-        // handle activation and deactivation
-        PositionMode previousMode = positionConfigs[tokenId].mode;
-        bool activated = previousMode == PositionMode.NONE && positionConfig.mode != PositionMode.NONE;
-        if (activated) {
-            positionStates[tokenId].lastActivated = uint32(block.timestamp);
-        } else {
-            bool deactivated = previousMode != PositionMode.NONE && positionConfig.mode == PositionMode.NONE;
-            if (deactivated) {
-                positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - positionStates[tokenId].lastActivated;
-            }
-            positionStates[tokenId].lastActivated = 0; // mark as deactivated
-        }
-
-        // update position config
-        (PoolKey memory poolKey,) = _getPoolAndPositionInfo(tokenId);
-        _removePositionTriggers(tokenId, poolKey);
-        positionConfigs[tokenId] = positionConfig;
+        positionConfigs[tokenId] = config;
         _addPositionTriggers(tokenId, poolKey);
 
         // emit event
-        emit SetPositionConfig(tokenId, positionConfig);
+        emit SetPositionConfig(tokenId, config);
     }
 
     // Abstract functions that must be implemented by the child contract
@@ -358,11 +284,11 @@ abstract contract RevertHookConfig is Transformer {
         TickLinkedList.List storage lowerList,
         TickLinkedList.List storage upperList
     ) internal {
-        if (autoRangeConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
-            lowerList.insert(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
+        if (positionConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
+            lowerList.insert(tickLower - positionConfigs[tokenId].autoRangeLowerLimit, tokenId);
         }
-        if (autoRangeConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
-            upperList.insert(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
+        if (positionConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
+            upperList.insert(tickUpper + positionConfigs[tokenId].autoRangeUpperLimit, tokenId);
         }
     }
 
@@ -374,19 +300,19 @@ abstract contract RevertHookConfig is Transformer {
         TickLinkedList.List storage lowerList,
         TickLinkedList.List storage upperList
     ) internal {
-        if (autoExitConfigs[tokenId].isRelative) {
-            if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerList.insert(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+        if (positionConfigs[tokenId].isRelative) {
+            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
+                lowerList.insert(tickLower - positionConfigs[tokenId].autoExitTickLower, tokenId);
             }
-            if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperList.insert(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                upperList.insert(tickUpper + positionConfigs[tokenId].autoExitTickUpper, tokenId);
             }
         } else {
-            if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerList.insert(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
+                lowerList.insert(positionConfigs[tokenId].autoExitTickLower, tokenId);
             }
-            if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperList.insert(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                upperList.insert(positionConfigs[tokenId].autoExitTickUpper, tokenId);
             }
         }
     }
@@ -403,16 +329,16 @@ abstract contract RevertHookConfig is Transformer {
         if (positionStates[tokenId].autoLendShares > 0) {
             if (Currency.unwrap(poolKey.currency0) == positionStates[tokenId].autoLendToken) {
                 upperList.insert(
-                    tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
+                    tickLower - positionConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
                 );
             } else {
-                lowerList.insert(tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick, tokenId);
+                lowerList.insert(tickUpper + positionConfigs[tokenId].autoLendToleranceTick, tokenId);
             }
         } else {
             lowerList.insert(
-                tickLower - autoLendConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
+                tickLower - positionConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
             );
-            upperList.insert(tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick * 2, tokenId);
+            upperList.insert(tickUpper + positionConfigs[tokenId].autoLendToleranceTick * 2, tokenId);
         }
     }
 
@@ -423,11 +349,11 @@ abstract contract RevertHookConfig is Transformer {
         int24 tickLower,
         int24 tickUpper
     ) internal {
-        if (autoRangeConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
-            lowerTriggerAfterSwap[poolId].remove(tickLower - autoRangeConfigs[tokenId].autoRangeLowerLimit, tokenId);
+        if (positionConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
+            lowerTriggerAfterSwap[poolId].remove(tickLower - positionConfigs[tokenId].autoRangeLowerLimit, tokenId);
         }
-        if (autoRangeConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
-            upperTriggerAfterSwap[poolId].remove(tickUpper + autoRangeConfigs[tokenId].autoRangeUpperLimit, tokenId);
+        if (positionConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
+            upperTriggerAfterSwap[poolId].remove(tickUpper + positionConfigs[tokenId].autoRangeUpperLimit, tokenId);
         }
     }
 
@@ -438,19 +364,19 @@ abstract contract RevertHookConfig is Transformer {
         int24 tickLower,
         int24 tickUpper
     ) internal {
-        if (autoExitConfigs[tokenId].isRelative) {
-            if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerTriggerAfterSwap[poolId].remove(tickLower - autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+        if (positionConfigs[tokenId].isRelative) {
+            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
+                lowerTriggerAfterSwap[poolId].remove(tickLower - positionConfigs[tokenId].autoExitTickLower, tokenId);
             }
-            if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperTriggerAfterSwap[poolId].remove(tickUpper + autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                upperTriggerAfterSwap[poolId].remove(tickUpper + positionConfigs[tokenId].autoExitTickUpper, tokenId);
             }
         } else {
-            if (autoExitConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickLower, tokenId);
+            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
+                lowerTriggerAfterSwap[poolId].remove(positionConfigs[tokenId].autoExitTickLower, tokenId);
             }
-            if (autoExitConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperTriggerAfterSwap[poolId].remove(autoExitConfigs[tokenId].autoExitTickUpper, tokenId);
+            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
+                upperTriggerAfterSwap[poolId].remove(positionConfigs[tokenId].autoExitTickUpper, tokenId);
             }
         }
     }
@@ -466,19 +392,19 @@ abstract contract RevertHookConfig is Transformer {
         if (positionStates[tokenId].autoLendShares > 0) {
             if (Currency.unwrap(poolKey.currency0) == positionStates[tokenId].autoLendToken) {
                 upperTriggerAfterSwap[poolId].remove(
-                    tickLower - autoLendConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
+                    tickLower - positionConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
                 );
             } else {
                 lowerTriggerAfterSwap[poolId].remove(
-                    tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick, tokenId
+                    tickUpper + positionConfigs[tokenId].autoLendToleranceTick, tokenId
                 );
             }
         } else {
             lowerTriggerAfterSwap[poolId].remove(
-                tickLower - autoLendConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
+                tickLower - positionConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
             );
             upperTriggerAfterSwap[poolId].remove(
-                tickUpper + autoLendConfigs[tokenId].autoLendToleranceTick * 2, tokenId
+                tickUpper + positionConfigs[tokenId].autoLendToleranceTick * 2, tokenId
             );
         }
     }

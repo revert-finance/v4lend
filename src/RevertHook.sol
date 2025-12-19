@@ -227,9 +227,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             // only works with absolute auto exit ticks
-            AutoExitConfig memory config = autoExitConfigs[tokenId];
-            bool isAutoExitTriggered = isUpperTrigger && tick == config.autoExitTickUpper || !isUpperTrigger
-                && tick == config.autoExitTickLower;
+            bool isAutoExitTriggered = isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickUpper || !isUpperTrigger
+                && tick == positionConfigs[tokenId].autoExitTickLower;
             if (isAutoExitTriggered) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
             } else {
@@ -246,8 +245,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         address owner = _getOwner(tokenId, false);
         bool ownedByVault = vaults[owner];
 
-        AutoExitConfig memory config = autoExitConfigs[tokenId];
-
         if (!isUpperTrigger) {
             if (ownedByVault) {
                 IVault(owner)
@@ -255,11 +252,11 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
                         tokenId,
                         address(this),
                         abi.encodeCall(
-                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower)
+                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger)
                         )
                     );
             } else {
-                autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapLower);
+                autoExit(poolKey, poolId, tokenId, isUpperTrigger);
             }
         } else if (isUpperTrigger) {
             if (ownedByVault) {
@@ -268,11 +265,11 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
                         tokenId,
                         address(this),
                         abi.encodeCall(
-                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper)
+                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger)
                         )
                     );
             } else {
-                autoExit(poolKey, poolId, tokenId, isUpperTrigger, config.autoExitSwapUpper);
+                autoExit(poolKey, poolId, tokenId, isUpperTrigger);
             }
         }
 
@@ -471,9 +468,9 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     }
 
     function _getSwapPoolKey(uint256 tokenId, PoolKey memory poolKey) internal view returns (PoolKey memory) {
-        uint24 swapPoolFee = positionConfigs[tokenId].swapPoolFee;
-        int24 swapPoolTickSpacing = positionConfigs[tokenId].swapPoolTickSpacing;
-        IHooks swapPoolHooks = positionConfigs[tokenId].swapPoolHooks;
+        uint24 swapPoolFee = generalConfigs[tokenId].swapPoolFee;
+        int24 swapPoolTickSpacing = generalConfigs[tokenId].swapPoolTickSpacing;
+        IHooks swapPoolHooks = generalConfigs[tokenId].swapPoolHooks;
 
         // if the swap pool key is the same as the configured swap pool key, return the pool key
         if (swapPoolHooks == poolKey.hooks && swapPoolFee == poolKey.fee && swapPoolTickSpacing == poolKey.tickSpacing)
@@ -485,9 +482,9 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         return PoolKey({
             currency0: poolKey.currency0,
             currency1: poolKey.currency1,
-            fee: positionConfigs[tokenId].swapPoolFee,
-            tickSpacing: positionConfigs[tokenId].swapPoolTickSpacing,
-            hooks: positionConfigs[tokenId].swapPoolHooks
+            fee: swapPoolFee,
+            tickSpacing: swapPoolTickSpacing,
+            hooks: swapPoolHooks
         });
     }
 
@@ -612,7 +609,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
 
             if (newTokenId > 0) {
-                autoLendConfigs[newTokenId] = autoLendConfigs[tokenId];
                 _setPositionConfig(newTokenId, positionConfigs[tokenId]);
                 _disablePosition(tokenId);
             } else {
@@ -659,8 +655,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         PoolId,
         /* poolId */
         uint256 tokenId,
-        bool isUpper,
-        bool doSwap
+        bool isUpper
     )
         public
     {
@@ -675,12 +670,10 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
-        if (doSwap) {
-            uint256 swapAmount = !isUpper ? amount0 : amount1;
-            PoolKey memory swapPoolKey = _getSwapPoolKey(tokenId, poolKey);
-            BalanceDelta swapDelta = _swap(swapPoolKey, !isUpper, swapAmount, tokenId);
-            (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
-        }
+        uint256 swapAmount = !isUpper ? amount0 : amount1;
+        PoolKey memory swapPoolKey = _getSwapPoolKey(tokenId, poolKey);
+        BalanceDelta swapDelta = _swap(swapPoolKey, !isUpper, swapAmount, tokenId);
+        (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
 
         _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
@@ -703,8 +696,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
-        int24 tickLower = baseTick + autoRangeConfigs[tokenId].autoRangeLowerDelta;
-        int24 tickUpper = baseTick + autoRangeConfigs[tokenId].autoRangeUpperDelta;
+        int24 tickLower = baseTick + positionConfigs[tokenId].autoRangeLowerDelta;
+        int24 tickUpper = baseTick + positionConfigs[tokenId].autoRangeUpperDelta;
 
         (amount0, amount1) = _swapToOptimalRange(tokenId, poolKey, tickLower, tickUpper, amount0, amount1);
 
@@ -720,10 +713,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
         // configure new position
-        autoRangeConfigs[newTokenId] = autoRangeConfigs[tokenId];
-        if (positionConfigs[tokenId].mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            autoExitConfigs[newTokenId] = autoExitConfigs[tokenId];
-        }
         _setPositionConfig(newTokenId, positionConfigs[tokenId]);
         _disablePosition(tokenId);
 

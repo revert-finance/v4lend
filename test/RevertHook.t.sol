@@ -201,17 +201,15 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_RANGE,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(address(0)),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
-        }));
-        hook.setAutoRangeConfig(token3Id, RevertHookConfig.AutoRangeConfig({
+            isRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60
+            autoRangeUpperDelta: 60,
+            autoLendToleranceTick: 0
         }));
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
@@ -293,11 +291,14 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
             autoCompoundMode: autoCompoundMode,
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
+            isRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -484,19 +485,16 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
-        }));
-        hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
         }));
+
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -537,34 +535,19 @@ contract RevertHookTest is BaseTest {
     }
 
     function testAutoExitAndAutoRange() public {
-       
-        // Configure auto range: triggers when price moves 1 tick away from position bounds
-        hook.setAutoRangeConfig(token3Id, RevertHookConfig.AutoRangeConfig({
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60
-        }));
-
-        // Configure auto exit with absolute ticks on the upper side only
-        // Set exit tick to be well above the initial upper bound
-        hook.setAutoExitConfig(token3Id, RevertHookConfig.AutoExitConfig({
-            isRelative: false, // Use absolute ticks
-            autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
-            autoExitTickUpper: tickUpper3 + poolKey.tickSpacing * 3,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false
-        }));
 
         // Configure AUTO_EXIT_AND_AUTO_RANGE mode
         hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT_AND_AUTO_RANGE,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
+            isRelative: false, // Use absolute ticks
+            autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
+            autoExitTickUpper: tickUpper3 + poolKey.tickSpacing * 3,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: -60,
+            autoRangeUpperDelta: 60,
+            autoLendToleranceTick: 0
         }));
 
         // approve all positions to the hook
@@ -666,18 +649,14 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(address(0)), // Use nonHookedPool for swapping
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
-        }));
-        hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
-            autoExitSwapLower: true, // Enable swap when exiting at lower bound
-            autoExitSwapUpper: false
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -756,18 +735,14 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
-        }));
-        hook.setAutoExitConfig(token2Id, RevertHookConfig.AutoExitConfig({
             isRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
-            autoExitSwapLower: false,
-            autoExitSwapUpper: false
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
         }));
 
         // DO NOT approve the position to the hook - this is the key difference
@@ -928,16 +903,15 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(autolendTokenId, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_LEND,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(address(0)),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
-        }));
-        hook.setAutoLendConfig(autolendTokenId, RevertHookConfig.AutoLendConfig({
+            isRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
             autoLendToleranceTick: 60
         }));
-
 
         // for auto lend where new positions may be created we need to approve all positions to the hook
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
