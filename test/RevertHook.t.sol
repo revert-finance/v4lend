@@ -646,6 +646,14 @@ contract RevertHookTest is BaseTest {
 
     function testBasicAutoExit_NonHookedPool() public {
 
+        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(address(0)),
+            maxPriceImpact0: 0,
+            maxPriceImpact1: 0
+        }));
+
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,

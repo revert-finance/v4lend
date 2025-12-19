@@ -470,13 +470,13 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     function _getSwapPoolKey(uint256 tokenId, PoolKey memory poolKey) internal view returns (PoolKey memory) {
         uint24 swapPoolFee = generalConfigs[tokenId].swapPoolFee;
         int24 swapPoolTickSpacing = generalConfigs[tokenId].swapPoolTickSpacing;
-        IHooks swapPoolHooks = generalConfigs[tokenId].swapPoolHooks;
 
-        // if the swap pool key is the same as the configured swap pool key, return the pool key
-        if (swapPoolHooks == poolKey.hooks && swapPoolFee == poolKey.fee && swapPoolTickSpacing == poolKey.tickSpacing)
-        {
+        // if not configured, return the pool key
+        if (swapPoolFee == 0 || swapPoolTickSpacing == 0) {
             return poolKey;
         }
+
+        IHooks swapPoolHooks = generalConfigs[tokenId].swapPoolHooks;
 
         // otherwise, return the configured swap pool key
         return PoolKey({

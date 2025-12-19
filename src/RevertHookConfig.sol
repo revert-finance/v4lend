@@ -141,6 +141,28 @@ abstract contract RevertHookConfig is Transformer {
         emit SetProtocolFeeRecipient(_protocolFeeRecipient);
     }
 
+    /// @param tokenId The token ID of the position
+    /// @param generalConfig The general configuration to set
+    function setGeneralConfig(uint256 tokenId, GeneralConfig calldata generalConfig) external {
+        if (_getOwner(tokenId, true) != msg.sender) {
+            revert Unauthorized();
+        }
+
+        (PoolKey memory poolKey,) = _getPoolAndPositionInfo(tokenId);
+        if (generalConfig.swapPoolTickSpacing % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
+        if (generalConfig.maxPriceImpact0 > 10000) {
+            revert InvalidConfig();
+        }
+        if (generalConfig.maxPriceImpact1 > 10000) {
+            revert InvalidConfig();
+        }
+
+        generalConfigs[tokenId] = generalConfig;
+        emit SetGeneralConfig(tokenId, generalConfig);
+    }
+
     /// @notice Sets the position configuration for a given token ID
     /// @param tokenId The token ID of the position
     /// @param positionConfig The position configuration to set
@@ -188,6 +210,13 @@ abstract contract RevertHookConfig is Transformer {
 
         (PoolKey memory poolKey,) = _getPoolAndPositionInfo(tokenId);
 
+        // validate config
+        if (config.autoExitTickLower % poolKey.tickSpacing != 0 && config.autoExitTickLower != type(int24).min) {
+            revert InvalidConfig();
+        }
+        if (config.autoExitTickUpper % poolKey.tickSpacing != 0 && config.autoExitTickUpper != type(int24).max) {
+            revert InvalidConfig();
+        }
         if (config.autoRangeLowerLimit % poolKey.tickSpacing != 0 && config.autoRangeLowerLimit != type(int24).min) {
             revert InvalidConfig();
         }
