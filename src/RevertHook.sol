@@ -1067,12 +1067,14 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         internal
         returns (BalanceDelta swapDelta)
     {
+        // TODO price impact check - need revert on external contract to work
+        /*
         uint32 maxPriceImpact = zeroForOne ? positionConfigs[tokenId].maxPriceImpact0 : positionConfigs[tokenId].maxPriceImpact1;
         uint160 sqrtPriceBeforeX96;
         if (maxPriceImpact > 0) {
             // Get price before swap for price impact calculation
             (sqrtPriceBeforeX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-        }
+        }*/
 
         // Prepare swap params
         SwapParams memory swapParams = SwapParams({
@@ -1084,7 +1086,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         // Execute swap via poolManager - if the swap fails
         try poolManager.swap(poolKey, swapParams, "") returns (BalanceDelta result) {
             swapDelta = result;
-            _checkPriceImpact(zeroForOne, swapAmount, swapDelta, sqrtPriceBeforeX96, maxPriceImpact);
+            //_checkPriceImpact(zeroForOne, swapAmount, swapDelta, sqrtPriceBeforeX96, maxPriceImpact);
             _handleSwapDeltas(poolKey, swapDelta);
         } catch (bytes memory reason) {
             // emit event
@@ -1106,70 +1108,21 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         uint160 sqrtPriceBeforeX96,
         uint32 maxPriceImpact
     ) internal view {
-        // If max price impact is 0, skip check (unlimited)
-        if (maxPriceImpact == 0) {
-            return;
-        }
+        if (maxPriceImpact == 0) return;
 
-        // Get actual output amount from swap delta
-        int256 delta0 = swapDelta.amount0();
-        int256 delta1 = swapDelta.amount1();
+        int256 delta = zeroForOne ? swapDelta.amount1() : swapDelta.amount0();
+        if (delta <= 0) return;
 
-        uint256 amountOut;
-        if (zeroForOne) {
-            // Swapping token0 -> token1, we receive token1
-            if (delta1 <= 0) {
-                return; // No output or we owe token1, skip check
-            }
-            amountOut = uint256(delta1);
-        } else {
-            // Swapping token1 -> token0, we receive token0
-            if (delta0 <= 0) {
-                return; // No output or we owe token0, skip check
-            }
-            amountOut = uint256(delta0);
-        }
+        uint256 amountOut = uint256(delta);
+        uint256 sqrtPriceSq = uint256(sqrtPriceBeforeX96) * uint256(sqrtPriceBeforeX96);
+        uint256 q96Sq = FixedPoint96.Q96 * FixedPoint96.Q96;
+        uint256 expectedOutput = zeroForOne
+            ? FullMath.mulDiv(swapAmount, sqrtPriceSq, q96Sq)
+            : FullMath.mulDiv(swapAmount, q96Sq, sqrtPriceSq);
 
-        // Calculate expected output based on spot price before swap
-        // For zeroForOne: spot price = sqrtPrice^2 / Q96^2 (token1 per token0)
-        // Expected output = swapAmount * spot price = swapAmount * sqrtPrice^2 / Q96^2
-        // For oneForZero: spot price = Q96^2 / sqrtPrice^2 (token0 per token1)
-        // Expected output = swapAmount * spot price = swapAmount * Q96^2 / sqrtPrice^2
+        if (amountOut >= expectedOutput) return;
 
-        uint256 expectedOutput;
-        if (zeroForOne) {
-            // price = sqrtPrice^2 / Q96^2 (token1 per token0)
-            expectedOutput = FullMath.mulDiv(
-                swapAmount,
-                uint256(sqrtPriceBeforeX96) * uint256(sqrtPriceBeforeX96),
-                FixedPoint96.Q96 * FixedPoint96.Q96
-            );
-        } else {
-            // price = Q96^2 / sqrtPrice^2 (token0 per token1)
-            expectedOutput = FullMath.mulDiv(
-                swapAmount,
-                FixedPoint96.Q96 * FixedPoint96.Q96,
-                uint256(sqrtPriceBeforeX96) * uint256(sqrtPriceBeforeX96)
-            );
-        }
-
-        // If expected output is 0, skip check
-        if (expectedOutput == 0) {
-            return;
-        }
-
-        // Calculate price impact in basis points
-        // Price impact = (expectedOutput - actualOutput) / expectedOutput * 10000
-        uint256 priceImpactBps;
-        if (amountOut < expectedOutput) {
-            priceImpactBps = FullMath.mulDiv(expectedOutput - amountOut, 10000, expectedOutput);
-        } else {
-            // If we got more than expected (shouldn't happen but handle gracefully)
-            return;
-        }
-
-        // Check if price impact exceeds maximum
-        if (priceImpactBps > maxPriceImpact) {
+        if (FullMath.mulDiv(expectedOutput - amountOut, 10000, expectedOutput) > maxPriceImpact) {
             revert PriceImpactExceeded();
         }
     }
