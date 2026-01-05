@@ -39,8 +39,6 @@ import {V4Oracle} from "./V4Oracle.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {RevertHookConfig} from "./RevertHookConfig.sol";
 
-import "forge-std/console.sol";
-
 /// @title RevertHook
 /// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting, auto-ranging and auto-lending of positions
 /// @dev Positions are not owned by the hook - they are owned by users directly or the vault with the correct permissions
@@ -157,9 +155,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         int24 tick = tickLowerLasts[poolId];
         int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
 
-        console.log("tick", tick);
-        console.log("tickEnd", tickEnd);
-
         if (tick == tickEnd) {
             return (this.afterSwap.selector, 0);
         }
@@ -171,9 +166,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         bool exists;
         (exists, tick) = list.searchFirstAfter(tick);
-
-        console.log("exists", exists);
-        console.log("tick", tick);
 
         while (true) {
             if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
@@ -192,12 +184,11 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
                 }
             }
 
-            console.log("processing tick", tick);
-
             // execute all triggers at this tick
             uint256 length = list.tokenIds[tick].length;
-            for (uint256 i = 0; i < length; i++) {
+            for (uint256 i; i < length;) {
                 _handleTokenIdAfterSwap(key, poolId, list.tokenIds[tick][i], list.increasing, tick);
+                unchecked { ++i; }
             }
 
             // tickEnd may have increased into list direction after the processing of the tokenId (because of swaps - autorange / autoexit will only do swaps in the same direcction)
@@ -327,8 +318,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
-        console.log("afterAddLiquidity");
-
         uint256 tokenId = uint256(params.salt);
 
         feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
@@ -357,8 +346,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
-        console.log("afterRemoveLiquidity");
-
         uint256 tokenId = uint256(params.salt);
         feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
 
@@ -382,19 +369,18 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         returns (BalanceDelta newFeeDelta)
     {
         address feeRecipient = protocolFeeRecipient;
-        uint32 accumulatedActiveTime = positionStates[tokenId].acumulatedActiveTime;
-        uint32 lastActivated = positionStates[tokenId].lastActivated;
+        PositionState storage state = positionStates[tokenId];
+        uint32 accumulatedActiveTime = state.acumulatedActiveTime;
+        uint32 lastActivated = state.lastActivated;
+        uint32 currentTime = uint32(block.timestamp);
         if (lastActivated > 0) {
-            accumulatedActiveTime += uint32(block.timestamp) - lastActivated;
-            positionStates[tokenId].lastActivated = uint32(block.timestamp);
+            accumulatedActiveTime += currentTime - lastActivated;
+            state.lastActivated = currentTime;
         }
-        uint32 lastCollect = positionStates[tokenId].lastCollect;
-        uint32 feeTime = lastCollect == 0 ? 0 : uint32(block.timestamp) - lastCollect;
+        uint32 lastCollect = state.lastCollect;
+        uint32 feeTime = lastCollect == 0 ? 0 : currentTime - lastCollect;
 
-        console.log("accumulatedActiveTime", accumulatedActiveTime);
-        console.log("feeTime", feeTime);
-
-        positionStates[tokenId].lastCollect = uint32(block.timestamp);
+        state.lastCollect = currentTime;
 
         // if no time has passed, or no active time has been accumulated, return 0 fees
         if (feeTime == 0 || accumulatedActiveTime == 0) {
@@ -727,7 +713,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @param tokenIds Array of token IDs to compound
     function autoCompound(uint256[] memory tokenIds) external {
         uint256 length = tokenIds.length;
-        for (uint256 i = 0; i < length; i++) {
+        for (uint256 i; i < length;) {
             uint256 tokenId = tokenIds[i];
             // check if position is in vault, if yes call transform on behalf of owner
             address owner = _getOwner(tokenId, false);
@@ -737,6 +723,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             } else {
                 poolManager.unlock(abi.encode(tokenId, msg.sender));
             }
+            unchecked { ++i; }
         }
     }
 

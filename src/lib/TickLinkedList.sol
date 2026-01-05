@@ -233,10 +233,11 @@ library TickLinkedList {
     /// @return bool True if tokenId was added, false if it was already present
     function _addToTickMapping(uint256[] storage tickPositions, uint256 tokenId) internal returns (bool) {
         uint256 length = tickPositions.length;
-        for (uint256 i = 0; i < length; i++) {
+        for (uint256 i; i < length;) {
             if (tickPositions[i] == tokenId) {
                 return false; // Already present
             }
+            unchecked { ++i; }
         }
         // Add to array
         tickPositions.push(tokenId);
@@ -250,15 +251,15 @@ library TickLinkedList {
     /// @return empty True if the array is empty after removal, false otherwise
     function _removeFromTickMapping(uint256[] storage tickPositions, uint256 tokenId) internal returns (bool removed, bool empty) {
         uint256 length = tickPositions.length;
-        for (uint256 i = 0; i < length; i++) {
+        for (uint256 i; i < length;) {
             if (tickPositions[i] == tokenId) {
                 // Swap with last element and pop
                 tickPositions[i] = tickPositions[length - 1];
                 tickPositions.pop();
                 return (true, length == 1);
             }
+            unchecked { ++i; }
         }
         return (false, length == 0);
     }
 }
-

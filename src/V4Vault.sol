@@ -25,9 +25,6 @@ import "./interfaces/IV4Oracle.sol";
 import "./interfaces/IInterestRateModel.sol";
 import "./utils/Constants.sol";
 
-import "forge-std/console.sol";
-
-
 /// @title Revert Lend Vault for token lending / borrowing using Uniswap V4 LP positions as collateral
 /// @notice The vault manages ONE ERC20 (eg. USDC) asset for lending / borrowing, but collateral positions can be composed of any 2 tokens configured each with a collateralFactor > 0
 /// Vault implements IERC4626 Vault Standard and is itself a ERC20 which represent shares of total lending pool
@@ -528,8 +525,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         override
         returns (uint256 newTokenId)
     {
-        console.log("transform called with tokenId:", tokenId);
-
         if (tokenId == 0 || !transformerAllowList[transformer]) {
             revert TransformNotAllowed();
         }
