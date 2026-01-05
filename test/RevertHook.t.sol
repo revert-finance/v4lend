@@ -1071,4 +1071,323 @@ contract RevertHookTest is BaseTest {
         if (tick < 0 && tick % tickSpacing != 0) compressed--;
         return compressed * tickSpacing;
     }
+
+    // ==================== Price Impact Limit Tests ====================
+
+    function testPriceImpactLimit_ZeroMeansNoLimit() public {
+        // Configure auto exit with maxPriceImpact = 0 (no limit)
+        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 0, // No limit
+            maxPriceImpact1: 0  // No limit
+        }));
+
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Record logs to check events
+        vm.recordLogs();
+
+        // Perform a swap to trigger auto exit - this swap moves the price significantly
+        uint256 amountIn = 7e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        // Verify auto exit happened (position has 0 liquidity)
+        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity after auto-exit");
+
+        // Check that HookSwapPartial was NOT emitted (full swap executed)
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 partialSwapEventSignature = keccak256("HookSwapPartial(uint256,bool,uint256,uint256)");
+        bool partialSwapEventFound = false;
+
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature && logs[i].emitter == address(hook)) {
+                partialSwapEventFound = true;
+                break;
+            }
+        }
+
+        assertFalse(partialSwapEventFound, "HookSwapPartial should NOT be emitted when maxPriceImpact is 0");
+
+        // Verify hook has no leftover balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
+
+    function testPriceImpactLimit_LimitEnforced() public {
+        // Configure auto exit with a very strict price impact limit (10 bps = 0.1%)
+        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 10, // 0.1% max price impact for token0 -> token1 swaps
+            maxPriceImpact1: 10  // 0.1% max price impact for token1 -> token0 swaps
+        }));
+
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Record logs to check for HookSwapPartial event
+        vm.recordLogs();
+
+        // Perform a large swap that should trigger the price impact limit
+        uint256 amountIn = 7e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        // Check for HookSwapPartial event
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 partialSwapEventSignature = keccak256("HookSwapPartial(uint256,bool,uint256,uint256)");
+        bool partialSwapEventFound = false;
+        uint256 requestedAmount;
+        uint256 swappedAmount;
+
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature && logs[i].emitter == address(hook)) {
+                partialSwapEventFound = true;
+                // Decode the event data
+                (,requestedAmount, swappedAmount) = abi.decode(logs[i].data, (bool,uint256, uint256));
+                break;
+            }
+        }
+
+        assertTrue(partialSwapEventFound, "HookSwapPartial should be emitted when price impact limit is reached");
+        assertLt(swappedAmount, requestedAmount, "Swapped amount should be less than requested due to price impact limit");
+
+        console.log("Requested swap amount:", requestedAmount);
+        console.log("Actual swapped amount:", swappedAmount);
+    }
+
+    function testPriceImpactLimit_ModerateLimit() public {
+        // Configure auto exit with a moderate price impact limit (100 bps = 1%)
+        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 100, // 1% max price impact
+            maxPriceImpact1: 100  // 1% max price impact
+        }));
+
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Get initial position liquidity
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(token2Id);
+        assertGt(initialLiquidity, 0, "Position should have initial liquidity");
+
+        // Record logs
+        vm.recordLogs();
+
+        // Perform a swap to trigger auto exit
+        uint256 amountIn = 7e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        // Verify auto exit happened - position liquidity should be 0
+        uint128 finalLiquidity = positionManager.getPositionLiquidity(token2Id);
+        assertEq(finalLiquidity, 0, "Position should have 0 liquidity after auto exit");
+
+        // Verify hook has no leftover balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
+
+    function testPriceImpactLimit_DifferentLimitsPerDirection() public {
+        // Configure different limits for each swap direction
+        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 10,   // Very strict for token0 -> token1 (0.1%)
+            maxPriceImpact1: 1000  // Loose for token1 -> token0 (10%)
+        }));
+
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Record logs
+        vm.recordLogs();
+
+        // Trigger auto exit with zeroForOne swap (should hit the strict limit)
+        uint256 amountIn = 7e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true, // This uses maxPriceImpact0 (strict)
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        // Check for HookSwapPartial event - should be emitted because of strict limit on zeroForOne
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 partialSwapEventSignature = keccak256("HookSwapPartial(uint256,bool,uint256,uint256)");
+        bool partialSwapEventFound = false;
+
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature && logs[i].emitter == address(hook)) {
+                partialSwapEventFound = true;
+                break;
+            }
+        }
+
+        // Should find partial swap event due to strict price impact limit
+        assertTrue(partialSwapEventFound, "HookSwapPartial should be emitted for zeroForOne swap with strict limit");
+    }
+
+    function testPriceImpactLimit_AutoRangeWithLimit() public {
+        // Configure auto range with a moderate price impact limit
+        hook.setGeneralConfig(token3Id, RevertHookConfig.GeneralConfig({
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 200, // 2% max price impact
+            maxPriceImpact1: 200  // 2% max price impact
+        }));
+
+        hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_RANGE,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: -60,
+            autoRangeUpperDelta: 60,
+            autoLendToleranceTick: 0
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        // Store initial state
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        uint128 initialLiquidity = positionManager.getPositionLiquidity(token3Id);
+        assertGt(initialLiquidity, 0, "Position should have initial liquidity");
+
+        // Perform swap to activate auto range
+        uint256 amountIn = 7e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Verify auto range happened
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Old position should have 0 liquidity after auto-range");
+
+        uint256 nextTokenIdAfter = positionManager.nextTokenId();
+        assertEq(nextTokenIdAfter, nextTokenIdBefore + 1, "A new position should be minted after auto-range");
+
+        // Verify new position has liquidity
+        uint256 newTokenId = nextTokenIdBefore;
+        assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "New position should have liquidity > 0");
+
+        // Verify hook has no leftover balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
+
+    function testPriceImpactLimit_AutoCompoundWithLimit() public {
+        // Configure auto compound with a moderate price impact limit
+        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
+            swapPoolFee: 3000,
+            swapPoolTickSpacing: 60,
+            swapPoolHooks: IHooks(hook),
+            maxPriceImpact0: 500, // 5% max price impact
+            maxPriceImpact1: 500  // 5% max price impact
+        }));
+
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND);
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+        hook.autoCompound(params);
+
+        // Verify liquidity increased after auto compound
+        uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2LiquidityAfter, token2Liquidity, "token2Id should have more liquidity after auto compound");
+
+        // Verify hook has no leftover balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
 }
