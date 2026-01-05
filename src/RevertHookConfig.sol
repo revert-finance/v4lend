@@ -244,41 +244,17 @@ abstract contract RevertHookConfig is Transformer {
     function _getOwner(uint256 tokenId, bool isRealOwner) internal view virtual returns (address);
     function _getPoolAndPositionInfo(uint256 tokenId) internal view virtual returns (PoolKey memory, PositionInfo);
 
-    /// @notice Adds position triggers based on the position configuration
+    /// @notice Adds position triggers based on the current position configuration
+    /// @dev Forces addition by assuming previous config was empty
     /// @param tokenId The token ID of the position
     /// @param poolKey The pool key
     function _addPositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PositionMode mode = positionConfigs[tokenId].mode;
-        if (mode == PositionMode.NONE || mode == PositionMode.AUTO_COMPOUND_ONLY) {
-            return;
-        }
-
-        PoolId poolId = poolKey.toId();
-
-        (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
-        int24 tickLower = posInfo.tickLower();
-        int24 tickUpper = posInfo.tickUpper();
-
-        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
-        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
-
-        // ensure the list is increasing (if not, set it to true - only once in first use)
-        if (!upperList.increasing) {
-            upperList.increasing = true;
-        }
-
-        if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            _addAutoRangeTriggers(tokenId, tickLower, tickUpper, lowerList, upperList);
-        } 
-        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            _addAutoExitTriggers(tokenId, tickLower, tickUpper, lowerList, upperList);
-        }
-        if (mode == PositionMode.AUTO_LEND) {
-            _addAutoLendTriggers(tokenId, poolKey, tickLower, tickUpper, lowerList, upperList);
-        }
+        // Force add by passing true - assumes previous config was empty
+        _updatePositionTriggers(tokenId, poolKey, positionConfigs[tokenId], true);
     }
 
-    /// @notice Removes position triggers based on the position configuration
+    /// @notice Removes position triggers based on the current position configuration
+    /// @dev Removes by updating to an empty config
     /// @param tokenId The token ID of the position
     /// @param poolKey The pool key
     function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
@@ -297,7 +273,7 @@ abstract contract RevertHookConfig is Transformer {
         });
 
         // Use _updatePositionTriggers to remove all current triggers by diffing against empty config
-        _updatePositionTriggers(tokenId, poolKey, emptyConfig);
+        _updatePositionTriggers(tokenId, poolKey, emptyConfig, false);
     }
 
     /// @notice Updates position triggers by computing the diff between old and new configs
@@ -306,10 +282,20 @@ abstract contract RevertHookConfig is Transformer {
     /// @param poolKey The pool key
     /// @param newConfig The new position configuration
     function _updatePositionTriggers(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig) internal {
+        _updatePositionTriggers(tokenId, poolKey, newConfig, false);
+    }
+
+    /// @notice Updates position triggers by computing the diff between old and new configs
+    /// @dev Only removes triggers that changed and only adds new triggers, avoiding redundant operations
+    /// @param tokenId The token ID of the position
+    /// @param poolKey The pool key
+    /// @param newConfig The new position configuration
+    /// @param force If true, assumes previous config was empty (for adding triggers without removal)
+    function _updatePositionTriggers(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig, bool force) internal {
         PositionConfig storage oldConfig = positionConfigs[tokenId];
 
         // If both modes require no triggers, nothing to do
-        bool oldHasTriggers = oldConfig.mode != PositionMode.NONE && oldConfig.mode != PositionMode.AUTO_COMPOUND_ONLY;
+        bool oldHasTriggers = !force && oldConfig.mode != PositionMode.NONE && oldConfig.mode != PositionMode.AUTO_COMPOUND_ONLY;
         bool newHasTriggers = newConfig.mode != PositionMode.NONE && newConfig.mode != PositionMode.AUTO_COMPOUND_ONLY;
 
         if (!oldHasTriggers && !newHasTriggers) {
@@ -328,7 +314,16 @@ abstract contract RevertHookConfig is Transformer {
         }
 
         // Pack old and new ticks into arrays to reduce stack variables
-        int24[4] memory oldTicks = _computeTriggerTicksFromStorage(tokenId, poolKey, oldConfig, posInfo.tickLower(), posInfo.tickUpper());
+        // When force is true, use sentinel values for old ticks (no triggers to remove)
+        int24[4] memory oldTicks;
+        if (force) {
+            oldTicks[0] = type(int24).min;
+            oldTicks[1] = type(int24).min;
+            oldTicks[2] = type(int24).max;
+            oldTicks[3] = type(int24).max;
+        } else {
+            oldTicks = _computeTriggerTicksFromStorage(tokenId, poolKey, oldConfig, posInfo.tickLower(), posInfo.tickUpper());
+        }
         int24[4] memory newTicks = _computeTriggerTicksFromMemory(tokenId, poolKey, newConfig, posInfo.tickLower(), posInfo.tickUpper());
 
         // Process lower triggers (indices 0 and 1)
@@ -477,72 +472,6 @@ abstract contract RevertHookConfig is Transformer {
                 ticks[0] = tickLower - autoLendToleranceTick * 2 - poolKey.tickSpacing;
                 ticks[2] = tickUpper + autoLendToleranceTick * 2;
             }
-        }
-    }
-
-    /// @notice Adds auto range triggers for a position
-    function _addAutoRangeTriggers(
-        uint256 tokenId,
-        int24 tickLower,
-        int24 tickUpper,
-        TickLinkedList.List storage lowerList,
-        TickLinkedList.List storage upperList
-    ) internal {
-        if (positionConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
-            lowerList.insert(tickLower - positionConfigs[tokenId].autoRangeLowerLimit, tokenId);
-        }
-        if (positionConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
-            upperList.insert(tickUpper + positionConfigs[tokenId].autoRangeUpperLimit, tokenId);
-        }
-    }
-
-    /// @notice Adds auto exit triggers for a position
-    function _addAutoExitTriggers(
-        uint256 tokenId,
-        int24 tickLower,
-        int24 tickUpper,
-        TickLinkedList.List storage lowerList,
-        TickLinkedList.List storage upperList
-    ) internal {
-        if (positionConfigs[tokenId].autoExitIsRelative) {
-            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerList.insert(tickLower - positionConfigs[tokenId].autoExitTickLower, tokenId);
-            }
-            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperList.insert(tickUpper + positionConfigs[tokenId].autoExitTickUpper, tokenId);
-            }
-        } else {
-            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerList.insert(positionConfigs[tokenId].autoExitTickLower, tokenId);
-            }
-            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperList.insert(positionConfigs[tokenId].autoExitTickUpper, tokenId);
-            }
-        }
-    }
-
-    /// @notice Adds auto lend triggers for a position
-    function _addAutoLendTriggers(
-        uint256 tokenId,
-        PoolKey memory poolKey,
-        int24 tickLower,
-        int24 tickUpper,
-        TickLinkedList.List storage lowerList,
-        TickLinkedList.List storage upperList
-    ) internal {
-        if (positionStates[tokenId].autoLendShares > 0) {
-            if (Currency.unwrap(poolKey.currency0) == positionStates[tokenId].autoLendToken) {
-                upperList.insert(
-                    tickLower - positionConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
-                );
-            } else {
-                lowerList.insert(tickUpper + positionConfigs[tokenId].autoLendToleranceTick, tokenId);
-            }
-        } else {
-            lowerList.insert(
-                tickLower - positionConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
-            );
-            upperList.insert(tickUpper + positionConfigs[tokenId].autoLendToleranceTick * 2, tokenId);
         }
     }
 
