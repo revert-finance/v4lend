@@ -215,13 +215,14 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         bool isUpperTrigger,
         int24 tick
     ) internal {
-        PositionMode mode = positionConfigs[tokenId].mode;
+        PositionConfig storage config = positionConfigs[tokenId];
+        PositionMode mode = config.mode;
         if (mode == PositionMode.AUTO_EXIT) {
             _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
             // only works with absolute auto exit ticks
-            bool isAutoExitTriggered = isUpperTrigger && tick == positionConfigs[tokenId].autoExitTickUpper || !isUpperTrigger
-                && tick == positionConfigs[tokenId].autoExitTickLower;
+            bool isAutoExitTriggered = (isUpperTrigger && tick == config.autoExitTickUpper)
+                || (!isUpperTrigger && tick == config.autoExitTickLower);
             if (isAutoExitTriggered) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
             } else {
@@ -236,34 +237,15 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
     function _handleAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
         address owner = _getOwner(tokenId, false);
-        bool ownedByVault = vaults[owner];
 
-        if (!isUpperTrigger) {
-            if (ownedByVault) {
-                IVault(owner)
-                    .transform(
-                        tokenId,
-                        address(this),
-                        abi.encodeCall(
-                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger)
-                        )
-                    );
-            } else {
-                autoExit(poolKey, poolId, tokenId, isUpperTrigger);
-            }
-        } else if (isUpperTrigger) {
-            if (ownedByVault) {
-                IVault(owner)
-                    .transform(
-                        tokenId,
-                        address(this),
-                        abi.encodeCall(
-                            this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger)
-                        )
-                    );
-            } else {
-                autoExit(poolKey, poolId, tokenId, isUpperTrigger);
-            }
+        if (vaults[owner]) {
+            IVault(owner).transform(
+                tokenId,
+                address(this),
+                abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
+            );
+        } else {
+            autoExit(poolKey, poolId, tokenId, isUpperTrigger);
         }
 
         _removePositionTriggers(tokenId, poolKey);
@@ -456,15 +438,14 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     }
 
     function _getSwapPoolKey(uint256 tokenId, PoolKey memory poolKey) internal view returns (PoolKey memory) {
-        uint24 swapPoolFee = generalConfigs[tokenId].swapPoolFee;
-        int24 swapPoolTickSpacing = generalConfigs[tokenId].swapPoolTickSpacing;
+        GeneralConfig storage config = generalConfigs[tokenId];
+        uint24 swapPoolFee = config.swapPoolFee;
+        int24 swapPoolTickSpacing = config.swapPoolTickSpacing;
 
         // if not configured, return the pool key
         if (swapPoolFee == 0 || swapPoolTickSpacing == 0) {
             return poolKey;
         }
-
-        IHooks swapPoolHooks = generalConfigs[tokenId].swapPoolHooks;
 
         // otherwise, return the configured swap pool key
         return PoolKey({
@@ -472,7 +453,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             currency1: poolKey.currency1,
             fee: swapPoolFee,
             tickSpacing: swapPoolTickSpacing,
-            hooks: swapPoolHooks
+            hooks: config.swapPoolHooks
         });
     }
 
@@ -544,17 +525,19 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @notice Resets the auto lend state for a given token ID
     /// @param tokenId The token ID of the position
     function _resetAutoLend(uint256 tokenId) internal {
-        positionStates[tokenId].autoLendShares = 0;
-        positionStates[tokenId].autoLendToken = address(0);
-        positionStates[tokenId].autoLendAmount = 0;
-        positionStates[tokenId].autoLendVault = address(0);
+        PositionState storage state = positionStates[tokenId];
+        state.autoLendShares = 0;
+        state.autoLendToken = address(0);
+        state.autoLendAmount = 0;
+        state.autoLendVault = address(0);
     }
 
     function _autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) internal {
-        address token = positionStates[tokenId].autoLendToken;
-        IERC4626 vault = IERC4626(positionStates[tokenId].autoLendVault);
+        PositionState storage posState = positionStates[tokenId];
+        address token = posState.autoLendToken;
+        IERC4626 vault = IERC4626(posState.autoLendVault);
         try vault.redeem(shares, address(this), address(this)) returns (uint256 amount) {
-            _handleAutoLendGain(tokenId, poolKey, Currency.wrap(token), amount, positionStates[tokenId].autoLendAmount);
+            _handleAutoLendGain(tokenId, poolKey, Currency.wrap(token), amount, posState.autoLendAmount);
 
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
@@ -620,12 +603,13 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         _removePositionTriggers(tokenId, poolKey);
 
-        uint256 shares = positionStates[tokenId].autoLendShares;
+        PositionState storage posState = positionStates[tokenId];
+        uint256 shares = posState.autoLendShares;
 
         if (shares > 0) {
-            address token = positionStates[tokenId].autoLendToken;
-            uint256 autoLendAmount = positionStates[tokenId].autoLendAmount;
-            IERC4626 vault = IERC4626(positionStates[tokenId].autoLendVault);
+            address token = posState.autoLendToken;
+            uint256 autoLendAmount = posState.autoLendAmount;
+            IERC4626 vault = IERC4626(posState.autoLendVault);
             uint256 amount = vault.redeem(shares, address(this), address(this));
 
             _handleAutoLendGain(tokenId, poolKey, Currency.wrap(token), amount, autoLendAmount);
@@ -752,8 +736,9 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @param tokenId The token ID to compound
     /// @param caller The address that initiated the auto-compound (for reward distribution)
     function _executeAutoCompound(uint256 tokenId, address caller) internal {
-        AutoCompoundMode mode = positionConfigs[tokenId].autoCompoundMode;
-        if (mode == AutoCompoundMode.NONE || positionConfigs[tokenId].mode == PositionMode.NONE) {
+        PositionConfig storage config = positionConfigs[tokenId];
+        AutoCompoundMode mode = config.autoCompoundMode;
+        if (mode == AutoCompoundMode.NONE || config.mode == PositionMode.NONE) {
             return;
         }
 
@@ -1083,8 +1068,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         view
         returns (uint160 sqrtPriceLimitX96)
     {
-        uint32 maxPriceImpact =
-            zeroForOne ? generalConfigs[tokenId].maxPriceImpact0 : generalConfigs[tokenId].maxPriceImpact1;
+        GeneralConfig storage config = generalConfigs[tokenId];
+        uint32 maxPriceImpact = zeroForOne ? config.maxPriceImpact0 : config.maxPriceImpact1;
 
         // If no price impact limit, use extreme values
         if (maxPriceImpact == 0) {

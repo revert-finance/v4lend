@@ -23,8 +23,6 @@ import "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import "./utils/Constants.sol";
 import "./interfaces/IV4Oracle.sol";
 
-import "forge-std/console.sol";
-
 // Chainlink Price Feed Interface
 interface AggregatorV3Interface {
     function decimals() external view returns (uint8);
