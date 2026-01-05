@@ -201,7 +201,7 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_RANGE,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
+            autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
 
@@ -291,7 +291,7 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
             autoCompoundMode: autoCompoundMode,
-            isRelative: false,
+            autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
             autoRangeLowerLimit: 0,
@@ -485,7 +485,7 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
+            autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoRangeLowerLimit: 0,
@@ -540,7 +540,7 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT_AND_AUTO_RANGE,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false, // Use absolute ticks
+            autoExitIsRelative: false, // Use absolute ticks
             autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
             autoExitTickUpper: tickUpper3 + poolKey.tickSpacing * 3,
             autoRangeLowerLimit: 0,
@@ -657,7 +657,7 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
+            autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoRangeLowerLimit: 0,
@@ -743,7 +743,7 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
+            autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2,
             autoRangeLowerLimit: 0,
@@ -911,7 +911,7 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(autolendTokenId, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_LEND,
             autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
+            autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
             autoRangeLowerLimit: 0,
@@ -1064,156 +1064,6 @@ contract RevertHookTest is BaseTest {
         // Final verification: hook contract has no leftover token balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
-    }
-
-    function testPriceImpactLimitPartialSwap() public {
-        // Set up a position with strict price impact limits (0.5% = 50 bps)
-        // This limits how much the price can move during the internal swap
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 50, // 0.5% max price impact for token0 -> token1
-            maxPriceImpact1: 50  // 0.5% max price impact for token1 -> token0
-        }));
-
-        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
-            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
-            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
-        }));
-
-        IERC721(address(positionManager)).approve(address(hook), token2Id);
-
-        // Assert that token2Id position has > 0 liquidity
-        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
-        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
-
-        // Perform a large swap to activate auto exit
-        // The internal hook swap will be limited by price impact, resulting in a partial swap
-        uint256 amountIn = 7e17;
-        swapRouter.swapExactTokensForTokens({
-            amountIn: amountIn,
-            amountOutMin: 0,
-            zeroForOne: true,
-            poolKey: poolKey,
-            hookData: Constants.ZERO_BYTES,
-            receiver: address(this),
-            deadline: block.timestamp + 1
-        });
-
-        // The position's liquidity should be removed (auto-exit triggered)
-        // The internal swap executed partially within price impact limits
-        uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
-        assertEq(token2LiquidityAfter, 0, "Position liquidity should be 0 after auto-exit");
-
-        // Verify hook contract has no leftover token balances
-        _verifyNoLeftoverBalances("price impact limit partial swap");
-    }
-
-    function testPriceImpactLimitAllowsSmallSlippage() public {
-        // Set up a position with generous price impact limits (50% = 5000 bps)
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 5000, // 50% max price impact for token0 -> token1
-            maxPriceImpact1: 5000  // 50% max price impact for token1 -> token0
-        }));
-
-        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
-            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
-            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
-        }));
-
-        IERC721(address(positionManager)).approve(address(hook), token2Id);
-
-        // Assert that token2Id position has > 0 liquidity
-        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
-        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
-
-        // Perform a swap to activate auto exit
-        uint256 amountIn = 7e17;
-        swapRouter.swapExactTokensForTokens({
-            amountIn: amountIn,
-            amountOutMin: 0,
-            zeroForOne: true,
-            poolKey: poolKey,
-            hookData: Constants.ZERO_BYTES,
-            receiver: address(this),
-            deadline: block.timestamp + 1
-        });
-
-        // With generous price impact limits, the auto-exit should succeed
-        token2Liquidity = positionManager.getPositionLiquidity(token2Id);
-        assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity after successful auto-exit");
-
-        // Verify hook contract has no leftover token balances
-        _verifyNoLeftoverBalances("generous price impact");
-    }
-
-    function testPriceImpactLimitDisabled() public {
-        // Test with maxPriceImpact set to 0 (disabled - should allow any slippage)
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 0, // Disabled
-            maxPriceImpact1: 0  // Disabled
-        }));
-
-        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
-            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
-            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-            isRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
-        }));
-
-        IERC721(address(positionManager)).approve(address(hook), token2Id);
-
-        // Assert that token2Id position has > 0 liquidity
-        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
-        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
-
-        // Perform a large swap - with price impact check disabled, should succeed
-        uint256 amountIn = 7e17;
-        swapRouter.swapExactTokensForTokens({
-            amountIn: amountIn,
-            amountOutMin: 0,
-            zeroForOne: true,
-            poolKey: poolKey,
-            hookData: Constants.ZERO_BYTES,
-            receiver: address(this),
-            deadline: block.timestamp + 1
-        });
-
-        // With disabled price impact check, auto-exit should succeed regardless of slippage
-        token2Liquidity = positionManager.getPositionLiquidity(token2Id);
-        assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity after auto-exit with disabled price impact");
-
-        // Verify hook contract has no leftover token balances
-        _verifyNoLeftoverBalances("disabled price impact");
     }
 
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {

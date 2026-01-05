@@ -180,7 +180,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             RevertHookConfig.PositionConfig({
                 mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
                 autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
-                isRelative: false,
+                autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
                 autoRangeLowerLimit: 0,
@@ -388,7 +388,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             RevertHookConfig.PositionConfig({
                 mode: RevertHookConfig.PositionMode.AUTO_RANGE,
                 autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
-                isRelative: false,
+                autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
                 autoRangeLowerLimit: autoRangeLowerLimit,

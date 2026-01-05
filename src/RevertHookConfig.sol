@@ -95,7 +95,7 @@ abstract contract RevertHookConfig is Transformer {
         PositionMode mode;
         AutoCompoundMode autoCompoundMode;
 
-        bool isRelative; // if true, the auto exit tick is relative to the position limits, if false, the auto exit tick is absolute
+        bool autoExitIsRelative; // if true, the auto exit tick is relative to the position limits, if false, the auto exit tick is absolute
         int24 autoExitTickLower;
         int24 autoExitTickUpper;
 
@@ -180,7 +180,7 @@ abstract contract RevertHookConfig is Transformer {
         _setPositionConfig(tokenId, PositionConfig({
             mode: PositionMode.NONE,
             autoCompoundMode: AutoCompoundMode.NONE,
-            isRelative: false,
+            autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
             autoRangeLowerLimit: type(int24).min,
@@ -329,7 +329,7 @@ abstract contract RevertHookConfig is Transformer {
         TickLinkedList.List storage lowerList,
         TickLinkedList.List storage upperList
     ) internal {
-        if (positionConfigs[tokenId].isRelative) {
+        if (positionConfigs[tokenId].autoExitIsRelative) {
             if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
                 lowerList.insert(tickLower - positionConfigs[tokenId].autoExitTickLower, tokenId);
             }
@@ -393,7 +393,7 @@ abstract contract RevertHookConfig is Transformer {
         int24 tickLower,
         int24 tickUpper
     ) internal {
-        if (positionConfigs[tokenId].isRelative) {
+        if (positionConfigs[tokenId].autoExitIsRelative) {
             if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
                 lowerTriggerAfterSwap[poolId].remove(tickLower - positionConfigs[tokenId].autoExitTickLower, tokenId);
             }
