@@ -93,6 +93,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
     // special events for swap failures / modifyLiquidities failures
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
+    event HookSwapPartial(PoolKey poolKey, uint256 amountSwapped, uint256 amountRequested);
     event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
     event HookAutoLendFailed(address vault, Currency currency, bytes reason);
 
@@ -1056,26 +1057,36 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         internal
         returns (BalanceDelta swapDelta)
     {
-        // TODO price impact check - need revert on external contract to work
-        /*
-        uint32 maxPriceImpact = zeroForOne ? positionConfigs[tokenId].maxPriceImpact0 : positionConfigs[tokenId].maxPriceImpact1;
-        uint160 sqrtPriceBeforeX96;
+        // Calculate price limit based on maxPriceImpact
+        uint160 sqrtPriceLimitX96;
+        uint32 maxPriceImpact =
+            zeroForOne ? generalConfigs[tokenId].maxPriceImpact0 : generalConfigs[tokenId].maxPriceImpact1;
+
         if (maxPriceImpact > 0) {
-            // Get price before swap for price impact calculation
-            (sqrtPriceBeforeX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-        }*/
+            sqrtPriceLimitX96 = _calculateSqrtPriceLimit(poolKey, zeroForOne, maxPriceImpact);
+        } else {
+            // No price impact limit - use extreme values
+            sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
+        }
 
         // Prepare swap params
         SwapParams memory swapParams = SwapParams({
             zeroForOne: zeroForOne,
             amountSpecified: -int256(swapAmount), // exact in
-            sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            sqrtPriceLimitX96: sqrtPriceLimitX96
         });
 
-        // Execute swap via poolManager - if the swap fails
+        // Execute swap via poolManager
         try poolManager.swap(poolKey, swapParams, "") returns (BalanceDelta result) {
+            // Check if swap was partial (hit price limit before completing)
+            uint256 amountSwapped = zeroForOne ? uint256(int256(-result.amount0())) : uint256(int256(-result.amount1()));
+
+            if (amountSwapped < swapAmount) {
+                // Swap was partial due to price limit - emit event but still process it
+                emit HookSwapPartial(poolKey, amountSwapped, swapAmount);
+            }
+
             swapDelta = result;
-            //_checkPriceImpact(zeroForOne, swapAmount, swapDelta, sqrtPriceBeforeX96, maxPriceImpact);
             _handleSwapDeltas(poolKey, swapDelta);
         } catch (bytes memory reason) {
             // emit event
@@ -1084,35 +1095,65 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         }
     }
 
-    /// @notice Checks if the swap price impact exceeds the maximum allowed
-    /// @param zeroForOne True if swapping token0 for token1, false otherwise
-    /// @param swapAmount The amount swapped (input)
-    /// @param swapDelta The balance delta from the swap
-    /// @param sqrtPriceBeforeX96 The sqrt price before the swap
-    /// @param maxPriceImpact The maximum price impact allowed
-    function _checkPriceImpact(
-        bool zeroForOne,
-        uint256 swapAmount,
-        BalanceDelta swapDelta,
-        uint160 sqrtPriceBeforeX96,
-        uint32 maxPriceImpact
-    ) internal view {
-        if (maxPriceImpact == 0) return;
+    /// @notice Calculates the sqrt price limit based on max price impact
+    /// @dev Price impact of X bps means price can move by X/10000 (e.g., 100 bps = 1%)
+    /// For zeroForOne: price decreases, so limit is lower than current
+    /// For oneForZero: price increases, so limit is higher than current
+    /// @param poolKey The pool key
+    /// @param zeroForOne True if swapping token0 for token1
+    /// @param maxPriceImpact Maximum price impact in basis points
+    /// @return sqrtPriceLimitX96 The calculated price limit
+    function _calculateSqrtPriceLimit(PoolKey memory poolKey, bool zeroForOne, uint32 maxPriceImpact)
+        internal
+        view
+        returns (uint160 sqrtPriceLimitX96)
+    {
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
 
-        int256 delta = zeroForOne ? swapDelta.amount1() : swapDelta.amount0();
-        if (delta <= 0) return;
+        // Calculate price multiplier: (1 - maxPriceImpact/10000) for zeroForOne, (1 + maxPriceImpact/10000) for oneForZero
+        // Since we're working with sqrtPrice, we need to apply sqrt of the multiplier
+        // sqrt(1 - x) ≈ 1 - x/2 for small x, but for accuracy we calculate it properly
+        //
+        // For zeroForOne: newSqrtPrice = sqrtPrice * sqrt(10000 - maxPriceImpact) / sqrt(10000)
+        // For oneForZero: newSqrtPrice = sqrtPrice * sqrt(10000 + maxPriceImpact) / sqrt(10000)
 
-        uint256 amountOut = uint256(delta);
-        uint256 sqrtPriceSq = uint256(sqrtPriceBeforeX96) * uint256(sqrtPriceBeforeX96);
-        uint256 q96Sq = FixedPoint96.Q96 * FixedPoint96.Q96;
-        uint256 expectedOutput = zeroForOne
-            ? FullMath.mulDiv(swapAmount, sqrtPriceSq, q96Sq)
-            : FullMath.mulDiv(swapAmount, q96Sq, sqrtPriceSq);
+        if (zeroForOne) {
+            // Price decreases - calculate lower bound
+            // sqrtPriceLimitX96 = sqrtPriceX96 * sqrt(10000 - maxPriceImpact) / 100
+            uint256 multiplier = 10000 - maxPriceImpact;
+            // Using approximation: sqrt(1-x) ≈ 1 - x/2 for small x
+            // sqrtMultiplier = sqrt(multiplier/10000) = sqrt(multiplier)/100
+            // For 1% impact (100 bps): multiplier = 9900, sqrt(9900)/100 ≈ 0.995
+            uint256 sqrtMultiplierScaled = _sqrt(multiplier * 1e18) * 1e9 / _sqrt(10000 * 1e18);
+            sqrtPriceLimitX96 = uint160(FullMath.mulDiv(sqrtPriceX96, sqrtMultiplierScaled, 1e18));
 
-        if (amountOut >= expectedOutput) return;
+            // Ensure we don't go below minimum
+            if (sqrtPriceLimitX96 < TickMath.MIN_SQRT_PRICE + 1) {
+                sqrtPriceLimitX96 = TickMath.MIN_SQRT_PRICE + 1;
+            }
+        } else {
+            // Price increases - calculate upper bound
+            uint256 multiplier = 10000 + maxPriceImpact;
+            uint256 sqrtMultiplierScaled = _sqrt(multiplier * 1e18) * 1e9 / _sqrt(10000 * 1e18);
+            sqrtPriceLimitX96 = uint160(FullMath.mulDiv(sqrtPriceX96, sqrtMultiplierScaled, 1e18));
 
-        if (FullMath.mulDiv(expectedOutput - amountOut, 10000, expectedOutput) > maxPriceImpact) {
-            revert PriceImpactExceeded();
+            // Ensure we don't go above maximum
+            if (sqrtPriceLimitX96 > TickMath.MAX_SQRT_PRICE - 1) {
+                sqrtPriceLimitX96 = TickMath.MAX_SQRT_PRICE - 1;
+            }
+        }
+    }
+
+    /// @notice Calculates the square root of a number using the Babylonian method
+    /// @param x The number to calculate the square root of
+    /// @return y The square root
+    function _sqrt(uint256 x) internal pure returns (uint256 y) {
+        if (x == 0) return 0;
+        uint256 z = (x + 1) / 2;
+        y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
         }
     }
 
