@@ -233,9 +233,8 @@ abstract contract RevertHookConfig is Transformer {
             revert InvalidConfig();
         }
 
-        _removePositionTriggers(tokenId, poolKey);
+        _updatePositionTriggers(tokenId, poolKey, config);
         positionConfigs[tokenId] = config;
-        _addPositionTriggers(tokenId, poolKey);
 
         // emit event
         emit SetPositionConfig(tokenId, config);
@@ -283,25 +282,201 @@ abstract contract RevertHookConfig is Transformer {
     /// @param tokenId The token ID of the position
     /// @param poolKey The pool key
     function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PositionMode mode = positionConfigs[tokenId].mode;
+        // Create an empty config that has no triggers (NONE mode with sentinel values)
+        PositionConfig memory emptyConfig = PositionConfig({
+            mode: PositionMode.NONE,
+            autoCompoundMode: AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        });
 
-        if (mode == PositionMode.NONE || mode == PositionMode.AUTO_COMPOUND_ONLY) {
+        // Use _updatePositionTriggers to remove all current triggers by diffing against empty config
+        _updatePositionTriggers(tokenId, poolKey, emptyConfig);
+    }
+
+    /// @notice Updates position triggers by computing the diff between old and new configs
+    /// @dev Only removes triggers that changed and only adds new triggers, avoiding redundant operations
+    /// @param tokenId The token ID of the position
+    /// @param poolKey The pool key
+    /// @param newConfig The new position configuration
+    function _updatePositionTriggers(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig) internal {
+        PositionConfig storage oldConfig = positionConfigs[tokenId];
+
+        // If both modes require no triggers, nothing to do
+        bool oldHasTriggers = oldConfig.mode != PositionMode.NONE && oldConfig.mode != PositionMode.AUTO_COMPOUND_ONLY;
+        bool newHasTriggers = newConfig.mode != PositionMode.NONE && newConfig.mode != PositionMode.AUTO_COMPOUND_ONLY;
+
+        if (!oldHasTriggers && !newHasTriggers) {
             return;
         }
 
         PoolId poolId = poolKey.toId();
         (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
-        int24 tickLower = posInfo.tickLower();
-        int24 tickUpper = posInfo.tickUpper();
+
+        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
+
+        // Ensure the list is increasing (if not, set it to true - only once in first use)
+        if (!upperList.increasing) {
+            upperList.increasing = true;
+        }
+
+        // Pack old and new ticks into arrays to reduce stack variables
+        int24[4] memory oldTicks = _computeTriggerTicksFromStorage(tokenId, poolKey, oldConfig, posInfo.tickLower(), posInfo.tickUpper());
+        int24[4] memory newTicks = _computeTriggerTicksFromMemory(tokenId, poolKey, newConfig, posInfo.tickLower(), posInfo.tickUpper());
+
+        // Process lower triggers (indices 0 and 1)
+        _updateTriggerList(lowerList, tokenId, oldTicks[0], oldTicks[1], newTicks[0], newTicks[1], type(int24).min);
+        // Process upper triggers (indices 2 and 3)
+        _updateTriggerList(upperList, tokenId, oldTicks[2], oldTicks[3], newTicks[2], newTicks[3], type(int24).max);
+    }
+
+    /// @notice Updates a single trigger list by removing old and adding new ticks
+    function _updateTriggerList(
+        TickLinkedList.List storage list,
+        uint256 tokenId,
+        int24 old1,
+        int24 old2,
+        int24 new1,
+        int24 new2,
+        int24 sentinel
+    ) internal {
+        // Remove old triggers that are not in new config
+        if (old1 != sentinel && old1 != new1 && old1 != new2) {
+            list.remove(old1, tokenId);
+        }
+        if (old2 != sentinel && old2 != new1 && old2 != new2) {
+            list.remove(old2, tokenId);
+        }
+        // Add new triggers that were not in old config
+        if (new1 != sentinel && new1 != old1 && new1 != old2) {
+            list.insert(new1, tokenId);
+        }
+        if (new2 != sentinel && new2 != old1 && new2 != old2) {
+            list.insert(new2, tokenId);
+        }
+    }
+
+    /// @notice Computes trigger ticks for a position config from storage
+    /// @return ticks Array of [lower1, lower2, upper1, upper2]
+    function _computeTriggerTicksFromStorage(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionConfig storage config,
+        int24 tickLower,
+        int24 tickUpper
+    ) internal view returns (int24[4] memory) {
+        // Copy storage config to memory and delegate to shared implementation
+        return _computeTriggerTicks(
+            tokenId,
+            poolKey,
+            config.mode,
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper,
+            config.autoLendToleranceTick,
+            tickLower,
+            tickUpper
+        );
+    }
+
+    /// @notice Computes trigger ticks from a config passed in memory
+    function _computeTriggerTicksFromMemory(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionConfig memory config,
+        int24 tickLower,
+        int24 tickUpper
+    ) internal view returns (int24[4] memory) {
+        return _computeTriggerTicks(
+            tokenId,
+            poolKey,
+            config.mode,
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper,
+            config.autoLendToleranceTick,
+            tickLower,
+            tickUpper
+        );
+    }
+
+    /// @notice Shared implementation for computing trigger ticks
+    function _computeTriggerTicks(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionMode mode,
+        int24 autoRangeLowerLimit,
+        int24 autoRangeUpperLimit,
+        bool autoExitIsRelative,
+        int24 autoExitTickLower,
+        int24 autoExitTickUpper,
+        int24 autoLendToleranceTick,
+        int24 tickLower,
+        int24 tickUpper
+    ) internal view returns (int24[4] memory ticks) {
+        ticks[0] = type(int24).min; // lower1
+        ticks[1] = type(int24).min; // lower2
+        ticks[2] = type(int24).max; // upper1
+        ticks[3] = type(int24).max; // upper2
+
+        if (mode == PositionMode.NONE || mode == PositionMode.AUTO_COMPOUND_ONLY) {
+            return ticks;
+        }
 
         if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            _removeAutoRangeTriggers(tokenId, poolId, tickLower, tickUpper);
-        } 
-        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            _removeAutoExitTriggers(tokenId, poolId, tickLower, tickUpper);
+            if (autoRangeLowerLimit != type(int24).min) {
+                ticks[0] = tickLower - autoRangeLowerLimit;
+            }
+            if (autoRangeUpperLimit != type(int24).max) {
+                ticks[2] = tickUpper + autoRangeUpperLimit;
+            }
         }
+
+        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
+            int24 exitLower;
+            int24 exitUpper;
+            if (autoExitIsRelative) {
+                exitLower = autoExitTickLower != type(int24).min ? tickLower - autoExitTickLower : type(int24).min;
+                exitUpper = autoExitTickUpper != type(int24).max ? tickUpper + autoExitTickUpper : type(int24).max;
+            } else {
+                exitLower = autoExitTickLower;
+                exitUpper = autoExitTickUpper;
+            }
+            if (ticks[0] != type(int24).min) {
+                ticks[1] = exitLower;
+            } else {
+                ticks[0] = exitLower;
+            }
+            if (ticks[2] != type(int24).max) {
+                ticks[3] = exitUpper;
+            } else {
+                ticks[2] = exitUpper;
+            }
+        }
+
         if (mode == PositionMode.AUTO_LEND) {
-            _removeAutoLendTriggers(tokenId, poolKey, poolId, tickLower, tickUpper);
+            PositionState storage state = positionStates[tokenId];
+            if (state.autoLendShares > 0) {
+                if (Currency.unwrap(poolKey.currency0) == state.autoLendToken) {
+                    ticks[2] = tickLower - autoLendToleranceTick - poolKey.tickSpacing;
+                } else {
+                    ticks[0] = tickUpper + autoLendToleranceTick;
+                }
+            } else {
+                ticks[0] = tickLower - autoLendToleranceTick * 2 - poolKey.tickSpacing;
+                ticks[2] = tickUpper + autoLendToleranceTick * 2;
+            }
         }
     }
 
@@ -371,71 +546,4 @@ abstract contract RevertHookConfig is Transformer {
         }
     }
 
-    /// @notice Removes auto range triggers for a position
-    function _removeAutoRangeTriggers(
-        uint256 tokenId,
-        PoolId poolId,
-        int24 tickLower,
-        int24 tickUpper
-    ) internal {
-        if (positionConfigs[tokenId].autoRangeLowerLimit != type(int24).min) {
-            lowerTriggerAfterSwap[poolId].remove(tickLower - positionConfigs[tokenId].autoRangeLowerLimit, tokenId);
-        }
-        if (positionConfigs[tokenId].autoRangeUpperLimit != type(int24).max) {
-            upperTriggerAfterSwap[poolId].remove(tickUpper + positionConfigs[tokenId].autoRangeUpperLimit, tokenId);
-        }
-    }
-
-    /// @notice Removes auto exit triggers for a position
-    function _removeAutoExitTriggers(
-        uint256 tokenId,
-        PoolId poolId,
-        int24 tickLower,
-        int24 tickUpper
-    ) internal {
-        if (positionConfigs[tokenId].autoExitIsRelative) {
-            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerTriggerAfterSwap[poolId].remove(tickLower - positionConfigs[tokenId].autoExitTickLower, tokenId);
-            }
-            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperTriggerAfterSwap[poolId].remove(tickUpper + positionConfigs[tokenId].autoExitTickUpper, tokenId);
-            }
-        } else {
-            if (positionConfigs[tokenId].autoExitTickLower != type(int24).min) {
-                lowerTriggerAfterSwap[poolId].remove(positionConfigs[tokenId].autoExitTickLower, tokenId);
-            }
-            if (positionConfigs[tokenId].autoExitTickUpper != type(int24).max) {
-                upperTriggerAfterSwap[poolId].remove(positionConfigs[tokenId].autoExitTickUpper, tokenId);
-            }
-        }
-    }
-
-    /// @notice Removes auto lend triggers for a position
-    function _removeAutoLendTriggers(
-        uint256 tokenId,
-        PoolKey memory poolKey,
-        PoolId poolId,
-        int24 tickLower,
-        int24 tickUpper
-    ) internal {
-        if (positionStates[tokenId].autoLendShares > 0) {
-            if (Currency.unwrap(poolKey.currency0) == positionStates[tokenId].autoLendToken) {
-                upperTriggerAfterSwap[poolId].remove(
-                    tickLower - positionConfigs[tokenId].autoLendToleranceTick - poolKey.tickSpacing, tokenId
-                );
-            } else {
-                lowerTriggerAfterSwap[poolId].remove(
-                    tickUpper + positionConfigs[tokenId].autoLendToleranceTick, tokenId
-                );
-            }
-        } else {
-            lowerTriggerAfterSwap[poolId].remove(
-                tickLower - positionConfigs[tokenId].autoLendToleranceTick * 2 - poolKey.tickSpacing, tokenId
-            );
-            upperTriggerAfterSwap[poolId].remove(
-                tickUpper + positionConfigs[tokenId].autoLendToleranceTick * 2, tokenId
-            );
-        }
-    }
 }
-
