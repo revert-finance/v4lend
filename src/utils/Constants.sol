@@ -67,4 +67,5 @@ abstract contract Constants {
     error InsufficientAmountAdded();
 
     error HookNotAllowed();
+    error PositionValueTooLow();
 }

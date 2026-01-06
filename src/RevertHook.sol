@@ -311,9 +311,13 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
 
-        // if adding from 0
-        if (int128(liquidity) == params.liquidityDelta) {
-            _addPositionTriggers(tokenId, key);
+        // Check if position has config and is not yet activated (triggers not added)
+        if (positionConfigs[tokenId].mode != PositionMode.NONE && !_isActivated(tokenId)) {
+            // Check if position value is now above minimum to add triggers
+            if (_getPositionValueNative(tokenId) >= minPositionValueNative) {
+                _addPositionTriggers(tokenId, key);
+                _activatePosition(tokenId);
+            }
         }
 
         return (BaseHook.afterAddLiquidity.selector, feeDelta);
@@ -338,9 +342,13 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
 
-        // remove the position from the lists
-        if (liquidity == 0) {
-            _removePositionTriggers(tokenId, key);
+        // Only check if position is currently activated (has triggers)
+        if (_isActivated(tokenId)) {
+            // Remove triggers if no liquidity left or value dropped below minimum
+            if (liquidity == 0 || _getPositionValueNative(tokenId) < minPositionValueNative) {
+                _removePositionTriggers(tokenId, key);
+                _deactivatePosition(tokenId);
+            }
         }
 
         return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
@@ -408,6 +416,13 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         } else {
             return owner;
         }
+    }
+
+    /// @notice Gets the position value in native token
+    /// @param tokenId The token ID of the position
+    /// @return value The position value in native token (wei)
+    function _getPositionValueNative(uint256 tokenId) internal view override returns (uint256 value) {
+        (value,,,) = v4Oracle.getValue(tokenId, address(0));
     }
 
     function _getCrossedTicks(PoolId poolId, int24 tickSpacing)

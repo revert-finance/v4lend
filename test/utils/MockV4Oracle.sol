@@ -25,11 +25,20 @@ contract MockV4Oracle is IV4Oracle {
     // Mapping from (token0, token1) to PoolKey for price lookup
     mapping(address => mapping(address => PoolKey)) public poolKeys;
 
+    // Mock value returned for getValue
+    uint256 public mockPositionValue = 1 ether;
+
     /// @notice Constructor
     /// @param _positionManager The PositionManager instance
     constructor(IPositionManager _positionManager) {
         positionManager = _positionManager;
         poolManager = _positionManager.poolManager();
+    }
+
+    /// @notice Sets the mock position value returned by getValue
+    /// @param value The mock value to return
+    function setMockPositionValue(uint256 value) external {
+        mockPositionValue = value;
     }
 
     /// @notice Sets the pool key for a token pair
@@ -55,9 +64,9 @@ contract MockV4Oracle is IV4Oracle {
         (sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolId);
     }
 
-    /// @notice Stub implementation - returns zero values
-    function getValue(uint256, address) external pure returns (uint256 value, uint256 feeValue, uint256, uint256) {
-        return (0, 0, 0, 0);
+    /// @notice Mock implementation - returns mockPositionValue
+    function getValue(uint256, address) external view returns (uint256 value, uint256 feeValue, uint256, uint256) {
+        return (mockPositionValue, 0, 0, 0);
     }
 
     /// @notice Stub implementation - returns zero/default values

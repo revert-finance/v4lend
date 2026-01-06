@@ -37,6 +37,9 @@ abstract contract RevertHookConfig is Transformer {
     // oracle price validation
     int24 public maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
 
+    // minimum position value in native token (address(0)) to be configurable
+    uint256 public minPositionValueNative = 0.01 ether;
+
     // Position trigger mappings
     mapping(PoolId => int24) public tickLowerLasts;
     mapping(PoolId poolId => TickLinkedList.List) public lowerTriggerAfterSwap;
@@ -45,6 +48,7 @@ abstract contract RevertHookConfig is Transformer {
     // Events
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event SetMaxTicksFromOracle(int24 maxTicksFromOracle);
+    event SetMinPositionValueNative(uint256 minPositionValueNative);
     event SetProtocolFeeBps(uint16 protocolFeeBps);
     event SetProtocolFeeRecipient(address protocolFeeRecipient);
 
@@ -124,6 +128,13 @@ abstract contract RevertHookConfig is Transformer {
         emit SetMaxTicksFromOracle(_maxTicksFromOracle);
     }
 
+    /// @notice Sets the minimum position value in native token required for configuration
+    /// @param _minPositionValueNative The minimum value in native token (wei)
+    function setMinPositionValueNative(uint256 _minPositionValueNative) onlyOwner external {
+        minPositionValueNative = _minPositionValueNative;
+        emit SetMinPositionValueNative(_minPositionValueNative);
+    }
+
     /// @notice Sets the protocol fee percentage
     /// @param _protocolFeeBps The protocol fee percentage (0-10000)
     function setProtocolFeeBps(uint16 _protocolFeeBps) onlyOwner external {
@@ -195,20 +206,15 @@ abstract contract RevertHookConfig is Transformer {
     /// @param tokenId The token ID of the position
     /// @param config The position configuration to set
     function _setPositionConfig(uint256 tokenId, PositionConfig memory config) internal {
-        // handle activation and deactivation
-        PositionMode previousMode = positionConfigs[tokenId].mode;
-        bool activated = previousMode == PositionMode.NONE && config.mode != PositionMode.NONE;
-        if (activated) {
-            positionStates[tokenId].lastActivated = uint32(block.timestamp);
-        } else {
-            bool deactivated = previousMode != PositionMode.NONE && config.mode == PositionMode.NONE;
-            if (deactivated) {
-                positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - positionStates[tokenId].lastActivated;
-            }
-            positionStates[tokenId].lastActivated = 0; // mark as deactivated
-        }
-
         (PoolKey memory poolKey,) = _getPoolAndPositionInfo(tokenId);
+
+        // validate minimum position value when activating
+        if (config.mode != PositionMode.NONE) {
+            uint256 value = _getPositionValueNative(tokenId);
+            if (value < minPositionValueNative) {
+                revert PositionValueTooLow();
+            }
+        }
 
         // validate config
         if (config.autoExitTickLower % poolKey.tickSpacing != 0 && config.autoExitTickLower != type(int24).min) {
@@ -236,6 +242,13 @@ abstract contract RevertHookConfig is Transformer {
         _updatePositionTriggers(tokenId, poolKey, config);
         positionConfigs[tokenId] = config;
 
+        // Handle activation/deactivation based on mode
+        if (config.mode != PositionMode.NONE) {
+            _activatePosition(tokenId);
+        } else {
+            _deactivatePosition(tokenId);
+        }
+
         // emit event
         emit SetPositionConfig(tokenId, config);
     }
@@ -243,6 +256,34 @@ abstract contract RevertHookConfig is Transformer {
     // Abstract functions that must be implemented by the child contract
     function _getOwner(uint256 tokenId, bool isRealOwner) internal view virtual returns (address);
     function _getPoolAndPositionInfo(uint256 tokenId) internal view virtual returns (PoolKey memory, PositionInfo);
+    function _getPositionValueNative(uint256 tokenId) internal view virtual returns (uint256);
+
+    /// @notice Marks position as activated (triggers are now active)
+    /// @dev Sets lastActivated timestamp - used to track active time for protocol fees
+    /// @param tokenId The token ID of the position
+    function _activatePosition(uint256 tokenId) internal {
+        if (positionStates[tokenId].lastActivated == 0) {
+            positionStates[tokenId].lastActivated = uint32(block.timestamp);
+        }
+    }
+
+    /// @notice Marks position as deactivated (triggers are now removed)
+    /// @dev Accumulates active time and clears lastActivated
+    /// @param tokenId The token ID of the position
+    function _deactivatePosition(uint256 tokenId) internal {
+        uint32 lastActivated = positionStates[tokenId].lastActivated;
+        if (lastActivated > 0) {
+            positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - lastActivated;
+            positionStates[tokenId].lastActivated = 0;
+        }
+    }
+
+    /// @notice Checks if position is currently activated (has active triggers)
+    /// @param tokenId The token ID of the position
+    /// @return True if position is activated
+    function _isActivated(uint256 tokenId) internal view returns (bool) {
+        return positionStates[tokenId].lastActivated > 0;
+    }
 
     /// @notice Adds position triggers based on the current position configuration
     /// @dev Forces addition by assuming previous config was empty

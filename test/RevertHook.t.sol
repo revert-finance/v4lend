@@ -47,6 +47,7 @@ contract RevertHookTest is BaseTest {
 
     MockERC4626Vault vault0;
     MockERC4626Vault vault1;
+    MockV4Oracle v4Oracle;
 
     uint256 tokenId;
     int24 tickLower;
@@ -80,7 +81,7 @@ contract RevertHookTest is BaseTest {
 
 
         // Deploy V4Oracle
-        MockV4Oracle v4Oracle = new MockV4Oracle(
+        v4Oracle = new MockV4Oracle(
             positionManager
         );
 
@@ -1389,5 +1390,266 @@ contract RevertHookTest is BaseTest {
         // Verify hook has no leftover balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
+
+    // ============ Minimum Position Value Tests ============
+
+    function testMinPositionValue_CannotConfigureBelowMinimum() public {
+        // Set mock oracle to return value below minimum
+        v4Oracle.setMockPositionValue(0.001 ether); // Below default 0.01 ether minimum
+
+        // Try to configure position - should revert
+        vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+    }
+
+    function testMinPositionValue_CanConfigureAboveMinimum() public {
+        // Set mock oracle to return value above minimum
+        v4Oracle.setMockPositionValue(1 ether); // Above default 0.01 ether minimum
+
+        // Configure position - should succeed
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Verify position is configured and activated
+        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured");
+
+        // Verify position is activated (lastActivated > 0)
+        (,, uint32 lastActivated,,,,) = hook.positionStates(tokenId);
+        assertGt(lastActivated, 0, "Position should be activated");
+    }
+
+    function testMinPositionValue_TriggersRemovedWhenValueDrops() public {
+        // Set mock oracle to return high value initially
+        v4Oracle.setMockPositionValue(1 ether);
+
+        // Configure position
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Verify position is activated
+        (,, uint32 lastActivatedBefore,,,,) = hook.positionStates(tokenId);
+        assertGt(lastActivatedBefore, 0, "Position should be activated initially");
+
+        // Simulate value drop by setting mock oracle to low value
+        v4Oracle.setMockPositionValue(0.001 ether);
+
+        // Remove some liquidity (triggers afterRemoveLiquidity hook)
+        uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
+        positionManager.decreaseLiquidity(
+            tokenId,
+            currentLiquidity / 2, // Remove half
+            0,
+            0,
+            address(this),
+            block.timestamp,
+            ""
+        );
+
+        // Verify position is deactivated (triggers removed due to low value)
+        (,, uint32 lastActivatedAfter,,,,) = hook.positionStates(tokenId);
+        assertEq(lastActivatedAfter, 0, "Position should be deactivated after value drops below minimum");
+    }
+
+    function testMinPositionValue_TriggersReaddedWhenValueIncreases() public {
+        // Set mock oracle to return low value initially
+        v4Oracle.setMockPositionValue(0.001 ether);
+
+        // Mint a new position (will not have triggers added due to low value)
+        uint128 liquidityAmount = 10e18;
+        (uint256 newTokenId,) = positionManager.mint(
+            poolKey,
+            tickLower,
+            tickUpper,
+            liquidityAmount,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        // Try to configure - should revert due to low value
+        vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
+        hook.setPositionConfig(newTokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Set mock oracle to return high value
+        v4Oracle.setMockPositionValue(1 ether);
+
+        // Now configure should succeed
+        hook.setPositionConfig(newTokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Verify position is activated
+        (,, uint32 lastActivated,,,,) = hook.positionStates(newTokenId);
+        assertGt(lastActivated, 0, "Position should be activated after value increases");
+    }
+
+    function testMinPositionValue_OwnerCanChangeMinimum() public {
+        // Default minimum is 0.01 ether
+        assertEq(hook.minPositionValueNative(), 0.01 ether, "Default minimum should be 0.01 ether");
+
+        // Set mock oracle to return value between old and new minimum
+        v4Oracle.setMockPositionValue(0.005 ether);
+
+        // Try to configure - should revert (value below 0.01 ether)
+        vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Owner lowers the minimum
+        hook.setMinPositionValueNative(0.001 ether);
+        assertEq(hook.minPositionValueNative(), 0.001 ether, "Minimum should be updated");
+
+        // Now configure should succeed
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Verify position is configured
+        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured");
+    }
+
+    function testMinPositionValue_DisablingPositionAlwaysAllowed() public {
+        // Set mock oracle to return high value
+        v4Oracle.setMockPositionValue(1 ether);
+
+        // Configure position
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Set mock oracle to return low value
+        v4Oracle.setMockPositionValue(0.001 ether);
+
+        // Disabling position (setting mode to NONE) should always work regardless of value
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.NONE,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Verify position is disabled
+        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.NONE), "Position should be disabled");
+
+        // Verify position is deactivated
+        (,, uint32 lastActivated,,,,) = hook.positionStates(tokenId);
+        assertEq(lastActivated, 0, "Position should be deactivated");
+    }
+
+    function testMinPositionValue_ZeroMinimumAllowsAll() public {
+        // Set minimum to 0
+        hook.setMinPositionValueNative(0);
+
+        // Set mock oracle to return 0 value
+        v4Oracle.setMockPositionValue(0);
+
+        // Configure should succeed even with 0 value
+        hook.setPositionConfig(tokenId, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // Verify position is configured
+        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured with 0 minimum");
     }
 }
