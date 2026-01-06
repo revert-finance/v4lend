@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
-import "./interfaces/IInterestRateModel.sol";
-import "./utils/Constants.sol";
+import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
+import {Constants} from "./utils/Constants.sol";
 
 /// @title Model for interest rate calculation used in Vault
 /// @notice Calculates both borrow and supply rate

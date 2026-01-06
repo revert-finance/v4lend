@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.26;
 
-import "forge-std/Test.sol";
-import "forge-std/console.sol";
+import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
 
-import "./V4ForkTestBase.sol";
-import "../../src/V4Oracle.sol";
-import "../../src/interfaces/IV4Oracle.sol";
+import {V4ForkTestBase} from "./V4ForkTestBase.sol";
+import {V4Oracle, AggregatorV3Interface} from "../../src/V4Oracle.sol";
+import {IV4Oracle} from "../../src/interfaces/IV4Oracle.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 /**
  * @title V4OracleTest
