@@ -8,15 +8,21 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
+
+import {IUniswapV4Router04} from "hookmate/interfaces/router/IUniswapV4Router04.sol";
 
 import {Swapper} from "../../src/utils/Swapper.sol";
 import {V4Utils} from "../../src/transformers/V4Utils.sol";
+import {V4Oracle, AggregatorV3Interface} from "../../src/V4Oracle.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "../V4TestBase.sol";
+import {V4TestBase} from "../V4TestBase.sol";
 
 /**
  * @title V4ForkTestBase

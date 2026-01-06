@@ -1,29 +1,27 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import "@uniswap/v4-core/src/types/PoolKey.sol";
-import "@uniswap/v4-core/src/types/Currency.sol";
-import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import "@uniswap/v4-core/src/interfaces/IHooks.sol";
-import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import "@uniswap/v4-core/src/libraries/TickMath.sol";
-import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 
-import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
-import "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
-import "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
 import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "../lib/IUniversalRouter.sol";
-import "./Constants.sol";
+import {IUniversalRouter} from "../lib/IUniversalRouter.sol";
+import {Constants} from "./Constants.sol";
 
 
 // base functionality to do swaps with different routing protocols

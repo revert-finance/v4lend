@@ -10,30 +10,25 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager, SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
-import {BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {Position} from "@uniswap/v4-core/src/libraries/Position.sol";
+import {BalanceDelta, toBalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
 import {LiquidityCalculator} from "./LiquidityCalculator.sol";
-import {Transformer} from "./transformers/Transformer.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {V4Oracle} from "./V4Oracle.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";

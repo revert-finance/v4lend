@@ -12,7 +12,8 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./V4ForkTestBase.sol";
+import {V4ForkTestBase} from "./V4ForkTestBase.sol";
+import {V4Utils} from "../../src/transformers/V4Utils.sol";
 
 /**
  * @title V4UtilsWithdrawAndCollectAndSwapTest

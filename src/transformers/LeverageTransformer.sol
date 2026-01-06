@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
-import "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
-import "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import "@uniswap/v4-core/src/libraries/TickMath.sol";
-import "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import "@uniswap/v4-core/src/types/PoolId.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import "../utils/Swapper.sol";
-import "../interfaces/IVault.sol";
-import "./Transformer.sol";
+import {Swapper} from "../utils/Swapper.sol";
+import {IVault} from "../interfaces/IVault.sol";
+import {Transformer, Ownable} from "./Transformer.sol";
 
 /// @title LeverageTransformer
 /// @notice Functionality to leverage / deleverage positions direcly in one tx

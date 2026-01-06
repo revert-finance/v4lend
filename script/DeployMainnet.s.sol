@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "forge-std/Script.sol";
+import {Script} from "forge-std/Script.sol";
 
 import {V4Utils} from "../src/transformers/V4Utils.sol";
 import {V4Oracle, AggregatorV3Interface} from "../src/V4Oracle.sol";

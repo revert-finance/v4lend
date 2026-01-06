@@ -9,7 +9,8 @@ import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol
 
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import "./V4ForkTestBase.sol";
+import {V4ForkTestBase} from "./V4ForkTestBase.sol";
+import {V4Utils} from "../../src/transformers/V4Utils.sol";
 
 /**
  * @title V4UtilsSwapTest
