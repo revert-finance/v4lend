@@ -1126,22 +1126,19 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         currency1.transfer(recipient, fees1);
         address owner = tokenOwner[tokenId];
 
-        // this is a problem if the token is native ETH and the owner has possibility to revert ETH recieval
-        // so wrap to WETH it to be sure it can not be reverted
-        if (amount0 - fees0 > 0) {
-            if (currency0.isAddressZero()) {
-                weth.deposit{value: amount0 - fees0}();
-                weth.transfer(owner, amount0 - fees0);
+        // wrap native ETH to WETH to prevent revert attacks from owner
+        _transferTokenOrWETH(currency0, amount0 - fees0, owner);
+        _transferTokenOrWETH(currency1, amount1 - fees1, owner);
+    }
+
+    // transfers token to recipient, wrapping native ETH to WETH to prevent revert attacks
+    function _transferTokenOrWETH(Currency currency, uint256 amount, address recipient) internal {
+        if (amount > 0) {
+            if (currency.isAddressZero()) {
+                weth.deposit{value: amount}();
+                weth.transfer(recipient, amount);
             } else {
-                currency0.transfer(owner, amount0 - fees0);
-            }
-        }
-        if (amount1 - fees1 > 0) {
-            if (currency1.isAddressZero()) {
-                weth.deposit{value: amount1 - fees1}();
-                weth.transfer(owner, amount1 - fees1);
-            } else {
-                currency1.transfer(owner, amount1 - fees1);
+                currency.transfer(recipient, amount);
             }
         }
     }
@@ -1367,27 +1364,28 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     function _resetDailyLendIncreaseLimit(uint256 newLendExchangeRateX96, bool force) internal {
-        // daily lend limit reset handling
         uint32 time = uint32(block.timestamp / 1 days);
         if (force || time > dailyLendIncreaseLimitLastReset) {
-            uint256 lendIncreaseLimit = _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil)
-                * MAX_DAILY_LEND_INCREASE_X32 / Q32;
-            dailyLendIncreaseLimitLeft =
-                dailyLendIncreaseLimitMin > lendIncreaseLimit ? dailyLendIncreaseLimitMin : lendIncreaseLimit;
+            dailyLendIncreaseLimitLeft = _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
             dailyLendIncreaseLimitLastReset = time;
         }
     }
 
     function _resetDailyDebtIncreaseLimit(uint256 newLendExchangeRateX96, bool force) internal {
-        // daily debt limit reset handling
         uint32 time = uint32(block.timestamp / 1 days);
         if (force || time > dailyDebtIncreaseLimitLastReset) {
-            uint256 debtIncreaseLimit = _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil)
-                * MAX_DAILY_DEBT_INCREASE_X32 / Q32;
-            dailyDebtIncreaseLimitLeft =
-                dailyDebtIncreaseLimitMin > debtIncreaseLimit ? dailyDebtIncreaseLimitMin : debtIncreaseLimit;
+            dailyDebtIncreaseLimitLeft = _calculateDailyLimit(newLendExchangeRateX96, dailyDebtIncreaseLimitMin, MAX_DAILY_DEBT_INCREASE_X32);
             dailyDebtIncreaseLimitLastReset = time;
         }
+    }
+
+    function _calculateDailyLimit(
+        uint256 newLendExchangeRateX96,
+        uint256 limitMin,
+        uint32 maxFactorX32
+    ) internal view returns (uint256) {
+        uint256 increaseLimit = _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil) * maxFactorX32 / Q32;
+        return limitMin > increaseLimit ? limitMin : increaseLimit;
     }
 
     function _checkLoanIsHealthy(uint256 tokenId, uint256 debt, bool withBuffer)

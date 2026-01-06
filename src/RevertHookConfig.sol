@@ -197,7 +197,13 @@ abstract contract RevertHookConfig is Transformer {
     /// @notice Disables a position by setting its config to NONE
     /// @param tokenId The token ID of the position to disable
     function _disablePosition(uint256 tokenId) internal {
-        _setPositionConfig(tokenId, PositionConfig({
+        _setPositionConfig(tokenId, _getEmptyPositionConfig(), false);
+    }
+
+    /// @notice Returns an empty position config with default/sentinel values
+    /// @return config The empty position config
+    function _getEmptyPositionConfig() internal pure returns (PositionConfig memory config) {
+        config = PositionConfig({
             mode: PositionMode.NONE,
             autoCompoundMode: AutoCompoundMode.NONE,
             autoExitIsRelative: false,
@@ -208,7 +214,7 @@ abstract contract RevertHookConfig is Transformer {
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
             autoLendToleranceTick: 0
-        }), false);
+        });
     }
 
     /// @notice Internal function to set position configuration
@@ -306,22 +312,8 @@ abstract contract RevertHookConfig is Transformer {
     /// @param tokenId The token ID of the position
     /// @param poolKey The pool key
     function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        // Create an empty config that has no triggers (NONE mode with sentinel values)
-        PositionConfig memory emptyConfig = PositionConfig({
-            mode: PositionMode.NONE,
-            autoCompoundMode: AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
-        });
-
         // Use _updatePositionTriggers to remove all current triggers by diffing against empty config
-        _updatePositionTriggers(tokenId, poolKey, emptyConfig, false);
+        _updatePositionTriggers(tokenId, poolKey, _getEmptyPositionConfig(), false);
     }
 
     /// @notice Updates position triggers by computing the diff between old and new configs

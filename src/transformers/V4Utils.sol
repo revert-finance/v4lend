@@ -232,7 +232,11 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         Instructions memory instructions
     ) internal {
         uint128 liquidity;
-        Currency targetToken = instructions.targetToken;
+        (
+            Currency swapSource,
+            uint256 amountIn0, uint256 amountOut0Min, bytes memory swapData0,
+            uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
+        ) = _getSwapParams(poolKey, instructions);
 
         (liquidity, amount0, amount1) = _swapAndIncrease(
             SwapAndIncreaseLiquidityParams(
@@ -241,15 +245,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
                 amount1,
                 instructions.recipient,
                 instructions.deadline,
-                targetToken == poolKey.currency0
-                    ? poolKey.currency1
-                    : (targetToken == poolKey.currency1 ? poolKey.currency0 : CurrencyLibrary.ADDRESS_ZERO),
-                targetToken == poolKey.currency0 ? instructions.amountIn1 : 0,
-                targetToken == poolKey.currency0 ? instructions.amountOut1Min : 0,
-                targetToken == poolKey.currency0 ? instructions.swapData1 : bytes(""),
-                targetToken == poolKey.currency1 ? instructions.amountIn0 : 0,
-                targetToken == poolKey.currency1 ? instructions.amountOut0Min : 0,
-                targetToken == poolKey.currency1 ? instructions.swapData0 : bytes(""),
+                swapSource,
+                amountIn0, amountOut0Min, swapData0,
+                amountIn1, amountOut1Min, swapData1,
                 instructions.amountAddMin0,
                 instructions.amountAddMin1,
                 bytes(""),
@@ -270,8 +268,13 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         uint256 amount1,
         Instructions memory instructions
     ) internal returns (uint256 newTokenId) {
-        Currency targetToken = instructions.targetToken;
         uint128 liquidity;
+        (
+            Currency swapSource,
+            uint256 amountIn0, uint256 amountOut0Min, bytes memory swapData0,
+            uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
+        ) = _getSwapParams(poolKey, instructions);
+
         (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
             SwapAndMintParams(
                 poolKey.currency0,
@@ -285,15 +288,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
                 instructions.recipient,
                 instructions.recipientNFT,
                 instructions.deadline,
-                targetToken == poolKey.currency0
-                    ? poolKey.currency1
-                    : (targetToken == poolKey.currency1 ? poolKey.currency0 : CurrencyLibrary.ADDRESS_ZERO),
-                targetToken == poolKey.currency0 ? instructions.amountIn1 : 0,
-                targetToken == poolKey.currency0 ? instructions.amountOut1Min : 0,
-                targetToken == poolKey.currency0 ? instructions.swapData1 : bytes(""),
-                targetToken == poolKey.currency1 ? instructions.amountIn0 : 0,
-                targetToken == poolKey.currency1 ? instructions.amountOut0Min : 0,
-                targetToken == poolKey.currency1 ? instructions.swapData0 : bytes(""),
+                swapSource,
+                amountIn0, amountOut0Min, swapData0,
+                amountIn1, amountOut1Min, swapData1,
                 instructions.amountAddMin0,
                 instructions.amountAddMin1,
                 instructions.swapAndMintReturnData,
@@ -303,6 +300,44 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         );
 
         emit ChangeRange(tokenId, newTokenId, liquidity, amount0, amount1);
+    }
+
+    /// @notice Gets swap parameters based on target token direction
+    /// @dev Extracts the common swap parameter logic from instructions
+    /// The swap params in SwapAndMintParams/SwapAndIncreaseLiquidityParams are:
+    /// - amountIn0/amountOut0Min/swapData0: for swapping TO token0
+    /// - amountIn1/amountOut1Min/swapData1: for swapping TO token1
+    function _getSwapParams(PoolKey memory poolKey, Instructions memory instructions)
+        internal
+        pure
+        returns (
+            Currency swapSource,
+            uint256 amountIn0, uint256 amountOut0Min, bytes memory swapData0,
+            uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
+        )
+    {
+        Currency targetToken = instructions.targetToken;
+
+        // When targetToken is currency0, we swap FROM currency1 TO get more currency0
+        // So we use instructions' token1 swap params (which define swap from token1)
+        // and place them in amountIn0/swapData0 (swap TO token0 params in the struct)
+        if (targetToken == poolKey.currency0) {
+            swapSource = poolKey.currency1;
+            // Swap from currency1 to get currency0 - use amountIn1/swapData1 from instructions
+            // but place into amountIn0/swapData0 slots (which are "swap TO token0" params)
+            amountIn0 = instructions.amountIn1;
+            amountOut0Min = instructions.amountOut1Min;
+            swapData0 = instructions.swapData1;
+        } else if (targetToken == poolKey.currency1) {
+            swapSource = poolKey.currency0;
+            // Swap from currency0 to get currency1 - use amountIn0/swapData0 from instructions
+            // but place into amountIn1/swapData1 slots (which are "swap TO token1" params)
+            amountIn1 = instructions.amountIn0;
+            amountOut1Min = instructions.amountOut0Min;
+            swapData1 = instructions.swapData0;
+        } else {
+            swapSource = CurrencyLibrary.ADDRESS_ZERO;
+        }
     }
 
     /// @notice Execute withdraw, collect and swap operation

@@ -723,14 +723,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     )
         public
     {
-        // validate caller (can be vault or poolmanager)
-        if (msg.sender != address(poolManager)) {
-            if (vaults[msg.sender]) {
-                _validateCaller(positionManager, tokenId);
-            } else {
-                revert Unauthorized();
-            }
-        }
+        _requireAuthorizedCaller(tokenId);
 
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
@@ -747,14 +740,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     }
 
     function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) public {
-        // validate caller (can be vault or poolmanager)
-        if (msg.sender != address(poolManager)) {
-            if (vaults[msg.sender]) {
-                _validateCaller(positionManager, tokenId);
-            } else {
-                revert Unauthorized();
-            }
-        }
+        _requireAuthorizedCaller(tokenId);
 
         int24 baseTick = _getTickLower(_getTick(poolId), poolKey.tickSpacing);
 
@@ -977,19 +963,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         amount0Added = currency0.balanceOfSelf();
         amount1Added = currency1.balanceOfSelf();
 
-        // Calculate liquidity from available amounts
-        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-
-        int24 tickLower = posInfo.tickLower();
-        int24 tickUpper = posInfo.tickUpper();
-
-        // Calculate liquidity from available amounts
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(tickLower),
-            TickMath.getSqrtPriceAtTick(tickUpper),
-            available0,
-            available1
+        uint128 liquidity = _calculateLiquidityForAmounts(
+            poolKey, posInfo.tickLower(), posInfo.tickUpper(), available0, available1
         );
 
         if (liquidity == 0) {
@@ -1055,17 +1030,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         amount0Added = uint128(currency0.balanceOfSelf());
         amount1Added = uint128(currency1.balanceOfSelf());
 
-        // Calculate liquidity from available amounts
-        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-
-        // Calculate liquidity from available amounts
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(tickLower),
-            TickMath.getSqrtPriceAtTick(tickUpper),
-            available0,
-            available1
-        );
+        uint128 liquidity = _calculateLiquidityForAmounts(poolKey, tickLower, tickUpper, available0, available1);
 
         // Use MINT_POSITION and SETTLE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
@@ -1261,41 +1226,25 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @param poolKey The pool key containing currency0 and currency1
     /// @param swapDelta The balance delta from the swap
     function _handleSwapDeltas(PoolKey memory poolKey, BalanceDelta swapDelta) internal {
-        Currency currency0 = poolKey.currency0;
-        Currency currency1 = poolKey.currency1;
+        _handleCurrencyDelta(poolKey.currency0, swapDelta.amount0());
+        _handleCurrencyDelta(poolKey.currency1, swapDelta.amount1());
+    }
 
-        // Handle currency0 delta
-        int256 delta0 = swapDelta.amount0();
-        if (delta0 < 0) {
-            // We owe token0 - settle the debt
-            uint256 amount0Owed = uint256(-delta0);
-            poolManager.sync(currency0);
-            if (currency0.isAddressZero()) {
-                poolManager.settle{value: amount0Owed}();
+    /// @notice Handles a single currency delta - settles if negative, takes if positive
+    /// @param currency The currency to handle
+    /// @param delta The delta amount (negative = we owe, positive = we receive)
+    function _handleCurrencyDelta(Currency currency, int256 delta) internal {
+        if (delta < 0) {
+            uint256 amountOwed = uint256(-delta);
+            poolManager.sync(currency);
+            if (currency.isAddressZero()) {
+                poolManager.settle{value: amountOwed}();
             } else {
-                currency0.transfer(address(poolManager), amount0Owed);
+                currency.transfer(address(poolManager), amountOwed);
                 poolManager.settle();
             }
-        } else if (delta0 > 0) {
-            // We receive token0
-            poolManager.take(currency0, address(this), uint256(delta0));
-        }
-
-        // Handle currency1 delta
-        int256 delta1 = swapDelta.amount1();
-        if (delta1 < 0) {
-            // We owe token1 - settle the debt
-            uint256 amount1Owed = uint256(-delta1);
-            poolManager.sync(currency1);
-            if (currency1.isAddressZero()) {
-                poolManager.settle{value: amount1Owed}();
-            } else {
-                currency1.transfer(address(poolManager), amount1Owed);
-                poolManager.settle();
-            }
-        } else if (delta1 > 0) {
-            // We receive token1
-            poolManager.take(currency1, address(this), uint256(delta1));
+        } else if (delta > 0) {
+            poolManager.take(currency, address(this), uint256(delta));
         }
     }
 
@@ -1383,5 +1332,42 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             }
             permit2.approve(tokenAddr, address(positionManager), uint160(amount), uint48(block.timestamp));
         }
+    }
+
+    /// @notice Validates that the caller is authorized to execute auto actions
+    /// @dev Caller must be poolManager, or a vault with valid transform context
+    /// @param tokenId The token ID to validate authorization for
+    function _requireAuthorizedCaller(uint256 tokenId) internal view {
+        if (msg.sender != address(poolManager)) {
+            if (vaults[msg.sender]) {
+                _validateCaller(positionManager, tokenId);
+            } else {
+                revert Unauthorized();
+            }
+        }
+    }
+
+    /// @notice Calculates the liquidity for given amounts and tick range
+    /// @param poolKey The pool key
+    /// @param tickLower The lower tick of the position
+    /// @param tickUpper The upper tick of the position
+    /// @param amount0 Amount of token0
+    /// @param amount1 Amount of token1
+    /// @return liquidity The calculated liquidity
+    function _calculateLiquidityForAmounts(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0,
+        uint256 amount1
+    ) internal view returns (uint128 liquidity) {
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
+        liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96,
+            TickMath.getSqrtPriceAtTick(tickLower),
+            TickMath.getSqrtPriceAtTick(tickUpper),
+            amount0,
+            amount1
+        );
     }
 }
