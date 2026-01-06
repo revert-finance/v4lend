@@ -1652,4 +1652,242 @@ contract RevertHookTest is BaseTest {
         (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured with 0 minimum");
     }
+
+    // ==================== Immediate Execution Tests ====================
+
+    function testImmediateExecution_AutoExit() public {
+        console.log("=== Test: Immediate Auto Exit Execution ===");
+
+        // First, perform a swap to move the tick out of the position range
+        uint256 amountIn = 7e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap", currentTick);
+
+        // Position 2 has range [tickLower2, tickUpper2] = [-60, 60]
+        // After swap, currentTick should be < -60, so the position is out of range on the lower side
+        assertTrue(currentTick < tickLower2, "Current tick should be below position lower bound");
+
+        // Get initial liquidity
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token2Id);
+        assertGt(liquidityBefore, 0, "token2Id should have liquidity before config");
+        console.log("liquidityBefore", liquidityBefore);
+
+        // Approve the hook to manage the position
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Now configure auto-exit with a trigger that should already be met
+        // Since the tick is already below tickLower2, setting autoExitTickLower to tickLower2 should trigger immediately
+        hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2,  // Trigger when tick <= -60
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // The auto-exit should have executed immediately
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(token2Id);
+        console.log("liquidityAfter", liquidityAfter);
+        assertEq(liquidityAfter, 0, "token2Id should have 0 liquidity after immediate auto-exit");
+
+        // Verify the position config is disabled
+        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.NONE), "Position should be disabled after auto-exit");
+
+        // Verify hook has no leftover balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
+
+    function testImmediateExecution_AutoRange() public {
+        console.log("=== Test: Immediate Auto Range Execution ===");
+
+        // First, perform a swap to move the tick out of the position range
+        uint256 amountIn = 7e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap", currentTick);
+
+        // Position 3 has range [tickLower3, tickUpper3] = [-60, 60]
+        assertTrue(currentTick < tickLower3, "Current tick should be below position lower bound");
+
+        // Get initial liquidity and position info
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        assertGt(liquidityBefore, 0, "token3Id should have liquidity before config");
+        console.log("liquidityBefore", liquidityBefore);
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        // Approve the hook to manage the position
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        // Configure auto-range with a trigger that should already be met
+        // autoRangeLowerLimit of 0 means trigger when tick reaches tickLower
+        hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_RANGE,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 0,  // Trigger when tick <= tickLower
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -60,
+            autoRangeUpperDelta: 60,
+            autoLendToleranceTick: 0
+        }));
+
+        // The auto-range should have executed immediately
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
+        console.log("liquidityAfter", liquidityAfter);
+        assertEq(liquidityAfter, 0, "token3Id should have 0 liquidity after immediate auto-range");
+
+        // Verify a new position was minted
+        uint256 nextTokenIdAfter = positionManager.nextTokenId();
+        assertEq(nextTokenIdAfter, nextTokenIdBefore + 1, "A new position should be minted");
+
+        // Verify new position has liquidity
+        uint256 newTokenId = nextTokenIdBefore;
+        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
+        console.log("newLiquidity", newLiquidity);
+        assertGt(newLiquidity, 0, "New position should have liquidity > 0");
+
+        // Verify new position is owned by the same owner
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(this),
+            "New position should be owned by the same address");
+
+        // Verify hook has no leftover balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
+
+    function testImmediateExecution_AutoLend() public {
+        console.log("=== Test: Immediate Auto Lend Execution ===");
+
+        // First, perform a swap to move the tick out of the position range
+        // Need to swap more to get past the AUTO_LEND trigger which is at tickLower - tickSpacing
+        uint256 amountIn = 14e17;  // Larger swap to move tick further
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap", currentTick);
+
+        // Position 3 has range [tickLower3, tickUpper3] = [-60, 60]
+        assertTrue(currentTick < tickLower3, "Current tick should be below position lower bound");
+
+        // Get initial liquidity
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        assertGt(liquidityBefore, 0, "token3Id should have liquidity before config");
+        console.log("liquidityBefore", liquidityBefore);
+
+        // Approve the hook to manage the position
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        // Configure auto-lend with a trigger that should already be met
+        // autoLendToleranceTick controls when the deposit happens - price goes out of range + tolerance
+        hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_LEND,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0  // No tolerance - trigger immediately when out of range
+        }));
+
+        // The auto-lend deposit should have executed immediately
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
+        console.log("liquidityAfter", liquidityAfter);
+        assertEq(liquidityAfter, 0, "token3Id should have 0 liquidity after immediate auto-lend deposit");
+
+        // Verify position state has auto-lend shares
+        (,,, address autoLendToken, uint256 autoLendShares,,) = hook.positionStates(token3Id);
+        console.log("autoLendShares", autoLendShares);
+        assertGt(autoLendShares, 0, "Position should have auto-lend shares");
+        assertEq(autoLendToken, Currency.unwrap(currency0), "Auto-lend should be for currency0 since price went down");
+
+        // Verify hook has no leftover balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
+    }
+
+    function testImmediateExecution_NoTriggerWhenInRange() public {
+        console.log("=== Test: No Immediate Execution When In Range ===");
+
+        // Don't perform any swap - position should be in range
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick", currentTick);
+
+        // Position 3 has range [tickLower3, tickUpper3] = [-60, 60]
+        // Current tick should be at 0 (within range)
+        assertTrue(currentTick >= tickLower3 && currentTick <= tickUpper3, "Current tick should be within position range");
+
+        // Get initial liquidity
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        assertGt(liquidityBefore, 0, "token3Id should have liquidity before config");
+        console.log("liquidityBefore", liquidityBefore);
+
+        // Approve the hook to manage the position
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        // Configure auto-exit with triggers outside current tick
+        hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
+            mode: RevertHookConfig.PositionMode.AUTO_EXIT,
+            autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower3 - 60,  // Trigger at -120, but we're at 0
+            autoExitTickUpper: tickUpper3 + 60,  // Trigger at 120, but we're at 0
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0
+        }));
+
+        // No immediate execution should happen - liquidity should remain
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
+        console.log("liquidityAfter", liquidityAfter);
+        assertEq(liquidityAfter, liquidityBefore, "token3Id should still have same liquidity - no immediate execution");
+
+        // Verify position is still configured (not disabled)
+        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_EXIT), "Position should still be configured for auto-exit");
+    }
 }

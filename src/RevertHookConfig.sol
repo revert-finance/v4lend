@@ -182,7 +182,16 @@ abstract contract RevertHookConfig is Transformer {
             revert Unauthorized();
         }
 
-        _setPositionConfig(tokenId, positionConfig);
+        // validate minimum position value when configuring
+        if (positionConfig.mode != PositionMode.NONE) {
+            uint256 value = _getPositionValueNative(tokenId);
+            if (value < minPositionValueNative) {
+                revert PositionValueTooLow();
+            }
+        }
+
+        // config and check if conditions are already met for immediate execution
+        _setPositionConfig(tokenId, positionConfig, true);
     }
 
     /// @notice Disables a position by setting its config to NONE
@@ -199,22 +208,14 @@ abstract contract RevertHookConfig is Transformer {
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
             autoLendToleranceTick: 0
-        }));
+        }), false);
     }
 
     /// @notice Internal function to set position configuration
     /// @param tokenId The token ID of the position
     /// @param config The position configuration to set
-    function _setPositionConfig(uint256 tokenId, PositionConfig memory config) internal {
+    function _setPositionConfig(uint256 tokenId, PositionConfig memory config, bool checkImmediateExecution) internal {
         (PoolKey memory poolKey,) = _getPoolAndPositionInfo(tokenId);
-
-        // validate minimum position value when activating
-        if (config.mode != PositionMode.NONE) {
-            uint256 value = _getPositionValueNative(tokenId);
-            if (value < minPositionValueNative) {
-                revert PositionValueTooLow();
-            }
-        }
 
         // validate config
         if (config.autoExitTickLower % poolKey.tickSpacing != 0 && config.autoExitTickLower != type(int24).min) {
@@ -245,6 +246,11 @@ abstract contract RevertHookConfig is Transformer {
         // Handle activation/deactivation based on mode
         if (config.mode != PositionMode.NONE) {
             _activatePosition(tokenId);
+
+            // Check if conditions are already met for immediate execution
+            if (checkImmediateExecution) {
+                _checkAndExecuteImmediate(tokenId, poolKey, config);
+            }
         } else {
             _deactivatePosition(tokenId);
         }
@@ -257,6 +263,7 @@ abstract contract RevertHookConfig is Transformer {
     function _getOwner(uint256 tokenId, bool isRealOwner) internal view virtual returns (address);
     function _getPoolAndPositionInfo(uint256 tokenId) internal view virtual returns (PoolKey memory, PositionInfo);
     function _getPositionValueNative(uint256 tokenId) internal view virtual returns (uint256);
+    function _checkAndExecuteImmediate(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config) internal virtual;
 
     /// @notice Marks position as activated (triggers are now active)
     /// @dev Sets lastActivated timestamp - used to track active time for protocol fees
@@ -267,7 +274,7 @@ abstract contract RevertHookConfig is Transformer {
         }
     }
 
-    /// @notice Marks position as deactivated (triggers are now removed)
+    /// @notice Marks position as deactivated - no more fee accumulation
     /// @dev Accumulates active time and clears lastActivated
     /// @param tokenId The token ID of the position
     function _deactivatePosition(uint256 tokenId) internal {

@@ -226,12 +226,12 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             if (isAutoExitTriggered) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
             } else {
-                _handleAutoRange(poolKey, poolId, tokenId, isUpperTrigger);
+                _handleAutoRange(poolKey, poolId, tokenId);
             }
         } else if (mode == PositionMode.AUTO_LEND) {
             _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_RANGE) {
-            _handleAutoRange(poolKey, poolId, tokenId, isUpperTrigger);
+            _handleAutoRange(poolKey, poolId, tokenId);
         }
     }
 
@@ -259,7 +259,6 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         }
 
         uint256 shares = positionStates[tokenId].autoLendShares;
-        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         if (shares > 0) {
             _autoLendWithdraw(poolKey, tokenId, shares);
         } else {
@@ -267,11 +266,10 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         }
     }
 
-    function _handleAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
+    function _handleAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
         address owner = _getOwner(tokenId, false);
-        bool ownedByVault = vaults[owner];
 
-        if (ownedByVault) {
+        if (vaults[owner]) {
             IVault(owner).transform(tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId)));
         } else {
             autoRange(poolKey, poolId, tokenId);
@@ -423,6 +421,85 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @return value The position value in native token (wei)
     function _getPositionValueNative(uint256 tokenId) internal view override returns (uint256 value) {
         (value,,,) = v4Oracle.getValue(tokenId, address(0));
+    }
+
+    /// @notice Checks if position config conditions are already met and executes immediately if so
+    /// @dev Called after setPositionConfig to handle cases where current tick already triggers the action
+    /// @param tokenId The token ID of the position
+    /// @param poolKey The pool key
+    /// @param config The position configuration
+    function _checkAndExecuteImmediate(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config) internal override {
+        // Skip for modes that don't have immediate triggers
+        if (config.mode == PositionMode.NONE || config.mode == PositionMode.AUTO_COMPOUND_ONLY) {
+            return;
+        }
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Check trigger conditions and get result
+        (bool shouldExecute, bool isUpperTrigger, int24 triggeredTick) = _checkTriggerConditions(
+            tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper()
+        );
+
+        if (shouldExecute) {
+            _executeImmediateAction(tokenId, poolKey, config, isUpperTrigger, triggeredTick);
+        }
+    }
+
+    /// @notice Checks if any trigger condition is met for immediate execution
+    /// @return shouldExecute True if a trigger condition is met
+    /// @return isUpperTrigger True if the upper trigger was hit, false for lower
+    /// @return triggeredTick The tick value that triggered the action
+    function _checkTriggerConditions(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionConfig memory config,
+        int24 posTickLower,
+        int24 posTickUpper
+    ) internal view returns (bool shouldExecute, bool isUpperTrigger, int24 triggeredTick) {
+        PoolId poolId = poolKey.toId();
+        int24 currentTickLower = _getTickLower(_getTick(poolId), poolKey.tickSpacing);
+
+        // Compute trigger ticks for the config
+        int24[4] memory triggerTicks = _computeTriggerTicksFromMemory(tokenId, poolKey, config, posTickLower, posTickUpper);
+
+        // Check lower triggers (fire when current tick falls below them)
+        if (triggerTicks[0] != type(int24).min && currentTickLower < triggerTicks[0]) {
+            return (true, false, triggerTicks[0]);
+        }
+        if (triggerTicks[1] != type(int24).min && currentTickLower < triggerTicks[1]) {
+            return (true, false, triggerTicks[1]);
+        }
+
+        // Check upper triggers (fire when current tick rises above them)
+        if (triggerTicks[2] != type(int24).max && currentTickLower >= triggerTicks[2]) {
+            return (true, true, triggerTicks[2]);
+        }
+        if (triggerTicks[3] != type(int24).max && currentTickLower >= triggerTicks[3]) {
+            return (true, true, triggerTicks[3]);
+        }
+
+        return (false, false, 0);
+    }
+
+    /// @notice Executes the appropriate action immediately based on config mode
+    function _executeImmediateAction(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionConfig memory config,
+        bool isUpperTrigger,
+        int24 tick
+    ) internal {
+        // Need to unlock poolManager for execution
+        poolManager.unlock(abi.encode(
+            tokenId,
+            poolKey,
+            config.mode,
+            isUpperTrigger,
+            tick,
+            config.autoExitTickLower,
+            config.autoExitTickUpper
+        ));
     }
 
     function _getCrossedTicks(PoolId poolId, int24 tickSpacing)
@@ -595,7 +672,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
 
             if (newTokenId > 0) {
-                _setPositionConfig(newTokenId, positionConfigs[tokenId]);
+                _setPositionConfig(newTokenId, positionConfigs[tokenId], false);
                 _disablePosition(tokenId);
             } else {
                 _addPositionTriggers(tokenId, poolKey);
@@ -700,7 +777,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
 
         // configure new position
-        _setPositionConfig(newTokenId, positionConfigs[tokenId]);
+        _setPositionConfig(newTokenId, positionConfigs[tokenId], false);
         _disablePosition(tokenId);
 
         emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
@@ -741,9 +818,52 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         if (msg.sender != address(poolManager)) {
             revert Unauthorized();
         }
-        (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
-        _executeAutoCompound(tokenId, caller);
+
+        // Differentiate action types by data length:
+        // - Auto-compound: abi.encode(uint256 tokenId, address caller) = 64 bytes
+        // - Immediate execution: abi.encode(uint256, PoolKey, ...) = much larger
+        if (data.length > 64) {
+            // Immediate execution action
+            (
+                uint256 tokenId,
+                PoolKey memory poolKey,
+                PositionMode mode,
+                bool isUpperTrigger,
+                int24 tick,
+                int24 autoExitTickLower,
+                int24 autoExitTickUpper
+            ) = abi.decode(data, (uint256, PoolKey, PositionMode, bool, int24, int24, int24));
+
+            _executeImmediateActionUnlocked(poolKey, tokenId, mode, isUpperTrigger, tick, autoExitTickLower, autoExitTickUpper);
+        } else {
+            // Default: auto-compound action (64 bytes exactly)
+            (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
+            _executeAutoCompound(tokenId, caller);
+        }
         return bytes("");
+    }
+
+    /// @notice Executes immediate action when poolManager is unlocked
+    /// @dev Called from unlockCallback to handle immediate auto-exit, auto-range, or auto-lend
+    function _executeImmediateActionUnlocked(
+        PoolKey memory poolKey,
+        uint256 tokenId,
+        PositionMode mode,
+        bool isUpperTrigger,
+        int24, /* tick */
+        int24, /* autoExitTickLower */
+        int24 /* autoExitTickUpper */
+    ) internal {
+        PoolId poolId = poolKey.toId();
+        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
+            // For combined mode triggered immediately, treat as auto-exit
+            // (the trigger tick determination was already done in _checkTriggerConditions)
+            _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
+        } else if (mode == PositionMode.AUTO_LEND) {
+            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
+        } else if (mode == PositionMode.AUTO_RANGE) {
+            _handleAutoRange(poolKey, poolId, tokenId);
+        }
     }
 
     /// @notice Internal function that executes the auto-compound logic
