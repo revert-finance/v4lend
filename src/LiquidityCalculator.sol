@@ -14,17 +14,9 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @title LiquidityCalculator
-/// @notice Library for calculating optimal swap amounts for double-sided liquidity deposits for Uniswap V4
-/// @dev Uses analytic solutions to efficiently compute optimal swap parameters
-library LiquidityCalculator {
-    using FullMath for uint256;
-    using UnsafeMath for uint256;
-    using StateLibrary for IPoolManager;
-
-    /// @notice Maximum fee in hundredths of a bip (1e6 = 100%)
-    uint256 internal constant MAX_FEE_PIPS = 1e6;
-
+/// @title ILiquidityCalculator
+/// @notice Interface for LiquidityCalculator contract
+interface ILiquidityCalculator {
     error Invalid_Pool();
     error Invalid_Tick_Range();
     error Math_Overflow();
@@ -35,6 +27,37 @@ library LiquidityCalculator {
         PoolId poolIdentifier;
         int24 tickSpacing;
     }
+
+    /// @notice Calculate optimal swap amount for double-sided liquidity deposit (simple version)
+    function calculateSimple(
+        uint160 sqrtPrice,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0,
+        uint256 amount1,
+        uint24 feeRate
+    ) external pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1);
+
+    /// @notice Calculate optimal swap amount for double-sided liquidity deposit (same pool version)
+    function calculateSamePool(
+        V4PoolInfo memory pool,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0Target,
+        uint256 amount1Target
+    ) external view returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1, uint160 sqrtPrice);
+}
+
+/// @title LiquidityCalculator
+/// @notice Contract for calculating optimal swap amounts for double-sided liquidity deposits for Uniswap V4
+/// @dev Uses analytic solutions to efficiently compute optimal swap parameters
+contract LiquidityCalculator is ILiquidityCalculator {
+    using FullMath for uint256;
+    using UnsafeMath for uint256;
+    using StateLibrary for IPoolManager;
+
+    /// @notice Maximum fee in hundredths of a bip (1e6 = 100%)
+    uint256 internal constant MAX_FEE_PIPS = 1e6;
 
     /// @notice Parameters for finding the next initialized tick in the tick bitmap
     struct NextInitializedTickParams {
@@ -93,18 +116,18 @@ library LiquidityCalculator {
         uint256 amount0,
         uint256 amount1,
         uint24 feeRate
-    ) internal pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) {
+    ) external pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) {
         if (amount0 == 0 && amount1 == 0) return (0, 0, false);
         if (lowerTick >= upperTick || lowerTick < TickMath.MIN_TICK || upperTick > TickMath.MAX_TICK) {
             revert Invalid_Tick_Range();
         }
-        
+
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(lowerTick);
         uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upperTick);
-        
+
         // Determine swap direction
-        swapDir0to1 = shouldSwap0to1(amount0, amount1, sqrtPrice, sqrtLower, sqrtUpper);
-        
+        swapDir0to1 = _shouldSwap0to1(amount0, amount1, sqrtPrice, sqrtLower, sqrtUpper);
+
         unchecked {
             if (sqrtPrice <= sqrtLower) {
                 (inputAmount, outputAmount) = _calculateSwapBelowRange(amount0, amount1, sqrtPrice, sqrtLower, feeRate);
@@ -139,7 +162,7 @@ library LiquidityCalculator {
         uint24 feeRate
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
         if (amount1 == 0) return (0, 0);
-        
+
         // Swap all token1 -> token0
         inputAmount = amount1;
         uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
@@ -165,7 +188,7 @@ library LiquidityCalculator {
         uint24 feeRate
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
         if (amount0 == 0) return (0, 0);
-        
+
         // Swap all token0 -> token1
         inputAmount = amount0;
         uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
@@ -197,7 +220,7 @@ library LiquidityCalculator {
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
         uint256 requiredRatio = _calculateRequiredRatio(sqrtPrice, sqrtLower, sqrtUpper);
         uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
-        
+
         if (swapDir0to1) {
             (inputAmount, outputAmount) = _calculateSwap0to1InRange(
                 amount0,
@@ -258,7 +281,7 @@ library LiquidityCalculator {
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
         uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
         if (amount0 <= requiredAmount0) return (0, 0);
-        
+
         uint256 excess0 = amount0 - requiredAmount0;
         uint256 swapRate = FullMath.mulDiv(
             FullMath.mulDiv(requiredRatio, feeMultiplier, FixedPoint96.Q96),
@@ -267,10 +290,10 @@ library LiquidityCalculator {
         );
         uint256 denominator = FixedPoint96.Q96 + swapRate;
         inputAmount = FullMath.mulDiv(excess0, FixedPoint96.Q96, denominator);
-        
+
         // Cap at available amount
         if (inputAmount > amount0) inputAmount = amount0;
-        
+
         // Calculate output
         outputAmount = FullMath.mulDiv(
             FullMath.mulDiv(inputAmount, sqrtPrice, sqrtUpper),
@@ -298,7 +321,7 @@ library LiquidityCalculator {
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
         uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
         if (requiredAmount0 <= amount0) return (0, 0);
-        
+
         uint256 deficit0 = requiredAmount0 - amount0;
         uint256 swapRate = FullMath.mulDiv(
             FullMath.mulDiv(requiredRatio, feeMultiplier, FixedPoint96.Q96),
@@ -311,10 +334,10 @@ library LiquidityCalculator {
             MAX_FEE_PIPS,
             denominator
         );
-        
+
         // Cap at available amount
         if (inputAmount > amount1) inputAmount = amount1;
-        
+
         // Calculate output
         outputAmount = FullMath.mulDiv(
             FullMath.mulDiv(inputAmount, sqrtLower, sqrtPrice),
@@ -340,7 +363,7 @@ library LiquidityCalculator {
         int24 upperTick,
         uint256 amount0Target,
         uint256 amount1Target
-    ) internal view returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1, uint160 sqrtPrice) {
+    ) external view returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1, uint160 sqrtPrice) {
         if (amount0Target == 0 && amount1Target == 0) return (0, 0, false, 0);
         if (lowerTick >= upperTick || lowerTick < TickMath.MIN_TICK || upperTick > TickMath.MAX_TICK) {
             revert Invalid_Tick_Range();
@@ -376,9 +399,9 @@ library LiquidityCalculator {
             mstore(add(state, 0xc0), sqrtUpper) // offset 0xc0
         }
         // Determine swap direction
-        swapDir0to1 = shouldSwap0to1(amount0Target, amount1Target, sqrtPrice, sqrtLower, sqrtUpper);
+        swapDir0to1 = _shouldSwap0to1(amount0Target, amount1Target, sqrtPrice, sqrtLower, sqrtUpper);
         // Simulate optimal swap by crossing ticks until direction reverses
-        traverseTicks(TraverseTicksParams({pool: pool, state: state, sqrtPrice: sqrtPrice, swapDir0to1: swapDir0to1}));
+        _traverseTicks(TraverseTicksParams({pool: pool, state: state, sqrtPrice: sqrtPrice, swapDir0to1: swapDir0to1}));
         // Load final state after crossing ticks
         uint128 lastLiquidity;
         uint160 sqrtPriceLast;
@@ -418,7 +441,7 @@ library LiquidityCalculator {
                 }
                 // If price is in range, use analytic solution
                 if (sqrtPriceLast >= sqrtLower) {
-                    sqrtPrice = calculateSwap1to0(state);
+                    sqrtPrice = _calculateSwap1to0(state);
                     inputAmount = amount1Target - lastAmount1
                         + SqrtPriceMath.getAmount1Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, true).mulDiv(
                             MAX_FEE_PIPS, MAX_FEE_PIPS - state.feeRate
@@ -452,7 +475,7 @@ library LiquidityCalculator {
                 }
                 // If price is in range, use analytic solution
                 if (sqrtPriceLast <= sqrtUpper) {
-                    sqrtPrice = calculateSwap0to1(state);
+                    sqrtPrice = _calculateSwap0to1(state);
                     inputAmount = amount0Target - lastAmount0
                         + SqrtPriceMath.getAmount0Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, true).mulDiv(
                             MAX_FEE_PIPS, MAX_FEE_PIPS - state.feeRate
@@ -614,7 +637,7 @@ library LiquidityCalculator {
     /// @notice Cross ticks during optimal swap calculation
     /// @dev Simulates crossing initialized ticks until swap direction reverses or price target reached
     /// @param params Parameters including pool, state, current price, and swap direction
-    function traverseTicks(TraverseTicksParams memory params) private view {
+    function _traverseTicks(TraverseTicksParams memory params) private view {
         int24 nextTick;
         int16 wordPosition = type(int16).min;
         uint256 tickBitmap;
@@ -677,7 +700,7 @@ library LiquidityCalculator {
             // Stop if we didn't reach the next tick or if direction reversed
             if (params.sqrtPrice != sqrtPriceNext) break;
             if (
-                shouldSwap0to1(
+                _shouldSwap0to1(
                     amount0Target, amount1Target, params.sqrtPrice, params.state.sqrtLower, params.state.sqrtUpper
                 ) != params.swapDir0to1
             ) {
@@ -709,7 +732,7 @@ library LiquidityCalculator {
     /// @dev Solves quadratic equation: root = (sqrt(b^2 + 4ac) + b) / 2a
     /// @param state Pool state at the last tick of optimal swap
     /// @return sqrtPriceFinal Final sqrt price after optimal swap
-    function calculateSwap0to1(SwapState memory state) private pure returns (uint160 sqrtPriceFinal) {
+    function _calculateSwap0to1(SwapState memory state) private pure returns (uint160 sqrtPriceFinal) {
         uint256 a;
         uint256 b;
         uint256 c;
@@ -779,7 +802,7 @@ library LiquidityCalculator {
     /// @dev Solves quadratic equation: root = (sqrt(b^2 + 4ac) + b) / 2a
     /// @param state Pool state at the last tick of optimal swap
     /// @return sqrtPriceFinal Final sqrt price after optimal swap
-    function calculateSwap1to0(SwapState memory state) private pure returns (uint160 sqrtPriceFinal) {
+    function _calculateSwap1to0(SwapState memory state) private pure returns (uint160 sqrtPriceFinal) {
         uint256 a;
         uint256 b;
         uint256 c;
@@ -857,7 +880,7 @@ library LiquidityCalculator {
     /// @param sqrtLower Lower bound sqrt price
     /// @param sqrtUpper Upper bound sqrt price
     /// @return true if should swap token0->token1, false otherwise
-    function checkSwapDirectionInRange(
+    function _checkSwapDirectionInRange(
         uint256 amount0Target,
         uint256 amount1Target,
         uint256 sqrtPrice,
@@ -881,18 +904,18 @@ library LiquidityCalculator {
     /// @param sqrtLower Lower bound sqrt price
     /// @param sqrtUpper Upper bound sqrt price
     /// @return true if should swap token0->token1, false otherwise
-    function shouldSwap0to1(
+    function _shouldSwap0to1(
         uint256 amount0Target,
         uint256 amount1Target,
         uint256 sqrtPrice,
         uint256 sqrtLower,
         uint256 sqrtUpper
-    ) internal pure returns (bool) {
+    ) private pure returns (bool) {
         // If price is below range, only need token0 (swap token1->token0)
         if (sqrtPrice <= sqrtLower) return false;
         // If price is above range, only need token1 (swap token0->token1)
         else if (sqrtPrice >= sqrtUpper) return true;
         // If price is in range, compare liquidity requirements
-        else return checkSwapDirectionInRange(amount0Target, amount1Target, sqrtPrice, sqrtLower, sqrtUpper);
+        else return _checkSwapDirectionInRange(amount0Target, amount1Target, sqrtPrice, sqrtLower, sqrtUpper);
     }
 }

@@ -6,7 +6,7 @@ import {console} from "forge-std/console.sol";
 
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
-import {LiquidityCalculator} from "../src/LiquidityCalculator.sol";
+import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -28,16 +28,22 @@ import {V4PoolManagerDeployer} from "hookmate/artifacts/V4PoolManager.sol";
 import {V4PositionManagerDeployer} from "hookmate/artifacts/V4PositionManager.sol";
 
 contract LiquidityCalculatorHelper {
+    ILiquidityCalculator public immutable liquidityCalculator;
+
+    constructor(ILiquidityCalculator _liquidityCalculator) {
+        liquidityCalculator = _liquidityCalculator;
+    }
+
     function getOptimalSwap(
-        LiquidityCalculator.V4PoolInfo memory cfg,
+        ILiquidityCalculator.V4PoolInfo memory cfg,
         int24 lower,
         int24 upper,
         uint256 amt0,
         uint256 amt1
     ) external view returns (uint256 inAmt, uint256 outAmt, bool dir, uint160 price) {
-        return LiquidityCalculator.calculateSamePool(cfg, lower, upper, amt0, amt1);
+        return liquidityCalculator.calculateSamePool(cfg, lower, upper, amt0, amt1);
     }
-    
+
     function getSimpleSwap(
         uint160 sqrtPrice,
         int24 lower,
@@ -45,8 +51,8 @@ contract LiquidityCalculatorHelper {
         uint256 amt0,
         uint256 amt1,
         uint24 feeRate
-    ) external pure returns (uint256 inAmt, uint256 outAmt, bool dir) {
-        return LiquidityCalculator.calculateSimple(sqrtPrice, lower, upper, amt0, amt1, feeRate);
+    ) external view returns (uint256 inAmt, uint256 outAmt, bool dir) {
+        return liquidityCalculator.calculateSimple(sqrtPrice, lower, upper, amt0, amt1, feeRate);
     }
 }
 
@@ -59,8 +65,9 @@ contract LiquidityCalculatorTest is Test {
     IPoolManager poolManager;
     IPositionManager positionManager;
     IPermit2 permit2;
-    LiquidityCalculator.V4PoolInfo poolCallee;
+    ILiquidityCalculator.V4PoolInfo poolCallee;
     LiquidityCalculatorHelper helper;
+    LiquidityCalculator liquidityCalculator;
     
     // Test tokens
     ERC20Mock token0;
@@ -135,15 +142,18 @@ contract LiquidityCalculatorTest is Test {
         // Initialize the pool in PoolManager
         poolManager.initialize(poolKey, SQRT_PRICE_1_0);
         
+        // Deploy LiquidityCalculator contract
+        liquidityCalculator = new LiquidityCalculator();
+
         // Create pool callee struct
-        poolCallee = LiquidityCalculator.V4PoolInfo({
+        poolCallee = ILiquidityCalculator.V4PoolInfo({
             poolMgr: poolManager,
             poolIdentifier: poolId,
             tickSpacing: DEFAULT_TICK_SPACING
         });
-        
+
         // Deploy helper contract
-        helper = new LiquidityCalculatorHelper();
+        helper = new LiquidityCalculatorHelper(liquidityCalculator);
         
         // Set up token approvals for PositionManager
         token0.approve(address(permit2), type(uint256).max);
@@ -475,8 +485,8 @@ contract LiquidityCalculatorTest is Test {
     /// @notice Test with empty pool (no initial liquidity)
     function test_LiquidityCalculator_EmptyPool() public {
         // Don't add initial liquidity
-        
-        vm.expectRevert(LiquidityCalculator.Math_Overflow.selector);
+
+        vm.expectRevert(ILiquidityCalculator.Math_Overflow.selector);
         helper.getOptimalSwap(
                 poolCallee,
                 -600,
