@@ -238,26 +238,51 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
         ) = _getSwapParams(poolKey, instructions);
 
+        SwapAndIncreaseLiquidityParams memory increaseParams = _buildSwapAndIncreaseParams(
+            tokenId, instructions, amount0, amount1,
+            swapSource, amountIn0, amountOut0Min, swapData0,
+            amountIn1, amountOut1Min, swapData1
+        );
+
         (liquidity, amount0, amount1) = _swapAndIncrease(
-            SwapAndIncreaseLiquidityParams(
-                tokenId,
-                amount0,
-                amount1,
-                instructions.recipient,
-                instructions.deadline,
-                swapSource,
-                amountIn0, amountOut0Min, swapData0,
-                amountIn1, amountOut1Min, swapData1,
-                instructions.amountAddMin0,
-                instructions.amountAddMin1,
-                bytes(""),
-                instructions.increaseLiquidityHookData
-            ),
+            increaseParams,
             poolKey.currency0,
             poolKey.currency1
         );
 
         emit CompoundFees(tokenId, liquidity, amount0, amount1);
+    }
+
+    /// @dev Helper to build SwapAndIncreaseLiquidityParams - extracted to reduce stack depth
+    function _buildSwapAndIncreaseParams(
+        uint256 tokenId,
+        Instructions memory instructions,
+        uint256 amount0,
+        uint256 amount1,
+        Currency swapSource,
+        uint256 amountIn0,
+        uint256 amountOut0Min,
+        bytes memory swapData0,
+        uint256 amountIn1,
+        uint256 amountOut1Min,
+        bytes memory swapData1
+    ) internal pure returns (SwapAndIncreaseLiquidityParams memory params) {
+        params.tokenId = tokenId;
+        params.amount0 = amount0;
+        params.amount1 = amount1;
+        params.recipient = instructions.recipient;
+        params.deadline = instructions.deadline;
+        params.swapSourceToken = swapSource;
+        params.amountIn0 = amountIn0;
+        params.amountOut0Min = amountOut0Min;
+        params.swapData0 = swapData0;
+        params.amountIn1 = amountIn1;
+        params.amountOut1Min = amountOut1Min;
+        params.swapData1 = swapData1;
+        params.amountAddMin0 = instructions.amountAddMin0;
+        params.amountAddMin1 = instructions.amountAddMin1;
+        params.decreaseLiquidityHookData = bytes("");
+        params.increaseLiquidityHookData = instructions.increaseLiquidityHookData;
     }
 
     /// @notice Execute change range operation - swap tokens and mint new position
@@ -275,31 +300,85 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
         ) = _getSwapParams(poolKey, instructions);
 
-        (newTokenId, liquidity, amount0, amount1) = _swapAndMint(
-            SwapAndMintParams(
-                poolKey.currency0,
-                poolKey.currency1,
-                instructions.fee,
-                instructions.tickSpacing,
-                instructions.tickLower,
-                instructions.tickUpper,
-                amount0,
-                amount1,
-                instructions.recipient,
-                instructions.recipientNFT,
-                instructions.deadline,
-                swapSource,
-                amountIn0, amountOut0Min, swapData0,
-                amountIn1, amountOut1Min, swapData1,
-                instructions.amountAddMin0,
-                instructions.amountAddMin1,
-                instructions.swapAndMintReturnData,
-                instructions.hook,
-                instructions.increaseLiquidityHookData
-            )
+        SwapAndMintParams memory mintParams = _buildSwapAndMintParams(
+            poolKey, instructions, amount0, amount1,
+            swapSource, amountIn0, amountOut0Min, swapData0,
+            amountIn1, amountOut1Min, swapData1
         );
 
+        (newTokenId, liquidity, amount0, amount1) = _swapAndMint(mintParams);
+
         emit ChangeRange(tokenId, newTokenId, liquidity, amount0, amount1);
+    }
+
+    /// @dev Helper to build SwapAndMintParams - extracted to reduce stack depth
+    function _buildSwapAndMintParams(
+        PoolKey memory poolKey,
+        Instructions memory instructions,
+        uint256 amount0,
+        uint256 amount1,
+        Currency swapSource,
+        uint256 amountIn0,
+        uint256 amountOut0Min,
+        bytes memory swapData0,
+        uint256 amountIn1,
+        uint256 amountOut1Min,
+        bytes memory swapData1
+    ) internal pure returns (SwapAndMintParams memory params) {
+        params.token0 = poolKey.currency0;
+        params.token1 = poolKey.currency1;
+        params.fee = instructions.fee;
+        params.tickSpacing = instructions.tickSpacing;
+        params.tickLower = instructions.tickLower;
+        params.tickUpper = instructions.tickUpper;
+        params.amount0 = amount0;
+        params.amount1 = amount1;
+        params.recipient = instructions.recipient;
+        params.recipientNFT = instructions.recipientNFT;
+        params.deadline = instructions.deadline;
+        params.swapSourceToken = swapSource;
+        params.amountIn0 = amountIn0;
+        params.amountOut0Min = amountOut0Min;
+        params.swapData0 = swapData0;
+        params.amountIn1 = amountIn1;
+        params.amountOut1Min = amountOut1Min;
+        params.swapData1 = swapData1;
+        params.amountAddMin0 = instructions.amountAddMin0;
+        params.amountAddMin1 = instructions.amountAddMin1;
+        params.returnData = instructions.swapAndMintReturnData;
+        params.hook = instructions.hook;
+        params.mintHookData = instructions.increaseLiquidityHookData;
+    }
+
+    /// @dev Helper to build SwapAndMintParams for _swapAndIncrease - extracted to reduce stack depth
+    function _buildSwapAndMintParamsForIncrease(
+        SwapAndIncreaseLiquidityParams memory params,
+        Currency token0,
+        Currency token1
+    ) internal pure returns (SwapAndMintParams memory mintParams) {
+        mintParams.token0 = token0;
+        mintParams.token1 = token1;
+        mintParams.fee = 0;
+        mintParams.tickSpacing = 0;
+        mintParams.tickLower = 0;
+        mintParams.tickUpper = 0;
+        mintParams.amount0 = params.amount0;
+        mintParams.amount1 = params.amount1;
+        mintParams.recipient = params.recipient;
+        mintParams.recipientNFT = params.recipient;
+        mintParams.deadline = params.deadline;
+        mintParams.swapSourceToken = params.swapSourceToken;
+        mintParams.amountIn0 = params.amountIn0;
+        mintParams.amountOut0Min = params.amountOut0Min;
+        mintParams.swapData0 = params.swapData0;
+        mintParams.amountIn1 = params.amountIn1;
+        mintParams.amountOut1Min = params.amountOut1Min;
+        mintParams.swapData1 = params.swapData1;
+        mintParams.amountAddMin0 = params.amountAddMin0;
+        mintParams.amountAddMin1 = params.amountAddMin1;
+        mintParams.returnData = bytes("");
+        mintParams.hook = address(0);
+        mintParams.mintHookData = bytes("");
     }
 
     /// @notice Gets swap parameters based on target token direction
@@ -658,33 +737,8 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         internal
         returns (uint128 liquidity, uint256 added0, uint256 added1)
     {
-         (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(
-            SwapAndMintParams(
-                token0,
-                token1,
-                0,
-                0,
-                0,
-                0,
-                params.amount0,
-                params.amount1,
-                params.recipient,
-                params.recipient,
-                params.deadline,
-                params.swapSourceToken,
-                params.amountIn0,
-                params.amountOut0Min,
-                params.swapData0,
-                params.amountIn1,
-                params.amountOut1Min,
-                params.swapData1,
-                params.amountAddMin0,
-                params.amountAddMin1,
-                bytes(""),
-                address(0),
-                bytes("")
-            )
-        );
+        SwapAndMintParams memory swapParams = _buildSwapAndMintParamsForIncrease(params, token0, token1);
+        (uint256 total0, uint256 total1) = _swapAndPrepareAmounts(swapParams);
 
         // Get position info to determine currencies for TAKE_PAIR
         (PoolKey memory poolKey, PositionInfo info) = positionManager.getPoolAndPositionInfo(params.tokenId);

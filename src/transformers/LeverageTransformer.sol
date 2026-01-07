@@ -74,42 +74,19 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         // collect fees before
         (uint256 amount0, uint256 amount1) = _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
 
-        uint256 amount = params.borrowAmount;
-        IVault(msg.sender).borrow(params.tokenId, amount);
-        
+        IVault(msg.sender).borrow(params.tokenId, params.borrowAmount);
+
         Currency token = Currency.wrap(IVault(msg.sender).asset());
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
- 
-        amount0 += token == token0 ? amount : 0;
-        amount1 += token == token1 ? amount : 0;
 
-        if (params.amountIn0 != 0) {
-            (uint256 amountIn, uint256 amountOut) = _routerSwap(
-                Swapper.RouterSwapParams(
-                    token, token0, params.amountIn0, params.amountOut0Min, params.swapData0
-                )
-            );
-            if (token == token1) {
-                amount1 -= amountIn;
-            }
-            amount -= amountIn;
-            amount0 += amountOut;
-        }
-        if (params.amountIn1 != 0) {
-            (uint256 amountIn, uint256 amountOut) = _routerSwap(
-                Swapper.RouterSwapParams(
-                    token, token1, params.amountIn1, params.amountOut1Min, params.swapData1
-                )
-            );
-            if (token == token0) {
-                amount0 -= amountIn;
-            }
-            amount -= amountIn;
-            amount1 += amountOut;
-        }
+        amount0 += token == token0 ? params.borrowAmount : 0;
+        amount1 += token == token1 ? params.borrowAmount : 0;
+
+        // Perform swaps in separate scope to reduce stack depth
+        (amount0, amount1) = _leverageUpSwaps(params, token, token0, token1, amount0, amount1);
 
         _handleApproval(permit2, token0, amount0);
         _handleApproval(permit2, token1, amount1);
@@ -128,9 +105,55 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             type(uint128).max,
             params.increaseLiquidityHookData
         );
-       
+
         positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), params.deadline);
 
+        _leverageUpFinalize(params, token, token0, token1, amount0, amount1);
+    }
+
+    /// @dev Helper function for swaps during leverageUp - extracted to reduce stack depth
+    function _leverageUpSwaps(
+        LeverageUpParams calldata params,
+        Currency token,
+        Currency token0,
+        Currency token1,
+        uint256 amount0,
+        uint256 amount1
+    ) internal returns (uint256, uint256) {
+        if (params.amountIn0 != 0) {
+            (uint256 amountIn, uint256 amountOut) = _routerSwap(
+                Swapper.RouterSwapParams(
+                    token, token0, params.amountIn0, params.amountOut0Min, params.swapData0
+                )
+            );
+            if (token == token1) {
+                amount1 -= amountIn;
+            }
+            amount0 += amountOut;
+        }
+        if (params.amountIn1 != 0) {
+            (uint256 amountIn, uint256 amountOut) = _routerSwap(
+                Swapper.RouterSwapParams(
+                    token, token1, params.amountIn1, params.amountOut1Min, params.swapData1
+                )
+            );
+            if (token == token0) {
+                amount0 -= amountIn;
+            }
+            amount1 += amountOut;
+        }
+        return (amount0, amount1);
+    }
+
+    /// @dev Helper function for finalizing leverageUp - extracted to reduce stack depth
+    function _leverageUpFinalize(
+        LeverageUpParams calldata params,
+        Currency token,
+        Currency token0,
+        Currency token1,
+        uint256 amount0,
+        uint256 amount1
+    ) internal {
         uint256 added0 = amount0 - token0.balanceOfSelf();
         uint256 added1 = amount1 - token1.balanceOfSelf();
 
@@ -148,8 +171,11 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         if (amount1 > added1) {
             token1.transfer(params.recipient, amount1 - added1);
         }
-        if (!(token == token0) && !(token == token1) && amount != 0) {
-            token.transfer(params.recipient, amount);
+        if (!(token == token0) && !(token == token1)) {
+            uint256 leftover = token.balanceOfSelf();
+            if (leftover != 0) {
+                token.transfer(params.recipient, leftover);
+            }
         }
     }
 
@@ -457,27 +483,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     /// @dev Helper function to call transform on vault
     function _callTransform(LeverageInParams calldata params, uint256 tokenId) internal returns (uint256) {
         // Build transform params for the leverageInTransform method
-        LeverageInTransformParams memory transformParams = LeverageInTransformParams({
-            tokenId: tokenId,
-            token0: params.token0,
-            token1: params.token1,
-            fee: params.fee,
-            tickSpacing: params.tickSpacing,
-            hook: params.hook,
-            tickLower: params.tickLower,
-            tickUpper: params.tickUpper,
-            borrowAmount: params.borrowAmount,
-            amountIn: params.amountIn,
-            amountOutMin: params.amountOutMin,
-            swapData: params.swapData,
-            swapDirection: params.swapDirection,
-            amountAddMin0: params.amountAddMin0,
-            amountAddMin1: params.amountAddMin1,
-            recipient: params.recipient,
-            deadline: params.deadline,
-            mintHookData: params.mintFinalHookData,
-            decreaseLiquidityHookData: params.decreaseLiquidityHookData
-        });
+        LeverageInTransformParams memory transformParams = _buildTransformParams(params, tokenId);
 
         // Call transform on the vault to create the final leveraged position
         bytes memory transformData = abi.encodeWithSelector(
@@ -486,6 +492,32 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         );
 
         return IVault(params.vault).transform(tokenId, address(this), transformData);
+    }
+
+    /// @dev Helper to build LeverageInTransformParams - extracted to reduce stack depth
+    function _buildTransformParams(
+        LeverageInParams calldata params,
+        uint256 tokenId
+    ) internal pure returns (LeverageInTransformParams memory transformParams) {
+        transformParams.tokenId = tokenId;
+        transformParams.token0 = params.token0;
+        transformParams.token1 = params.token1;
+        transformParams.fee = params.fee;
+        transformParams.tickSpacing = params.tickSpacing;
+        transformParams.hook = params.hook;
+        transformParams.tickLower = params.tickLower;
+        transformParams.tickUpper = params.tickUpper;
+        transformParams.borrowAmount = params.borrowAmount;
+        transformParams.amountIn = params.amountIn;
+        transformParams.amountOutMin = params.amountOutMin;
+        transformParams.swapData = params.swapData;
+        transformParams.swapDirection = params.swapDirection;
+        transformParams.amountAddMin0 = params.amountAddMin0;
+        transformParams.amountAddMin1 = params.amountAddMin1;
+        transformParams.recipient = params.recipient;
+        transformParams.deadline = params.deadline;
+        transformParams.mintHookData = params.mintFinalHookData;
+        transformParams.decreaseLiquidityHookData = params.decreaseLiquidityHookData;
     }
 
     /// @notice Transform method called from vault to create the final leveraged position
