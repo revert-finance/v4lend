@@ -2,6 +2,8 @@
 pragma solidity ^0.8.0;
 
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -10,9 +12,10 @@ import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmo
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
@@ -22,7 +25,7 @@ import {Transformer, Ownable} from "./Transformer.sol";
 
 /// @title LeverageTransformer
 /// @notice Functionality to leverage / deleverage positions direcly in one tx
-contract LeverageTransformer is Transformer, Swapper {
+contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
     /// @notice Permit2 contract
     IPermit2 public immutable permit2;
@@ -237,5 +240,434 @@ contract LeverageTransformer is Transformer, Swapper {
         if (amount1 != 0 && !(token == token1)) {
             token1.transfer(params.recipient, amount1);
         }
+    }
+
+    struct LeverageInParams {
+        // vault to create position in
+        address vault;
+        // pool key parameters (one of token0/token1 must be the vault's lend token)
+        Currency token0;
+        Currency token1;
+        uint24 fee;
+        int24 tickSpacing;
+        address hook;
+        // position ticks for the leveraged position
+        int24 tickLower;
+        int24 tickUpper;
+        // initial token amount provided by user (must be the non-lend token)
+        uint256 initialAmount;
+        // how much to borrow
+        uint256 borrowAmount;
+        // how much to swap from lend token to other token (or vice versa if swapDirection is false)
+        uint256 amountIn;
+        uint256 amountOutMin;
+        bytes swapData;
+        // true = swap lend token to other token, false = swap other token to lend token
+        bool swapDirection;
+        // for adding liquidity slippage
+        uint256 amountAddMin0;
+        uint256 amountAddMin1;
+        // recipient for leftover tokens
+        address recipient;
+        // for all uniswap deadlineable functions
+        uint256 deadline;
+        // hook data for minting the dummy position (optional)
+        bytes mintHookData;
+        // hook data for the final leveraged position (optional)
+        bytes mintFinalHookData;
+        // hook data for decreasing liquidity from dummy position (optional)
+        bytes decreaseLiquidityHookData;
+    }
+
+    struct LeverageInTransformParams {
+        // which token is being transformed (dummy position)
+        uint256 tokenId;
+        // pool key parameters for the new position (one of token0/token1 must be the vault's lend token)
+        Currency token0;
+        Currency token1;
+        uint24 fee;
+        int24 tickSpacing;
+        address hook;
+        // position ticks for the final leveraged position
+        int24 tickLower;
+        int24 tickUpper;
+        // how much to borrow
+        uint256 borrowAmount;
+        // how much to swap from lend token to other token (or vice versa if swapDirection is false)
+        uint256 amountIn;
+        uint256 amountOutMin;
+        bytes swapData;
+        // true = swap lend token to other token, false = swap other token to lend token
+        bool swapDirection;
+        // for adding liquidity slippage
+        uint256 amountAddMin0;
+        uint256 amountAddMin1;
+        // recipient for leftover tokens
+        address recipient;
+        // for all uniswap deadlineable functions
+        uint256 deadline;
+        // hook data for the final leveraged position (optional)
+        bytes mintHookData;
+        // hook data for decreasing liquidity from dummy position (optional)
+        bytes decreaseLiquidityHookData;
+    }
+
+    /// @notice Creates a leveraged position from a single token
+    /// @dev Creates a one-sided dummy position, adds it to vault as collateral, then transforms it to the desired position
+    /// @param params The parameters for creating the leveraged position
+    /// @return tokenId The token ID of the final leveraged position
+    function leverageIn(LeverageInParams calldata params) external payable returns (uint256 tokenId) {
+        if (!vaults[params.vault]) {
+            revert Unauthorized();
+        }
+
+        // Validate that one token is the lend token
+        Currency lendToken = Currency.wrap(IVault(params.vault).asset());
+        Currency otherToken;
+        if (lendToken == params.token0) {
+            otherToken = params.token1;
+        } else if (lendToken == params.token1) {
+            otherToken = params.token0;
+        } else {
+            revert InvalidToken();
+        }
+
+        // Transfer initial token from user and create dummy position
+        tokenId = _createDummyPosition(params, otherToken);
+
+        // Send the dummy position to the vault (creates a loan with 0 debt)
+        // The owner is set to this contract (LeverageTransformer) so we can call transform directly
+        IERC721(address(positionManager)).safeTransferFrom(address(this), params.vault, tokenId);
+
+        // Call transform on the vault to create the final leveraged position
+        tokenId = _callTransform(params, tokenId);
+
+        // Transfer ownership of the loan to the original caller
+        IVault(params.vault).transferLoan(tokenId, params.recipient);
+    }
+
+    /// @dev Helper function to create the dummy position
+    function _createDummyPosition(LeverageInParams calldata params, Currency otherToken) internal returns (uint256 tokenId) {
+        // Transfer initial token from user (must be the non-lend token)
+        if (!otherToken.isAddressZero()) {
+            SafeERC20.safeTransferFrom(
+                IERC20(Currency.unwrap(otherToken)),
+                msg.sender,
+                address(this),
+                params.initialAmount
+            );
+        }
+
+        // Create pool key
+        PoolKey memory poolKey = PoolKey({
+            currency0: params.token0,
+            currency1: params.token1,
+            fee: params.fee,
+            tickSpacing: params.tickSpacing,
+            hooks: IHooks(params.hook)
+        });
+
+        // Get dummy tick range based on which token is the other token
+        (int24 dummyTickLower, int24 dummyTickUpper) = _getDummyTickRange(poolKey, otherToken, params.tickSpacing);
+
+        // Handle approval for the initial token
+        _handleApproval(permit2, otherToken, params.initialAmount);
+
+        // Calculate liquidity for dummy position
+        uint256 amount0 = otherToken == params.token0 ? params.initialAmount : 0;
+        uint256 amount1 = otherToken == params.token1 ? params.initialAmount : 0;
+
+        uint128 liquidity = _calculateLiquidity(dummyTickLower, dummyTickUpper, poolKey, amount0, amount1);
+
+        // Mint the dummy position
+        _mintDummyPosition(poolKey, dummyTickLower, dummyTickUpper, liquidity, params);
+
+        // Get the newly minted token ID
+        tokenId = positionManager.nextTokenId() - 1;
+
+        // Return any leftover tokens to the caller (may occur due to rounding)
+        uint256 leftover = otherToken.balanceOfSelf();
+        if (leftover > 0) {
+            otherToken.transfer(msg.sender, leftover);
+        }
+    }
+
+    /// @dev Helper function to get dummy tick range for one-sided position
+    /// @dev Uses a wide tick range to ensure all initial tokens can be deposited
+    function _getDummyTickRange(
+        PoolKey memory poolKey,
+        Currency otherToken,
+        int24 tickSpacing
+    ) internal view returns (int24 dummyTickLower, int24 dummyTickUpper) {
+        // Get current tick to create a one-sided position
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+
+        // Round current tick to tick spacing
+        int24 roundedTick = (currentTick / tickSpacing) * tickSpacing;
+
+        // Use MIN_TICK and MAX_TICK aligned to tick spacing to create a wide range
+        // This ensures all tokens can be deposited into the dummy position
+        int24 minTick = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
+        int24 maxTick = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
+
+        if (otherToken == poolKey.currency0) {
+            // Token0 only position: must be above current price
+            // Use range from just above current tick to max tick
+            dummyTickLower = roundedTick + tickSpacing;
+            dummyTickUpper = maxTick;
+        } else {
+            // Token1 only position: must be below current price
+            // Use range from min tick to just below current tick
+            dummyTickLower = minTick;
+            dummyTickUpper = roundedTick - tickSpacing;
+        }
+    }
+
+    /// @dev Helper function to mint the dummy position
+    function _mintDummyPosition(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 liquidity,
+        LeverageInParams calldata params
+    ) internal {
+        (bytes memory actions, bytes[] memory mintParams) = _buildActionsForIncreasingLiquidity(
+            uint8(Actions.MINT_POSITION),
+            poolKey.currency0,
+            poolKey.currency1
+        );
+
+        mintParams[0] = abi.encode(
+            poolKey,
+            tickLower,
+            tickUpper,
+            liquidity,
+            type(uint128).max,
+            type(uint128).max,
+            address(this),
+            params.mintHookData
+        );
+
+        positionManager.modifyLiquidities{value: address(this).balance}(
+            abi.encode(actions, mintParams),
+            params.deadline
+        );
+    }
+
+    /// @dev Helper function to call transform on vault
+    function _callTransform(LeverageInParams calldata params, uint256 tokenId) internal returns (uint256) {
+        // Build transform params for the leverageInTransform method
+        LeverageInTransformParams memory transformParams = LeverageInTransformParams({
+            tokenId: tokenId,
+            token0: params.token0,
+            token1: params.token1,
+            fee: params.fee,
+            tickSpacing: params.tickSpacing,
+            hook: params.hook,
+            tickLower: params.tickLower,
+            tickUpper: params.tickUpper,
+            borrowAmount: params.borrowAmount,
+            amountIn: params.amountIn,
+            amountOutMin: params.amountOutMin,
+            swapData: params.swapData,
+            swapDirection: params.swapDirection,
+            amountAddMin0: params.amountAddMin0,
+            amountAddMin1: params.amountAddMin1,
+            recipient: params.recipient,
+            deadline: params.deadline,
+            mintHookData: params.mintFinalHookData,
+            decreaseLiquidityHookData: params.decreaseLiquidityHookData
+        });
+
+        // Call transform on the vault to create the final leveraged position
+        bytes memory transformData = abi.encodeWithSelector(
+            this.leverageInTransform.selector,
+            transformParams
+        );
+
+        return IVault(params.vault).transform(tokenId, address(this), transformData);
+    }
+
+    /// @notice Transform method called from vault to create the final leveraged position
+    /// @dev Removes dummy position liquidity, borrows, swaps, and mints new position with desired ticks
+    /// @param params The parameters for the transform
+    function leverageInTransform(LeverageInTransformParams calldata params) external {
+        _validateCaller(positionManager, params.tokenId);
+
+        Currency lendToken = Currency.wrap(IVault(msg.sender).asset());
+
+        // Remove dummy position, borrow and swap - returns amounts available for new position
+        (uint256 amount0, uint256 amount1) = _removeBorrowAndSwap(params, lendToken);
+
+        // Create the new position with desired ticks
+        uint256 newTokenId = _mintNewPosition(params, amount0, amount1);
+
+        // Verify slippage and send new position to vault
+        _finalizeLeverageIn(params, amount0, amount1, newTokenId);
+    }
+
+    /// @dev Helper function to remove dummy position, borrow, and swap
+    function _removeBorrowAndSwap(
+        LeverageInTransformParams calldata params,
+        Currency lendToken
+    ) internal returns (uint256 amount0, uint256 amount1) {
+        // Determine which token is the other (non-lend) token
+        Currency otherToken = lendToken == params.token0 ? params.token1 : params.token0;
+
+        // Get current liquidity of the dummy position
+        uint128 dummyLiquidity = positionManager.getPositionLiquidity(params.tokenId);
+
+        // Remove all liquidity from the dummy position (and collect any fees)
+        _decreaseLiquidity(
+            params.tokenId,
+            dummyLiquidity,
+            0,
+            0,
+            params.deadline,
+            params.decreaseLiquidityHookData
+        );
+
+        // Get the current token balances which include:
+        // - Leftover tokens from the initial deposit that weren't used by the dummy position
+        // - Tokens returned from decreasing the dummy position liquidity
+        amount0 = params.token0.balanceOfSelf();
+        amount1 = params.token1.balanceOfSelf();
+
+        // Borrow from the vault
+        IVault(msg.sender).borrow(params.tokenId, params.borrowAmount);
+
+        // Add borrowed amount to the lend token balance
+        if (lendToken == params.token0) {
+            amount0 += params.borrowAmount;
+        } else {
+            amount1 += params.borrowAmount;
+        }
+
+        // Perform optional swap if needed
+        if (params.amountIn != 0) {
+            Currency tokenIn;
+            Currency tokenOut;
+
+            if (params.swapDirection) {
+                // Swap lend token to other token
+                tokenIn = lendToken;
+                tokenOut = otherToken;
+            } else {
+                // Swap other token to lend token
+                tokenIn = otherToken;
+                tokenOut = lendToken;
+            }
+
+            (uint256 amountIn, uint256 amountOut) = _routerSwap(
+                Swapper.RouterSwapParams(tokenIn, tokenOut, params.amountIn, params.amountOutMin, params.swapData)
+            );
+
+            // Update amounts based on which tokens were swapped
+            if (tokenIn == params.token0) {
+                amount0 -= amountIn;
+            } else {
+                amount1 -= amountIn;
+            }
+            if (tokenOut == params.token0) {
+                amount0 += amountOut;
+            } else {
+                amount1 += amountOut;
+            }
+        }
+    }
+
+    /// @dev Helper function to mint the new position
+    function _mintNewPosition(
+        LeverageInTransformParams calldata params,
+        uint256 amount0,
+        uint256 amount1
+    ) internal returns (uint256 newTokenId) {
+        // Approve tokens for position manager
+        _handleApproval(permit2, params.token0, amount0);
+        _handleApproval(permit2, params.token1, amount1);
+
+        // Create pool key for the new position
+        PoolKey memory poolKey = PoolKey({
+            currency0: params.token0,
+            currency1: params.token1,
+            fee: params.fee,
+            tickSpacing: params.tickSpacing,
+            hooks: IHooks(params.hook)
+        });
+
+        // Calculate liquidity for the new position
+        uint128 newLiquidity = _calculateLiquidity(params.tickLower, params.tickUpper, poolKey, amount0, amount1);
+
+        // Mint the new position with desired ticks
+        (bytes memory actions, bytes[] memory mintParams) = _buildActionsForIncreasingLiquidity(
+            uint8(Actions.MINT_POSITION),
+            params.token0,
+            params.token1
+        );
+
+        mintParams[0] = abi.encode(
+            poolKey,
+            params.tickLower,
+            params.tickUpper,
+            newLiquidity,
+            type(uint128).max,
+            type(uint128).max,
+            address(this),
+            params.mintHookData
+        );
+
+        positionManager.modifyLiquidities{value: address(this).balance}(
+            abi.encode(actions, mintParams),
+            params.deadline
+        );
+
+        // Get the newly minted token ID
+        newTokenId = positionManager.nextTokenId() - 1;
+    }
+
+    /// @dev Helper function to finalize the leverage in operation
+    function _finalizeLeverageIn(
+        LeverageInTransformParams calldata params,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 newTokenId
+    ) internal {
+        // Calculate amounts added
+        uint256 added0 = amount0 - params.token0.balanceOfSelf();
+        uint256 added1 = amount1 - params.token1.balanceOfSelf();
+
+        // Check minimum amounts were added
+        if (added0 < params.amountAddMin0) {
+            revert InsufficientAmountAdded();
+        }
+        if (added1 < params.amountAddMin1) {
+            revert InsufficientAmountAdded();
+        }
+
+        // Send the new position to the vault - this will replace the dummy position
+        // The vault's onERC721Received will handle replacing the old position with the new one
+        IERC721(address(positionManager)).safeTransferFrom(address(this), msg.sender, newTokenId);
+
+        // Send leftover tokens to recipient (lendToken is always one of token0 or token1)
+        uint256 leftover0 = params.token0.balanceOfSelf();
+        uint256 leftover1 = params.token1.balanceOfSelf();
+
+        if (leftover0 != 0) {
+            params.token0.transfer(params.recipient, leftover0);
+        }
+        if (leftover1 != 0) {
+            params.token1.transfer(params.recipient, leftover1);
+        }
+    }
+
+    /// @notice Callback for receiving ERC721 tokens
+    /// @dev Required for receiving NFTs from the position manager
+    function onERC721Received(address, address, uint256, bytes calldata)
+        external
+        pure
+        override
+        returns (bytes4)
+    {
+        return IERC721Receiver.onERC721Received.selector;
     }
 }
