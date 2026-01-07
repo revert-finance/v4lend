@@ -57,6 +57,9 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     event AutoLendDeposit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
     event AutoLendWithdraw(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
     event AutoLendForceExit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
+    event AutoLeverage(
+        uint256 indexed tokenId, bool isUpperTrigger, uint256 debtBefore, uint256 debtAfter
+    );
 
     // events for token transfers
     event SendLeftoverTokens(
@@ -229,6 +232,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_RANGE) {
             _handleAutoRange(poolKey, poolId, tokenId);
+        } else if (mode == PositionMode.AUTO_LEVERAGE) {
+            _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
         }
     }
 
@@ -271,6 +276,20 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         } else {
             autoRange(poolKey, poolId, tokenId);
         }
+    }
+
+    function _handleAutoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
+        // AUTO_LEVERAGE only works for vault-owned positions (opposite of AUTO_LEND)
+        address owner = _getOwner(tokenId, false);
+        if (!vaults[owner]) {
+            return;
+        }
+
+        IVault(owner).transform(
+            tokenId,
+            address(this),
+            abi.encodeCall(this.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
+        );
     }
 
     function _beforeAddLiquidity(
@@ -418,6 +437,13 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     /// @return value The position value in native token (wei)
     function _getPositionValueNative(uint256 tokenId) internal view override returns (uint256 value) {
         (value,,,) = v4Oracle.getValue(tokenId, address(0));
+    }
+
+    /// @notice Gets the current base tick for a pool
+    /// @param poolKey The pool key
+    /// @return tick The current base tick
+    function _getCurrentBaseTick(PoolKey memory poolKey) internal view override returns (int24 tick) {
+        return _getTickLower(_getTick(poolKey.toId()), poolKey.tickSpacing);
     }
 
     /// @notice Checks if position config conditions are already met and executes immediately if so
@@ -766,6 +792,248 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
     }
 
+    /// @notice Adjusts leverage for a vault-owned position based on current vs target debt
+    /// @dev Called via transform() from vault when tick triggers are hit
+    /// @param poolKey The pool key
+    /// @param poolId The pool ID
+    /// @param tokenId The token ID of the position
+    /// @param isUpperTrigger True if upper trigger was hit, false if lower trigger was hit
+    function autoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) public {
+        _requireAuthorizedCaller(tokenId);
+
+        // Get current loan info from vault
+        IVault vault = IVault(msg.sender);
+        (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+
+        // Get target leverage ratio from config
+        uint16 targetBps = positionConfigs[tokenId].autoLeverageTargetBps;
+
+        // Calculate current leverage ratio in bps
+        uint256 currentRatioBps = collateralValue > 0 ? currentDebt * 10000 / collateralValue : 0;
+
+        // Decision based on comparing current ratio to target ratio
+        if (currentRatioBps < targetBps) {
+            // Need more leverage: borrow more, add liquidity
+            _autoLeverageUp(poolKey, tokenId, vault, currentDebt, collateralValue, targetBps);
+        } else if (currentRatioBps > targetBps) {
+            // Too much leverage: remove liquidity, repay
+            _autoLeverageDown(poolKey, tokenId, vault, currentDebt, collateralValue, targetBps);
+        }
+
+        // Update base tick to current tick and reset triggers
+        // First remove old triggers (using current stored baseTick)
+        _removePositionTriggers(tokenId, poolKey);
+
+        // Update base tick to current tick
+        int24 currentTick = _getCurrentBaseTick(poolKey);
+        int24 roundedTick = (currentTick / poolKey.tickSpacing) * poolKey.tickSpacing;
+        positionStates[tokenId].autoLeverageBaseTick = roundedTick;
+
+        // Add new triggers (using new baseTick)
+        _addPositionTriggers(tokenId, poolKey);
+
+        // Get updated debt for event
+        (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
+
+        emit AutoLeverage(tokenId, isUpperTrigger, currentDebt, newDebt);
+    }
+
+    /// @notice Increases leverage by borrowing more and adding liquidity
+    /// @dev Uses formula: X = (T*C - D) / (1 - T) where T = target ratio, C = collateral, D = debt
+    /// This accounts for the fact that borrowed amount X increases both debt and collateral by X
+    function _autoLeverageUp(
+        PoolKey memory poolKey,
+        uint256 tokenId,
+        IVault vault,
+        uint256 currentDebt,
+        uint256 collateralValue,
+        uint16 targetBps
+    ) internal {
+        // Only leverage up if current ratio is below target
+        // currentRatio = currentDebt / collateralValue
+        // We need: currentDebt * 10000 < collateralValue * targetBps
+        if (currentDebt * 10000 >= collateralValue * targetBps) {
+            return;
+        }
+
+        // Calculate exact amount to borrow to reach target leverage
+        // After borrowing X: newDebt = D + X, newCollateral = C + X
+        // Target: (D + X) / (C + X) = T/10000
+        // Solving: X = (T*C - D*10000) / (10000 - T)
+        // Note: We already verified T*C > D*10000 above, so numerator > 0
+        // And targetBps < 10000 for valid leverage ratios, so denominator > 0
+        uint256 numerator = uint256(targetBps) * collateralValue - currentDebt * 10000;
+        uint256 denominator = 10000 - uint256(targetBps);
+
+        if (denominator == 0) {
+            return; // targetBps = 10000 means 100% leverage which is invalid
+        }
+
+        uint256 borrowAmount = numerator / denominator;
+
+        if (borrowAmount == 0) {
+            return;
+        }
+
+        // Get asset token from vault
+        Currency lendToken = Currency.wrap(vault.asset());
+
+        // Borrow from vault (vault's transform context allows this)
+        vault.borrow(tokenId, borrowAmount);
+
+        // Get position info
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Swap borrowed lend token to position tokens and add liquidity
+        (uint256 amount0, uint256 amount1) = _swapToOptimalRange(
+            tokenId,
+            poolKey,
+            posInfo.tickLower(),
+            posInfo.tickUpper(),
+            lendToken == poolKey.currency0 ? borrowAmount : 0,
+            lendToken == poolKey.currency1 ? borrowAmount : 0
+        );
+
+        _handleApproval(poolKey.currency0, amount0);
+        _handleApproval(poolKey.currency1, amount1);
+
+        // Add liquidity to position
+        _increaseLiquidity(tokenId, poolKey, posInfo, uint128(amount0), uint128(amount1));
+
+        // Send any leftover tokens to position owner
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
+    }
+
+    /// @notice Decreases leverage by removing liquidity and repaying debt
+    /// @dev Uses formula: X = (D - T*C) / (1 - T) where T = target ratio, C = collateral, D = debt
+    /// This accounts for the fact that repaying X decreases both debt and collateral by X
+    function _autoLeverageDown(
+        PoolKey memory poolKey,
+        uint256 tokenId,
+        IVault vault,
+        uint256 currentDebt,
+        uint256 collateralValue,
+        uint16 targetBps
+    ) internal {
+        // Only delever if current ratio is above target
+        // currentRatio = currentDebt / collateralValue
+        // We need: currentDebt * 10000 > collateralValue * targetBps
+        if (currentDebt * 10000 <= collateralValue * targetBps) {
+            return;
+        }
+
+        // Calculate exact amount to repay to reach target leverage
+        // After repaying X: newDebt = D - X, newCollateral = C - X
+        // Target: (D - X) / (C - X) = T/10000
+        // Solving: X = (D*10000 - T*C) / (10000 - T)
+        // Note: We already verified D*10000 > T*C above, so numerator > 0
+        uint256 numerator = currentDebt * 10000 - uint256(targetBps) * collateralValue;
+        uint256 denominator = 10000 - uint256(targetBps);
+
+        if (denominator == 0) {
+            return; // targetBps = 10000 means 100% leverage which is invalid
+        }
+
+        uint256 repayAmount = numerator / denominator;
+
+        // Get asset token from vault
+        Currency lendToken = Currency.wrap(vault.asset());
+
+        // Get current liquidity
+        uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
+
+        // Get position value to calculate proportional liquidity to remove
+        (uint256 fullValue,,,) = v4Oracle.getValue(tokenId, vault.asset());
+
+        if (fullValue == 0 || currentLiquidity == 0) {
+            return;
+        }
+
+        // Calculate liquidity to remove (proportional to repay amount)
+        uint128 liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / fullValue);
+
+        // Cap at current liquidity
+        if (liquidityToRemove > currentLiquidity) {
+            liquidityToRemove = currentLiquidity;
+        }
+
+        if (liquidityToRemove == 0) {
+            return;
+        }
+
+        // Decrease liquidity
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidityPartial(tokenId, liquidityToRemove);
+
+        // Swap to lend token
+        uint256 lendAmount = 0;
+        PoolKey memory swapPoolKey = _getSwapPoolKey(tokenId, poolKey);
+        if (lendToken == currency0) {
+            lendAmount = amount0;
+            if (amount1 > 0) {
+                _swap(swapPoolKey, false, amount1, tokenId);  // swap token1 to token0
+                lendAmount = currency0.balanceOfSelf();
+            }
+        } else {
+            lendAmount = amount1;
+            if (amount0 > 0) {
+                _swap(swapPoolKey, true, amount0, tokenId);  // swap token0 to token1
+                lendAmount = currency1.balanceOfSelf();
+            }
+        }
+
+        // Repay to vault
+        if (lendAmount > 0) {
+            // Cap repay amount at current debt
+            if (lendAmount > currentDebt) {
+                lendAmount = currentDebt;
+            }
+            SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), msg.sender, lendAmount);
+            vault.repay(tokenId, lendAmount, false);
+        }
+
+        // Send any leftover tokens to position owner
+        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
+    }
+
+    /// @notice Decreases a specific amount of liquidity from a position
+    /// @param tokenId The position NFT token ID
+    /// @param liquidityToRemove The amount of liquidity to remove
+    /// @return currency0 The currency of token0
+    /// @return currency1 The currency of token1
+    /// @return amount0 Amount of token0 received
+    /// @return amount1 Amount of token1 received
+    function _decreaseLiquidityPartial(uint256 tokenId, uint128 liquidityToRemove)
+        internal
+        returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)
+    {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        currency0 = poolKey.currency0;
+        currency1 = poolKey.currency1;
+
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)
+        );
+        bytes[] memory params_array = new bytes[](2);
+
+        params_array[0] = abi.encode(
+            tokenId,
+            liquidityToRemove,
+            0,  // amount0Min
+            0,  // amount1Min
+            bytes("")  // hookData
+        );
+
+        params_array[1] = abi.encode(currency0, currency1, address(this));
+
+        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params_array) {
+            amount0 = currency0.balanceOfSelf();
+            amount1 = currency1.balanceOfSelf();
+        } catch (bytes memory reason) {
+            emit HookModifyLiquiditiesFailed(actions, params_array, reason);
+        }
+    }
+
     /// @notice Auto-compounds fees from positions (this can be called by anyone)
     /// @dev Collects fees, swaps to achieve proportions (offchain optimized calculation), and adds liquidity back via PositionManager
     ///      Fees are based on actual added amounts to incentivize optimal swapping
@@ -827,7 +1095,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     }
 
     /// @notice Executes immediate action when poolManager is unlocked
-    /// @dev Called from unlockCallback to handle immediate auto-exit, auto-range, or auto-lend
+    /// @dev Called from unlockCallback to handle immediate auto-exit, auto-range, auto-lend, or auto-leverage
     function _executeImmediateActionUnlocked(
         PoolKey memory poolKey,
         uint256 tokenId,
@@ -846,6 +1114,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
         } else if (mode == PositionMode.AUTO_RANGE) {
             _handleAutoRange(poolKey, poolId, tokenId);
+        } else if (mode == PositionMode.AUTO_LEVERAGE) {
+            _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
         }
     }
 
