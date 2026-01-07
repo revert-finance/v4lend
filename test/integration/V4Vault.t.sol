@@ -1461,5 +1461,409 @@ contract V4VaultTest is V4ForkTestBase {
         vm.stopPrank();
     }
 
+    // leverage in tests
+    function test_LeverageIn() public {
+        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        vault.setTransformer(address(leverageTransformer), true);
+        leverageTransformer.setVault(address(vault));
+
+        // Deposit USDC to the vault so there's liquidity to borrow
+        _deposit(100000000, WHALE_ACCOUNT); // 100 USDC
+
+        // Get pool info from existing position to reuse pool key parameters
+        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(nft1TokenId);
+
+        // User starts with WETH and wants to create a leveraged position
+        address user = address(0x1234567890123456789012345678901234567890);
+        uint256 initialWethAmount = 0.01 ether;
+
+        // Give user some WETH
+        deal(address(weth), user, initialWethAmount);
+
+        console.log("=== LEVERAGE IN TEST ===");
+        console.log("Pool token0:", Currency.unwrap(poolKey.currency0));
+        console.log("Pool token1:", Currency.unwrap(poolKey.currency1));
+        console.log("Pool fee:", poolKey.fee);
+        console.log("Pool tickSpacing:", poolKey.tickSpacing);
+        console.log("User initial WETH:", initialWethAmount);
+
+        vm.startPrank(user);
+
+        // Approve WETH for the leverage transformer
+        weth.approve(address(leverageTransformer), initialWethAmount);
+
+        // Use reasonable tick ranges (not the full range from existing position)
+        // For USDC/WETH pool with tickSpacing=10, use a range around current price
+        int24 tickLower = -200000; // reasonable lower bound
+        int24 tickUpper = -190000; // reasonable upper bound
+
+        // Create swap data to swap some borrowed USDC to WETH
+        uint256 borrowAmount = 10000000; // 10 USDC
+        uint256 swapAmount = 5000000; // 5 USDC to swap to WETH
+        bytes memory swapData = _createSwapData(swapAmount, 1, address(usdc), address(weth), address(leverageTransformer));
+
+        LeverageTransformer.LeverageInParams memory params = LeverageTransformer.LeverageInParams({
+            vault: address(vault),
+            token0: poolKey.currency0,
+            token1: poolKey.currency1,
+            fee: poolKey.fee,
+            tickSpacing: poolKey.tickSpacing,
+            hook: address(poolKey.hooks),
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            initialAmount: initialWethAmount,
+            borrowAmount: borrowAmount,
+            amountIn: swapAmount,
+            amountOutMin: 1,
+            swapData: swapData,
+            swapDirection: true, // swap USDC (lend token) to WETH (other token)
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            recipient: user,
+            deadline: block.timestamp,
+            mintHookData: "",
+            mintFinalHookData: "",
+            decreaseLiquidityHookData: ""
+        });
+
+        // Execute leverage in
+        uint256 newTokenId = leverageTransformer.leverageIn(params);
+
+        console.log("New token ID:", newTokenId);
+
+        // Verify the position was created and is owned by the vault
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault");
+
+        // Verify the loan owner is the user
+        assertEq(vault.ownerOf(newTokenId), user, "Loan should be owned by user");
+
+        // Verify the loan has debt
+        uint256 debtShares = vault.loans(newTokenId);
+        assertGt(debtShares, 0, "Loan should have debt shares");
+
+        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(newTokenId);
+        console.log("Debt:", debt);
+        console.log("Full value:", fullValue);
+        console.log("Collateral value:", collateralValue);
+
+        assertGt(debt, 0, "Loan should have debt");
+        assertGt(collateralValue, debt, "Loan should be healthy (collateral > debt)");
+
+        // Verify the new position has liquidity
+        uint128 liquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertGt(liquidity, 0, "Position should have liquidity");
+        console.log("Position liquidity:", liquidity);
+
+        vm.stopPrank();
+    }
+
+    // Test leverageIn with pool where token0 is the lend token (USDC)
+    function test_LeverageIn_Token0IsLendToken() public {
+        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        vault.setTransformer(address(leverageTransformer), true);
+        leverageTransformer.setVault(address(vault));
+
+        // Deposit USDC to the vault so there's liquidity to borrow
+        _deposit(100000000, WHALE_ACCOUNT); // 100 USDC
+
+        // Get pool info from existing position
+        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(nft1TokenId);
+
+        // Verify USDC is token0 in this pool
+        assertEq(Currency.unwrap(poolKey.currency0), address(usdc), "USDC should be token0");
+
+        // User starts with WETH (token1) and wants to create a leveraged position
+        address user = address(0x1234567890123456789012345678901234567890);
+        uint256 initialWethAmount = 0.01 ether;
+
+        // Give user some WETH
+        deal(address(weth), user, initialWethAmount);
+
+        console.log("=== LEVERAGE IN TEST (Token0 is lend token) ===");
+
+        vm.startPrank(user);
+        weth.approve(address(leverageTransformer), initialWethAmount);
+
+        // Use reasonable tick ranges
+        int24 tickLower = -200000;
+        int24 tickUpper = -190000;
+
+        uint256 borrowAmount = 10000000; // 10 USDC
+        uint256 swapAmount = 5000000; // 5 USDC to swap to WETH
+        bytes memory swapData = _createSwapData(swapAmount, 1, address(usdc), address(weth), address(leverageTransformer));
+
+        LeverageTransformer.LeverageInParams memory params = LeverageTransformer.LeverageInParams({
+            vault: address(vault),
+            token0: poolKey.currency0,
+            token1: poolKey.currency1,
+            fee: poolKey.fee,
+            tickSpacing: poolKey.tickSpacing,
+            hook: address(poolKey.hooks),
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            initialAmount: initialWethAmount,
+            borrowAmount: borrowAmount,
+            amountIn: swapAmount,
+            amountOutMin: 1,
+            swapData: swapData,
+            swapDirection: true, // swap lend token (USDC) to other token (WETH)
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            recipient: user,
+            deadline: block.timestamp,
+            mintHookData: "",
+            mintFinalHookData: "",
+            decreaseLiquidityHookData: ""
+        });
+
+        uint256 newTokenId = leverageTransformer.leverageIn(params);
+
+        // Verify position and loan
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault");
+        assertEq(vault.ownerOf(newTokenId), user, "Loan should be owned by user");
+
+        (uint256 debt,, uint256 collateralValue,,) = vault.loanInfo(newTokenId);
+        assertGt(collateralValue, debt, "Loan should be healthy");
+
+        vm.stopPrank();
+    }
+
+    // Test that leverageIn reverts when neither token is the lend token
+    function test_LeverageIn_InvalidToken() public {
+        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        vault.setTransformer(address(leverageTransformer), true);
+        leverageTransformer.setVault(address(vault));
+
+        address user = address(0x1234567890123456789012345678901234567890);
+
+        vm.startPrank(user);
+
+        // Try to create position with DAI/WETH pool (neither is USDC which is the lend token)
+        LeverageTransformer.LeverageInParams memory params = LeverageTransformer.LeverageInParams({
+            vault: address(vault),
+            token0: Currency.wrap(address(dai)),
+            token1: Currency.wrap(address(weth)),
+            fee: 3000,
+            tickSpacing: 60,
+            hook: address(0),
+            tickLower: -887220,
+            tickUpper: 887220,
+            initialAmount: 1 ether,
+            borrowAmount: 10000000,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: "",
+            swapDirection: true,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            recipient: user,
+            deadline: block.timestamp,
+            mintHookData: "",
+            mintFinalHookData: "",
+            decreaseLiquidityHookData: ""
+        });
+
+        vm.expectRevert(Constants.InvalidToken.selector);
+        leverageTransformer.leverageIn(params);
+
+        vm.stopPrank();
+    }
+
+    // Test leverageIn with full range position
+    function test_LeverageIn_FullRange() public {
+        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        vault.setTransformer(address(leverageTransformer), true);
+        leverageTransformer.setVault(address(vault));
+
+        // Increase limits for this test (need ~5000 USDC)
+        vault.setLimits(0, 10000000000, 10000000000, 10000000000, 10000000000); // 10000 USDC limits
+
+        // Deposit USDC to the vault so there's liquidity to borrow
+        // For full range with 1 ETH (~$4318), we need ~$4318 USDC to balance
+        _deposit(5000000000, WHALE_ACCOUNT); // 5000 USDC
+
+        // Get pool info from existing position to reuse pool key parameters
+        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(nft1TokenId);
+
+        // User starts with WETH and wants to create a full range leveraged position
+        address user = address(0x1234567890123456789012345678901234567890);
+        uint256 initialWethAmount = 1 ether; // ~$4318 at current prices
+
+        // Give user some WETH
+        deal(address(weth), user, initialWethAmount);
+
+        console.log("=== LEVERAGE IN FULL RANGE TEST ===");
+        console.log("Pool token0:", Currency.unwrap(poolKey.currency0));
+        console.log("Pool token1:", Currency.unwrap(poolKey.currency1));
+        console.log("Pool fee:", poolKey.fee);
+        console.log("Pool tickSpacing:", poolKey.tickSpacing);
+        console.log("User initial WETH:", initialWethAmount);
+
+        vm.startPrank(user);
+
+        // Approve WETH for the leverage transformer
+        weth.approve(address(leverageTransformer), initialWethAmount);
+
+        // Use full range tick values (aligned to tick spacing)
+        // TickMath.MIN_TICK = -887272, TickMath.MAX_TICK = 887272
+        // For tickSpacing = 10, we need to round to nearest multiple of 10
+        int24 tickLower = -887270; // -887272 rounded up to multiple of 10
+        int24 tickUpper = 887270;  // 887272 rounded down to multiple of 10
+
+        // For full range positions, borrow USDC equivalent in value to the initial WETH (~$4318)
+        // No swapping needed - both tokens go directly into the position
+        uint256 borrowAmount = 4300000000; // 4300 USDC (~$4318 worth)
+
+        LeverageTransformer.LeverageInParams memory params = LeverageTransformer.LeverageInParams({
+            vault: address(vault),
+            token0: poolKey.currency0,
+            token1: poolKey.currency1,
+            fee: poolKey.fee,
+            tickSpacing: poolKey.tickSpacing,
+            hook: address(poolKey.hooks),
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            initialAmount: initialWethAmount,
+            borrowAmount: borrowAmount,
+            amountIn: 0, // no swap
+            amountOutMin: 0,
+            swapData: bytes(""),
+            swapDirection: true,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            recipient: user,
+            deadline: block.timestamp,
+            mintHookData: "",
+            mintFinalHookData: "",
+            decreaseLiquidityHookData: ""
+        });
+
+        // Execute leverage in
+        uint256 newTokenId = leverageTransformer.leverageIn(params);
+
+        console.log("New token ID:", newTokenId);
+
+        // Verify the position was created and is owned by the vault
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault");
+
+        // Verify the loan owner is the user
+        assertEq(vault.ownerOf(newTokenId), user, "Loan should be owned by user");
+
+        // Verify the loan has debt
+        uint256 debtShares = vault.loans(newTokenId);
+        assertGt(debtShares, 0, "Loan should have debt shares");
+
+        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(newTokenId);
+        console.log("Debt:", debt);
+        console.log("Full value:", fullValue);
+        console.log("Collateral value:", collateralValue);
+
+        assertGt(debt, 0, "Loan should have debt");
+        assertGt(collateralValue, debt, "Loan should be healthy (collateral > debt)");
+
+        // Verify the new position has liquidity
+        uint128 liquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertGt(liquidity, 0, "Position should have liquidity");
+        console.log("Position liquidity:", liquidity);
+
+        // Verify position tick range is full range
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
+        assertEq(positionInfo.tickLower(), tickLower, "Position should have full range tickLower");
+        assertEq(positionInfo.tickUpper(), tickUpper, "Position should have full range tickUpper");
+        console.log("Position tickLower:", positionInfo.tickLower());
+        console.log("Position tickUpper:", positionInfo.tickUpper());
+
+        vm.stopPrank();
+    }
+
+    // ============ transferLoan Tests ============
+
+    function test_TransferLoan() public {
+        _setupBasicLoan(true);
+
+        address newOwner = address(0x9999);
+
+        // Verify initial owner
+        assertEq(vault.ownerOf(nft1TokenId), nft1Owner, "Initial owner should be nft1Owner");
+
+        // Transfer the loan
+        vm.prank(nft1Owner);
+        vault.transferLoan(nft1TokenId, newOwner);
+
+        // Verify new owner
+        assertEq(vault.ownerOf(nft1TokenId), newOwner, "New owner should be set");
+
+        // Verify old owner no longer owns it
+        assertEq(vault.loanCount(nft1Owner), 0, "Old owner should have no tokens");
+
+        // Verify new owner has the token
+        assertEq(vault.loanCount(newOwner), 1, "New owner should have one token");
+        assertEq(vault.loanAtIndex(newOwner, 0), nft1TokenId, "New owner should have the transferred token");
+    }
+
+    function test_TransferLoan_Unauthorized() public {
+        _setupBasicLoan(true);
+
+        address notOwner = address(0x8888);
+        address newOwner = address(0x9999);
+
+        // Try to transfer from non-owner - should fail
+        vm.prank(notOwner);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        vault.transferLoan(nft1TokenId, newOwner);
+    }
+
+    function test_TransferLoan_ToZeroAddress() public {
+        _setupBasicLoan(true);
+
+        // Try to transfer to zero address - should fail
+        vm.prank(nft1Owner);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        vault.transferLoan(nft1TokenId, address(0));
+    }
+
+    function test_TransferLoan_PreservesDebt() public {
+        _setupBasicLoan(true);
+
+        address newOwner = address(0x9999);
+
+        // Get debt before transfer
+        (uint256 debtBefore,,,,) = vault.loanInfo(nft1TokenId);
+        assertGt(debtBefore, 0, "Should have debt before transfer");
+
+        // Transfer the loan
+        vm.prank(nft1Owner);
+        vault.transferLoan(nft1TokenId, newOwner);
+
+        // Verify debt is preserved
+        (uint256 debtAfter,,,,) = vault.loanInfo(nft1TokenId);
+        assertEq(debtAfter, debtBefore, "Debt should be preserved after transfer");
+    }
+
+    function test_TransferLoan_NewOwnerCanRepay() public {
+        _setupBasicLoan(true);
+
+        address newOwner = address(0x9999);
+
+        // Transfer the loan
+        vm.prank(nft1Owner);
+        vault.transferLoan(nft1TokenId, newOwner);
+
+        // Give new owner some USDC to repay
+        deal(address(usdc), newOwner, 200000000); // 200 USDC
+
+        // Get debt amount
+        (uint256 debt,,,,) = vault.loanInfo(nft1TokenId);
+
+        // New owner repays the debt
+        vm.startPrank(newOwner);
+        usdc.approve(address(vault), debt);
+        vault.repay(nft1TokenId, debt, false);
+        vm.stopPrank();
+
+        // Verify debt is repaid
+        (uint256 debtAfter,,,,) = vault.loanInfo(nft1TokenId);
+        assertEq(debtAfter, 0, "Debt should be zero after repayment");
+    }
 
 }

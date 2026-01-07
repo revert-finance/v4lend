@@ -41,6 +41,7 @@ interface IVault is IERC4626 {
 
     function create(uint256 tokenId, address recipient) external;
 
+    function transferLoan(uint256 tokenId, address newOwner) external;
 
     function approveTransform(uint256 tokenId, address target, bool active) external;
     function transform(uint256 tokenId, address transformer, bytes calldata data) external returns (uint256);

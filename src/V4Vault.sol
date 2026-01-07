@@ -72,6 +72,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     event Add(uint256 indexed tokenId, address owner, uint256 oldTokenId); // when a token is added replacing another token - oldTokenId > 0
     event Remove(uint256 indexed tokenId, address owner, address recipient);
+    event Transfer(uint256 indexed tokenId, address from, address to);
 
     event ExchangeRateUpdate(uint256 debtExchangeRateX96, uint256 lendExchangeRateX96);
     // Deposit and Withdraw events are defined in IERC4626
@@ -516,6 +517,30 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         transformApprovals[msg.sender][tokenId][target] = isActive;
 
         emit ApprovedTransform(tokenId, msg.sender, target, isActive);
+    }
+
+    /// @notice Transfers ownership of a loan to a new owner
+    /// @param tokenId The token ID of the loan to transfer
+    /// @param newOwner The address of the new owner
+    function transferLoan(uint256 tokenId, address newOwner) external override {
+
+        // transferLoan is not allowed during transformer mode
+        if (transformedTokenId != 0) {
+            revert TransformNotAllowed();
+        }
+
+        address currentOwner = tokenOwner[tokenId];
+        if (currentOwner != msg.sender) {
+            revert Unauthorized();
+        }
+        if (newOwner == address(0)) {
+            revert Unauthorized();
+        }
+
+        _removeTokenFromOwner(currentOwner, tokenId);
+        _addTokenToOwner(newOwner, tokenId);
+
+        emit Transfer(tokenId, currentOwner, newOwner);
     }
 
     /// @notice Method which allows a contract to transform a loan by changing it (and only at the end checking collateral)
