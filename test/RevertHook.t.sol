@@ -215,7 +215,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
             autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
@@ -304,7 +305,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -498,7 +500,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
 
@@ -553,7 +556,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
             autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // approve all positions to the hook
@@ -670,7 +674,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -756,7 +761,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // DO NOT approve the position to the hook - this is the key difference
@@ -924,7 +930,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 60
+            autoLendToleranceTick: 60,
+            autoLeverageTargetBps: 0
         }));
 
         // for auto lend where new positions may be created we need to approve all positions to the hook
@@ -934,7 +941,7 @@ contract RevertHookTest is BaseTest {
         uint128 initialLiquidity = positionManager.getPositionLiquidity(autolendTokenId);
         assertGt(initialLiquidity, 0, "Position should have liquidity initially");
 
-        (,,, address autoLendToken, uint256 autoLendShares,,) = hook.positionStates(autolendTokenId);
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(autolendTokenId);
 
         assertEq(autoLendShares, 0, "Should have no autolend shares initially");
         assertEq(autoLendToken, address(0), "Should have no autolend token initially");
@@ -957,7 +964,7 @@ contract RevertHookTest is BaseTest {
         });
 
         // Verify currency0 deposit was triggered
-        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency0 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency0), "Should have currency0 as autolend token");
         assertGt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have received assets");
@@ -982,7 +989,7 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency0 withdraw was triggered
-        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency0 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have less assets after withdraw");
@@ -1008,7 +1015,7 @@ contract RevertHookTest is BaseTest {
         console.log("currentTick after swap", currentTick);
 
         // Verify currency1 deposit was triggered
-        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency1 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency1), "Should have currency1 as autolend token");
         assertGt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have received assets");
@@ -1036,7 +1043,7 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency1 withdraw was triggered
-        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency1 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have less assets after withdraw");
@@ -1057,7 +1064,7 @@ contract RevertHookTest is BaseTest {
             deadline: block.timestamp
         });
 
-        (,,,autoLendToken, autoLendShares,,) = hook.positionStates(autolendTokenId);
+        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
 
         // Verify currency0 deposit was triggered again
         assertGt(autoLendShares, 0, "Should have autolend shares after second currency0 deposit");
@@ -1100,7 +1107,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -1163,7 +1171,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -1226,7 +1235,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -1279,7 +1289,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
@@ -1335,7 +1346,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -60,
             autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         IERC721(address(positionManager)).approve(address(hook), token3Id);
@@ -1415,7 +1427,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
     }
 
@@ -1434,15 +1447,16 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Verify position is configured and activated
-        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (RevertHookConfig.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured");
 
         // Verify position is activated (lastActivated > 0)
-        (,, uint32 lastActivated,,,,) = hook.positionStates(tokenId);
+        (,, uint32 lastActivated,,,,,) = hook.positionStates(tokenId);
         assertGt(lastActivated, 0, "Position should be activated");
     }
 
@@ -1461,11 +1475,12 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Verify position is activated
-        (,, uint32 lastActivatedBefore,,,,) = hook.positionStates(tokenId);
+        (,, uint32 lastActivatedBefore,,,,,) = hook.positionStates(tokenId);
         assertGt(lastActivatedBefore, 0, "Position should be activated initially");
 
         // Simulate value drop by setting mock oracle to low value
@@ -1484,7 +1499,7 @@ contract RevertHookTest is BaseTest {
         );
 
         // Verify position is deactivated (triggers removed due to low value)
-        (,, uint32 lastActivatedAfter,,,,) = hook.positionStates(tokenId);
+        (,, uint32 lastActivatedAfter,,,,,) = hook.positionStates(tokenId);
         assertEq(lastActivatedAfter, 0, "Position should be deactivated after value drops below minimum");
     }
 
@@ -1518,7 +1533,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Set mock oracle to return high value
@@ -1535,11 +1551,12 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Verify position is activated
-        (,, uint32 lastActivated,,,,) = hook.positionStates(newTokenId);
+        (,, uint32 lastActivated,,,,,) = hook.positionStates(newTokenId);
         assertGt(lastActivated, 0, "Position should be activated after value increases");
     }
 
@@ -1562,7 +1579,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Owner lowers the minimum
@@ -1580,11 +1598,12 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Verify position is configured
-        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (RevertHookConfig.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured");
     }
 
@@ -1603,7 +1622,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Set mock oracle to return low value
@@ -1620,15 +1640,16 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Verify position is disabled
-        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (RevertHookConfig.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.NONE), "Position should be disabled");
 
         // Verify position is deactivated
-        (,, uint32 lastActivated,,,,) = hook.positionStates(tokenId);
+        (,, uint32 lastActivated,,,,,) = hook.positionStates(tokenId);
         assertEq(lastActivated, 0, "Position should be deactivated");
     }
 
@@ -1650,11 +1671,12 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // Verify position is configured
-        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (RevertHookConfig.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured with 0 minimum");
     }
 
@@ -1703,7 +1725,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // The auto-exit should have executed immediately
@@ -1712,7 +1735,7 @@ contract RevertHookTest is BaseTest {
         assertEq(liquidityAfter, 0, "token2Id should have 0 liquidity after immediate auto-exit");
 
         // Verify the position config is disabled
-        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(token2Id);
+        (RevertHookConfig.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.NONE), "Position should be disabled after auto-exit");
 
         // Verify hook has no leftover balances
@@ -1764,7 +1787,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: -60,
             autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // The auto-range should have executed immediately
@@ -1834,7 +1858,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0  // No tolerance - trigger immediately when out of range
+            autoLendToleranceTick: 0,  // No tolerance - trigger immediately when out of range
+            autoLeverageTargetBps: 0
         }));
 
         // The auto-lend deposit should have executed immediately
@@ -1843,7 +1868,7 @@ contract RevertHookTest is BaseTest {
         assertEq(liquidityAfter, 0, "token3Id should have 0 liquidity after immediate auto-lend deposit");
 
         // Verify position state has auto-lend shares
-        (,,, address autoLendToken, uint256 autoLendShares,,) = hook.positionStates(token3Id);
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
         console.log("autoLendShares", autoLendShares);
         assertGt(autoLendShares, 0, "Position should have auto-lend shares");
         assertEq(autoLendToken, Currency.unwrap(currency0), "Auto-lend should be for currency0 since price went down");
@@ -1883,7 +1908,8 @@ contract RevertHookTest is BaseTest {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         }));
 
         // No immediate execution should happen - liquidity should remain
@@ -1892,7 +1918,7 @@ contract RevertHookTest is BaseTest {
         assertEq(liquidityAfter, liquidityBefore, "token3Id should still have same liquidity - no immediate execution");
 
         // Verify position is still configured (not disabled)
-        (RevertHookConfig.PositionMode mode,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (RevertHookConfig.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_EXIT), "Position should still be configured for auto-exit");
     }
 }

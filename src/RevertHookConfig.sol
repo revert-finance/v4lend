@@ -9,6 +9,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {Transformer} from "./transformers/Transformer.sol";
+import {IVault} from "./interfaces/IVault.sol";
 
 /// @title RevertHookConfig
 /// @notice Base class containing all configuration-related structures, storage, and functions
@@ -62,7 +63,8 @@ abstract contract RevertHookConfig is Transformer {
         AUTO_RANGE,
         AUTO_EXIT,
         AUTO_EXIT_AND_AUTO_RANGE,
-        AUTO_LEND
+        AUTO_LEND,
+        AUTO_LEVERAGE
     }
 
     enum AutoCompoundMode {
@@ -82,6 +84,8 @@ abstract contract RevertHookConfig is Transformer {
         uint256 autoLendShares;
         uint256 autoLendAmount;
         address autoLendVault;
+
+        int24 autoLeverageBaseTick; // Base tick for auto-leverage triggers (triggers at baseTick ± 10 * tickSpacing)
     }
 
     struct GeneralConfig {
@@ -109,6 +113,8 @@ abstract contract RevertHookConfig is Transformer {
         int24 autoRangeUpperDelta;
 
         int24 autoLendToleranceTick;
+
+        uint16 autoLeverageTargetBps; // target debt/collateral ratio (0-10000 bps, e.g., 5000 = 50%)
     }
 
 
@@ -213,7 +219,8 @@ abstract contract RevertHookConfig is Transformer {
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
             autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
         });
     }
 
@@ -245,6 +252,25 @@ abstract contract RevertHookConfig is Transformer {
         if (config.autoLendToleranceTick % poolKey.tickSpacing != 0) {
             revert InvalidConfig();
         }
+        if (config.autoLeverageTargetBps >= 10000) {
+            revert InvalidConfig();
+        }
+        // AUTO_LEVERAGE only works for vault-owned positions where one token is the lend asset
+        if (config.mode == PositionMode.AUTO_LEVERAGE) {
+            address owner = _getOwner(tokenId, false);
+            if (!vaults[owner]) {
+                revert InvalidConfig();
+            }
+            // Verify one of the position tokens is the vault's lend asset
+            address lendAsset = IVault(owner).asset();
+            if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
+                revert InvalidConfig();
+            }
+            // Initialize base tick from current tick (rounded to tick spacing)
+            int24 currentTick = _getCurrentBaseTick(poolKey);
+            int24 roundedTick = (currentTick / poolKey.tickSpacing) * poolKey.tickSpacing;
+            positionStates[tokenId].autoLeverageBaseTick = roundedTick;
+        }
 
         _updatePositionTriggers(tokenId, poolKey, config);
         positionConfigs[tokenId] = config;
@@ -269,6 +295,7 @@ abstract contract RevertHookConfig is Transformer {
     function _getOwner(uint256 tokenId, bool isRealOwner) internal view virtual returns (address);
     function _getPoolAndPositionInfo(uint256 tokenId) internal view virtual returns (PoolKey memory, PositionInfo);
     function _getPositionValueNative(uint256 tokenId) internal view virtual returns (uint256);
+    function _getCurrentBaseTick(PoolKey memory poolKey) internal view virtual returns (int24);
     function _checkAndExecuteImmediate(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config) internal virtual;
 
     /// @notice Marks position as activated (triggers are now active)
@@ -512,6 +539,13 @@ abstract contract RevertHookConfig is Transformer {
                 ticks[0] = tickLower - autoLendToleranceTick * 2 - poolKey.tickSpacing;
                 ticks[2] = tickUpper + autoLendToleranceTick * 2;
             }
+        }
+
+        if (mode == PositionMode.AUTO_LEVERAGE) {
+            // Use stored base tick for triggers (baseTick ± 10 * tickSpacing)
+            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
+            ticks[0] = baseTick - 10 * poolKey.tickSpacing;  // Lower trigger
+            ticks[2] = baseTick + 10 * poolKey.tickSpacing;  // Upper trigger
         }
     }
 
