@@ -28,7 +28,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {LiquidityCalculator} from "./LiquidityCalculator.sol";
+import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {V4Oracle} from "./V4Oracle.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
@@ -96,8 +96,9 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
 
     IPositionManager public immutable positionManager;
     V4Oracle public immutable v4Oracle;
+    ILiquidityCalculator public immutable liquidityCalculator;
 
-    constructor(address protocolFeeRecipient_, IPermit2 _permit2, V4Oracle _v4Oracle)
+    constructor(address protocolFeeRecipient_, IPermit2 _permit2, V4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator)
         BaseHook(_v4Oracle.poolManager())
         Ownable(msg.sender)
     {
@@ -105,6 +106,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         protocolFeeRecipient = protocolFeeRecipient_;
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
+        liquidityCalculator = _liquidityCalculator;
     }
 
     function _getPoolAndPositionInfo(uint256 tokenId) internal view override returns (PoolKey memory, PositionInfo) {
@@ -912,8 +914,8 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
             swapPoolKey.hooks == poolKey.hooks && swapPoolKey.fee == poolKey.fee
                 && swapPoolKey.tickSpacing == poolKey.tickSpacing
         ) {
-            (inputAmount,, swapDir0to1,) = LiquidityCalculator.calculateSamePool(
-                LiquidityCalculator.V4PoolInfo({
+            (inputAmount,, swapDir0to1,) = liquidityCalculator.calculateSamePool(
+                ILiquidityCalculator.V4PoolInfo({
                     poolMgr: poolManager, poolIdentifier: poolKey.toId(), tickSpacing: poolKey.tickSpacing
                 }),
                 tickLower,
@@ -924,7 +926,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         } else {
             (uint160 sqrtPrice,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
             (inputAmount,, swapDir0to1) =
-                LiquidityCalculator.calculateSimple(sqrtPrice, tickLower, tickUpper, amount0, amount1, swapPoolKey.fee);
+                liquidityCalculator.calculateSimple(sqrtPrice, tickLower, tickUpper, amount0, amount1, swapPoolKey.fee);
         }
 
         if (inputAmount > 0) {

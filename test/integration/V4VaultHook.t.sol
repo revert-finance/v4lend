@@ -18,6 +18,7 @@ import {InterestRateModel} from "../../src/InterestRateModel.sol";
 
 import {RevertHook} from "../../src/RevertHook.sol";
 import {RevertHookConfig} from "../../src/RevertHookConfig.sol";
+import {LiquidityCalculator} from "../../src/LiquidityCalculator.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
@@ -35,6 +36,7 @@ contract V4VaultHookTest is V4ForkTestBase {
     V4Vault vault;
     InterestRateModel interestRateModel;
     RevertHook revertHook;
+    LiquidityCalculator liquidityCalculator;
 
     function setUp() public override {
         super.setUp(); // Call V4ForkTestBase setUp first
@@ -58,6 +60,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         // without reserve for now
         vault.setReserveFactor(0);
 
+        // Deploy LiquidityCalculator
+        liquidityCalculator = new LiquidityCalculator();
+
         // Deploy RevertHook
         address hookFlags = address(
             uint160(
@@ -67,7 +72,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
 
-        bytes memory constructorArgs = abi.encode(address(this), permit2, v4Oracle);
+        bytes memory constructorArgs = abi.encode(address(this), permit2, v4Oracle, liquidityCalculator);
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
         revertHook = RevertHook(hookFlags);
 

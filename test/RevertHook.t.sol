@@ -23,6 +23,7 @@ import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
 import {RevertHookConfig} from "../src/RevertHookConfig.sol";
+import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
 import {MockV4Oracle} from "./utils/MockV4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -43,6 +44,7 @@ contract RevertHookTest is BaseTest {
     PoolKey poolKey;
 
     RevertHook hook;
+    LiquidityCalculator liquidityCalculator;
     PoolId poolId;
 
     MockERC4626Vault vault0;
@@ -87,7 +89,10 @@ contract RevertHookTest is BaseTest {
 
         protocolFeeRecipient = makeAddr("protocolFeeRecipient");
 
-        bytes memory constructorArgs = abi.encode(protocolFeeRecipient, permit2, v4Oracle); // Add all the necessary constructor arguments from the hook
+        // Deploy LiquidityCalculator
+        liquidityCalculator = new LiquidityCalculator();
+
+        bytes memory constructorArgs = abi.encode(protocolFeeRecipient, permit2, v4Oracle, liquidityCalculator); // Add all the necessary constructor arguments from the hook
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
