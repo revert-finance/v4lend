@@ -41,61 +41,7 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using TickLinkedList for TickLinkedList.List;
 
-    // events for auto actions
-    event AutoCompound(
-        uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1
-    );
-    event AutoExit(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
-    event AutoRange(
-        uint256 indexed tokenId,
-        uint256 newTokenId,
-        Currency currency0,
-        Currency currency1,
-        uint256 amount0,
-        uint256 amount1
-    );
-    event AutoLendDeposit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
-    event AutoLendWithdraw(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
-    event AutoLendForceExit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
-    event AutoLeverage(
-        uint256 indexed tokenId, bool isUpperTrigger, uint256 debtBefore, uint256 debtAfter
-    );
-
-    // events for token transfers
-    event SendLeftoverTokens(
-        uint256 indexed tokenId,
-        Currency currency0,
-        Currency currency1,
-        uint256 amount0,
-        uint256 amount1,
-        address recipient
-    );
-    event SendRewards(
-        uint256 indexed tokenId,
-        Currency currency0,
-        Currency currency1,
-        uint256 amount0,
-        uint256 amount1,
-        address recipient
-    );
-    event SendProtocolFee(
-        uint256 indexed tokenId,
-        Currency currency0,
-        Currency currency1,
-        uint256 amount0,
-        uint256 amount1,
-        address recipient
-    );
-
-    // special events for swap failures / modifyLiquidities failures
-    event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
-    event HookSwapPartial(uint256 indexed tokenId, bool zeroForOne, uint256 requested, uint256 swapped);
-    event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
-    event HookAutoLendFailed(address vault, Currency currency, bytes reason);
-    
-
     IPermit2 public immutable permit2;
-    mapping(address => bool) private permit2Approved;
 
     IPositionManager public immutable positionManager;
     V4Oracle public immutable v4Oracle;
