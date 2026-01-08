@@ -10,7 +10,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
-import {V4Oracle} from "./V4Oracle.sol";
+import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
 /// @title RevertHookFunctions
@@ -20,7 +20,7 @@ contract RevertHookFunctions is RevertHookFunctionsBase {
 
     constructor(
         IPermit2 _permit2,
-        V4Oracle _v4Oracle,
+        IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator
     ) RevertHookFunctionsBase(_permit2, _v4Oracle, _liquidityCalculator) {}
 
