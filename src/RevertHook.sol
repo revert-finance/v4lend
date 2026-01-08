@@ -51,19 +51,24 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice The RevertHookFunctions2 contract for delegatecall (auto-leverage, auto-lend)
     RevertHookFunctions2 public immutable hookFunctions2;
 
-    constructor(address protocolFeeRecipient_, IPermit2 _permit2, V4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator)
-        BaseHook(_v4Oracle.poolManager())
-        Ownable(msg.sender)
-    {
+    constructor(
+        address owner_,
+        address protocolFeeRecipient_,
+        IPermit2 _permit2,
+        V4Oracle _v4Oracle,
+        ILiquidityCalculator _liquidityCalculator,
+        RevertHookFunctions _hookFunctions,
+        RevertHookFunctions2 _hookFunctions2
+    ) BaseHook(_v4Oracle.poolManager()) Ownable(owner_) {
         positionManager = _v4Oracle.positionManager();
         protocolFeeRecipient = protocolFeeRecipient_;
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
 
-        // Deploy the functions contracts with the same immutable parameters
-        hookFunctions = new RevertHookFunctions(_permit2, _v4Oracle, _liquidityCalculator);
-        hookFunctions2 = new RevertHookFunctions2(_permit2, _v4Oracle, _liquidityCalculator);
+        // Use pre-deployed function contracts
+        hookFunctions = _hookFunctions;
+        hookFunctions2 = _hookFunctions2;
     }
 
     // ==================== Configuration Setters ====================

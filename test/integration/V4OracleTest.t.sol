@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {V4ForkTestBase} from "./V4ForkTestBase.sol";
 import {V4Oracle, AggregatorV3Interface} from "../../src/V4Oracle.sol";
@@ -288,6 +289,190 @@ contract V4OracleTest is V4ForkTestBase {
             differenceBpsX100 <= maxDifferenceBpsX100 || maxDifferenceBpsX100 == type(uint16).max,
             "Price difference should be within maxPoolPriceDifference"
         );
+    }
+
+    /// @notice Test that getPoolSqrtPriceX96 is calculated correctly from Chainlink feeds
+    /// @dev Manually calculates the expected sqrtPriceX96 and compares to oracle result
+    function testGetPoolSqrtPriceX96Calculation() public {
+        console.log("=== Testing getPoolSqrtPriceX96 Calculation ===");
+
+        // Test pairs: (token0, token1)
+        // 1. WETH/USDC
+        _testSqrtPriceCalculation(WETH_ADDRESS, USDC_ADDRESS, "WETH/USDC");
+
+        // 2. USDC/WETH (reversed)
+        _testSqrtPriceCalculation(USDC_ADDRESS, WETH_ADDRESS, "USDC/WETH");
+
+        // 3. WBTC/USDC
+        _testSqrtPriceCalculation(WBTC_ADDRESS, USDC_ADDRESS, "WBTC/USDC");
+
+        // 4. DAI/USDC (stablecoin pair)
+        _testSqrtPriceCalculation(DAI_ADDRESS, USDC_ADDRESS, "DAI/USDC");
+
+        // 5. Native ETH/USDC
+        _testSqrtPriceCalculation(address(0), USDC_ADDRESS, "ETH/USDC");
+
+        // 6. Same token (edge case - should return Q96)
+        _testSqrtPriceCalculation(USDC_ADDRESS, USDC_ADDRESS, "USDC/USDC");
+
+        console.log("=== All getPoolSqrtPriceX96 Calculation Tests Passed ===");
+    }
+
+    /// @notice Helper to test sqrtPriceX96 calculation for a specific token pair
+    /// @param token0 First token address
+    /// @param token1 Second token address
+    /// @param pairName Name of the pair for logging
+    function _testSqrtPriceCalculation(address token0, address token1, string memory pairName) internal view {
+        console.log("");
+        console.log("--- Testing pair:", pairName, "---");
+
+        // Get oracle's sqrtPriceX96
+        uint160 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(token0, token1);
+        console.log("Oracle sqrtPriceX96:", oracleSqrtPriceX96);
+
+        // Edge case: same token should return Q96
+        if (token0 == token1) {
+            assertEq(oracleSqrtPriceX96, uint160(Q96), "Same token should return Q96");
+            console.log("Verified: same token returns Q96");
+            return;
+        }
+
+        // Manually calculate expected sqrtPriceX96
+        // Formula: sqrt(price0X96 * Q96 / price1X96) * 2^48
+
+        // Get individual prices from Chainlink (in reference token terms)
+        uint256 price0X96 = _getManualPriceX96(token0);
+        uint256 price1X96 = _getManualPriceX96(token1);
+
+        console.log("Manual price0X96:", price0X96);
+        console.log("Manual price1X96:", price1X96);
+
+        // Calculate expected sqrtPriceX96
+        uint256 priceRatioX96 = price0X96 * Q96 / price1X96;
+        uint256 expectedSqrtPriceX96 = Math.sqrt(priceRatioX96) * (2 ** 48);
+
+        console.log("Expected sqrtPriceX96:", expectedSqrtPriceX96);
+
+        // Verify they match exactly
+        assertEq(oracleSqrtPriceX96, uint160(expectedSqrtPriceX96),
+            string(abi.encodePacked("sqrtPriceX96 mismatch for ", pairName)));
+
+        // Verify the price is reasonable (non-zero)
+        assertTrue(oracleSqrtPriceX96 > 0, "sqrtPriceX96 should be positive");
+
+        // Verify the actual price derived from sqrtPriceX96
+        // price = (sqrtPriceX96 / Q96)^2 = sqrtPriceX96^2 / Q96
+        uint256 derivedPriceX96 = (uint256(oracleSqrtPriceX96) * uint256(oracleSqrtPriceX96)) / Q96;
+        console.log("Derived priceX96 (token0/token1):", derivedPriceX96);
+
+        // The derived price should equal price0X96/price1X96
+        uint256 expectedPriceX96 = price0X96 * Q96 / price1X96;
+
+        // Allow small rounding error (< 0.01% due to sqrt precision)
+        uint256 priceDiff;
+        if (derivedPriceX96 >= expectedPriceX96) {
+            priceDiff = derivedPriceX96 - expectedPriceX96;
+        } else {
+            priceDiff = expectedPriceX96 - derivedPriceX96;
+        }
+
+        uint256 maxAllowedDiff = expectedPriceX96 / 10000; // 0.01%
+        assertTrue(priceDiff <= maxAllowedDiff,
+            "Derived price should match expected within 0.01%");
+
+        console.log("Verified:", pairName, "calculation is correct");
+    }
+
+    /// @notice Manually get priceX96 for a token using the same logic as V4Oracle
+    /// @dev Replicates _getReferenceTokenPriceX96 logic for verification
+    /// @param token Token address to get price for
+    /// @return priceX96 Price in Q96 format relative to reference token
+    function _getManualPriceX96(address token) internal view returns (uint256 priceX96) {
+        address referenceToken = v4Oracle.referenceToken();
+
+        // If token is the reference token, price is Q96
+        if (token == referenceToken) {
+            return Q96;
+        }
+
+        // Get Chainlink price for the token
+        uint256 chainlinkPriceX96 = _getManualChainlinkPriceX96(token);
+
+        // Get Chainlink price for reference token
+        uint256 chainlinkReferencePriceX96 = _getManualChainlinkPriceX96(referenceToken);
+
+        // Get token decimals
+        (,,,uint8 tokenDecimals) = v4Oracle.feedConfigs(token);
+        uint8 referenceTokenDecimals = v4Oracle.referenceTokenDecimals();
+
+        // Calculate price with decimal adjustment (same as V4Oracle._getReferenceTokenPriceX96)
+        if (referenceTokenDecimals > tokenDecimals) {
+            priceX96 = (10 ** (referenceTokenDecimals - tokenDecimals)) * chainlinkPriceX96
+                * Q96 / chainlinkReferencePriceX96;
+        } else if (referenceTokenDecimals < tokenDecimals) {
+            priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96
+                / (10 ** (tokenDecimals - referenceTokenDecimals));
+        } else {
+            priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96;
+        }
+    }
+
+    /// @notice Manually get Chainlink price in X96 format
+    /// @param token Token address
+    /// @return Chainlink price in Q96 format
+    function _getManualChainlinkPriceX96(address token) internal view returns (uint256) {
+        address chainlinkReferenceToken = v4Oracle.chainlinkReferenceToken();
+
+        // If token is the chainlink reference token (e.g., 0xdead for USD), return Q96
+        if (token == chainlinkReferenceToken) {
+            return Q96;
+        }
+
+        // Get feed config
+        (AggregatorV3Interface feed,, uint8 feedDecimals,) = v4Oracle.feedConfigs(token);
+
+        // Get latest price from Chainlink
+        (, int256 answer,,,) = feed.latestRoundData();
+
+        // Convert to Q96 format
+        return uint256(answer) * Q96 / (10 ** feedDecimals);
+    }
+
+    /// @notice Test sqrtPriceX96 symmetry - swapping token order should give inverse
+    function testGetPoolSqrtPriceX96Symmetry() public {
+        console.log("=== Testing getPoolSqrtPriceX96 Symmetry ===");
+
+        // Get sqrtPriceX96 for WETH/USDC
+        uint160 sqrtPrice_WETH_USDC = v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS);
+
+        // Get sqrtPriceX96 for USDC/WETH (reversed)
+        uint160 sqrtPrice_USDC_WETH = v4Oracle.getPoolSqrtPriceX96(USDC_ADDRESS, WETH_ADDRESS);
+
+        console.log("sqrtPrice(WETH/USDC):", sqrtPrice_WETH_USDC);
+        console.log("sqrtPrice(USDC/WETH):", sqrtPrice_USDC_WETH);
+
+        // Calculate prices from sqrtPrices
+        uint256 price_WETH_USDC = (uint256(sqrtPrice_WETH_USDC) * uint256(sqrtPrice_WETH_USDC)) / Q96;
+        uint256 price_USDC_WETH = (uint256(sqrtPrice_USDC_WETH) * uint256(sqrtPrice_USDC_WETH)) / Q96;
+
+        console.log("price(WETH/USDC):", price_WETH_USDC);
+        console.log("price(USDC/WETH):", price_USDC_WETH);
+
+        // Verify: price_WETH_USDC * price_USDC_WETH should approximately equal Q96^2 / Q96 = Q96
+        // Because if WETH/USDC = X, then USDC/WETH = 1/X
+        // So X * (1/X) = 1, and in Q96 terms: priceX96 * inversePriceX96 / Q96 = Q96
+        uint256 product = (price_WETH_USDC * price_USDC_WETH) / Q96;
+
+        console.log("Product (should be ~Q96):", product);
+        console.log("Q96:", Q96);
+
+        // Allow 1% tolerance for rounding
+        uint256 tolerance = Q96 / 100;
+        uint256 diff = product > Q96 ? product - Q96 : Q96 - product;
+
+        assertTrue(diff < tolerance, "Price * inverse price should equal Q96 (within 1%)");
+
+        console.log("=== Symmetry Test Passed ===");
     }
 
     // recieves ETH from decreasing liquidity
