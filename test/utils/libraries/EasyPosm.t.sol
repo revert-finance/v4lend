@@ -14,8 +14,51 @@ import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+
 import {EasyPosm} from "./EasyPosm.sol";
 import {BaseTest} from "../BaseTest.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
+
+contract DonateRouter is IUnlockCallback {
+    using CurrencySettler for Currency;
+    IPoolManager public immutable poolManager;
+
+    struct DonateCallbackData {
+        PoolKey key;
+        uint256 amount0;
+        uint256 amount1;
+        address sender;
+    }
+
+    constructor(IPoolManager _poolManager) {
+        poolManager = _poolManager;
+    }
+
+    function donate(PoolKey memory key, uint256 amount0, uint256 amount1) external returns (BalanceDelta delta) {
+        return abi.decode(
+            poolManager.unlock(abi.encode(DonateCallbackData(key, amount0, amount1, msg.sender))), (BalanceDelta)
+        );
+    }
+
+    function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
+        require(msg.sender == address(poolManager), "only pool manager");
+
+        DonateCallbackData memory data = abi.decode(rawData, (DonateCallbackData));
+
+        BalanceDelta delta = poolManager.donate(data.key, data.amount0, data.amount1, "");
+
+        if (data.amount0 > 0) {
+            data.key.currency0.settle(poolManager, data.sender, data.amount0, false);
+        }
+        if (data.amount1 > 0) {
+            data.key.currency1.settle(poolManager, data.sender, data.amount1, false);
+        }
+
+        return abi.encode(delta);
+    }
+}
 
 contract EasyPosmTest is Test, BaseTest {
     using EasyPosm for IPositionManager;
@@ -32,6 +75,8 @@ contract EasyPosmTest is Test, BaseTest {
     PoolKey key;
     PoolKey nativeKey;
 
+    DonateRouter donateRouter;
+
     function setUp() public {
         deployArtifacts();
 
@@ -47,6 +92,9 @@ contract EasyPosmTest is Test, BaseTest {
         // full-range liquidity
         tickLower = TickMath.minUsableTick(key.tickSpacing);
         tickUpper = TickMath.maxUsableTick(key.tickSpacing);
+
+        // Create donate router for fee generation tests
+        donateRouter = new DonateRouter(poolManager);
     }
 
     function test_mintLiquidity() public {
@@ -220,30 +268,33 @@ contract EasyPosmTest is Test, BaseTest {
         assertEq(delta.amount1(), -mintDelta.amount1() - 1 wei);
     }
 
-    // This test requires a donateRouter, TODO
-    // function test_collect() public {
-    //     (uint256 tokenId,) = positionManager.mint(
-    //         key,
-    //         tickLower,
-    //         tickUpper,
-    //         100e18,
-    //         type(uint256).max,
-    //         type(uint256).max,
-    //         address(this),
-    //         block.timestamp + 1,
-    //         Constants.ZERO_BYTES
-    //     );
+    function test_collect() public {
+        (uint256 tokenId,) = positionManager.mint(
+            key,
+            tickLower,
+            tickUpper,
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp + 1,
+            Constants.ZERO_BYTES
+        );
 
-    //     // donate to regenerate fee revenue
-    //     uint128 feeRevenue0 = 1e18;
-    //     uint128 feeRevenue1 = 0.1e18;
+        // donate to generate fee revenue
+        uint128 feeRevenue0 = 1e18;
+        uint128 feeRevenue1 = 0.1e18;
 
-    //     poolManager.donate(key, feeRevenue0, feeRevenue1, Constants.ZERO_BYTES);
+        // Approve tokens for donate router
+        MockERC20(Currency.unwrap(currency0)).approve(address(donateRouter), feeRevenue0);
+        MockERC20(Currency.unwrap(currency1)).approve(address(donateRouter), feeRevenue1);
 
-    //     // position collects half of the revenue since 50% of the liquidity is minted in setUp()
-    //     BalanceDelta delta =
-    //         positionManager.collect(tokenId, 0, 0, address(0x123), block.timestamp + 1, Constants.ZERO_BYTES);
-    //     assertEq(uint128(delta.amount0()), feeRevenue0 - 1 wei);
-    //     assertEq(uint128(delta.amount1()), feeRevenue1 - 1 wei);
-    // }
+        donateRouter.donate(key, feeRevenue0, feeRevenue1);
+
+        // position collects 100% of the revenue since it's the only liquidity in range
+        BalanceDelta delta =
+            positionManager.collect(tokenId, 0, 0, address(0x123), block.timestamp + 1, Constants.ZERO_BYTES);
+        assertEq(uint128(delta.amount0()), feeRevenue0 - 1 wei);
+        assertEq(uint128(delta.amount1()), feeRevenue1 - 1 wei);
+    }
 }
