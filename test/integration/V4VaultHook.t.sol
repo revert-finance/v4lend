@@ -18,6 +18,7 @@ import {InterestRateModel} from "../../src/InterestRateModel.sol";
 
 import {RevertHook} from "../../src/RevertHook.sol";
 import {RevertHookConfig} from "../../src/RevertHookConfig.sol";
+import {RevertHookState} from "../../src/RevertHookState.sol";
 import {LiquidityCalculator} from "../../src/LiquidityCalculator.sol";
 import {Constants} from "../../src/utils/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -183,9 +184,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.AUTO_COMPOUND_ONLY,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -392,9 +393,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.AUTO_RANGE,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -657,8 +658,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify config is still correctly set
-        (RevertHookConfig.PositionMode mode,,,,,,,,,, uint16 storedTargetBps) = revertHook.positionConfigs(hookedTokenId);
-        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_LEVERAGE), "Mode should still be AUTO_LEVERAGE");
+        (RevertHookState.PositionMode mode,,,,,,,,,, uint16 storedTargetBps) = revertHook.positionConfigs(hookedTokenId);
+        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_LEVERAGE), "Mode should still be AUTO_LEVERAGE");
         assertEq(storedTargetBps, targetBps, "Target bps should still be set");
 
         console.log("\nAutoLeverage configuration test completed successfully");
@@ -714,9 +715,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.AUTO_LEVERAGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -730,8 +731,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify config was set
-        (RevertHookConfig.PositionMode mode,,,,,,,,,, uint16 autoLeverageTargetBps) = revertHook.positionConfigs(hookedTokenId);
-        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_LEVERAGE), "Mode should be AUTO_LEVERAGE");
+        (RevertHookState.PositionMode mode,,,,,,,,,, uint16 autoLeverageTargetBps) = revertHook.positionConfigs(hookedTokenId);
+        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_LEVERAGE), "Mode should be AUTO_LEVERAGE");
         assertEq(autoLeverageTargetBps, targetBps, "Target bps should match");
     }
 
@@ -794,9 +795,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.expectRevert(Constants.InvalidConfig.selector);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.AUTO_LEVERAGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -832,9 +833,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.expectRevert(Constants.InvalidConfig.selector);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.AUTO_LEVERAGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -852,9 +853,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.expectRevert(Constants.InvalidConfig.selector);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.AUTO_LEVERAGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -901,9 +902,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.AUTO_LEVERAGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -917,8 +918,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify config was set successfully
-        (RevertHookConfig.PositionMode mode,,,,,,,,,, uint16 targetBps) = revertHook.positionConfigs(hookedTokenId);
-        assertEq(uint8(mode), uint8(RevertHookConfig.PositionMode.AUTO_LEVERAGE), "Mode should be AUTO_LEVERAGE");
+        (RevertHookState.PositionMode mode,,,,,,,,,, uint16 targetBps) = revertHook.positionConfigs(hookedTokenId);
+        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_LEVERAGE), "Mode should be AUTO_LEVERAGE");
         assertEq(targetBps, 5000, "Target should be 5000 bps");
     }
 
@@ -1101,17 +1102,17 @@ contract V4VaultHookTest is V4ForkTestBase {
         _configurePositionForAutoLeverage(hookedTokenId, targetBps);
 
         // Verify mode is set
-        (RevertHookConfig.PositionMode modeBefore,,,,,,,,,, uint16 targetBpsBefore) = revertHook.positionConfigs(hookedTokenId);
-        assertEq(uint8(modeBefore), uint8(RevertHookConfig.PositionMode.AUTO_LEVERAGE), "Mode should be AUTO_LEVERAGE");
+        (RevertHookState.PositionMode modeBefore,,,,,,,,,, uint16 targetBpsBefore) = revertHook.positionConfigs(hookedTokenId);
+        assertEq(uint8(modeBefore), uint8(RevertHookState.PositionMode.AUTO_LEVERAGE), "Mode should be AUTO_LEVERAGE");
         assertEq(targetBpsBefore, targetBps, "Target should be set");
 
         // Disable AUTO_LEVERAGE by setting mode to NONE
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
-            RevertHookConfig.PositionConfig({
-                mode: RevertHookConfig.PositionMode.NONE,
-                autoCompoundMode: RevertHookConfig.AutoCompoundMode.NONE,
+            RevertHookState.PositionConfig({
+                mode: RevertHookState.PositionMode.NONE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -1125,8 +1126,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify mode is disabled
-        (RevertHookConfig.PositionMode modeAfter,,,,,,,,,, uint16 targetBpsAfter) = revertHook.positionConfigs(hookedTokenId);
-        assertEq(uint8(modeAfter), uint8(RevertHookConfig.PositionMode.NONE), "Mode should be NONE");
+        (RevertHookState.PositionMode modeAfter,,,,,,,,,, uint16 targetBpsAfter) = revertHook.positionConfigs(hookedTokenId);
+        assertEq(uint8(modeAfter), uint8(RevertHookState.PositionMode.NONE), "Mode should be NONE");
         assertEq(targetBpsAfter, 0, "Target should be reset");
 
         // Move price - should NOT trigger any leverage adjustment since mode is disabled
