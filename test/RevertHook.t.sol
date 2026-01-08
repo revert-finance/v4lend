@@ -23,7 +23,6 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
-import {RevertHookConfig} from "../src/RevertHookConfig.sol";
 import {RevertHookState} from "../src/RevertHookState.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
 import {MockV4Oracle} from "./utils/MockV4Oracle.sol";

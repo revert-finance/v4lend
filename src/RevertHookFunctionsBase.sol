@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
@@ -13,7 +13,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
@@ -23,14 +23,14 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {V4Oracle} from "./V4Oracle.sol";
-import {RevertHookState} from "./RevertHookState.sol";
-import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 
 /// @title RevertHookFunctionsBase
 /// @notice Base contract with shared helper functions for RevertHookFunctions and RevertHookFunctions2
-abstract contract RevertHookFunctionsBase is RevertHookState {
+/// @dev Inherits from RevertHookTriggers for state access and trigger management
+abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     using PoolIdLibrary for PoolKey;
-    using TickLinkedList for TickLinkedList.List;
+    using CurrencyLibrary for Currency;
 
     IPermit2 public immutable permit2;
     IPositionManager public immutable positionManager;
@@ -46,15 +46,22 @@ abstract contract RevertHookFunctionsBase is RevertHookState {
         poolManager = _v4Oracle.poolManager();
     }
 
-    // ==================== Owner & Auth Helpers ====================
+    // ==================== Abstract Function Implementation ====================
 
-    /// @notice Gets the owner of a position
-    /// @param tokenId The token ID
-    /// @param isRealOwner If true, returns the real owner (not the vault), otherwise returns the direct owner
-    function _getPositionOwner(uint256 tokenId, bool isRealOwner) internal view returns (address) {
+    /// @notice Implementation of abstract function from RevertHookTriggers
+    function _getPoolAndPositionInfo(uint256 tokenId) internal view override returns (PoolKey memory, PositionInfo) {
+        return positionManager.getPoolAndPositionInfo(tokenId);
+    }
+
+    // ==================== Owner Helper ====================
+
+    /// @notice Returns the owner of the position
+    function _getOwner(uint256 tokenId, bool isRealOwner) internal view returns (address) {
         address owner = IERC721(address(positionManager)).ownerOf(tokenId);
         return (isRealOwner && vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
     }
+
+    // ==================== Auth Helpers ====================
 
     /// @notice Validates that the caller is authorized to interact with the position
     function _requireAuthorization(uint256 tokenId) internal view {
@@ -100,18 +107,6 @@ abstract contract RevertHookFunctionsBase is RevertHookState {
 
     // ==================== Position Config Helpers ====================
 
-    /// @notice Disables a position (sets mode to NONE)
-    function _disablePosition(uint256 tokenId) internal {
-        positionConfigs[tokenId].mode = PositionMode.NONE;
-        positionConfigs[tokenId].autoCompoundMode = AutoCompoundMode.NONE;
-        uint32 lastActivated = positionStates[tokenId].lastActivated;
-        if (lastActivated > 0) {
-            positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - lastActivated;
-            positionStates[tokenId].lastActivated = 0;
-        }
-        emit SetPositionConfig(tokenId, positionConfigs[tokenId]);
-    }
-
     /// @notice Copies configuration from one position to a new position
     function _copyPositionConfig(uint256 newTokenId, PositionConfig storage oldConfig) internal {
         positionConfigs[newTokenId] = oldConfig;
@@ -121,107 +116,6 @@ abstract contract RevertHookFunctionsBase is RevertHookState {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
         _addPositionTriggers(newTokenId, poolKey);
         emit SetPositionConfig(newTokenId, positionConfigs[newTokenId]);
-    }
-
-    // ==================== Trigger Management ====================
-
-    /// @notice Adds triggers for a position to the tick linked lists
-    function _addPositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PoolId poolId = poolKey.toId();
-        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        int24[4] memory triggerTicks = _computeTriggerTicks(tokenId, poolKey, positionInfo.tickLower(), positionInfo.tickUpper());
-
-        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
-        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
-
-        if (!upperList.increasing) upperList.increasing = true;
-
-        if (triggerTicks[0] != type(int24).min) lowerList.insert(triggerTicks[0], tokenId);
-        if (triggerTicks[1] != type(int24).min) lowerList.insert(triggerTicks[1], tokenId);
-        if (triggerTicks[2] != type(int24).max) upperList.insert(triggerTicks[2], tokenId);
-        if (triggerTicks[3] != type(int24).max) upperList.insert(triggerTicks[3], tokenId);
-    }
-
-    /// @notice Removes triggers for a position from the tick linked lists
-    function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PoolId poolId = poolKey.toId();
-        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        int24[4] memory triggerTicks = _computeTriggerTicks(tokenId, poolKey, positionInfo.tickLower(), positionInfo.tickUpper());
-
-        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
-        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
-
-        if (triggerTicks[0] != type(int24).min) lowerList.remove(triggerTicks[0], tokenId);
-        if (triggerTicks[1] != type(int24).min) lowerList.remove(triggerTicks[1], tokenId);
-        if (triggerTicks[2] != type(int24).max) upperList.remove(triggerTicks[2], tokenId);
-        if (triggerTicks[3] != type(int24).max) upperList.remove(triggerTicks[3], tokenId);
-    }
-
-    /// @notice Computes the trigger ticks for a position based on its configuration
-    function _computeTriggerTicks(
-        uint256 tokenId,
-        PoolKey memory poolKey,
-        int24 tickLower,
-        int24 tickUpper
-    ) internal view returns (int24[4] memory triggers) {
-        triggers[0] = type(int24).min;
-        triggers[1] = type(int24).min;
-        triggers[2] = type(int24).max;
-        triggers[3] = type(int24).max;
-
-        PositionConfig storage config = positionConfigs[tokenId];
-        PositionMode mode = config.mode;
-
-        if (mode == PositionMode.NONE || mode == PositionMode.AUTO_COMPOUND_ONLY) {
-            return triggers;
-        }
-
-        // Auto-range triggers
-        if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            if (config.autoRangeLowerLimit != type(int24).min) {
-                triggers[0] = tickLower - config.autoRangeLowerLimit;
-            }
-            if (config.autoRangeUpperLimit != type(int24).max) {
-                triggers[2] = tickUpper + config.autoRangeUpperLimit;
-            }
-        }
-
-        // Auto-exit triggers
-        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            int24 exitLower = config.autoExitIsRelative
-                ? (config.autoExitTickLower != type(int24).min ? tickLower - config.autoExitTickLower : type(int24).min)
-                : config.autoExitTickLower;
-            int24 exitUpper = config.autoExitIsRelative
-                ? (config.autoExitTickUpper != type(int24).max ? tickUpper + config.autoExitTickUpper : type(int24).max)
-                : config.autoExitTickUpper;
-
-            if (triggers[0] != type(int24).min) triggers[1] = exitLower;
-            else triggers[0] = exitLower;
-            if (triggers[2] != type(int24).max) triggers[3] = exitUpper;
-            else triggers[2] = exitUpper;
-        }
-
-        // Auto-lend triggers
-        if (mode == PositionMode.AUTO_LEND) {
-            PositionState storage state = positionStates[tokenId];
-            if (state.autoLendShares > 0) {
-                if (Currency.unwrap(poolKey.currency0) == state.autoLendToken) {
-                    triggers[2] = tickLower - config.autoLendToleranceTick - poolKey.tickSpacing;
-                } else {
-                    triggers[0] = tickUpper + config.autoLendToleranceTick;
-                }
-            } else {
-                triggers[0] = tickLower - config.autoLendToleranceTick * 2 - poolKey.tickSpacing;
-                triggers[2] = tickUpper + config.autoLendToleranceTick * 2;
-            }
-        }
-
-        // Auto-leverage triggers
-        if (mode == PositionMode.AUTO_LEVERAGE) {
-            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
-            triggers[0] = baseTick - 10 * poolKey.tickSpacing;
-            triggers[2] = baseTick + 10 * poolKey.tickSpacing;
-        }
     }
 
     // ==================== Swap Helpers ====================

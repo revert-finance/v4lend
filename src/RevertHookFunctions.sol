@@ -43,7 +43,7 @@ contract RevertHookFunctions is RevertHookFunctionsBase {
         (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
 
         // Send tokens to owner and disable position
-        _sendLeftoverTokens(tokenId, currency0, currency1, _getPositionOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
         _disablePosition(tokenId);
 
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
@@ -78,11 +78,11 @@ contract RevertHookFunctions is RevertHookFunctionsBase {
             newTickUpper,
             uint128(amount0),
             uint128(amount1),
-            _getPositionOwner(tokenId, false)
+            _getOwner(tokenId, false)
         );
 
         // Send leftover tokens and copy config to new position
-        _sendLeftoverTokens(tokenId, currency0, currency1, _getPositionOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
         _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
         _disablePosition(tokenId);
 
@@ -95,7 +95,7 @@ contract RevertHookFunctions is RevertHookFunctionsBase {
     /// @param tokenIds Array of token IDs to compound
     function autoCompound(uint256[] memory tokenIds) external {
         for (uint256 i; i < tokenIds.length;) {
-            address owner = _getPositionOwner(tokenIds[i], false);
+            address owner = _getOwner(tokenIds[i], false);
             if (vaults[owner]) {
                 IVault(owner).transform(
                     tokenIds[i],
@@ -163,7 +163,7 @@ contract RevertHookFunctions is RevertHookFunctionsBase {
         }
 
         // Send remaining tokens to owner
-        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getPositionOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
     }
 
     // ==================== Internal Helpers ====================

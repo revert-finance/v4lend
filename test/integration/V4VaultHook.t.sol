@@ -17,7 +17,6 @@ import {V4Oracle} from "../../src/V4Oracle.sol";
 import {InterestRateModel} from "../../src/InterestRateModel.sol";
 
 import {RevertHook} from "../../src/RevertHook.sol";
-import {RevertHookConfig} from "../../src/RevertHookConfig.sol";
 import {RevertHookState} from "../../src/RevertHookState.sol";
 import {LiquidityCalculator} from "../../src/LiquidityCalculator.sol";
 import {Constants} from "../../src/utils/Constants.sol";

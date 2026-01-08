@@ -95,7 +95,7 @@ contract RevertHookFunctions2 is RevertHookFunctionsBase {
         _approveToken(poolKey.currency0, amount0);
         _approveToken(poolKey.currency1, amount1);
         _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
-        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getPositionOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
     }
 
     /// @notice Decreases leverage by removing liquidity and repaying debt
@@ -139,7 +139,7 @@ contract RevertHookFunctions2 is RevertHookFunctionsBase {
             vault.repay(tokenId, lendAmount, false);
         }
 
-        _sendLeftoverTokens(tokenId, currency0, currency1, _getPositionOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
     }
 
     // ==================== Auto Lend ====================
@@ -147,7 +147,7 @@ contract RevertHookFunctions2 is RevertHookFunctionsBase {
     /// @notice Forces exit from auto-lend position (called by position owner)
     /// @param tokenId The token ID of the position
     function autoLendForceExit(uint256 tokenId) external {
-        address owner = _getPositionOwner(tokenId, true);
+        address owner = _getOwner(tokenId, true);
         if (msg.sender != owner) revert Unauthorized();
 
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -198,7 +198,7 @@ contract RevertHookFunctions2 is RevertHookFunctionsBase {
             positionStates[tokenId].autoLendAmount = lendAmount;
             positionStates[tokenId].autoLendVault = address(lendVault);
 
-            _sendLeftoverTokens(tokenId, currency0, currency1, _getPositionOwner(tokenId, true));
+            _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
             _addPositionTriggers(tokenId, poolKey);
 
             emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
@@ -254,7 +254,7 @@ contract RevertHookFunctions2 is RevertHookFunctionsBase {
                     baseTick + poolKey.tickSpacing + tickWidth,
                     uint128(redeemedAmount),
                     0,
-                    _getPositionOwner(tokenId, false)
+                    _getOwner(tokenId, false)
                 );
             }
         } else {
@@ -264,12 +264,12 @@ contract RevertHookFunctions2 is RevertHookFunctionsBase {
             } else {
                 // Current tick within/below position - mint new position below current tick
                 int24 tickWidth = positionInfo.tickUpper() - positionInfo.tickLower();
-                (newTokenId,,) = _mintPosition(poolKey, baseTick - tickWidth, baseTick, 0, uint128(redeemedAmount), _getPositionOwner(tokenId, false));
+                (newTokenId,,) = _mintPosition(poolKey, baseTick - tickWidth, baseTick, 0, uint128(redeemedAmount), _getOwner(tokenId, false));
             }
         }
 
         _resetAutoLendState(tokenId);
-        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getPositionOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
 
         if (newTokenId > 0) {
             _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
