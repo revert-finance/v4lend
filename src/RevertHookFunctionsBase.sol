@@ -22,7 +22,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
-import {V4Oracle} from "./V4Oracle.sol";
+import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 
 /// @title RevertHookFunctionsBase
@@ -34,11 +34,11 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
 
     IPermit2 public immutable permit2;
     IPositionManager public immutable positionManager;
-    V4Oracle public immutable v4Oracle;
+    IV4Oracle public immutable v4Oracle;
     ILiquidityCalculator public immutable liquidityCalculator;
     IPoolManager public immutable poolManager;
 
-    constructor(IPermit2 _permit2, V4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) Ownable(address(1)) {
+    constructor(IPermit2 _permit2, IV4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) Ownable(address(1)) {
         positionManager = _v4Oracle.positionManager();
         permit2 = _permit2;
         v4Oracle = _v4Oracle;

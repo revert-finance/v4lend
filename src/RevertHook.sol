@@ -25,7 +25,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
-import {V4Oracle} from "./V4Oracle.sol";
+import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 import {RevertHookFunctions} from "./RevertHookFunctions.sol";
@@ -42,7 +42,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     IPermit2 public immutable permit2;
 
     IPositionManager public immutable positionManager;
-    V4Oracle public immutable v4Oracle;
+    IV4Oracle public immutable v4Oracle;
     ILiquidityCalculator public immutable liquidityCalculator;
 
     /// @notice The RevertHookFunctions contract for delegatecall (auto-exit, auto-range, auto-compound)
@@ -55,7 +55,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         address owner_,
         address protocolFeeRecipient_,
         IPermit2 _permit2,
-        V4Oracle _v4Oracle,
+        IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
         RevertHookFunctions _hookFunctions,
         RevertHookFunctions2 _hookFunctions2

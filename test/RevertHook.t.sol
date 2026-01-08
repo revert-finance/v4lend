@@ -24,7 +24,10 @@ import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
 import {RevertHookState} from "../src/RevertHookState.sol";
+import {RevertHookFunctions} from "../src/RevertHookFunctions.sol";
+import {RevertHookFunctions2} from "../src/RevertHookFunctions2.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
+import {IV4Oracle} from "../src/interfaces/IV4Oracle.sol";
 import {MockV4Oracle} from "./utils/MockV4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -93,7 +96,11 @@ contract RevertHookTest is BaseTest {
         // Deploy LiquidityCalculator
         liquidityCalculator = new LiquidityCalculator();
 
-        bytes memory constructorArgs = abi.encode(protocolFeeRecipient, permit2, v4Oracle, liquidityCalculator); // Add all the necessary constructor arguments from the hook
+        // Deploy RevertHookFunctions and RevertHookFunctions2
+        RevertHookFunctions hookFunctions = new RevertHookFunctions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookFunctions2 hookFunctions2 = new RevertHookFunctions2(permit2, v4Oracle, liquidityCalculator);
+
+        bytes memory constructorArgs = abi.encode(address(this), protocolFeeRecipient, permit2, v4Oracle, liquidityCalculator, hookFunctions, hookFunctions2);
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
