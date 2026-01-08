@@ -1,565 +1,338 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
 
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
-import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {V4Oracle} from "./V4Oracle.sol";
-import {RevertHookState} from "./RevertHookState.sol";
-import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
 /// @title RevertHookFunctions2
 /// @notice Contains leverage and auto-lend related functions for RevertHook (called via delegatecall)
-contract RevertHookFunctions2 is RevertHookState {
+contract RevertHookFunctions2 is RevertHookFunctionsBase {
     using PoolIdLibrary for PoolKey;
-    using TickLinkedList for TickLinkedList.List;
 
-    IPermit2 public immutable permit2;
-    IPositionManager public immutable positionManager;
-    V4Oracle public immutable v4Oracle;
-    ILiquidityCalculator public immutable liquidityCalculator;
-    IPoolManager public immutable poolManager;
-
-    constructor(IPermit2 _permit2, V4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) Ownable(address(1)) {
-        positionManager = _v4Oracle.positionManager();
-        permit2 = _permit2;
-        v4Oracle = _v4Oracle;
-        liquidityCalculator = _liquidityCalculator;
-        poolManager = _v4Oracle.poolManager();
-    }
+    constructor(
+        IPermit2 _permit2,
+        V4Oracle _v4Oracle,
+        ILiquidityCalculator _liquidityCalculator
+    ) RevertHookFunctionsBase(_permit2, _v4Oracle, _liquidityCalculator) {}
 
     // ==================== Auto Leverage ====================
 
-    function autoLeverage(PoolKey memory poolKey, PoolId, uint256 tokenId, bool isUp) public {
-        _requireAuth(tokenId);
-        IVault v = IVault(msg.sender);
-        (uint256 debt,, uint256 cVal,,) = v.loanInfo(tokenId);
-        uint16 target = positionConfigs[tokenId].autoLeverageTargetBps;
-        uint256 ratio = cVal > 0 ? debt * 10000 / cVal : 0;
-        if (ratio < target) {
-            _leverageUp(poolKey, tokenId, v, debt, cVal, target);
-        } else if (ratio > target) {
-            _leverageDown(poolKey, tokenId, v, debt, cVal, target);
+    /// @notice Adjusts leverage for a vault-owned position based on current vs target debt ratio
+    /// @param poolKey The pool key for the position
+    /// @param tokenId The token ID of the position
+    /// @param isUpperTrigger True if triggered by upper tick
+    function autoLeverage(PoolKey memory poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) public {
+        _requireAuthorization(tokenId);
+
+        IVault vault = IVault(msg.sender);
+        (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+
+        uint16 targetRatioBps = positionConfigs[tokenId].autoLeverageTargetBps;
+        uint256 currentRatio = collateralValue > 0 ? currentDebt * 10000 / collateralValue : 0;
+
+        // Adjust leverage based on current vs target ratio
+        if (currentRatio < targetRatioBps) {
+            _increaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
+        } else if (currentRatio > targetRatioBps) {
+            _decreaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
         }
-        _removeTriggers(tokenId, poolKey);
-        positionStates[tokenId].autoLeverageBaseTick =
-            (_tickLower(_tick(poolKey.toId()), poolKey.tickSpacing) / poolKey.tickSpacing) * poolKey.tickSpacing;
-        _addTriggers(tokenId, poolKey);
-        (uint256 newDebt,,,,) = v.loanInfo(tokenId);
-        emit AutoLeverage(tokenId, isUp, debt, newDebt);
+
+        // Update triggers for new base tick
+        _removePositionTriggers(tokenId, poolKey);
+        int24 newBaseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
+        positionStates[tokenId].autoLeverageBaseTick = (newBaseTick / poolKey.tickSpacing) * poolKey.tickSpacing;
+        _addPositionTriggers(tokenId, poolKey);
+
+        (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
+        emit AutoLeverage(tokenId, isUpperTrigger, currentDebt, newDebt);
     }
 
-    function _leverageUp(
-        PoolKey memory pk,
-        uint256 id,
-        IVault v,
-        uint256 debt,
-        uint256 cVal,
-        uint16 target
+    /// @notice Increases leverage by borrowing and adding liquidity
+    function _increaseLeverage(
+        PoolKey memory poolKey,
+        uint256 tokenId,
+        IVault vault,
+        uint256 currentDebt,
+        uint256 collateralValue,
+        uint16 targetRatioBps
     ) internal {
-        if (debt * 10000 >= cVal * target) return;
-        uint256 d = 10000 - uint256(target);
-        if (d == 0) return;
-        uint256 borrowAmt = (uint256(target) * cVal - debt * 10000) / d;
-        if (borrowAmt == 0) return;
-        Currency lendToken = Currency.wrap(v.asset());
-        v.borrow(id, borrowAmt);
-        (, PositionInfo pi) = positionManager.getPoolAndPositionInfo(id);
-        (uint256 a0, uint256 a1) = _optSwap(
-            id, pk, pi.tickLower(), pi.tickUpper(), lendToken == pk.currency0 ? borrowAmt : 0, lendToken == pk.currency1 ? borrowAmt : 0
+        if (currentDebt * 10000 >= collateralValue * targetRatioBps) return;
+
+        uint256 denominator = 10000 - uint256(targetRatioBps);
+        if (denominator == 0) return;
+
+        // Calculate amount to borrow to reach target ratio
+        uint256 borrowAmount = (uint256(targetRatioBps) * collateralValue - currentDebt * 10000) / denominator;
+        if (borrowAmount == 0) return;
+
+        // Borrow from vault
+        Currency lendToken = Currency.wrap(vault.asset());
+        vault.borrow(tokenId, borrowAmount);
+
+        // Swap to optimal ratio and add liquidity
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        (uint256 amount0, uint256 amount1) = _calculateAndSwap(
+            tokenId,
+            poolKey,
+            positionInfo.tickLower(),
+            positionInfo.tickUpper(),
+            lendToken == poolKey.currency0 ? borrowAmount : 0,
+            lendToken == poolKey.currency1 ? borrowAmount : 0
         );
-        _approve(pk.currency0, a0);
-        _approve(pk.currency1, a1);
-        _incLiq(id, pk, pi, uint128(a0), uint128(a1));
-        _sendLeftover(id, pk.currency0, pk.currency1, _owner(id, true));
+
+        _approveToken(poolKey.currency0, amount0);
+        _approveToken(poolKey.currency1, amount1);
+        _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getPositionOwner(tokenId, true));
     }
 
-    function _leverageDown(
-        PoolKey memory pk,
-        uint256 id,
-        IVault v,
-        uint256 debt,
-        uint256 cVal,
-        uint16 target
+    /// @notice Decreases leverage by removing liquidity and repaying debt
+    function _decreaseLeverage(
+        PoolKey memory poolKey,
+        uint256 tokenId,
+        IVault vault,
+        uint256 currentDebt,
+        uint256 collateralValue,
+        uint16 targetRatioBps
     ) internal {
-        if (debt * 10000 <= cVal * target) return;
-        uint256 d = 10000 - uint256(target);
-        if (d == 0) return;
-        uint256 repayAmt = (debt * 10000 - uint256(target) * cVal) / d;
-        Currency lendToken = Currency.wrap(v.asset());
-        uint128 liq = positionManager.getPositionLiquidity(id);
-        (uint256 fullVal,,,) = v4Oracle.getValue(id, v.asset());
-        if (fullVal == 0 || liq == 0) return;
-        uint128 removeLiq = uint128(uint256(liq) * repayAmt / fullVal);
-        if (removeLiq > liq) removeLiq = liq;
-        if (removeLiq == 0) return;
-        (Currency c0, Currency c1, uint256 a0, uint256 a1) = _decreaseLiqPartial(id, removeLiq);
-        uint256 lendAmt = _swapToLendToken(id, pk, lendToken, c0, c1, a0, a1);
-        if (lendAmt > 0) {
-            if (lendAmt > debt) lendAmt = debt;
-            SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), msg.sender, lendAmt);
-            v.repay(id, lendAmt, false);
+        if (currentDebt * 10000 <= collateralValue * targetRatioBps) return;
+
+        uint256 denominator = 10000 - uint256(targetRatioBps);
+        if (denominator == 0) return;
+
+        // Calculate amount to repay to reach target ratio
+        uint256 repayAmount = (currentDebt * 10000 - uint256(targetRatioBps) * collateralValue) / denominator;
+
+        Currency lendToken = Currency.wrap(vault.asset());
+        uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
+        (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, vault.asset());
+
+        if (positionValue == 0 || currentLiquidity == 0) return;
+
+        // Calculate liquidity to remove based on value ratio
+        uint128 liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / positionValue);
+        if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
+        if (liquidityToRemove == 0) return;
+
+        // Remove partial liquidity and swap to lend token
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
+            _decreaseLiquidityPartial(tokenId, liquidityToRemove);
+
+        uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
+
+        // Repay debt
+        if (lendAmount > 0) {
+            if (lendAmount > currentDebt) lendAmount = currentDebt;
+            SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), msg.sender, lendAmount);
+            vault.repay(tokenId, lendAmount, false);
         }
-        _sendLeftover(id, c0, c1, _owner(id, true));
+
+        _sendLeftoverTokens(tokenId, currency0, currency1, _getPositionOwner(tokenId, true));
     }
 
     // ==================== Auto Lend ====================
 
+    /// @notice Forces exit from auto-lend position (called by position owner)
+    /// @param tokenId The token ID of the position
     function autoLendForceExit(uint256 tokenId) external {
-        address o = _owner(tokenId, true);
-        if (msg.sender != o) revert Unauthorized();
-        (PoolKey memory pk,) = positionManager.getPoolAndPositionInfo(tokenId);
-        _removeTriggers(tokenId, pk);
-        PositionState storage ps = positionStates[tokenId];
-        if (ps.autoLendShares > 0) {
-            uint256 amt = IERC4626(ps.autoLendVault).redeem(ps.autoLendShares, address(this), address(this));
-            _handleLendGain(tokenId, pk, Currency.wrap(ps.autoLendToken), amt, ps.autoLendAmount);
-            _sendLeftover(tokenId, pk.currency0, pk.currency1, o);
-            emit AutoLendForceExit(tokenId, Currency.wrap(ps.autoLendToken), amt, ps.autoLendShares);
+        address owner = _getPositionOwner(tokenId, true);
+        if (msg.sender != owner) revert Unauthorized();
+
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        _removePositionTriggers(tokenId, poolKey);
+
+        PositionState storage state = positionStates[tokenId];
+        if (state.autoLendShares > 0) {
+            // Redeem shares from lending vault
+            uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(
+                state.autoLendShares, address(this), address(this)
+            );
+
+            // Handle any gains from lending
+            _processLendingGain(tokenId, poolKey, Currency.wrap(state.autoLendToken), redeemedAmount, state.autoLendAmount);
+            _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
+
+            emit AutoLendForceExit(tokenId, Currency.wrap(state.autoLendToken), redeemedAmount, state.autoLendShares);
         }
-        _resetLendState(tokenId);
-        _disable(tokenId);
+
+        _resetAutoLendState(tokenId);
+        _disablePosition(tokenId);
     }
 
-    function autoLendDeposit(PoolKey memory pk, PoolId, uint256 tokenId, bool isUp) external {
-        _removeTriggers(tokenId, pk);
-        (Currency c0, Currency c1, uint256 a0, uint256 a1) = _decreaseLiq(tokenId, false);
-        Currency c = isUp ? c1 : c0;
-        address addr = Currency.unwrap(c);
-        uint256 amt = isUp ? a1 : a0;
-        IERC4626 vault = autoLendVaults[addr];
-        if (address(vault) == address(0)) return;
-        SafeERC20.forceApprove(IERC20(addr), address(vault), amt);
-        try vault.deposit(amt, address(this)) returns (uint256 sh) {
-            positionStates[tokenId].autoLendShares = sh;
-            positionStates[tokenId].autoLendToken = addr;
-            positionStates[tokenId].autoLendAmount = amt;
-            positionStates[tokenId].autoLendVault = address(vault);
-            _sendLeftover(tokenId, c0, c1, _owner(tokenId, true));
-            _addTriggers(tokenId, pk);
-            emit AutoLendDeposit(tokenId, c, amt, sh);
-        } catch (bytes memory r) {
-            emit HookAutoLendFailed(address(vault), c, r);
+    /// @notice Deposits position funds into lending vault when out of range
+    /// @param poolKey The pool key for the position
+    /// @param tokenId The token ID of the position
+    /// @param isUpperTrigger True if triggered by upper tick
+    function autoLendDeposit(PoolKey memory poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
+        _removePositionTriggers(tokenId, poolKey);
+
+        // Remove all liquidity
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+
+        // Determine which token to lend based on trigger direction
+        Currency lendCurrency = isUpperTrigger ? currency1 : currency0;
+        address tokenAddress = Currency.unwrap(lendCurrency);
+        uint256 lendAmount = isUpperTrigger ? amount1 : amount0;
+
+        IERC4626 lendVault = autoLendVaults[tokenAddress];
+        if (address(lendVault) == address(0)) return;
+
+        // Deposit into lending vault
+        SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), lendAmount);
+        try lendVault.deposit(lendAmount, address(this)) returns (uint256 shares) {
+            // Store lending state
+            positionStates[tokenId].autoLendShares = shares;
+            positionStates[tokenId].autoLendToken = tokenAddress;
+            positionStates[tokenId].autoLendAmount = lendAmount;
+            positionStates[tokenId].autoLendVault = address(lendVault);
+
+            _sendLeftoverTokens(tokenId, currency0, currency1, _getPositionOwner(tokenId, true));
+            _addPositionTriggers(tokenId, poolKey);
+
+            emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
+        } catch (bytes memory reason) {
+            emit HookAutoLendFailed(address(lendVault), lendCurrency, reason);
         }
-        SafeERC20.forceApprove(IERC20(addr), address(vault), 0);
+        SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), 0);
     }
 
-    function autoLendWithdraw(PoolKey memory pk, uint256 tokenId, uint256 shares) external {
-        PositionState storage ps = positionStates[tokenId];
-        try IERC4626(ps.autoLendVault).redeem(shares, address(this), address(this)) returns (uint256 amt) {
-            _processLendWithdraw(pk, tokenId, ps.autoLendToken, amt, ps.autoLendAmount);
-        } catch (bytes memory r) {
-            emit HookAutoLendFailed(address(autoLendVaults[ps.autoLendToken]), Currency.wrap(ps.autoLendToken), r);
+    /// @notice Withdraws from lending vault and adds liquidity back when in range
+    /// @param poolKey The pool key for the position
+    /// @param tokenId The token ID of the position
+    /// @param shares The number of shares to redeem
+    function autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) external {
+        PositionState storage state = positionStates[tokenId];
+
+        try IERC4626(state.autoLendVault).redeem(shares, address(this), address(this)) returns (uint256 amount) {
+            _processLendWithdraw(poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount);
+        } catch (bytes memory reason) {
+            emit HookAutoLendFailed(
+                address(autoLendVaults[state.autoLendToken]), Currency.wrap(state.autoLendToken), reason
+            );
         }
     }
 
+    /// @notice Processes lending withdrawal and adds liquidity back
     function _processLendWithdraw(
-        PoolKey memory pk,
+        PoolKey memory poolKey,
         uint256 tokenId,
-        address tok,
-        uint256 amt,
-        uint256 lendAmt
+        address tokenAddress,
+        uint256 redeemedAmount,
+        uint256 originalLendAmount
     ) internal {
-        _handleLendGain(tokenId, pk, Currency.wrap(tok), amt, lendAmt);
-        (, PositionInfo pi) = positionManager.getPoolAndPositionInfo(tokenId);
-        _approve(Currency.wrap(tok), amt);
-        uint256 newId;
-        int24 base = _tickLower(_tick(pk.toId()), pk.tickSpacing);
-        if (tok == Currency.unwrap(pk.currency0)) {
-            if (base < pi.tickLower()) {
-                _incLiq(tokenId, pk, pi, uint128(amt), 0);
+        _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
+
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _approveToken(Currency.wrap(tokenAddress), redeemedAmount);
+
+        uint256 newTokenId;
+        int24 baseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
+
+        // Add liquidity based on which token was lent
+        if (tokenAddress == Currency.unwrap(poolKey.currency0)) {
+            if (baseTick < positionInfo.tickLower()) {
+                // Current tick below position - can add token0 to existing position
+                _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(redeemedAmount), 0);
             } else {
-                (newId,,) = _mint(
-                    pk, base + pk.tickSpacing, base + pk.tickSpacing + (pi.tickUpper() - pi.tickLower()), uint128(amt), 0, _owner(tokenId, false)
+                // Current tick within/above position - mint new position above current tick
+                int24 tickWidth = positionInfo.tickUpper() - positionInfo.tickLower();
+                (newTokenId,,) = _mintPosition(
+                    poolKey,
+                    baseTick + poolKey.tickSpacing,
+                    baseTick + poolKey.tickSpacing + tickWidth,
+                    uint128(redeemedAmount),
+                    0,
+                    _getPositionOwner(tokenId, false)
                 );
             }
         } else {
-            if (base >= pi.tickUpper()) {
-                _incLiq(tokenId, pk, pi, 0, uint128(amt));
+            if (baseTick >= positionInfo.tickUpper()) {
+                // Current tick above position - can add token1 to existing position
+                _increaseLiquidity(tokenId, poolKey, positionInfo, 0, uint128(redeemedAmount));
             } else {
-                (newId,,) = _mint(pk, base - (pi.tickUpper() - pi.tickLower()), base, 0, uint128(amt), _owner(tokenId, false));
+                // Current tick within/below position - mint new position below current tick
+                int24 tickWidth = positionInfo.tickUpper() - positionInfo.tickLower();
+                (newTokenId,,) = _mintPosition(poolKey, baseTick - tickWidth, baseTick, 0, uint128(redeemedAmount), _getPositionOwner(tokenId, false));
             }
         }
-        _resetLendState(tokenId);
-        _sendLeftover(tokenId, pk.currency0, pk.currency1, _owner(tokenId, true));
-        if (newId > 0) {
-            _copyConfig(newId, positionConfigs[tokenId]);
-            _disable(tokenId);
+
+        _resetAutoLendState(tokenId);
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getPositionOwner(tokenId, true));
+
+        if (newTokenId > 0) {
+            _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
+            _disablePosition(tokenId);
         } else {
-            _addTriggers(tokenId, pk);
+            _addPositionTriggers(tokenId, poolKey);
         }
-        emit AutoLendWithdraw(tokenId, Currency.wrap(tok), amt, positionStates[tokenId].autoLendShares);
+
+        emit AutoLendWithdraw(tokenId, Currency.wrap(tokenAddress), redeemedAmount, positionStates[tokenId].autoLendShares);
     }
 
-    // ==================== Helper Functions ====================
+    // ==================== Internal Helpers ====================
 
-    function _owner(uint256 id, bool real) internal view returns (address) {
-        address o = IERC721(address(positionManager)).ownerOf(id);
-        return (real && vaults[o]) ? IVault(o).ownerOf(id) : o;
-    }
-
-    function _tick(PoolId id) internal view returns (int24 t) {
-        (, t,,) = StateLibrary.getSlot0(poolManager, id);
-    }
-
-    function _tickLower(int24 t, int24 sp) internal pure returns (int24) {
-        int24 c = t / sp;
-        if (t < 0 && t % sp != 0) c--;
-        return c * sp;
-    }
-
-    function _getSwapPool(uint256 id, PoolKey memory pk) internal view returns (PoolKey memory) {
-        GeneralConfig storage c = generalConfigs[id];
-        if (c.swapPoolFee == 0 || c.swapPoolTickSpacing == 0) return pk;
-        return PoolKey({
-            currency0: pk.currency0,
-            currency1: pk.currency1,
-            fee: c.swapPoolFee,
-            tickSpacing: c.swapPoolTickSpacing,
-            hooks: c.swapPoolHooks
-        });
-    }
-
-    function _disable(uint256 id) internal {
-        positionConfigs[id].mode = PositionMode.NONE;
-        positionConfigs[id].autoCompoundMode = AutoCompoundMode.NONE;
-        uint32 la = positionStates[id].lastActivated;
-        if (la > 0) {
-            positionStates[id].acumulatedActiveTime += uint32(block.timestamp) - la;
-            positionStates[id].lastActivated = 0;
-        }
-        emit SetPositionConfig(id, positionConfigs[id]);
-    }
-
-    function _copyConfig(uint256 newId, PositionConfig storage old) internal {
-        positionConfigs[newId] = old;
-        if (positionStates[newId].lastActivated == 0) {
-            positionStates[newId].lastActivated = uint32(block.timestamp);
-        }
-        (PoolKey memory pk,) = positionManager.getPoolAndPositionInfo(newId);
-        _addTriggers(newId, pk);
-        emit SetPositionConfig(newId, positionConfigs[newId]);
-    }
-
-    function _handleLendGain(uint256 id, PoolKey memory pk, Currency c, uint256 amt, uint256 lendAmt) internal {
-        uint256 gain = amt > lendAmt ? amt - lendAmt : 0;
-        if (gain > 0) {
-            bool is0 = pk.currency0 == c;
-            c.transfer(protocolFeeRecipient, gain * protocolFeeBps / 10000);
-            emit SendProtocolFee(id, pk.currency0, pk.currency1, is0 ? gain : 0, is0 ? 0 : gain, protocolFeeRecipient);
-        }
-    }
-
-    function _resetLendState(uint256 id) internal {
-        PositionState storage s = positionStates[id];
-        s.autoLendShares = 0;
-        s.autoLendToken = address(0);
-        s.autoLendAmount = 0;
-        s.autoLendVault = address(0);
-    }
-
+    /// @notice Swaps tokens to the lend token
     function _swapToLendToken(
-        uint256 id,
-        PoolKey memory pk,
+        uint256 tokenId,
+        PoolKey memory poolKey,
         Currency lendToken,
-        Currency c0,
-        Currency c1,
-        uint256 a0,
-        uint256 a1
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1
     ) internal returns (uint256) {
-        PoolKey memory sp = _getSwapPool(id, pk);
-        if (lendToken == c0) {
-            if (a1 > 0) _swap(sp, false, a1, id);
-            return c0.balanceOfSelf();
+        PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
+        if (lendToken == currency0) {
+            if (amount1 > 0) _executeSwap(swapPool, false, amount1, tokenId);
+            return currency0.balanceOfSelf();
         } else {
-            if (a0 > 0) _swap(sp, true, a0, id);
-            return c1.balanceOfSelf();
+            if (amount0 > 0) _executeSwap(swapPool, true, amount0, tokenId);
+            return currency1.balanceOfSelf();
         }
     }
 
-    function _addTriggers(uint256 id, PoolKey memory pk) internal {
-        PoolId pid = pk.toId();
-        (, PositionInfo pi) = positionManager.getPoolAndPositionInfo(id);
-        int24[4] memory t = _triggerTicks(id, pk, pi.tickLower(), pi.tickUpper());
-        TickLinkedList.List storage ll = lowerTriggerAfterSwap[pid];
-        TickLinkedList.List storage ul = upperTriggerAfterSwap[pid];
-        if (!ul.increasing) ul.increasing = true;
-        if (t[0] != type(int24).min) ll.insert(t[0], id);
-        if (t[1] != type(int24).min) ll.insert(t[1], id);
-        if (t[2] != type(int24).max) ul.insert(t[2], id);
-        if (t[3] != type(int24).max) ul.insert(t[3], id);
-    }
-
-    function _removeTriggers(uint256 id, PoolKey memory pk) internal {
-        PoolId pid = pk.toId();
-        (, PositionInfo pi) = positionManager.getPoolAndPositionInfo(id);
-        int24[4] memory t = _triggerTicks(id, pk, pi.tickLower(), pi.tickUpper());
-        TickLinkedList.List storage ll = lowerTriggerAfterSwap[pid];
-        TickLinkedList.List storage ul = upperTriggerAfterSwap[pid];
-        if (t[0] != type(int24).min) ll.remove(t[0], id);
-        if (t[1] != type(int24).min) ll.remove(t[1], id);
-        if (t[2] != type(int24).max) ul.remove(t[2], id);
-        if (t[3] != type(int24).max) ul.remove(t[3], id);
-    }
-
-    function _triggerTicks(uint256 id, PoolKey memory pk, int24 tL, int24 tU) internal view returns (int24[4] memory t) {
-        t[0] = type(int24).min;
-        t[1] = type(int24).min;
-        t[2] = type(int24).max;
-        t[3] = type(int24).max;
-        PositionConfig storage c = positionConfigs[id];
-        PositionMode m = c.mode;
-        if (m == PositionMode.NONE || m == PositionMode.AUTO_COMPOUND_ONLY) return t;
-        if (m == PositionMode.AUTO_RANGE || m == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            if (c.autoRangeLowerLimit != type(int24).min) t[0] = tL - c.autoRangeLowerLimit;
-            if (c.autoRangeUpperLimit != type(int24).max) t[2] = tU + c.autoRangeUpperLimit;
-        }
-        if (m == PositionMode.AUTO_EXIT || m == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            int24 eL = c.autoExitIsRelative
-                ? (c.autoExitTickLower != type(int24).min ? tL - c.autoExitTickLower : type(int24).min)
-                : c.autoExitTickLower;
-            int24 eU = c.autoExitIsRelative
-                ? (c.autoExitTickUpper != type(int24).max ? tU + c.autoExitTickUpper : type(int24).max)
-                : c.autoExitTickUpper;
-            if (t[0] != type(int24).min) t[1] = eL;
-            else t[0] = eL;
-            if (t[2] != type(int24).max) t[3] = eU;
-            else t[2] = eU;
-        }
-        if (m == PositionMode.AUTO_LEND) {
-            PositionState storage s = positionStates[id];
-            if (s.autoLendShares > 0) {
-                if (Currency.unwrap(pk.currency0) == s.autoLendToken) {
-                    t[2] = tL - c.autoLendToleranceTick - pk.tickSpacing;
-                } else {
-                    t[0] = tU + c.autoLendToleranceTick;
-                }
-            } else {
-                t[0] = tL - c.autoLendToleranceTick * 2 - pk.tickSpacing;
-                t[2] = tU + c.autoLendToleranceTick * 2;
-            }
-        }
-        if (m == PositionMode.AUTO_LEVERAGE) {
-            int24 b = positionStates[id].autoLeverageBaseTick;
-            t[0] = b - 10 * pk.tickSpacing;
-            t[2] = b + 10 * pk.tickSpacing;
-        }
-    }
-
-    function _optSwap(
-        uint256 id,
-        PoolKey memory pk,
-        int24 tL,
-        int24 tU,
-        uint256 a0,
-        uint256 a1
-    ) internal returns (uint256, uint256) {
-        PoolKey memory sp = _getSwapPool(id, pk);
-        uint256 inp;
-        bool dir;
-        if (sp.hooks == pk.hooks && sp.fee == pk.fee && sp.tickSpacing == pk.tickSpacing) {
-            (inp,, dir,) = liquidityCalculator.calculateSamePool(
-                ILiquidityCalculator.V4PoolInfo({poolMgr: poolManager, poolIdentifier: pk.toId(), tickSpacing: pk.tickSpacing}),
-                tL,
-                tU,
-                a0,
-                a1
+    /// @notice Processes gain from lending (takes protocol fee on gain)
+    function _processLendingGain(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        Currency lendCurrency,
+        uint256 redeemedAmount,
+        uint256 originalAmount
+    ) internal {
+        uint256 gain = redeemedAmount > originalAmount ? redeemedAmount - originalAmount : 0;
+        if (gain > 0) {
+            bool isToken0 = poolKey.currency0 == lendCurrency;
+            uint256 protocolFee = gain * protocolFeeBps / 10000;
+            lendCurrency.transfer(protocolFeeRecipient, protocolFee);
+            emit SendProtocolFee(
+                tokenId,
+                poolKey.currency0,
+                poolKey.currency1,
+                isToken0 ? protocolFee : 0,
+                isToken0 ? 0 : protocolFee,
+                protocolFeeRecipient
             );
-        } else {
-            (uint160 sq,,,) = StateLibrary.getSlot0(poolManager, pk.toId());
-            (inp,, dir) = liquidityCalculator.calculateSimple(sq, tL, tU, a0, a1, sp.fee);
-        }
-        if (inp > 0) return _applyDelta(_swap(sp, dir, inp, id), a0, a1);
-        return (a0, a1);
-    }
-
-    function _incLiq(
-        uint256 id,
-        PoolKey memory pk,
-        PositionInfo pi,
-        uint128 av0,
-        uint128 av1
-    ) internal returns (uint256, uint256) {
-        uint256 b0 = pk.currency0.balanceOfSelf();
-        uint256 b1 = pk.currency1.balanceOfSelf();
-        (uint160 sq,,,) = StateLibrary.getSlot0(poolManager, pk.toId());
-        uint128 liq = LiquidityAmounts.getLiquidityForAmounts(
-            sq, TickMath.getSqrtPriceAtTick(pi.tickLower()), TickMath.getSqrtPriceAtTick(pi.tickUpper()), av0, av1
-        );
-        if (liq == 0) return (0, 0);
-        bytes memory act = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory p = new bytes[](2);
-        p[0] = abi.encode(id, liq, type(uint128).max, type(uint128).max, bytes(""));
-        p[1] = abi.encode(pk.currency0, pk.currency1, address(this));
-        try positionManager.modifyLiquiditiesWithoutUnlock(act, p) {
-            return (b0 - pk.currency0.balanceOfSelf(), b1 - pk.currency1.balanceOfSelf());
-        } catch (bytes memory r) {
-            emit HookModifyLiquiditiesFailed(act, p, r);
-            return (0, 0);
         }
     }
 
-    function _mint(
-        PoolKey memory pk,
-        int24 tL,
-        int24 tU,
-        uint128 av0,
-        uint128 av1,
-        address rec
-    ) internal returns (uint256 newId, uint256 a0, uint256 a1) {
-        newId = positionManager.nextTokenId();
-        a0 = pk.currency0.balanceOfSelf();
-        a1 = pk.currency1.balanceOfSelf();
-        (uint160 sq,,,) = StateLibrary.getSlot0(poolManager, pk.toId());
-        uint128 liq = LiquidityAmounts.getLiquidityForAmounts(
-            sq, TickMath.getSqrtPriceAtTick(tL), TickMath.getSqrtPriceAtTick(tU), av0, av1
-        );
-        bytes memory act = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory p = new bytes[](2);
-        p[0] = abi.encode(pk, tL, tU, liq, av0, av1, rec, bytes(""));
-        p[1] = abi.encode(pk.currency0, pk.currency1, address(this));
-        try positionManager.modifyLiquiditiesWithoutUnlock(act, p) {
-            a0 -= pk.currency0.balanceOfSelf();
-            a1 -= pk.currency1.balanceOfSelf();
-            if (vaults[rec]) IVault(rec).notifyERC721Received(newId, rec);
-        } catch (bytes memory r) {
-            emit HookModifyLiquiditiesFailed(act, p, r);
-            a0 = 0;
-            a1 = 0;
-        }
-    }
-
-    function _decreaseLiq(uint256 id, bool feesOnly) internal returns (Currency c0, Currency c1, uint256 a0, uint256 a1) {
-        (PoolKey memory pk,) = positionManager.getPoolAndPositionInfo(id);
-        uint128 liq = feesOnly ? 0 : positionManager.getPositionLiquidity(id);
-        c0 = pk.currency0;
-        c1 = pk.currency1;
-        bytes memory act =
-            abi.encodePacked(feesOnly ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory p = new bytes[](2);
-        p[0] = abi.encode(id, liq, feesOnly ? type(uint128).max : 0, feesOnly ? type(uint128).max : 0, bytes(""));
-        p[1] = abi.encode(c0, c1, address(this));
-        try positionManager.modifyLiquiditiesWithoutUnlock(act, p) {
-            a0 = c0.balanceOfSelf();
-            a1 = c1.balanceOfSelf();
-        } catch (bytes memory r) {
-            emit HookModifyLiquiditiesFailed(act, p, r);
-        }
-    }
-
-    function _decreaseLiqPartial(uint256 id, uint128 rem) internal returns (Currency c0, Currency c1, uint256 a0, uint256 a1) {
-        (PoolKey memory pk,) = positionManager.getPoolAndPositionInfo(id);
-        c0 = pk.currency0;
-        c1 = pk.currency1;
-        bytes memory act = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory p = new bytes[](2);
-        p[0] = abi.encode(id, rem, 0, 0, bytes(""));
-        p[1] = abi.encode(c0, c1, address(this));
-        try positionManager.modifyLiquiditiesWithoutUnlock(act, p) {
-            a0 = c0.balanceOfSelf();
-            a1 = c1.balanceOfSelf();
-        } catch (bytes memory r) {
-            emit HookModifyLiquiditiesFailed(act, p, r);
-        }
-    }
-
-    function _swap(PoolKey memory pk, bool z2o, uint256 amt, uint256 id) internal returns (BalanceDelta d) {
-        GeneralConfig storage c = generalConfigs[id];
-        uint128 mul = z2o ? c.sqrtPriceMultiplier0 : c.sqrtPriceMultiplier1;
-        uint160 lim;
-        if (mul == 0) {
-            lim = z2o ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
-        } else {
-            (uint160 sq,,,) = StateLibrary.getSlot0(poolManager, pk.toId());
-            lim = uint160(FullMath.mulDiv(sq, mul, Q64));
-            if (z2o && lim <= TickMath.MIN_SQRT_PRICE) lim = TickMath.MIN_SQRT_PRICE + 1;
-            if (!z2o && lim >= TickMath.MAX_SQRT_PRICE) lim = TickMath.MAX_SQRT_PRICE - 1;
-        }
-        SwapParams memory sp = SwapParams({zeroForOne: z2o, amountSpecified: -int256(amt), sqrtPriceLimitX96: lim});
-        try poolManager.swap(pk, sp, "") returns (BalanceDelta r) {
-            d = r;
-            _settleDeltas(pk, d);
-            uint256 swapped = uint256(int256(-(z2o ? r.amount0() : r.amount1())));
-            if (swapped < amt) emit HookSwapPartial(id, z2o, amt, swapped);
-        } catch (bytes memory r) {
-            emit HookSwapFailed(pk, sp, r);
-        }
-    }
-
-    function _settleDeltas(PoolKey memory pk, BalanceDelta d) internal {
-        _settleDelta(pk.currency0, d.amount0());
-        _settleDelta(pk.currency1, d.amount1());
-    }
-
-    function _settleDelta(Currency c, int256 d) internal {
-        if (d < 0) {
-            uint256 a = uint256(-d);
-            poolManager.sync(c);
-            if (c.isAddressZero()) {
-                poolManager.settle{value: a}();
-            } else {
-                c.transfer(address(poolManager), a);
-                poolManager.settle();
-            }
-        } else if (d > 0) {
-            poolManager.take(c, address(this), uint256(d));
-        }
-    }
-
-    function _sendLeftover(uint256 id, Currency c0, Currency c1, address rec) internal {
-        uint256 a0 = c0.balanceOfSelf();
-        uint256 a1 = c1.balanceOfSelf();
-        if (a0 != 0) c0.transfer(rec, a0);
-        if (a1 != 0) c1.transfer(rec, a1);
-        emit SendLeftoverTokens(id, c0, c1, a0, a1, rec);
-    }
-
-    function _approve(Currency t, uint256 a) internal {
-        if (a != 0 && !t.isAddressZero()) {
-            address addr = Currency.unwrap(t);
-            if (!permit2Approved[addr]) {
-                SafeERC20.forceApprove(IERC20(addr), address(permit2), type(uint256).max);
-                permit2Approved[addr] = true;
-            }
-            permit2.approve(addr, address(positionManager), uint160(a), uint48(block.timestamp));
-        }
-    }
-
-    function _requireAuth(uint256 id) internal view {
-        if (msg.sender != address(poolManager)) {
-            if (vaults[msg.sender]) {
-                _validateCaller(positionManager, id);
-            } else {
-                revert Unauthorized();
-            }
-        }
-    }
-
-    function _applyDelta(BalanceDelta d, uint256 a0, uint256 a1) internal pure returns (uint256, uint256) {
-        int128 d0 = d.amount0();
-        int128 d1 = d.amount1();
-        return (
-            d0 < 0 ? a0 - uint256(int256(-d0)) : a0 + uint256(int256(d0)),
-            d1 < 0 ? a1 - uint256(int256(-d1)) : a1 + uint256(int256(d1))
-        );
+    /// @notice Resets the auto-lend state for a position
+    function _resetAutoLendState(uint256 tokenId) internal {
+        PositionState storage state = positionStates[tokenId];
+        state.autoLendShares = 0;
+        state.autoLendToken = address(0);
+        state.autoLendAmount = 0;
+        state.autoLendVault = address(0);
     }
 }
