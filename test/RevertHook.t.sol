@@ -8,6 +8,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -656,13 +657,7 @@ contract RevertHookTest is BaseTest {
 
     function testBasicAutoExit_NonHookedPool() public {
 
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(address(0)),
-            maxPriceImpact0: 0,
-            maxPriceImpact1: 0
-        }));
+        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(address(0)), 0, 0);
 
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
@@ -1089,13 +1084,7 @@ contract RevertHookTest is BaseTest {
 
     function testPriceImpactLimit_ZeroMeansNoLimit() public {
         // Configure auto exit with maxPriceImpact = 0 (no limit)
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 0, // No limit
-            maxPriceImpact1: 0  // No limit
-        }));
+        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 0, 0);
 
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
@@ -1153,13 +1142,8 @@ contract RevertHookTest is BaseTest {
 
     function testPriceImpactLimit_LimitEnforced() public {
         // Configure auto exit with a very strict price impact limit (10 bps = 0.1%)
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 10, // 0.1% max price impact for token0 -> token1 swaps
-            maxPriceImpact1: 10  // 0.1% max price impact for token1 -> token0 swaps
-        }));
+        uint32 maxPriceImpactBps = 10;
+        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), maxPriceImpactBps, maxPriceImpactBps);
 
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
@@ -1211,19 +1195,17 @@ contract RevertHookTest is BaseTest {
         assertTrue(partialSwapEventFound, "HookSwapPartial should be emitted when price impact limit is reached");
         assertLt(swappedAmount, requestedAmount, "Swapped amount should be less than requested due to price impact limit");
 
+        // Verify that the partial swap amount is significantly less than the requested amount
+        // With 10 bps limit, the hook's swap should be limited to a small fraction
+        assertLt(swappedAmount * 10, requestedAmount, "Partial swap should be much smaller than requested with strict limit");
+
         console.log("Requested swap amount:", requestedAmount);
         console.log("Actual swapped amount:", swappedAmount);
     }
 
     function testPriceImpactLimit_ModerateLimit() public {
         // Configure auto exit with a moderate price impact limit (100 bps = 1%)
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 100, // 1% max price impact
-            maxPriceImpact1: 100  // 1% max price impact
-        }));
+        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 100, 100);
 
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
@@ -1271,13 +1253,9 @@ contract RevertHookTest is BaseTest {
 
     function testPriceImpactLimit_DifferentLimitsPerDirection() public {
         // Configure different limits for each swap direction
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 10,   // Very strict for token0 -> token1 (0.1%)
-            maxPriceImpact1: 1000  // Loose for token1 -> token0 (10%)
-        }));
+        // maxPriceImpact0: 10 bps (0.1%) - Very strict for token0 -> token1
+        // maxPriceImpact1: 1000 bps (10%) - Loose for token1 -> token0
+        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 10, 1000);
 
         hook.setPositionConfig(token2Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_EXIT,
@@ -1327,14 +1305,8 @@ contract RevertHookTest is BaseTest {
     }
 
     function testPriceImpactLimit_AutoRangeWithLimit() public {
-        // Configure auto range with a moderate price impact limit
-        hook.setGeneralConfig(token3Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 200, // 2% max price impact
-            maxPriceImpact1: 200  // 2% max price impact
-        }));
+        // Configure auto range with a moderate price impact limit (200 bps = 2%)
+        hook.setGeneralConfig(token3Id, 3000, 60, IHooks(hook), 200, 200);
 
         hook.setPositionConfig(token3Id, RevertHookConfig.PositionConfig({
             mode: RevertHookConfig.PositionMode.AUTO_RANGE,
@@ -1385,14 +1357,8 @@ contract RevertHookTest is BaseTest {
     }
 
     function testPriceImpactLimit_AutoCompoundWithLimit() public {
-        // Configure auto compound with a moderate price impact limit
-        hook.setGeneralConfig(token2Id, RevertHookConfig.GeneralConfig({
-            swapPoolFee: 3000,
-            swapPoolTickSpacing: 60,
-            swapPoolHooks: IHooks(hook),
-            maxPriceImpact0: 500, // 5% max price impact
-            maxPriceImpact1: 500  // 5% max price impact
-        }));
+        // Configure auto compound with a moderate price impact limit (500 bps = 5%)
+        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 500, 500);
 
         uint128 token2Liquidity = _setupAutoCompoundTest(RevertHookConfig.AutoCompoundMode.AUTO_COMPOUND);
 

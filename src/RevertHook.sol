@@ -1424,11 +1424,11 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         }
     }
 
-    /// @notice Calculates the sqrtPriceLimitX96 based on maxPriceImpact
-    /// @dev If maxPriceImpact is 0, returns the extreme limit (no price constraint)
+    /// @notice Calculates the sqrtPriceLimitX96 based on pre-calculated sqrt price multiplier
+    /// @dev If multiplier is 0, returns the extreme limit (no price constraint)
     /// @param poolKey The pool key
     /// @param zeroForOne True if swapping token0 for token1, false otherwise
-    /// @param tokenId The token ID to get maxPriceImpact from
+    /// @param tokenId The token ID to get the multiplier from
     /// @return sqrtPriceLimitX96 The calculated price limit
     function _calculateSqrtPriceLimitX96(PoolKey memory poolKey, bool zeroForOne, uint256 tokenId)
         internal
@@ -1436,52 +1436,25 @@ contract RevertHook is RevertHookConfig, BaseHook, IUnlockCallback {
         returns (uint160 sqrtPriceLimitX96)
     {
         GeneralConfig storage config = generalConfigs[tokenId];
-        uint32 maxPriceImpact = zeroForOne ? config.maxPriceImpact0 : config.maxPriceImpact1;
+        uint128 multiplier = zeroForOne ? config.sqrtPriceMultiplier0 : config.sqrtPriceMultiplier1;
 
-        // If no price impact limit, use extreme values
-        if (maxPriceImpact == 0) {
+        // If no price impact limit (multiplier = 0), use extreme values
+        if (multiplier == 0) {
             return zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
         }
 
         // Get current price
         (uint160 currentSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
 
-        // Calculate price limit based on maxPriceImpact (in basis points)
-        // For zeroForOne (selling token0), price decreases, so limit is lower
-        // For oneForZero (selling token1), price increases, so limit is higher
-        //
-        // Price impact = (P_before - P_after) / P_before for zeroForOne
-        // So P_after >= P_before * (1 - maxPriceImpact/10000)
-        //
-        // Since sqrtPrice = sqrt(price), we need:
-        // sqrtP_after >= sqrtP_before * sqrt(1 - maxPriceImpact/10000)
-        //
-        // Using second-order Taylor expansion:
-        // sqrt(1 - x) ≈ 1 - x/2 - x²/8 where x = maxPriceImpact/10000
-        // sqrt(1 + x) ≈ 1 + x/2 - x²/8 where x = maxPriceImpact/10000
-        //
-        // So for zeroForOne: sqrtP_after >= sqrtP_before * (1 - maxPriceImpact/20000 - maxPriceImpact²/800000000)
-        // And for oneForZero: sqrtP_after <= sqrtP_before * (1 + maxPriceImpact/20000 - maxPriceImpact²/800000000)
+        // Calculate price limit: sqrtPriceLimitX96 = currentSqrtPriceX96 * multiplier / Q64
+        sqrtPriceLimitX96 = uint160(FullMath.mulDiv(currentSqrtPriceX96, multiplier, Q64));
 
+        // Ensure we stay within valid bounds
         if (zeroForOne) {
-            // Price decreases, calculate lower bound
-            // sqrtPriceLimitX96 = currentSqrtPriceX96 * (1 - maxPriceImpact/20000 - maxPriceImpact²/800000000)
-            // = currentSqrtPriceX96 * (800000000 - 40000*maxPriceImpact - maxPriceImpact²) / 800000000
-            uint256 maxPriceImpact256 = uint256(maxPriceImpact);
-            uint256 numerator = 800000000 - 40000 * maxPriceImpact256 - maxPriceImpact256 * maxPriceImpact256;
-            sqrtPriceLimitX96 = uint160(FullMath.mulDiv(currentSqrtPriceX96, numerator, 800000000));
-            // Ensure we don't go below minimum
             if (sqrtPriceLimitX96 <= TickMath.MIN_SQRT_PRICE) {
                 sqrtPriceLimitX96 = TickMath.MIN_SQRT_PRICE + 1;
             }
         } else {
-            // Price increases, calculate upper bound
-            // sqrtPriceLimitX96 = currentSqrtPriceX96 * (1 + maxPriceImpact/20000 - maxPriceImpact²/800000000)
-            // = currentSqrtPriceX96 * (800000000 + 40000*maxPriceImpact - maxPriceImpact²) / 800000000
-            uint256 maxPriceImpact256 = uint256(maxPriceImpact);
-            uint256 numerator = 800000000 + 40000 * maxPriceImpact256 - maxPriceImpact256 * maxPriceImpact256;
-            sqrtPriceLimitX96 = uint160(FullMath.mulDiv(currentSqrtPriceX96, numerator, 800000000));
-            // Ensure we don't go above maximum
             if (sqrtPriceLimitX96 >= TickMath.MAX_SQRT_PRICE) {
                 sqrtPriceLimitX96 = TickMath.MAX_SQRT_PRICE - 1;
             }

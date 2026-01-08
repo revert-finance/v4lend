@@ -7,6 +7,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {Transformer} from "./transformers/Transformer.sol";
 import {IVault} from "./interfaces/IVault.sol";
@@ -94,9 +95,13 @@ abstract contract RevertHookConfig is Transformer {
         int24 swapPoolTickSpacing;
         IHooks swapPoolHooks;
 
-        // max price impact in basis points (bps) for swaps
-        uint32 maxPriceImpact0; // swaps token 0 to token 1
-        uint32 maxPriceImpact1; // swaps token 1 to token 0
+        // sqrt price multipliers for max price impact (pre-calculated from basis points)
+        // For zeroForOne swaps: sqrtPriceLimit = currentSqrtPrice * sqrtPriceMultiplier0 / Q64
+        // For oneForZero swaps: sqrtPriceLimit = currentSqrtPrice * sqrtPriceMultiplier1 / Q64
+        // Value of 0 means no price limit (uses extreme values)
+        // Using uint128 to accommodate multipliers > 1 (for oneForZero, up to sqrt(2) * Q64)
+        uint128 sqrtPriceMultiplier0; // for swaps token 0 to token 1 (price decreases)
+        uint128 sqrtPriceMultiplier1; // for swaps token 1 to token 0 (price increases)
     }
 
     struct PositionConfig {
@@ -158,23 +163,71 @@ abstract contract RevertHookConfig is Transformer {
         emit SetProtocolFeeRecipient(_protocolFeeRecipient);
     }
 
+    /// @notice Calculates the sqrt price multiplier from basis points
+    /// @dev For zeroForOne: multiplier = sqrt(1 - bps/10000) * Q64
+    ///      For oneForZero: multiplier = sqrt(1 + bps/10000) * Q64
+    /// @param maxPriceImpactBps The max price impact in basis points (0-10000)
+    /// @param zeroForOne True if for zeroForOne swaps (price decreases), false for oneForZero (price increases)
+    /// @return multiplier The Q64 sqrt price multiplier (fits in uint128 for multipliers up to sqrt(2) * Q64)
+    function _calculateSqrtPriceMultiplier(uint32 maxPriceImpactBps, bool zeroForOne)
+        internal
+        pure
+        returns (uint128 multiplier)
+    {
+        if (maxPriceImpactBps == 0) {
+            return 0; // 0 means no price limit
+        }
+
+        // Calculate (10000 ± bps) * Q64² / 10000, then take sqrt
+        // For zeroForOne: sqrt((10000 - bps) / 10000) * Q64 = sqrt((10000 - bps) * Q64² / 10000)
+        // For oneForZero: sqrt((10000 + bps) / 10000) * Q64 = sqrt((10000 + bps) * Q64² / 10000)
+        uint256 q64Squared = uint256(Q64) * uint256(Q64);
+        uint256 numerator;
+        if (zeroForOne) {
+            numerator = (10000 - maxPriceImpactBps) * q64Squared / 10000;
+        } else {
+            numerator = (10000 + maxPriceImpactBps) * q64Squared / 10000;
+        }
+
+        multiplier = uint128(Math.sqrt(numerator));
+    }
+
     /// @param tokenId The token ID of the position
-    /// @param generalConfig The general configuration to set
-    function setGeneralConfig(uint256 tokenId, GeneralConfig calldata generalConfig) external {
+    /// @param swapPoolFee The fee for the swap pool
+    /// @param swapPoolTickSpacing The tick spacing for the swap pool
+    /// @param swapPoolHooks The hooks for the swap pool
+    /// @param maxPriceImpactBps0 Max price impact in basis points for token0->token1 swaps (0-10000, 0 means no limit)
+    /// @param maxPriceImpactBps1 Max price impact in basis points for token1->token0 swaps (0-10000, 0 means no limit)
+    function setGeneralConfig(
+        uint256 tokenId,
+        uint24 swapPoolFee,
+        int24 swapPoolTickSpacing,
+        IHooks swapPoolHooks,
+        uint32 maxPriceImpactBps0,
+        uint32 maxPriceImpactBps1
+    ) external {
         if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
 
         (PoolKey memory poolKey,) = _getPoolAndPositionInfo(tokenId);
-        if (generalConfig.swapPoolTickSpacing % poolKey.tickSpacing != 0) {
+        if (swapPoolTickSpacing % poolKey.tickSpacing != 0) {
             revert InvalidConfig();
         }
-        if (generalConfig.maxPriceImpact0 > 10000) {
+        if (maxPriceImpactBps0 > 10000) {
             revert InvalidConfig();
         }
-        if (generalConfig.maxPriceImpact1 > 10000) {
+        if (maxPriceImpactBps1 > 10000) {
             revert InvalidConfig();
         }
+
+        GeneralConfig memory generalConfig = GeneralConfig({
+            swapPoolFee: swapPoolFee,
+            swapPoolTickSpacing: swapPoolTickSpacing,
+            swapPoolHooks: swapPoolHooks,
+            sqrtPriceMultiplier0: _calculateSqrtPriceMultiplier(maxPriceImpactBps0, true),
+            sqrtPriceMultiplier1: _calculateSqrtPriceMultiplier(maxPriceImpactBps1, false)
+        });
 
         generalConfigs[tokenId] = generalConfig;
         emit SetGeneralConfig(tokenId, generalConfig);
