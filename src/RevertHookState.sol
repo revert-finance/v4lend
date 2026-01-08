@@ -4,6 +4,9 @@ pragma solidity ^0.8.30;
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {Transformer} from "./transformers/Transformer.sol";
 
@@ -73,6 +76,7 @@ abstract contract RevertHookState is Transformer {
 
     // ==================== Events ====================
 
+    // Configuration events
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event SetMaxTicksFromOracle(int24 maxTicksFromOracle);
     event SetMinPositionValueNative(uint256 minPositionValueNative);
@@ -80,6 +84,58 @@ abstract contract RevertHookState is Transformer {
     event SetProtocolFeeRecipient(address protocolFeeRecipient);
     event SetGeneralConfig(uint256 indexed tokenId, GeneralConfig generalConfig);
     event SetPositionConfig(uint256 indexed tokenId, PositionConfig positionConfig);
+
+    // Auto action events
+    event AutoCompound(
+        uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1
+    );
+    event AutoExit(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
+    event AutoRange(
+        uint256 indexed tokenId,
+        uint256 newTokenId,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1
+    );
+    event AutoLendDeposit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
+    event AutoLendWithdraw(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
+    event AutoLendForceExit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
+    event AutoLeverage(
+        uint256 indexed tokenId, bool isUpperTrigger, uint256 debtBefore, uint256 debtAfter
+    );
+
+    // Token transfer events
+    event SendLeftoverTokens(
+        uint256 indexed tokenId,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1,
+        address recipient
+    );
+    event SendRewards(
+        uint256 indexed tokenId,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1,
+        address recipient
+    );
+    event SendProtocolFee(
+        uint256 indexed tokenId,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1,
+        address recipient
+    );
+
+    // Special events for swap failures / modifyLiquidities failures
+    event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
+    event HookSwapPartial(uint256 indexed tokenId, bool zeroForOne, uint256 requested, uint256 swapped);
+    event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
+    event HookAutoLendFailed(address vault, Currency currency, bytes reason);
 
     // ==================== State Variables ====================
 
@@ -108,4 +164,7 @@ abstract contract RevertHookState is Transformer {
     mapping(PoolId => int24) public tickLowerLasts;
     mapping(PoolId poolId => TickLinkedList.List) public lowerTriggerAfterSwap;
     mapping(PoolId poolId => TickLinkedList.List) public upperTriggerAfterSwap;
+
+    // Permit2 approval tracking
+    mapping(address => bool) internal permit2Approved;
 }
