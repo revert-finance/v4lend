@@ -21,6 +21,18 @@ abstract contract RevertHookTriggers is RevertHookState {
     /// @notice Gets position and pool info - must be implemented by child
     function _getPoolAndPositionInfo(uint256 tokenId) internal view virtual returns (PoolKey memory, PositionInfo);
 
+    /// @notice Returns the owner of the position - must be implemented by child
+    function _getOwner(uint256 tokenId, bool isRealOwner) internal view virtual returns (address);
+
+    // ==================== Tick Helpers ====================
+
+    /// @notice Calculates the tick lower for a given tick and spacing
+    function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
+        int24 compressed = tick / tickSpacing;
+        if (tick < 0 && tick % tickSpacing != 0) compressed--;
+        return compressed * tickSpacing;
+    }
+
     // ==================== Position Config Helpers ====================
 
     /// @notice Disables a position by setting its config to NONE
