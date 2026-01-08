@@ -56,7 +56,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     // ==================== Owner Helper ====================
 
     /// @notice Returns the owner of the position
-    function _getOwner(uint256 tokenId, bool isRealOwner) internal view returns (address) {
+    function _getOwner(uint256 tokenId, bool isRealOwner) internal view override returns (address) {
         address owner = IERC721(address(positionManager)).ownerOf(tokenId);
         return (isRealOwner && vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
     }
@@ -79,13 +79,6 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     /// @notice Gets the current tick for a pool
     function _getCurrentTick(PoolId poolId) internal view returns (int24 tick) {
         (, tick,,) = StateLibrary.getSlot0(poolManager, poolId);
-    }
-
-    /// @notice Calculates the tick lower for a given tick and spacing
-    function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
-        int24 compressed = tick / tickSpacing;
-        if (tick < 0 && tick % tickSpacing != 0) compressed--;
-        return compressed * tickSpacing;
     }
 
     // ==================== Pool Key Helpers ====================

@@ -230,7 +230,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     /// @notice Returns the owner of the position
-    function _getOwner(uint256 tokenId, bool isRealOwner) internal view returns (address) {
+    function _getOwner(uint256 tokenId, bool isRealOwner) internal view override returns (address) {
         address owner = IERC721(address(positionManager)).ownerOf(tokenId);
         return (isRealOwner && vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
     }
@@ -610,12 +610,6 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         (, tick,,) = StateLibrary.getSlot0(poolManager, poolId);
     }
 
-    function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
-        int24 compressed = tick / tickSpacing;
-        if (tick < 0 && tick % tickSpacing != 0) compressed--;
-        return compressed * tickSpacing;
-    }
-
     // ==================== Public Functions (called by vault transform or directly) ====================
 
     function autoExit(
@@ -636,30 +630,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function autoLendForceExit(uint256 tokenId) external {
-        (bool success,) = address(hookFunctions2).delegatecall(
-            abi.encodeCall(hookFunctions2.autoLendForceExit, (tokenId))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLendForceExit, (tokenId)));
     }
 
     function autoCompound(uint256[] memory tokenIds) external {
-        (bool success,) = address(hookFunctions).delegatecall(
-            abi.encodeCall(hookFunctions.autoCompound, (tokenIds))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoCompound, (tokenIds)));
     }
 
     function autoCompoundForVault(uint256 tokenId, address caller) external {
-        (bool success,) = address(hookFunctions).delegatecall(
-            abi.encodeCall(hookFunctions.autoCompoundForVault, (tokenId, caller))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoCompoundForVault, (tokenId, caller)));
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
@@ -708,12 +687,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _executeAutoCompound(uint256 tokenId, address caller) internal {
-        (bool success,) = address(hookFunctions).delegatecall(
-            abi.encodeCall(hookFunctions.executeAutoCompound, (tokenId, caller))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.executeAutoCompound, (tokenId, caller)));
     }
 
     function _getOracleMaxEndTick(PoolKey memory poolKey, bool up) internal view returns (int24 maxEndTick) {
@@ -728,50 +702,32 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
     }
 
-    // ==================== Internal Delegatecall Wrappers ====================
+    // ==================== Internal Delegatecall Helper ====================
 
-    function _delegatecallAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        (bool success,) = address(hookFunctions).delegatecall(
-            abi.encodeCall(hookFunctions.autoExit, (poolKey, poolId, tokenId, isUpper))
-        );
+    function _delegatecall(address target, bytes memory data) internal {
+        (bool success,) = target.delegatecall(data);
         if (!success) {
             revert TransformFailed();
         }
+    }
+
+    function _delegatecallAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
+        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoExit, (poolKey, poolId, tokenId, isUpper)));
     }
 
     function _delegatecallAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
-        (bool success,) = address(hookFunctions).delegatecall(
-            abi.encodeCall(hookFunctions.autoRange, (poolKey, poolId, tokenId))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoRange, (poolKey, poolId, tokenId)));
     }
 
     function _delegatecallAutoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
-        (bool success,) = address(hookFunctions2).delegatecall(
-            abi.encodeCall(hookFunctions2.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger)));
     }
 
     function _delegatecallAutoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        (bool success,) = address(hookFunctions2).delegatecall(
-            abi.encodeCall(hookFunctions2.autoLendDeposit, (poolKey, poolId, tokenId, isUpper))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLendDeposit, (poolKey, poolId, tokenId, isUpper)));
     }
 
     function _delegatecallAutoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) internal {
-        (bool success,) = address(hookFunctions2).delegatecall(
-            abi.encodeCall(hookFunctions2.autoLendWithdraw, (poolKey, tokenId, shares))
-        );
-        if (!success) {
-            revert TransformFailed();
-        }
+        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLendWithdraw, (poolKey, tokenId, shares)));
     }
 }
