@@ -185,16 +185,14 @@ contract DeployBase is Script {
         console.log("Found valid hook address:", expectedHookAddress);
         console.log("Using salt:", vm.toString(salt));
 
-        RevertHook revertHook = new RevertHook{salt: salt}(
-            deployer,
-            deployer,
-            IPermit2(PERMIT2),
-            oracle,
-            ILiquidityCalculator(liquidityCalculator),
-            hookFunctions,
-            hookFunctions2
-        );
-        require(address(revertHook) == expectedHookAddress, "Hook address mismatch");
+        // Deploy RevertHook using CREATE2_DEPLOYER proxy
+        // The CREATE2_DEPLOYER expects: salt (32 bytes) + creation code
+        bytes memory deployData = abi.encodePacked(salt, creationCodeWithArgs);
+        (bool success, bytes memory returnData) = CREATE2_DEPLOYER.call(deployData);
+        require(success && returnData.length == 0, "CREATE2 deployment failed");
+
+        RevertHook revertHook = RevertHook(expectedHookAddress);
+        require(address(revertHook).code.length > 0, "Hook deployment failed");
         console.log("RevertHook deployed at:", address(revertHook));
 
         // Configure RevertHook settings
