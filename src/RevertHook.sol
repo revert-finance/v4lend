@@ -34,6 +34,14 @@ import {RevertHookFunctions2} from "./RevertHookFunctions2.sol";
 /// @title RevertHook
 /// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting, auto-ranging and auto-lending of positions
 /// @dev Positions are not owned by the hook - they are owned by users directly or the vault with the correct permissions
+/// @dev Security considerations:
+/// - Hook actions are triggered by pool swaps via afterSwap callback - price validation via maxTicksFromOracle prevents manipulation
+/// - Delegatecall pattern preserves storage context when calling hookFunctions/hookFunctions2
+/// - Protocol fees are time-weighted based on accumulated active time to prevent fee gaming
+/// - Position value must exceed minPositionValueNative to prevent dust position spam
+/// - For vault-owned positions, transforms go through vault.transform() which enforces collateral health checks
+/// - Oracle price validation prevents excessive price deviation from triggering invalid actions
+/// @custom:security-contact security@revert.finance
 contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using TickLinkedList for TickLinkedList.List;

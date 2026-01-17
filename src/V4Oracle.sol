@@ -33,6 +33,14 @@ interface AggregatorV3Interface {
 
 /// @title V4Oracle for Uniswap V4 position valuation using Chainlink feeds
 /// @notice Simplified oracle that only uses Chainlink feeds (no TWAP) to calculate V4 position values
+/// @dev Security considerations:
+/// - Price manipulation protection via maxPoolPriceDifference which compares pool price vs Chainlink price
+/// - L2 sequencer uptime validation prevents stale prices during sequencer downtime
+/// - SEQUENCER_GRACE_PERIOD_TIME (10 min) ensures price feeds have updated after sequencer restarts
+/// - maxFeedAge prevents use of stale Chainlink data
+/// - Position value uses oracle-derived prices (not pool prices) for liquidation calculations
+/// - All arithmetic uses FullMath for precision to prevent rounding exploits
+/// @custom:security-contact security@revert.finance
 contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     uint256 private constant SEQUENCER_GRACE_PERIOD_TIME = 600; // 10mins
 

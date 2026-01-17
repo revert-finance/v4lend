@@ -31,6 +31,14 @@ import {Constants} from "./utils/Constants.sol";
 /// @title Revert Lend Vault for token lending / borrowing using Uniswap V4 LP positions as collateral
 /// @notice The vault manages ONE ERC20 (eg. USDC) asset for lending / borrowing, but collateral positions can be composed of any 2 tokens configured each with a collateralFactor > 0
 /// Vault implements IERC4626 Vault Standard and is itself a ERC20 which represent shares of total lending pool
+/// @dev Security considerations:
+/// - Exchange rates only increase (except in bad debt socialization) ensuring share value preservation
+/// - Transformer pattern allows atomic position modifications with post-execution health checks
+/// - Reentrancy protection via transformedTokenId state that prevents nested transforms
+/// - Oracle manipulation protection via maxPoolPriceDifference checks in V4Oracle
+/// - Position hooks must be allowlisted to prevent malicious hook interactions
+/// - Daily limits provide circuit breaker protection against flash loan attacks
+/// @custom:security-contact security@revert.finance
 contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Constants {
     using Math for uint256;
 
@@ -544,6 +552,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice Method which allows a contract to transform a loan by changing it (and only at the end checking collateral)
+    /// @dev SECURITY: This function is critical - it temporarily grants NFT approval to transformer
+    /// and only validates collateral health AFTER the transformation completes.
+    /// Reentrancy is prevented by the transformedTokenId check at the start.
+    /// Only whitelisted transformers can be called to prevent malicious contract interactions.
+    /// The transformer can replace the position with a new one (different tokenId) during transform.
     /// @param tokenId The token ID to be processed
     /// @param transformer The address of a whitelisted transformer contract
     /// @param data Encoded transformation params
@@ -602,6 +615,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice Borrows specified amount using token as collateral
+    /// @dev SECURITY: Borrowing includes a BORROW_SAFETY_BUFFER_X32 (95%) to provide margin before liquidation.
+    /// minLoanSize prevents dust positions that would be unprofitable to liquidate.
+    /// Daily debt increase limits provide circuit breaker protection.
+    /// When called from a transformer, health check is deferred until transform completion.
     /// @param tokenId The token ID to use as collateral
     /// @param assets How much assets to borrow
     function borrow(uint256 tokenId, uint256 assets) external override {
@@ -729,6 +746,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     /// @notice Liquidates position - needed assets are depending on current price.
     /// Sufficient assets need to be approved to the contract for the liquidation to succeed.
+    /// @dev SECURITY: Liquidation is only possible when position is unhealthy (collateralValue < debt).
+    /// Liquidation penalty ranges from MIN_LIQUIDATION_PENALTY_X32 (2%) to MAX_LIQUIDATION_PENALTY_X32 (10%)
+    /// based on how undercollateralized the position is. In extreme cases where position value < penalty,
+    /// bad debt is socialized across all lenders via exchange rate reduction.
+    /// Oracle prices are used for valuation to prevent price manipulation attacks.
     /// @param params The params defining liquidation
     /// @return amount0 The amount of the first type of asset collected.
     /// @return amount1 The amount of the second type of asset collected.
