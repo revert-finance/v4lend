@@ -187,12 +187,13 @@ contract DeployBase is Script {
 
         // Deploy RevertHook using CREATE2_DEPLOYER proxy
         // The CREATE2_DEPLOYER expects: salt (32 bytes) + creation code
+        // Returns the deployed address on success
         bytes memory deployData = abi.encodePacked(salt, creationCodeWithArgs);
-        (bool success, bytes memory returnData) = CREATE2_DEPLOYER.call(deployData);
-        require(success && returnData.length == 0, "CREATE2 deployment failed");
+        (bool success,) = CREATE2_DEPLOYER.call(deployData);
+        require(success, "CREATE2 deployment failed");
 
         RevertHook revertHook = RevertHook(expectedHookAddress);
-        require(address(revertHook).code.length > 0, "Hook deployment failed");
+        require(address(revertHook).code.length > 0, "Hook not deployed at expected address");
         console.log("RevertHook deployed at:", address(revertHook));
 
         // Configure RevertHook settings
