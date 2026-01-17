@@ -17,6 +17,8 @@ import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {RevertHook} from "../../src/RevertHook.sol";
 import {RevertHookState} from "../../src/RevertHookState.sol";
+import {RevertHookFunctions} from "../../src/RevertHookFunctions.sol";
+import {RevertHookFunctions2} from "../../src/RevertHookFunctions2.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../../src/LiquidityCalculator.sol";
 import {V4Oracle} from "../../src/V4Oracle.sol";
 
@@ -45,6 +47,12 @@ contract RevertHookInvariants is V4TestBase {
         v4Oracle = new V4Oracle(positionManager, address(token1), address(0));
         v4Oracle.setMaxPoolPriceDifference(10000);
 
+        // Deploy HookFunctions contracts
+        RevertHookFunctions hookFunctions =
+            new RevertHookFunctions(permit2, v4Oracle, ILiquidityCalculator(liquidityCalculator));
+        RevertHookFunctions2 hookFunctions2 =
+            new RevertHookFunctions2(permit2, v4Oracle, ILiquidityCalculator(liquidityCalculator));
+
         // Deploy RevertHook with correct flags
         address hookFlags = address(
             uint160(
@@ -54,8 +62,15 @@ contract RevertHookInvariants is V4TestBase {
             ) ^ (0x4444 << 144)
         );
 
-        bytes memory constructorArgs =
-            abi.encode(address(this), permit2, v4Oracle, ILiquidityCalculator(liquidityCalculator));
+        bytes memory constructorArgs = abi.encode(
+            address(this), // owner
+            address(this), // protocolFeeRecipient
+            permit2,
+            v4Oracle,
+            ILiquidityCalculator(liquidityCalculator),
+            hookFunctions,
+            hookFunctions2
+        );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
         revertHook = RevertHook(hookFlags);
 

@@ -116,6 +116,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     function getValue(uint256 tokenId, address token)
         external
         view
+        virtual
         override
         returns (uint256 value, uint256 feeValue, uint256 price0X96, uint256 price1X96)
     {

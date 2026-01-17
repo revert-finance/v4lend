@@ -18,7 +18,9 @@ import {InterestRateModel} from "../../src/InterestRateModel.sol";
 
 import {RevertHook} from "../../src/RevertHook.sol";
 import {RevertHookState} from "../../src/RevertHookState.sol";
-import {LiquidityCalculator} from "../../src/LiquidityCalculator.sol";
+import {RevertHookFunctions} from "../../src/RevertHookFunctions.sol";
+import {RevertHookFunctions2} from "../../src/RevertHookFunctions2.sol";
+import {LiquidityCalculator, ILiquidityCalculator} from "../../src/LiquidityCalculator.sol";
 import {Constants} from "../../src/utils/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -64,6 +66,12 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Deploy LiquidityCalculator
         liquidityCalculator = new LiquidityCalculator();
 
+        // Deploy HookFunctions contracts
+        RevertHookFunctions hookFunctions =
+            new RevertHookFunctions(permit2, v4Oracle, ILiquidityCalculator(liquidityCalculator));
+        RevertHookFunctions2 hookFunctions2 =
+            new RevertHookFunctions2(permit2, v4Oracle, ILiquidityCalculator(liquidityCalculator));
+
         // Deploy RevertHook
         address hookFlags = address(
             uint160(
@@ -73,7 +81,15 @@ contract V4VaultHookTest is V4ForkTestBase {
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
 
-        bytes memory constructorArgs = abi.encode(address(this), permit2, v4Oracle, liquidityCalculator);
+        bytes memory constructorArgs = abi.encode(
+            address(this), // owner
+            address(this), // protocolFeeRecipient
+            permit2,
+            v4Oracle,
+            ILiquidityCalculator(liquidityCalculator),
+            hookFunctions,
+            hookFunctions2
+        );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
         revertHook = RevertHook(hookFlags);
 

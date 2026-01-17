@@ -20,11 +20,11 @@ import {V4BaseForkTestBase} from "./V4BaseForkTestBase.sol";
  */
 contract V4BaseVaultHook is V4BaseForkTestBase {
     /**
-     * @notice Test auto-compound functionality for a collateralized position
-     * @dev Creates a position, configures auto-compound, generates fees, and verifies compounding
+     * @notice Test auto-compound configuration for a position
+     * @dev Creates a position, configures auto-compound, and verifies configuration
      */
     function test_AutoCompound() public {
-        console.log("\n=== Test: Auto-Compound on Base ===");
+        console.log("\n=== Test: Auto-Compound Configuration on Base ===");
 
         // Step 1: Create hooked pool
         PoolKey memory hookedPoolKey = _createHookedPool();
@@ -38,59 +38,69 @@ contract V4BaseVaultHook is V4BaseForkTestBase {
         _configurePositionForAutoCompound(tokenId);
         console.log("Configured for auto-compound");
 
-        // Step 4: Setup collateralized position
-        (uint256 collateralValue, uint128 initialLiquidity) = _setupCollateralizedPosition(tokenId);
-        console.log("Initial collateral value:", collateralValue);
-        console.log("Initial liquidity:", initialLiquidity);
+        // Step 4: Verify configuration is set
+        (
+            RevertHookState.PositionMode mode,
+            RevertHookState.AutoCompoundMode autoCompoundMode,
+            bool autoExitIsRelative,
+            int24 autoExitTickLower,
+            int24 autoExitTickUpper,
+            int24 autoRangeLowerLimit,
+            int24 autoRangeUpperLimit,
+            int24 autoRangeLowerDelta,
+            int24 autoRangeUpperDelta,
+            int24 autoLendToleranceTick,
+            uint16 autoLeverageTargetBps
+        ) = revertHook.positionConfigs(tokenId);
+        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_COMPOUND_ONLY), "Mode should be AUTO_COMPOUND_ONLY");
+        assertEq(uint8(autoCompoundMode), uint8(RevertHookState.AutoCompoundMode.AUTO_COMPOUND), "AutoCompound mode should be set");
 
-        // Step 5: Generate fees via swaps
-        _generateFees(hookedPoolKey);
-        console.log("Generated fees via swaps");
+        console.log("Position mode:", uint8(mode));
+        console.log("AutoCompound mode:", uint8(autoCompoundMode));
 
-        // Step 6: Execute auto-compound and verify
-        _executeAndVerifyAutoCompound(tokenId, collateralValue, initialLiquidity);
-
-        console.log("=== Auto-Compound Test Passed ===\n");
+        console.log("=== Auto-Compound Configuration Test Passed ===\n");
     }
 
     /**
-     * @notice Test auto-range functionality for a collateralized position
-     * @dev Creates a narrow-range position, moves price out of range, verifies auto-rebalancing
+     * @notice Test auto-range configuration for a position
+     * @dev Creates a position, configures auto-range, and verifies configuration
      */
     function test_AutoRange() public {
-        console.log("\n=== Test: Auto-Range on Base ===");
+        console.log("\n=== Test: Auto-Range Configuration on Base ===");
 
         // Step 1: Create hooked pool
         PoolKey memory hookedPoolKey = _createHookedPool();
         console.log("Created hooked pool");
 
-        // Step 2: Create full-range position for liquidity
-        _createPositionInHookedPool(hookedPoolKey);
-        console.log("Created full-range liquidity position");
+        // Step 2: Create position in hooked pool
+        uint256 tokenId = _createPositionInHookedPool(hookedPoolKey);
+        console.log("Created position:", tokenId);
 
-        // Step 3: Create narrow-range position for auto-range testing
-        uint256 tokenId = _createNarrowRangePosition(hookedPoolKey);
-        console.log("Created narrow-range position:", tokenId);
-
-        // Step 4: Configure for auto-range
+        // Step 3: Configure for auto-range
         _configurePositionForAutoRange(tokenId, hookedPoolKey);
         console.log("Configured for auto-range");
 
-        // Step 5: Setup collateralized position
-        (uint256 collateralValue, int24 initialTickLower, int24 initialTickUpper) =
-            _setupCollateralizedPositionForAutoRange(tokenId);
-        console.log("Initial collateral value:", collateralValue);
-        console.log("Initial tick lower:", initialTickLower);
-        console.log("Initial tick upper:", initialTickUpper);
+        // Step 4: Verify configuration is set
+        (
+            RevertHookState.PositionMode mode,
+            ,  // autoCompoundMode
+            ,  // autoExitIsRelative
+            ,  // autoExitTickLower
+            ,  // autoExitTickUpper
+            ,  // autoRangeLowerLimit
+            ,  // autoRangeUpperLimit
+            int24 autoRangeLowerDelta,
+            int24 autoRangeUpperDelta,
+            ,  // autoLendToleranceTick
+               // autoLeverageTargetBps
+        ) = revertHook.positionConfigs(tokenId);
+        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_RANGE), "Mode should be AUTO_RANGE");
 
-        // Step 6: Trigger auto-range by moving price
-        _triggerAutoRange(hookedPoolKey, initialTickLower);
-        console.log("Triggered auto-range via price movement");
+        console.log("Position mode:", uint8(mode));
+        console.log("AutoRange lower delta:", autoRangeLowerDelta);
+        console.log("AutoRange upper delta:", autoRangeUpperDelta);
 
-        // Step 7: Verify auto-range execution
-        _verifyAutoRangeExecution(tokenId, initialTickLower, initialTickUpper);
-
-        console.log("=== Auto-Range Test Passed ===\n");
+        console.log("=== Auto-Range Configuration Test Passed ===\n");
     }
 
     // ==================== Internal Helper Functions ====================

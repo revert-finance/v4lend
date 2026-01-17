@@ -24,8 +24,11 @@ import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
 import {RevertHookState} from "../src/RevertHookState.sol";
+import {RevertHookFunctions} from "../src/RevertHookFunctions.sol";
+import {RevertHookFunctions2} from "../src/RevertHookFunctions2.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
 import {MockV4Oracle} from "./utils/MockV4Oracle.sol";
+import {V4Oracle} from "../src/V4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MockERC4626Vault} from "./utils/MockERC4626Vault.sol";
@@ -83,17 +86,33 @@ contract RevertHookTest is BaseTest {
         );
 
 
-        // Deploy V4Oracle
-        v4Oracle = new MockV4Oracle(
-            positionManager
-        );
+        // Deploy MockV4Oracle
+        v4Oracle = new MockV4Oracle(positionManager);
 
         protocolFeeRecipient = makeAddr("protocolFeeRecipient");
 
         // Deploy LiquidityCalculator
         liquidityCalculator = new LiquidityCalculator();
 
-        bytes memory constructorArgs = abi.encode(protocolFeeRecipient, permit2, v4Oracle, liquidityCalculator); // Add all the necessary constructor arguments from the hook
+        // Deploy real V4Oracle for hook functions (they require the concrete type)
+        V4Oracle realOracle = new V4Oracle(positionManager, Currency.unwrap(currency0), address(0));
+        realOracle.setMaxPoolPriceDifference(type(uint16).max); // Disable price checks
+
+        // Deploy HookFunctions contracts with real oracle
+        RevertHookFunctions hookFunctions =
+            new RevertHookFunctions(permit2, realOracle, ILiquidityCalculator(liquidityCalculator));
+        RevertHookFunctions2 hookFunctions2 =
+            new RevertHookFunctions2(permit2, realOracle, ILiquidityCalculator(liquidityCalculator));
+
+        bytes memory constructorArgs = abi.encode(
+            address(this), // owner
+            protocolFeeRecipient,
+            permit2,
+            realOracle,
+            ILiquidityCalculator(liquidityCalculator),
+            hookFunctions,
+            hookFunctions2
+        );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
@@ -112,6 +131,9 @@ contract RevertHookTest is BaseTest {
         // Set vaults in hook using the setter function
         hook.setAutoLendVault(Currency.unwrap(currency0), vault0);
         hook.setAutoLendVault(Currency.unwrap(currency1), vault1);
+
+        // Disable min position value check to avoid oracle configuration
+        hook.setMinPositionValueNative(0);
         
         // Verify vaults are set correctly
         assertEq(address(hook.autoLendVaults(Currency.unwrap(currency0))), address(vault0), "Vault0 should be set");
