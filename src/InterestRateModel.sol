@@ -7,8 +7,17 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
 import {Constants} from "./utils/Constants.sol";
 
-/// @title Model for interest rate calculation used in Vault
-/// @notice Calculates both borrow and supply rate
+/// @title Model for interest rate calculation used in V4Vault
+/// @notice Calculates both borrow and supply rates using a two-slope model (similar to Compound V2)
+/// @dev Interest rate model with a kink:
+///   - Below kink: borrowRate = baseRate + utilizationRate * multiplier
+///   - Above kink: borrowRate = baseRate + kink * multiplier + (utilizationRate - kink) * jumpMultiplier
+///   - supplyRate = borrowRate * utilizationRate (lenders receive less than borrowers pay due to reserves)
+/// @custom:security Rate Limits:
+///   - baseRatePerYear capped at 10% (MAX_BASE_RATE_X64)
+///   - multiplierPerYear and jumpMultiplierPerYear capped at 200% (MAX_MULTIPLIER_X64)
+/// @custom:security Admin:
+///   - Only owner can update rate parameters via setValues()
 contract InterestRateModel is Ownable, IInterestRateModel, Constants {
 
     uint256 public constant YEAR_SECS = 31557600; // taking into account leap years

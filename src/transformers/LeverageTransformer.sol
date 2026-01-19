@@ -24,7 +24,21 @@ import {IVault} from "../interfaces/IVault.sol";
 import {Transformer, Ownable} from "./Transformer.sol";
 
 /// @title LeverageTransformer
-/// @notice Functionality to leverage / deleverage positions direcly in one tx
+/// @notice Enables atomic leverage/deleverage operations on Uniswap V4 positions used as collateral
+/// @dev Provides three main operations:
+///   - leverageUp: Borrow and add liquidity to an existing position
+///   - leverageDown: Remove liquidity and repay debt
+///   - leverageIn: Create a leveraged position from scratch with a single token
+/// @custom:security Trust Model:
+///   - Must be whitelisted as transformer in V4Vault to call borrow()
+///   - Uses external swap routers - swap data should be validated off-chain
+/// @custom:security Slippage Protection:
+///   - amountRemoveMin0/1: Minimum amounts when decreasing liquidity
+///   - amountAddMin0/1: Minimum amounts when adding liquidity
+///   - amountOutMin: Minimum output for swaps
+/// @custom:security Collateral Health:
+///   - V4Vault verifies collateral health after transform completes
+///   - Leverage operations fail if resulting position would be undercollateralized
 contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
     /// @notice Permit2 contract
@@ -67,7 +81,11 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         bytes increaseLiquidityHookData;
     }
 
-    // method called from transform() method in Vault
+    /// @notice Increases leverage by borrowing and adding liquidity to an existing position
+    /// @dev Called via V4Vault.transform(). Collects fees, borrows from vault, swaps if needed,
+    ///      then adds all available tokens as liquidity. Leftover tokens sent to recipient.
+    /// @param params LeverageUpParams struct containing borrow amount, swap configs, and slippage limits
+    /// @custom:security Must be called through vault transform to have borrow access
     function leverageUp(LeverageUpParams calldata params) external {
         _validateCaller(positionManager, params.tokenId);
 
@@ -203,7 +221,11 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         bytes decreaseLiquidityHookData;
     }
 
-    // method called from transform() method in Vault
+    /// @notice Decreases leverage by removing liquidity and repaying debt
+    /// @dev Called via V4Vault.transform(). Removes liquidity, swaps to vault asset,
+    ///      and repays as much debt as possible. Leftover tokens sent to recipient.
+    /// @param params LeverageDownParams struct containing liquidity to remove, swap configs, and slippage limits
+    /// @custom:security Must be called through vault transform
     function leverageDown(LeverageDownParams calldata params) external {
         _validateCaller(positionManager, params.tokenId);
 

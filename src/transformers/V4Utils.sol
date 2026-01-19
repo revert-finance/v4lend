@@ -25,9 +25,19 @@ import {IVault} from "../interfaces/IVault.sol";
 import {Transformer, Ownable} from "./Transformer.sol";
 
 /// @title V4Utils v1.0
-/// @notice Utility functions for Uniswap V4 positions
-/// It does not hold any ERC20 or NFTs.
-/// It can be simply redeployed when new / better functionality is implemented
+/// @notice Utility contract for Uniswap V4 position management operations
+/// @dev Provides atomic operations for position management: compound fees, change range, withdraw and swap.
+///      Stateless contract - does not hold any ERC20 or NFTs between transactions.
+/// @custom:security Trust Model:
+///   - Acts as a transformer when used with V4Vault - can borrow during transform mode
+///   - Uses external swap routers (Universal Router, 0x) - swap data must be validated off-chain
+/// @custom:security Slippage Protection:
+///   - amountRemoveMin0/1: Minimum amounts when decreasing liquidity
+///   - amountAddMin0/1: Minimum amounts when adding liquidity
+///   - amountOutMin: Minimum output for swaps
+/// @custom:security MEV Exposure:
+///   - Swap operations may be subject to sandwich attacks
+///   - Users should use appropriate slippage parameters and deadline
 contract V4Utils is Transformer, Swapper, IERC721Receiver {
     using SafeCast for uint256;
 

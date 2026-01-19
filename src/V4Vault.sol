@@ -30,7 +30,18 @@ import {Constants} from "./utils/Constants.sol";
 
 /// @title Revert Lend Vault for token lending / borrowing using Uniswap V4 LP positions as collateral
 /// @notice The vault manages ONE ERC20 (eg. USDC) asset for lending / borrowing, but collateral positions can be composed of any 2 tokens configured each with a collateralFactor > 0
-/// Vault implements IERC4626 Vault Standard and is itself a ERC20 which represent shares of total lending pool
+/// @dev Vault implements IERC4626 Vault Standard and is itself an ERC20 which represents shares of the total lending pool
+/// @custom:security Trust Assumptions:
+///   - Owner is trusted to configure valid token collateral factors and transformers
+///   - Oracle is trusted to provide accurate position valuations
+///   - Transformers are whitelisted and audited contracts that can modify positions atomically
+///   - Interest rate model is trusted for rate calculations
+/// @custom:security Reentrancy:
+///   - transform() is protected by transformedTokenId state variable acting as a reentrancy guard
+///   - liquidate() and borrow() check transformedTokenId to prevent reentrancy
+/// @custom:security Oracle Manipulation:
+///   - Position values depend on V4Oracle which validates pool prices against Chainlink feeds
+///   - Price manipulation attacks are mitigated by maxPoolPriceDifference check
 contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Constants {
     using Math for uint256;
 
@@ -423,14 +434,20 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     ////////////////// EXTERNAL FUNCTIONS
 
-    /// @notice Creates a new collateralized position (transfer approved position)
-    /// @param tokenId The token ID associated with the new position.
-    /// @param recipient Address to recieve the position in the vault
+    /// @notice Creates a new collateralized position by transferring an approved Uniswap V4 position NFT
+    /// @dev The position NFT must be approved for this contract. The recipient becomes the loan owner.
+    /// @param tokenId The token ID of the Uniswap V4 position NFT to use as collateral
+    /// @param recipient Address to receive ownership of the position/loan in the vault
+    /// @custom:security The hook attached to the position must be in hookAllowList or be address(0)
     function create(uint256 tokenId, address recipient) external override {
         IERC721(address(positionManager)).safeTransferFrom(msg.sender, address(this), tokenId, abi.encode(recipient));
     }
 
-    /// @notice Handles special case when a token is received by the vault from a hook contract
+    /// @notice Handles special case when a token is received by the vault from a hook contract during transform
+    /// @dev Can only be called by whitelisted transformers while in transform mode. Used when hooks create new positions.
+    /// @param tokenId The token ID of the newly received position NFT
+    /// @param recipient Address to receive ownership of the position/loan
+    /// @custom:security Only callable from transformer contracts during active transform to prevent unauthorized position injection
     function notifyERC721Received(uint256 tokenId, address recipient) external override {
 
         // must be called from a transformer contract, be in transform mode and the token must not be owned by anyone else
@@ -543,11 +560,16 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         emit Transfer(tokenId, currentOwner, newOwner);
     }
 
-    /// @notice Method which allows a contract to transform a loan by changing it (and only at the end checking collateral)
-    /// @param tokenId The token ID to be processed
-    /// @param transformer The address of a whitelisted transformer contract
-    /// @param data Encoded transformation params
-    /// @return newTokenId Final token ID (may be different than input token ID when the position was replaced by transformation)
+    /// @notice Allows a whitelisted transformer contract to atomically modify a loan position
+    /// @dev The transformer pattern enables complex operations (range changes, leverage, etc.) while ensuring
+    ///      collateral health is verified only after all modifications complete.
+    /// @param tokenId The token ID of the position to transform
+    /// @param transformer The address of a whitelisted transformer contract (must be in transformerAllowList)
+    /// @param data Encoded function call data to execute on the transformer
+    /// @return newTokenId Final token ID (may differ from input if position was replaced during transformation)
+    /// @custom:security Reentrancy Protection: Uses transformedTokenId as mutex - reverts if already in transform
+    /// @custom:security Trust Model: Transformers are whitelisted by owner and can call borrow() during transform
+    /// @custom:security After transform completes, loan health is verified to ensure sufficient collateralization
     function transform(uint256 tokenId, address transformer, bytes calldata data)
         external
         override
@@ -601,9 +623,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         transformedTokenId = 0;
     }
 
-    /// @notice Borrows specified amount using token as collateral
-    /// @param tokenId The token ID to use as collateral
-    /// @param assets How much assets to borrow
+    /// @notice Borrows specified amount of the vault's asset using the position as collateral
+    /// @dev Can be called by position owner directly, or by transformers during transform mode.
+    ///      Checks global debt limits, daily limits, minimum loan size, and collateral health.
+    /// @param tokenId The token ID of the position to use as collateral
+    /// @param assets Amount of assets to borrow (in asset token decimals)
+    /// @custom:security Validates sufficient collateralization after borrow (with 5% safety buffer when not in transform)
+    /// @custom:security In transform mode, health check is deferred to end of transform()
     function borrow(uint256 tokenId, uint256 assets) external override {
 
         bool isTransformMode = tokenId != 0 && transformedTokenId == tokenId && transformerAllowList[msg.sender];
@@ -727,11 +753,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 feeValue;
     }
 
-    /// @notice Liquidates position - needed assets are depending on current price.
-    /// Sufficient assets need to be approved to the contract for the liquidation to succeed.
-    /// @param params The params defining liquidation
-    /// @return amount0 The amount of the first type of asset collected.
-    /// @return amount1 The amount of the second type of asset collected.
+    /// @notice Liquidates an unhealthy position by repaying debt and receiving collateral
+    /// @dev Liquidation penalty ranges from 2% to 10% based on position health.
+    ///      If position value < debt + max penalty, shortfall is covered by reserves then lenders.
+    /// @param params LiquidateParams struct containing tokenId, min amounts, deadline, and hook data
+    /// @return amount0 Amount of token0 received by liquidator
+    /// @return amount1 Amount of token1 received by liquidator
+    /// @custom:security Not callable during transform mode to prevent manipulation
+    /// @custom:security Liquidator must approve sufficient assets before calling
+    /// @custom:security Penalty calculation: linear interpolation from 2% (just liquidatable) to 10% (fully underwater)
     function liquidate(LiquidateParams calldata params) external override returns (uint256 amount0, uint256 amount1) {
         // liquidation is not allowed during transformer mode
         if (transformedTokenId != 0) {
@@ -818,10 +848,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     ////////////////// ADMIN FUNCTIONS only callable by owner
 
-    /// @notice withdraw protocol reserves (onlyOwner)
-    /// only allows to withdraw excess reserves (> globalLendAmount * reserveProtectionFactor)
-    /// @param amount amount to withdraw
-    /// @param receiver receiver address
+    /// @notice Withdraws protocol reserves accumulated from interest spread (onlyOwner)
+    /// @dev Only allows withdrawing reserves above the protection threshold (globalLendAmount * reserveProtectionFactor).
+    ///      This ensures minimum reserves are always maintained to absorb potential bad debt.
+    /// @param amount Amount of reserves to withdraw
+    /// @param receiver Address to receive the withdrawn reserves
+    /// @custom:security Protected by reserveProtectionFactor to maintain solvency buffer
     function withdrawReserves(uint256 amount, address receiver) external onlyOwner {
         (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
 
@@ -842,9 +874,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         emit WithdrawReserves(amount, receiver);
     }
 
-    /// @notice configure transformer contract (onlyOwner)
-    /// @param transformer address of transformer contract
-    /// @param active should the transformer be active?
+    /// @notice Configures whether a contract is allowed to act as a transformer (onlyOwner)
+    /// @dev Transformers can call transform() to atomically modify positions and borrow during transform mode.
+    ///      Only add audited contracts as transformers - they have significant privileges.
+    /// @param transformer Address of the transformer contract
+    /// @param active Whether the transformer should be active (true) or disabled (false)
+    /// @custom:security Critical: Transformers can borrow and modify positions - ensure proper auditing
     function setTransformer(address transformer, bool active) external onlyOwner {
         // protects protocol from owner trying to set dangerous transformer
         if (
@@ -911,10 +946,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         emit SetReserveProtectionFactor(_reserveProtectionFactorX32);
     }
 
-    /// @notice Sets or updates the configuration for a token (onlyOwner)
-    /// @param token Token to configure
-    /// @param collateralFactorX32 collateral factor for this token mutiplied by Q32
-    /// @param collateralValueLimitFactorX32 how much of it maybe used as collateral measured as percentage of total lent assets mutiplied by Q32
+    /// @notice Sets or updates the collateral configuration for a token (onlyOwner)
+    /// @dev Collateral factor determines how much of a token's value counts toward borrowing capacity.
+    ///      Value limit prevents over-concentration of risk in a single collateral type.
+    /// @param token Token address to configure (use address(0) for native ETH)
+    /// @param collateralFactorX32 Collateral factor multiplied by Q32 (max 90%, e.g., 0.85 * Q32 for 85%)
+    /// @param collateralValueLimitFactorX32 Max debt backed by this token as % of total lent, multiplied by Q32
+    /// @custom:security Lower collateral factors for volatile tokens reduce liquidation risk
     function setTokenConfig(address token, uint32 collateralFactorX32, uint32 collateralValueLimitFactorX32)
         external
         onlyOwner

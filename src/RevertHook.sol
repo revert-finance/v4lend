@@ -32,8 +32,21 @@ import {RevertHookFunctions} from "./RevertHookFunctions.sol";
 import {RevertHookFunctions2} from "./RevertHookFunctions2.sol";
 
 /// @title RevertHook
-/// @notice Hook that allows to add LP Positions via PositionManager and enables auto-compounding, auto-exiting, auto-ranging and auto-lending of positions
-/// @dev Positions are not owned by the hook - they are owned by users directly or the vault with the correct permissions
+/// @notice Uniswap V4 hook enabling automated LP position management features
+/// @dev Implements hook callbacks to trigger automated actions based on price movements.
+///      Positions are owned by users directly or by V4Vault as collateral.
+/// @custom:security Hook Permissions:
+///   - afterInitialize: Tracks pool tick for trigger calculations
+///   - beforeAddLiquidity: Validates sender is position manager or hook itself
+///   - afterAddLiquidity: Takes protocol fees, activates position triggers
+///   - afterRemoveLiquidity: Takes protocol fees, deactivates empty positions
+///   - afterSwap: Executes triggered actions (auto-exit, auto-range, auto-lend, auto-leverage)
+/// @custom:security Oracle Protection:
+///   - maxTicksFromOracle limits how far from oracle price actions can execute
+///   - Prevents manipulation attacks by constraining execution to valid price ranges
+/// @custom:security Delegatecall Pattern:
+///   - Uses hookFunctions and hookFunctions2 via delegatecall to avoid contract size limits
+///   - All state is maintained in this contract
 contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using TickLinkedList for TickLinkedList.List;
@@ -73,25 +86,35 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     // ==================== Configuration Setters ====================
 
-    /// @notice Sets the ERC4626 vault for a given token address
+    /// @notice Sets the ERC4626 vault to use for auto-lend feature for a specific token (onlyOwner)
+    /// @dev When AUTO_LEND mode triggers, idle position value is deposited into this vault
+    /// @param token The token address (typically stablecoin) that the vault accepts
+    /// @param vault The ERC4626 vault contract to deposit into
     function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
         autoLendVaults[token] = vault;
         emit SetAutoLendVault(token, vault);
     }
 
-    /// @notice Sets the maximum ticks from oracle for price validation
+    /// @notice Sets the maximum tick deviation allowed from oracle price for automated actions (onlyOwner)
+    /// @dev Protects against price manipulation by limiting execution to prices within range of oracle
+    /// @param _maxTicksFromOracle Maximum tick difference from oracle-derived tick (e.g., 100 = ~1% price deviation)
+    /// @custom:security Lower values provide stronger manipulation protection but may prevent legitimate executions
     function setMaxTicksFromOracle(int24 _maxTicksFromOracle) external onlyOwner {
         maxTicksFromOracle = _maxTicksFromOracle;
         emit SetMaxTicksFromOracle(_maxTicksFromOracle);
     }
 
-    /// @notice Sets the minimum position value in native token required for configuration
+    /// @notice Sets the minimum position value (in native token) required to enable automated features (onlyOwner)
+    /// @dev Prevents dust positions from triggering gas-expensive automated actions
+    /// @param _minPositionValueNative Minimum position value in native token (e.g., 0.01 ether)
     function setMinPositionValueNative(uint256 _minPositionValueNative) external onlyOwner {
         minPositionValueNative = _minPositionValueNative;
         emit SetMinPositionValueNative(_minPositionValueNative);
     }
 
-    /// @notice Sets the protocol fee percentage
+    /// @notice Sets the protocol fee percentage charged on position fees while active (onlyOwner)
+    /// @dev Fee is calculated proportionally based on time position was active vs total time since last collect
+    /// @param _protocolFeeBps Protocol fee in basis points (e.g., 100 = 1%, max 10000 = 100%)
     function setProtocolFeeBps(uint16 _protocolFeeBps) external onlyOwner {
         if (_protocolFeeBps > 10000) {
             revert InvalidConfig();
@@ -106,7 +129,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         emit SetProtocolFeeRecipient(_protocolFeeRecipient);
     }
 
-    /// @notice Sets the general configuration for a position
+    /// @notice Sets the general swap configuration for a position
+    /// @dev Configures which pool to use for rebalancing swaps and max price impact limits.
+    ///      Only callable by position owner (real owner if position is in vault).
+    /// @param tokenId The position token ID to configure
+    /// @param swapPoolFee Fee tier of the pool to use for swaps
+    /// @param swapPoolTickSpacing Tick spacing of the swap pool (must be multiple of position pool's tick spacing)
+    /// @param swapPoolHooks Hook address of the swap pool
+    /// @param maxPriceImpactBps0 Maximum price impact in basis points when swapping token0
+    /// @param maxPriceImpactBps1 Maximum price impact in basis points when swapping token1
     function setGeneralConfig(
         uint256 tokenId,
         uint24 swapPoolFee,
@@ -139,7 +170,12 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         emit SetGeneralConfig(tokenId, generalConfig);
     }
 
-    /// @notice Sets the position configuration for a given token ID
+    /// @notice Sets the automation configuration for a position
+    /// @dev Configures the automated behavior mode and parameters for a position.
+    ///      Only callable by position owner. Position must meet minimum value requirement.
+    /// @param tokenId The position token ID to configure
+    /// @param positionConfig Configuration struct containing mode and parameters for automation
+    /// @custom:security Validates position meets minPositionValueNative to prevent dust position attacks
     function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external {
         if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
@@ -617,6 +653,13 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     // ==================== Public Functions (called by vault transform or directly) ====================
 
+    /// @notice Executes auto-exit for a position, removing liquidity and swapping to single token
+    /// @dev Called via vault transform for collateralized positions or directly for non-vault positions.
+    ///      Delegatecalls to hookFunctions contract.
+    /// @param poolKey The pool key for the position's pool
+    /// @param poolId The pool ID
+    /// @param tokenId The position token ID to auto-exit
+    /// @param isUpper True if triggered by upper tick boundary, false for lower
     function autoExit(
         PoolKey memory poolKey,
         PoolId poolId,
@@ -626,26 +669,54 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         _delegatecallAutoExit(poolKey, poolId, tokenId, isUpper);
     }
 
+    /// @notice Executes auto-range for a position, adjusting tick range around current price
+    /// @dev Creates a new position with adjusted ticks and transfers debt if applicable.
+    ///      Delegatecalls to hookFunctions contract.
+    /// @param poolKey The pool key for the position's pool
+    /// @param poolId The pool ID
+    /// @param tokenId The position token ID to auto-range
     function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) public {
         _delegatecallAutoRange(poolKey, poolId, tokenId);
     }
 
+    /// @notice Executes auto-leverage adjustment for a vault-owned position
+    /// @dev Adjusts leverage based on price movement. Only works for vault-owned positions.
+    ///      Delegatecalls to hookFunctions2 contract.
+    /// @param poolKey The pool key for the position's pool
+    /// @param poolId The pool ID
+    /// @param tokenId The position token ID to adjust leverage
+    /// @param isUpperTrigger True if triggered by upper tick boundary, false for lower
     function autoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) public {
         _delegatecallAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
     }
 
+    /// @notice Forces exit from auto-lend mode, withdrawing deposited tokens
+    /// @dev Can be called to manually exit auto-lend before trigger conditions
+    /// @param tokenId The position token ID to force exit
     function autoLendForceExit(uint256 tokenId) external {
         _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLendForceExit, (tokenId)));
     }
 
+    /// @notice Manually triggers auto-compound for multiple positions
+    /// @dev Collects fees and reinvests them as liquidity. Anyone can call this.
+    /// @param tokenIds Array of position token IDs to compound
     function autoCompound(uint256[] memory tokenIds) external {
         _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoCompound, (tokenIds)));
     }
 
+    /// @notice Triggers auto-compound for a vault-owned position via transform
+    /// @dev Used when position is collateral in a vault
+    /// @param tokenId The position token ID to compound
+    /// @param caller The address initiating the compound (for reward distribution)
     function autoCompoundForVault(uint256 tokenId, address caller) external {
         _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoCompoundForVault, (tokenId, caller)));
     }
 
+    /// @notice Callback from pool manager during immediate execution of triggered actions
+    /// @dev Called when setPositionConfig triggers immediate execution via poolManager.unlock()
+    /// @param data Encoded action parameters or (tokenId, caller) for auto-compound
+    /// @return Empty bytes (required by interface)
+    /// @custom:security Only callable by pool manager
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         if (msg.sender != address(poolManager)) {
             revert Unauthorized();
