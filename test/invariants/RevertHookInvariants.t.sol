@@ -275,10 +275,10 @@ contract RevertHookStateInvariantTest is Test {
         assertTrue(true, "State invariant check passed");
     }
 
-    /// @notice Position config mode should be valid enum value
+    /// @notice Position config modeFlags should be valid flag combinations
     function test_position_mode_valid(uint8 mode) public pure {
-        // Valid modes are 0-6 based on the PositionMode enum
-        bool isValid = mode <= 6;
+        // Valid modeFlags are combinations of flags 0-31 (5 flags currently defined)
+        bool isValid = mode <= 31;
 
         // This test documents the valid range
         if (isValid) {

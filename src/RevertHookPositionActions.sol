@@ -11,11 +11,12 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
-/// @title RevertHookFunctions
+/// @title RevertHookPositionActions
 /// @notice Contains auto-exit, auto-range, and auto-compound functions for RevertHook (called via delegatecall)
-contract RevertHookFunctions is RevertHookFunctionsBase {
+contract RevertHookPositionActions is RevertHookFunctionsBase {
     using PoolIdLibrary for PoolKey;
 
     constructor(
@@ -128,7 +129,7 @@ contract RevertHookFunctions is RevertHookFunctionsBase {
         AutoCompoundMode compoundMode = config.autoCompoundMode;
 
         // Skip if compound is disabled or position is not active
-        if (compoundMode == AutoCompoundMode.NONE || config.mode == PositionMode.NONE) {
+        if (compoundMode == AutoCompoundMode.NONE || PositionModeFlags.isNone(config.modeFlags)) {
             return;
         }
 

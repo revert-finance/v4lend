@@ -7,6 +7,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookState} from "./RevertHookState.sol";
 
 /// @title RevertHookTriggers
@@ -46,7 +47,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     /// @notice Returns an empty position config with default/sentinel values
     function _getEmptyPositionConfig() internal pure returns (PositionConfig memory config) {
         config = PositionConfig({
-            mode: PositionMode.NONE,
+            modeFlags: PositionModeFlags.MODE_NONE,
             autoCompoundMode: AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -89,7 +90,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _addPositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
         PositionConfig storage config = positionConfigs[tokenId];
 
-        if (config.mode == PositionMode.NONE || config.mode == PositionMode.AUTO_COMPOUND_ONLY) {
+        if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
             return;
         }
 
@@ -115,7 +116,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
         PositionConfig storage config = positionConfigs[tokenId];
 
-        if (config.mode == PositionMode.NONE || config.mode == PositionMode.AUTO_COMPOUND_ONLY) {
+        if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
             return;
         }
 
@@ -142,8 +143,8 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _updatePositionTriggersInternal(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig, bool force) internal {
         PositionConfig storage oldConfig = positionConfigs[tokenId];
 
-        bool oldHasTriggers = !force && oldConfig.mode != PositionMode.NONE && oldConfig.mode != PositionMode.AUTO_COMPOUND_ONLY;
-        bool newHasTriggers = newConfig.mode != PositionMode.NONE && newConfig.mode != PositionMode.AUTO_COMPOUND_ONLY;
+        bool oldHasTriggers = !force && PositionModeFlags.hasTriggers(oldConfig.modeFlags);
+        bool newHasTriggers = PositionModeFlags.hasTriggers(newConfig.modeFlags);
 
         if (!oldHasTriggers && !newHasTriggers) {
             return;
@@ -201,7 +202,7 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 tickUpper
     ) internal view returns (int24[4] memory ticks) {
         return _computeTriggerTicksCore(
-            tokenId, poolKey, config.mode,
+            tokenId, poolKey, config.modeFlags,
             config.autoRangeLowerLimit, config.autoRangeUpperLimit,
             config.autoExitIsRelative, config.autoExitTickLower, config.autoExitTickUpper,
             config.autoLendToleranceTick, tickLower, tickUpper
@@ -217,7 +218,7 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 tickUpper
     ) internal view returns (int24[4] memory ticks) {
         return _computeTriggerTicksCore(
-            tokenId, poolKey, config.mode,
+            tokenId, poolKey, config.modeFlags,
             config.autoRangeLowerLimit, config.autoRangeUpperLimit,
             config.autoExitIsRelative, config.autoExitTickLower, config.autoExitTickUpper,
             config.autoLendToleranceTick, tickLower, tickUpper
@@ -225,10 +226,13 @@ abstract contract RevertHookTriggers is RevertHookState {
     }
 
     /// @notice Core trigger tick computation logic
+    /// @dev Trigger slots: [0]=range/leverage lower (first trigger going down), [1]=exit lower,
+    ///      [2]=range/leverage upper (first trigger going up), [3]=exit upper
+    ///      When AUTO_RANGE and AUTO_LEVERAGE are combined, we use the trigger that fires first in each direction.
     function _computeTriggerTicksCore(
         uint256 tokenId,
         PoolKey memory poolKey,
-        PositionMode mode,
+        uint8 modeFlags,
         int24 autoRangeLowerLimit,
         int24 autoRangeUpperLimit,
         bool autoExitIsRelative,
@@ -243,20 +247,52 @@ abstract contract RevertHookTriggers is RevertHookState {
         ticks[2] = type(int24).max;
         ticks[3] = type(int24).max;
 
-        if (mode == PositionMode.NONE || mode == PositionMode.AUTO_COMPOUND_ONLY) {
+        if (!PositionModeFlags.hasTriggers(modeFlags)) {
             return ticks;
         }
 
-        if (mode == PositionMode.AUTO_RANGE || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
+        bool hasAutoRange = PositionModeFlags.hasAutoRange(modeFlags);
+        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
+
+        // Compute AUTO_RANGE trigger ticks
+        int24 rangeLower = type(int24).min;
+        int24 rangeUpper = type(int24).max;
+        if (hasAutoRange) {
             if (autoRangeLowerLimit != type(int24).min) {
-                ticks[0] = tickLower - autoRangeLowerLimit;
+                rangeLower = tickLower - autoRangeLowerLimit;
             }
             if (autoRangeUpperLimit != type(int24).max) {
-                ticks[2] = tickUpper + autoRangeUpperLimit;
+                rangeUpper = tickUpper + autoRangeUpperLimit;
             }
         }
 
-        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
+        // Compute AUTO_LEVERAGE trigger ticks
+        int24 leverageLower = type(int24).min;
+        int24 leverageUpper = type(int24).max;
+        if (hasAutoLeverage) {
+            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
+            leverageLower = baseTick - 10 * poolKey.tickSpacing;
+            leverageUpper = baseTick + 10 * poolKey.tickSpacing;
+        }
+
+        // When both AUTO_RANGE and AUTO_LEVERAGE are set, use the trigger that fires first in each direction:
+        // - Going DOWN: first trigger = higher tick value (closer to current price)
+        // - Going UP: first trigger = lower tick value (closer to current price)
+        if (hasAutoRange && hasAutoLeverage) {
+            // For lower triggers (price going down), use the HIGHER tick (fires first)
+            ticks[0] = rangeLower > leverageLower ? rangeLower : leverageLower;
+            // For upper triggers (price going up), use the LOWER tick (fires first)
+            ticks[2] = rangeUpper < leverageUpper ? rangeUpper : leverageUpper;
+        } else if (hasAutoRange) {
+            ticks[0] = rangeLower;
+            ticks[2] = rangeUpper;
+        } else if (hasAutoLeverage) {
+            ticks[0] = leverageLower;
+            ticks[2] = leverageUpper;
+        }
+
+        // AUTO_EXIT triggers (ticks[1] and ticks[3], or ticks[0]/ticks[2] if no range/leverage)
+        if (PositionModeFlags.hasAutoExit(modeFlags)) {
             int24 exitLower;
             int24 exitUpper;
             if (autoExitIsRelative) {
@@ -266,6 +302,7 @@ abstract contract RevertHookTriggers is RevertHookState {
                 exitLower = autoExitTickLower;
                 exitUpper = autoExitTickUpper;
             }
+            // Place exit triggers in slots [1] and [3] if range/leverage triggers exist, otherwise in [0] and [2]
             if (ticks[0] != type(int24).min) {
                 ticks[1] = exitLower;
             } else {
@@ -278,7 +315,8 @@ abstract contract RevertHookTriggers is RevertHookState {
             }
         }
 
-        if (mode == PositionMode.AUTO_LEND) {
+        // AUTO_LEND triggers (mutually exclusive with AUTO_EXIT and AUTO_LEVERAGE per validation)
+        if (PositionModeFlags.hasAutoLend(modeFlags)) {
             PositionState storage state = positionStates[tokenId];
             if (state.autoLendShares > 0) {
                 if (Currency.unwrap(poolKey.currency0) == state.autoLendToken) {
@@ -290,12 +328,6 @@ abstract contract RevertHookTriggers is RevertHookState {
                 ticks[0] = tickLower - autoLendToleranceTick * 2 - poolKey.tickSpacing;
                 ticks[2] = tickUpper + autoLendToleranceTick * 2;
             }
-        }
-
-        if (mode == PositionMode.AUTO_LEVERAGE) {
-            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
-            ticks[0] = baseTick - 10 * poolKey.tickSpacing;
-            ticks[2] = baseTick + 10 * poolKey.tickSpacing;
         }
     }
 }
