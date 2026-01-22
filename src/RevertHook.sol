@@ -419,7 +419,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         // Priority 1: AUTO_EXIT (check if this is an exit trigger)
         if (PositionModeFlags.hasAutoExit(modeFlags)) {
-            bool isAutoExitTriggered = _isExitTrigger(config, isUpperTrigger, tick);
+            bool isAutoExitTriggered = _isExitTrigger(tokenId, config, isUpperTrigger, tick);
             if (isAutoExitTriggered) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
                 return;
@@ -489,12 +489,29 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     /// @notice Checks if the triggered tick is an exit trigger
-    function _isExitTrigger(PositionConfig storage config, bool isUpperTrigger, int24 tick) internal view returns (bool) {
-        if (isUpperTrigger) {
-            return tick == config.autoExitTickUpper;
+    /// @dev Handles both absolute and relative exit tick configurations
+    function _isExitTrigger(
+        uint256 tokenId,
+        PositionConfig storage config,
+        bool isUpperTrigger,
+        int24 tick
+    ) internal view returns (bool) {
+        int24 exitTick;
+        if (config.autoExitIsRelative) {
+            (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+            if (isUpperTrigger) {
+                exitTick = config.autoExitTickUpper != type(int24).max
+                    ? posInfo.tickUpper() + config.autoExitTickUpper
+                    : type(int24).max;
+            } else {
+                exitTick = config.autoExitTickLower != type(int24).min
+                    ? posInfo.tickLower() - config.autoExitTickLower
+                    : type(int24).min;
+            }
         } else {
-            return tick == config.autoExitTickLower;
+            exitTick = isUpperTrigger ? config.autoExitTickUpper : config.autoExitTickLower;
         }
+        return tick == exitTick;
     }
 
     function _handleAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
@@ -718,6 +735,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             config.modeFlags,
             isUpperTrigger,
             tick,
+            config.autoExitIsRelative,
             config.autoExitTickLower,
             config.autoExitTickUpper
         ));
@@ -822,11 +840,12 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 uint8 modeFlags,
                 bool isUpperTrigger,
                 int24 tick,
+                bool autoExitIsRelative,
                 int24 autoExitTickLower,
                 int24 autoExitTickUpper
-            ) = abi.decode(data, (uint256, PoolKey, uint8, bool, int24, int24, int24));
+            ) = abi.decode(data, (uint256, PoolKey, uint8, bool, int24, bool, int24, int24));
 
-            _executeImmediateActionUnlocked(poolKey, tokenId, modeFlags, isUpperTrigger, tick, autoExitTickLower, autoExitTickUpper);
+            _executeImmediateActionUnlocked(poolKey, tokenId, modeFlags, isUpperTrigger, tick, autoExitIsRelative, autoExitTickLower, autoExitTickUpper);
         } else {
             (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
             _executeAutoCompound(tokenId, caller);
@@ -840,6 +859,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         uint8 modeFlags,
         bool isUpperTrigger,
         int24 tick,
+        bool autoExitIsRelative,
         int24 autoExitTickLower,
         int24 autoExitTickUpper
     ) internal {
@@ -847,9 +867,22 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         // Priority 1: AUTO_EXIT (check if this is an exit trigger)
         if (PositionModeFlags.hasAutoExit(modeFlags)) {
-            bool isAutoExitTriggered = isUpperTrigger
-                ? tick == autoExitTickUpper
-                : tick == autoExitTickLower;
+            int24 exitTick;
+            if (autoExitIsRelative) {
+                (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+                if (isUpperTrigger) {
+                    exitTick = autoExitTickUpper != type(int24).max
+                        ? posInfo.tickUpper() + autoExitTickUpper
+                        : type(int24).max;
+                } else {
+                    exitTick = autoExitTickLower != type(int24).min
+                        ? posInfo.tickLower() - autoExitTickLower
+                        : type(int24).min;
+                }
+            } else {
+                exitTick = isUpperTrigger ? autoExitTickUpper : autoExitTickLower;
+            }
+            bool isAutoExitTriggered = tick == exitTick;
             if (isAutoExitTriggered) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
                 return;
