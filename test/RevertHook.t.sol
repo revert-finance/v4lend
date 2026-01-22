@@ -552,6 +552,72 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
     }
 
+    function testBasicAutoExit_Relative() public {
+        // Get initial position info to understand the tick range
+        (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token2Id);
+        int24 posTickLower = posInfoBefore.tickLower();
+        int24 posTickUpper = posInfoBefore.tickUpper();
+
+        // Configure auto-exit with RELATIVE ticks
+        // Setting autoExitTickLower = poolKey.tickSpacing means exit when price drops
+        // to (posTickLower - poolKey.tickSpacing)
+        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: true, // Use RELATIVE ticks
+            autoExitTickLower: poolKey.tickSpacing, // Exit tick = posTickLower - tickSpacing
+            autoExitTickUpper: type(int24).max, // Don't exit on upper side
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        // Assert that token2Id position has > 0 liquidity before swap
+        uint128 token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertGt(token2Liquidity, 0, "token2Id should have > 0 liquidity");
+
+        // Calculate the expected absolute exit tick (relative to position's tickLower)
+        int24 expectedExitTick = posTickLower - poolKey.tickSpacing;
+        console.log("Position tickLower:", posTickLower);
+        console.log("Position tickUpper:", posTickUpper);
+        console.log("Expected exit tick (relative):", expectedExitTick);
+
+        // Perform a swap to activate auto exit
+        // This should trigger when price crosses (posTickLower - tickSpacing)
+        uint256 amountIn = 7e17;
+        BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
+            amountIn: amountIn,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        assertEq(int256(swapDelta.amount0()), -int256(amountIn));
+
+        // Get current tick after swap
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        console.log("currentTick after swap:", currentTick);
+
+        // Verify the exit trigger was hit
+        assertTrue(currentTick < expectedExitTick, "Current tick should be below the relative exit tick");
+
+        // Verify auto-exit happened: position should have 0 liquidity
+        token2Liquidity = positionManager.getPositionLiquidity(token2Id);
+        assertEq(token2Liquidity, 0, "token2Id should have 0 liquidity after relative auto-exit");
+
+        // Verify hook contract has no leftover token balances
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-exit");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
+    }
+
     function testAutoExitAndAutoRange() public {
 
         // Configure AUTO_EXIT_AND_AUTO_RANGE mode
