@@ -29,8 +29,8 @@ import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
-import {RevertHookFunctions} from "./RevertHookFunctions.sol";
-import {RevertHookFunctions2} from "./RevertHookFunctions2.sol";
+import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";
+import {RevertHookLendingActions} from "./RevertHookLendingActions.sol";
 
 /// @title RevertHook
 /// @notice Uniswap V4 hook enabling automated LP position management features
@@ -59,11 +59,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     IV4Oracle public immutable v4Oracle;
     ILiquidityCalculator public immutable liquidityCalculator;
 
-    /// @notice The RevertHookFunctions contract for delegatecall (auto-exit, auto-range, auto-compound)
-    RevertHookFunctions public immutable hookFunctions;
+    /// @notice The RevertHookPositionActions contract for delegatecall (auto-exit, auto-range, auto-compound)
+    RevertHookPositionActions public immutable hookFunctions;
 
-    /// @notice The RevertHookFunctions2 contract for delegatecall (auto-leverage, auto-lend)
-    RevertHookFunctions2 public immutable hookFunctions2;
+    /// @notice The RevertHookLendingActions contract for delegatecall (auto-leverage, auto-lend)
+    RevertHookLendingActions public immutable hookFunctions2;
 
     constructor(
         address owner_,
@@ -71,8 +71,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
-        RevertHookFunctions _hookFunctions,
-        RevertHookFunctions2 _hookFunctions2
+        RevertHookPositionActions _hookFunctions,
+        RevertHookLendingActions _hookFunctions2
     ) BaseHook(_v4Oracle.poolManager()) Ownable(owner_) {
         positionManager = _v4Oracle.positionManager();
         protocolFeeRecipient = protocolFeeRecipient_;

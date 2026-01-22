@@ -16,9 +16,9 @@ import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
-/// @title RevertHookFunctions2
-/// @notice Contains leverage and auto-lend related functions for RevertHook (called via delegatecall)
-contract RevertHookFunctions2 is RevertHookFunctionsBase {
+/// @title RevertHookLendingActions
+/// @notice Contains auto-leverage and auto-lend functions for RevertHook (called via delegatecall)
+contract RevertHookLendingActions is RevertHookFunctionsBase {
     using PoolIdLibrary for PoolKey;
 
     constructor(

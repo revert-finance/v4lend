@@ -26,7 +26,7 @@ import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 
 /// @title RevertHookFunctionsBase
-/// @notice Base contract with shared helper functions for RevertHookFunctions and RevertHookFunctions2
+/// @notice Base contract with shared helper functions for RevertHookPositionActions and RevertHookLendingActions
 /// @dev Inherits from RevertHookTriggers for state access and trigger management
 abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     using PoolIdLibrary for PoolKey;

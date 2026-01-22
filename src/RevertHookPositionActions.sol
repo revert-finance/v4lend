@@ -14,9 +14,9 @@ import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
-/// @title RevertHookFunctions
+/// @title RevertHookPositionActions
 /// @notice Contains auto-exit, auto-range, and auto-compound functions for RevertHook (called via delegatecall)
-contract RevertHookFunctions is RevertHookFunctionsBase {
+contract RevertHookPositionActions is RevertHookFunctionsBase {
     using PoolIdLibrary for PoolKey;
 
     constructor(

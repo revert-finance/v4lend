@@ -19,8 +19,8 @@ import {InterestRateModel} from "../../src/InterestRateModel.sol";
 import {RevertHook} from "../../src/RevertHook.sol";
 import {RevertHookState} from "../../src/RevertHookState.sol";
 import {PositionModeFlags} from "../../src/lib/PositionModeFlags.sol";
-import {RevertHookFunctions} from "../../src/RevertHookFunctions.sol";
-import {RevertHookFunctions2} from "../../src/RevertHookFunctions2.sol";
+import {RevertHookPositionActions} from "../../src/RevertHookPositionActions.sol";
+import {RevertHookLendingActions} from "../../src/RevertHookLendingActions.sol";
 import {LiquidityCalculator} from "../../src/LiquidityCalculator.sol";
 import {Constants} from "../../src/utils/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -76,9 +76,9 @@ contract V4VaultHookTest is V4ForkTestBase {
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
 
-        // Deploy RevertHookFunctions and RevertHookFunctions2
-        RevertHookFunctions hookFunctions = new RevertHookFunctions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookFunctions2 hookFunctions2 = new RevertHookFunctions2(permit2, v4Oracle, liquidityCalculator);
+        // Deploy RevertHookPositionActions and RevertHookLendingActions
+        RevertHookPositionActions hookFunctions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookLendingActions hookFunctions2 = new RevertHookLendingActions(permit2, v4Oracle, liquidityCalculator);
 
         bytes memory constructorArgs = abi.encode(address(this), address(this), permit2, v4Oracle, liquidityCalculator, hookFunctions, hookFunctions2);
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
