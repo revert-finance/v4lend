@@ -8,6 +8,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {Transformer} from "./transformers/Transformer.sol";
 
 /// @title RevertHookState
@@ -15,16 +16,6 @@ import {Transformer} from "./transformers/Transformer.sol";
 /// @dev This contract separates state from logic to improve code organization
 abstract contract RevertHookState is Transformer {
     // ==================== Enums ====================
-
-    enum PositionMode {
-        NONE,
-        AUTO_COMPOUND_ONLY,
-        AUTO_RANGE,
-        AUTO_EXIT,
-        AUTO_EXIT_AND_AUTO_RANGE,
-        AUTO_LEND,
-        AUTO_LEVERAGE
-    }
 
     enum AutoCompoundMode {
         NONE,
@@ -61,7 +52,7 @@ abstract contract RevertHookState is Transformer {
     }
 
     struct PositionConfig {
-        PositionMode mode;
+        uint8 modeFlags; // Combination of PositionModeFlags (e.g., MODE_AUTO_COMPOUND | MODE_AUTO_RANGE)
         AutoCompoundMode autoCompoundMode;
         bool autoExitIsRelative; // if true, the auto exit tick is relative to the position limits, if false, the auto exit tick is absolute
         int24 autoExitTickLower;

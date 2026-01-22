@@ -27,6 +27,7 @@ import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 import {RevertHookFunctions} from "./RevertHookFunctions.sol";
 import {RevertHookFunctions2} from "./RevertHookFunctions2.sol";
@@ -181,7 +182,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             revert Unauthorized();
         }
 
-        if (positionConfig.mode != PositionMode.NONE) {
+        if (!PositionModeFlags.isNone(positionConfig.modeFlags)) {
             uint256 value = _getPositionValueNative(tokenId);
             if (value < minPositionValueNative) {
                 revert PositionValueTooLow();
@@ -235,16 +236,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             revert InvalidConfig();
         }
 
-        // AUTO_LEVERAGE only works for vault-owned positions where one token is the lend asset
-        if (config.mode == PositionMode.AUTO_LEVERAGE) {
-            address owner = _getOwner(tokenId, false);
-            if (!vaults[owner]) {
-                revert InvalidConfig();
-            }
-            address lendAsset = IVault(owner).asset();
-            if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
-                revert InvalidConfig();
-            }
+        // Validate mode flag combinations
+        _validateModeFlags(config.modeFlags, tokenId, poolKey);
+
+        // AUTO_LEVERAGE requires setting base tick
+        if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
             int24 currentTick = _getCurrentBaseTick(poolKey);
             positionStates[tokenId].autoLeverageBaseTick = (currentTick / poolKey.tickSpacing) * poolKey.tickSpacing;
         }
@@ -252,7 +248,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         _updatePositionTriggers(tokenId, poolKey, config);
         positionConfigs[tokenId] = config;
 
-        if (config.mode != PositionMode.NONE) {
+        if (!PositionModeFlags.isNone(config.modeFlags)) {
             _activatePosition(tokenId);
             if (checkImmediateExecution) {
                 _checkAndExecuteImmediate(tokenId, poolKey, config);
@@ -262,6 +258,41 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
 
         emit SetPositionConfig(tokenId, config);
+    }
+
+    // ==================== Mode Validation ====================
+
+    /// @notice Validates mode flag combinations
+    /// @dev Reverts if invalid combinations are detected
+    function _validateModeFlags(uint8 modeFlags, uint256 tokenId, PoolKey memory poolKey) internal view {
+        // AUTO_LEVERAGE only for vault-owned positions with lend asset
+        if (PositionModeFlags.hasAutoLeverage(modeFlags)) {
+            address owner = _getOwner(tokenId, false);
+            if (!vaults[owner]) {
+                revert InvalidConfig();
+            }
+            address lendAsset = IVault(owner).asset();
+            if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
+                revert InvalidConfig();
+            }
+        }
+
+        // AUTO_LEND only for non-vault positions
+        if (PositionModeFlags.hasAutoLend(modeFlags)) {
+            address owner = _getOwner(tokenId, false);
+            if (vaults[owner]) {
+                revert InvalidConfig();
+            }
+        }
+
+        // Invalid combinations
+        if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoLeverage(modeFlags)) {
+            revert InvalidConfig();
+        }
+        if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoExit(modeFlags)) {
+            revert InvalidConfig();
+        }
+        // NOTE: AUTO_LEVERAGE + AUTO_EXIT (+ AUTO_RANGE) is valid for vault positions
     }
 
     // ==================== Abstract Function Implementations ====================
@@ -384,23 +415,85 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         int24 tick
     ) internal {
         PositionConfig storage config = positionConfigs[tokenId];
-        PositionMode mode = config.mode;
-        if (mode == PositionMode.AUTO_EXIT) {
-            _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
-        } else if (mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            bool isAutoExitTriggered = (isUpperTrigger && tick == config.autoExitTickUpper)
-                || (!isUpperTrigger && tick == config.autoExitTickLower);
+        uint8 modeFlags = config.modeFlags;
+
+        // Priority 1: AUTO_EXIT (check if this is an exit trigger)
+        if (PositionModeFlags.hasAutoExit(modeFlags)) {
+            bool isAutoExitTriggered = _isExitTrigger(config, isUpperTrigger, tick);
             if (isAutoExitTriggered) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
-            } else {
-                _handleAutoRange(poolKey, poolId, tokenId);
+                return;
             }
-        } else if (mode == PositionMode.AUTO_LEND) {
-            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
-        } else if (mode == PositionMode.AUTO_RANGE) {
+        }
+
+        bool hasAutoRange = PositionModeFlags.hasAutoRange(modeFlags);
+        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
+
+        // When both AUTO_RANGE and AUTO_LEVERAGE are enabled, determine which action to take
+        // based on which trigger was actually hit
+        if (hasAutoRange && hasAutoLeverage) {
+            (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+            int24 tickLower = posInfo.tickLower();
+            int24 tickUpper = posInfo.tickUpper();
+
+            // Compute individual trigger ticks
+            int24 rangeLower = config.autoRangeLowerLimit != type(int24).min
+                ? tickLower - config.autoRangeLowerLimit
+                : type(int24).min;
+            int24 rangeUpper = config.autoRangeUpperLimit != type(int24).max
+                ? tickUpper + config.autoRangeUpperLimit
+                : type(int24).max;
+
+            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
+            int24 leverageLower = baseTick - 10 * poolKey.tickSpacing;
+            int24 leverageUpper = baseTick + 10 * poolKey.tickSpacing;
+
+            // The shared trigger is the one that fires first. Now determine which mode to execute:
+            // - If range trigger is closer (fires first), execute AUTO_RANGE
+            // - If leverage trigger is closer (fires first), execute AUTO_LEVERAGE
+            if (isUpperTrigger) {
+                // Price went up - lower tick value fires first
+                if (rangeUpper <= leverageUpper) {
+                    _handleAutoRange(poolKey, poolId, tokenId);
+                } else {
+                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+                }
+            } else {
+                // Price went down - higher tick value fires first
+                if (rangeLower >= leverageLower) {
+                    _handleAutoRange(poolKey, poolId, tokenId);
+                } else {
+                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+                }
+            }
+            return;
+        }
+
+        // Priority 2: AUTO_RANGE (when not combined with AUTO_LEVERAGE)
+        if (hasAutoRange) {
             _handleAutoRange(poolKey, poolId, tokenId);
-        } else if (mode == PositionMode.AUTO_LEVERAGE) {
+            return;
+        }
+
+        // Priority 3: AUTO_LEVERAGE (when not combined with AUTO_RANGE)
+        if (hasAutoLeverage) {
             _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+            return;
+        }
+
+        // Priority 4: AUTO_LEND
+        if (PositionModeFlags.hasAutoLend(modeFlags)) {
+            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
+            return;
+        }
+    }
+
+    /// @notice Checks if the triggered tick is an exit trigger
+    function _isExitTrigger(PositionConfig storage config, bool isUpperTrigger, int24 tick) internal view returns (bool) {
+        if (isUpperTrigger) {
+            return tick == config.autoExitTickUpper;
+        } else {
+            return tick == config.autoExitTickLower;
         }
     }
 
@@ -485,7 +578,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
 
-        if (positionConfigs[tokenId].mode != PositionMode.NONE && !_isActivated(tokenId)) {
+        if (!PositionModeFlags.isNone(positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
             if (_getPositionValueNative(tokenId) >= minPositionValueNative) {
                 _addPositionTriggers(tokenId, key);
                 _activatePosition(tokenId);
@@ -569,7 +662,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Checks if position config conditions are already met and executes immediately if so
     function _checkAndExecuteImmediate(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config) internal {
-        if (config.mode == PositionMode.NONE || config.mode == PositionMode.AUTO_COMPOUND_ONLY) {
+        if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
             return;
         }
 
@@ -622,7 +715,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         poolManager.unlock(abi.encode(
             tokenId,
             poolKey,
-            config.mode,
+            config.modeFlags,
             isUpperTrigger,
             tick,
             config.autoExitTickLower,
@@ -726,14 +819,14 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             (
                 uint256 tokenId,
                 PoolKey memory poolKey,
-                PositionMode mode,
+                uint8 modeFlags,
                 bool isUpperTrigger,
                 int24 tick,
                 int24 autoExitTickLower,
                 int24 autoExitTickUpper
-            ) = abi.decode(data, (uint256, PoolKey, PositionMode, bool, int24, int24, int24));
+            ) = abi.decode(data, (uint256, PoolKey, uint8, bool, int24, int24, int24));
 
-            _executeImmediateActionUnlocked(poolKey, tokenId, mode, isUpperTrigger, tick, autoExitTickLower, autoExitTickUpper);
+            _executeImmediateActionUnlocked(poolKey, tokenId, modeFlags, isUpperTrigger, tick, autoExitTickLower, autoExitTickUpper);
         } else {
             (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
             _executeAutoCompound(tokenId, caller);
@@ -744,21 +837,79 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     function _executeImmediateActionUnlocked(
         PoolKey memory poolKey,
         uint256 tokenId,
-        PositionMode mode,
+        uint8 modeFlags,
         bool isUpperTrigger,
-        int24,
-        int24,
-        int24
+        int24 tick,
+        int24 autoExitTickLower,
+        int24 autoExitTickUpper
     ) internal {
         PoolId poolId = poolKey.toId();
-        if (mode == PositionMode.AUTO_EXIT || mode == PositionMode.AUTO_EXIT_AND_AUTO_RANGE) {
-            _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
-        } else if (mode == PositionMode.AUTO_LEND) {
-            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
-        } else if (mode == PositionMode.AUTO_RANGE) {
+
+        // Priority 1: AUTO_EXIT (check if this is an exit trigger)
+        if (PositionModeFlags.hasAutoExit(modeFlags)) {
+            bool isAutoExitTriggered = isUpperTrigger
+                ? tick == autoExitTickUpper
+                : tick == autoExitTickLower;
+            if (isAutoExitTriggered) {
+                _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
+                return;
+            }
+        }
+
+        bool hasAutoRange = PositionModeFlags.hasAutoRange(modeFlags);
+        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
+
+        // When both AUTO_RANGE and AUTO_LEVERAGE are enabled, determine which action to take
+        if (hasAutoRange && hasAutoLeverage) {
+            PositionConfig storage config = positionConfigs[tokenId];
+            (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+            int24 tickLower = posInfo.tickLower();
+            int24 tickUpper = posInfo.tickUpper();
+
+            // Compute individual trigger ticks
+            int24 rangeLower = config.autoRangeLowerLimit != type(int24).min
+                ? tickLower - config.autoRangeLowerLimit
+                : type(int24).min;
+            int24 rangeUpper = config.autoRangeUpperLimit != type(int24).max
+                ? tickUpper + config.autoRangeUpperLimit
+                : type(int24).max;
+
+            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
+            int24 leverageLower = baseTick - 10 * poolKey.tickSpacing;
+            int24 leverageUpper = baseTick + 10 * poolKey.tickSpacing;
+
+            if (isUpperTrigger) {
+                if (rangeUpper <= leverageUpper) {
+                    _handleAutoRange(poolKey, poolId, tokenId);
+                } else {
+                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+                }
+            } else {
+                if (rangeLower >= leverageLower) {
+                    _handleAutoRange(poolKey, poolId, tokenId);
+                } else {
+                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+                }
+            }
+            return;
+        }
+
+        // Priority 2: AUTO_RANGE
+        if (hasAutoRange) {
             _handleAutoRange(poolKey, poolId, tokenId);
-        } else if (mode == PositionMode.AUTO_LEVERAGE) {
+            return;
+        }
+
+        // Priority 3: AUTO_LEVERAGE
+        if (hasAutoLeverage) {
             _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+            return;
+        }
+
+        // Priority 4: AUTO_LEND
+        if (PositionModeFlags.hasAutoLend(modeFlags)) {
+            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
+            return;
         }
     }
 

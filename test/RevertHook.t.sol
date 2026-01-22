@@ -24,6 +24,7 @@ import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
 import {RevertHookState} from "../src/RevertHookState.sol";
+import {PositionModeFlags} from "../src/lib/PositionModeFlags.sol";
 import {RevertHookFunctions} from "../src/RevertHookFunctions.sol";
 import {RevertHookFunctions2} from "../src/RevertHookFunctions2.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
@@ -213,7 +214,7 @@ contract RevertHookTest is BaseTest {
 
     function testBasicAutoRange() public {
         hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_RANGE,
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -304,7 +305,7 @@ contract RevertHookTest is BaseTest {
     /// @return token2Liquidity The initial liquidity of the position
     function _setupAutoCompoundTest(RevertHook.AutoCompoundMode autoCompoundMode) internal returns (uint128 token2Liquidity) {
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: autoCompoundMode,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -499,7 +500,7 @@ contract RevertHookTest is BaseTest {
     function testBasicAutoExit() public {
 
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
@@ -555,7 +556,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure AUTO_EXIT_AND_AUTO_RANGE mode
         hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT_AND_AUTO_RANGE,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false, // Use absolute ticks
             autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
@@ -667,7 +668,7 @@ contract RevertHookTest is BaseTest {
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(address(0)), 0, 0);
 
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
@@ -754,7 +755,7 @@ contract RevertHookTest is BaseTest {
     function testAutoExit_NotApproved() public {
         // Set up autoExit config for token2Id
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
@@ -923,7 +924,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure autolend for this position
         hook.setPositionConfig(autolendTokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_LEND,
+            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1094,7 +1095,7 @@ contract RevertHookTest is BaseTest {
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 0, 0);
 
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
@@ -1153,7 +1154,7 @@ contract RevertHookTest is BaseTest {
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), maxPriceImpactBps, maxPriceImpactBps);
 
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
@@ -1215,7 +1216,7 @@ contract RevertHookTest is BaseTest {
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 100, 100);
 
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
@@ -1265,7 +1266,7 @@ contract RevertHookTest is BaseTest {
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 10, 1000);
 
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
@@ -1316,7 +1317,7 @@ contract RevertHookTest is BaseTest {
         hook.setGeneralConfig(token3Id, 3000, 60, IHooks(hook), 200, 200);
 
         hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_RANGE,
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1391,7 +1392,7 @@ contract RevertHookTest is BaseTest {
         // Try to configure position - should revert
         vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1411,7 +1412,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure position - should succeed
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1425,8 +1426,8 @@ contract RevertHookTest is BaseTest {
         }));
 
         // Verify position is configured and activated
-        (RevertHookState.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
-        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_COMPOUND, "Position should be configured");
 
         // Verify position is activated (lastActivated > 0)
         (,, uint32 lastActivated,,,,,) = hook.positionStates(tokenId);
@@ -1439,7 +1440,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure position
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1497,7 +1498,7 @@ contract RevertHookTest is BaseTest {
         // Try to configure - should revert due to low value
         vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
         hook.setPositionConfig(newTokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1515,7 +1516,7 @@ contract RevertHookTest is BaseTest {
 
         // Now configure should succeed
         hook.setPositionConfig(newTokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1543,7 +1544,7 @@ contract RevertHookTest is BaseTest {
         // Try to configure - should revert (value below 0.01 ether)
         vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1562,7 +1563,7 @@ contract RevertHookTest is BaseTest {
 
         // Now configure should succeed
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1576,8 +1577,8 @@ contract RevertHookTest is BaseTest {
         }));
 
         // Verify position is configured
-        (RevertHookState.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
-        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_COMPOUND, "Position should be configured");
     }
 
     function testMinPositionValue_DisablingPositionAlwaysAllowed() public {
@@ -1586,7 +1587,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure position
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1604,7 +1605,7 @@ contract RevertHookTest is BaseTest {
 
         // Disabling position (setting mode to NONE) should always work regardless of value
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.NONE,
+            modeFlags: PositionModeFlags.MODE_NONE,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1618,8 +1619,8 @@ contract RevertHookTest is BaseTest {
         }));
 
         // Verify position is disabled
-        (RevertHookState.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
-        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.NONE), "Position should be disabled");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled");
 
         // Verify position is deactivated
         (,, uint32 lastActivated,,,,,) = hook.positionStates(tokenId);
@@ -1635,7 +1636,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure should succeed even with 0 value
         hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_COMPOUND_ONLY,
+            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1649,8 +1650,8 @@ contract RevertHookTest is BaseTest {
         }));
 
         // Verify position is configured
-        (RevertHookState.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(tokenId);
-        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_COMPOUND_ONLY), "Position should be configured with 0 minimum");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_COMPOUND, "Position should be configured with 0 minimum");
     }
 
     // ==================== Immediate Execution Tests ====================
@@ -1689,7 +1690,7 @@ contract RevertHookTest is BaseTest {
         // Now configure auto-exit with a trigger that should already be met
         // Since the tick is already below tickLower2, setting autoExitTickLower to tickLower2 should trigger immediately
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2,  // Trigger when tick <= -60
@@ -1708,8 +1709,8 @@ contract RevertHookTest is BaseTest {
         assertEq(liquidityAfter, 0, "token2Id should have 0 liquidity after immediate auto-exit");
 
         // Verify the position config is disabled
-        (RevertHookState.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(token2Id);
-        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.NONE), "Position should be disabled after auto-exit");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after auto-exit");
 
         // Verify hook has no leftover balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
@@ -1751,7 +1752,7 @@ contract RevertHookTest is BaseTest {
         // Configure auto-range with a trigger that should already be met
         // autoRangeLowerLimit of 0 means trigger when tick reaches tickLower
         hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_RANGE,
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1822,7 +1823,7 @@ contract RevertHookTest is BaseTest {
         // Configure auto-lend with a trigger that should already be met
         // autoLendToleranceTick controls when the deposit happens - price goes out of range + tolerance
         hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_LEND,
+            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
@@ -1872,7 +1873,7 @@ contract RevertHookTest is BaseTest {
 
         // Configure auto-exit with triggers outside current tick
         hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            mode: RevertHookState.PositionMode.AUTO_EXIT,
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: tickLower3 - 60,  // Trigger at -120, but we're at 0
@@ -1891,7 +1892,7 @@ contract RevertHookTest is BaseTest {
         assertEq(liquidityAfter, liquidityBefore, "token3Id should still have same liquidity - no immediate execution");
 
         // Verify position is still configured (not disabled)
-        (RevertHookState.PositionMode mode,,,,,,,,,,) = hook.positionConfigs(token3Id);
-        assertEq(uint8(mode), uint8(RevertHookState.PositionMode.AUTO_EXIT), "Position should still be configured for auto-exit");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "Position should still be configured for auto-exit");
     }
 }
