@@ -293,6 +293,17 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             revert InvalidConfig();
         }
         // NOTE: AUTO_LEVERAGE + AUTO_EXIT (+ AUTO_RANGE) is valid for vault positions
+
+        // AUTO_EXIT for vault positions requires lend asset in pool (for debt repayment)
+        if (PositionModeFlags.hasAutoExit(modeFlags)) {
+            address owner = _getOwner(tokenId, false);
+            if (vaults[owner]) {
+                address lendAsset = IVault(owner).asset();
+                if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
+                    revert InvalidConfig();
+                }
+            }
+        }
     }
 
     // ==================== Abstract Function Implementations ====================

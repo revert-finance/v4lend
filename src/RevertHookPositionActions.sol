@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
 
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
@@ -18,6 +21,7 @@ import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 /// @notice Contains auto-exit, auto-range, and auto-compound functions for RevertHook (called via delegatecall)
 contract RevertHookPositionActions is RevertHookFunctionsBase {
     using PoolIdLibrary for PoolKey;
+    using CurrencyLibrary for Currency;
 
     constructor(
         IPermit2 _permit2,
@@ -28,6 +32,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     // ==================== Auto Exit ====================
 
     /// @notice Executes auto-exit for a position when trigger conditions are met
+    /// @dev For vault positions with debt, repays debt before sending remaining tokens to owner
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick, false if lower tick
@@ -37,14 +42,84 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         // Remove all liquidity and collect fees
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
-        // Swap to the desired token based on trigger direction
+        address owner = _getOwner(tokenId, false);
+        address realOwner = _getOwner(tokenId, true);
+
+        // Check if this is a vault position with debt
+        if (vaults[owner]) {
+            uint256 debtShares = IVault(owner).loans(tokenId);
+
+            if (debtShares > 0) {
+                _autoExitWithDebtRepayment(
+                    tokenId, poolKey, IVault(owner), realOwner, isUpperTrigger, currency0, currency1, amount0, amount1
+                );
+                return;
+            }
+        }
+
+        // No debt case: swap based on trigger direction and send to owner
         bool swapZeroForOne = !isUpperTrigger;
         uint256 swapAmount = swapZeroForOne ? amount0 : amount1;
         BalanceDelta swapDelta = _executeSwap(_getSwapPoolKey(tokenId, poolKey), swapZeroForOne, swapAmount, tokenId);
         (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
 
-        // Send tokens to owner and disable position
-        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
+        _disablePosition(tokenId);
+
+        emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
+    }
+
+    /// @notice Handles auto-exit for vault positions with outstanding debt
+    /// @dev Swaps to lend asset and repays debt, respecting the trigger direction for final token
+    function _autoExitWithDebtRepayment(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        IVault vault,
+        address realOwner,
+        bool isUpperTrigger,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1
+    ) internal {
+        address lendAsset = vault.asset();
+        Currency lendToken = Currency.wrap(lendAsset);
+        bool lendIsToken0 = (lendToken == currency0);
+
+        // Target token based on trigger direction: upper trigger -> token1, lower trigger -> token0
+        bool targetIsToken0 = !isUpperTrigger;
+        bool targetIsLendToken = (targetIsToken0 == lendIsToken0);
+
+        (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
+
+        if (targetIsLendToken) {
+            // Target IS lend token: swap all to lend token first, then repay
+            uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
+
+            if (lendAmount > 0 && currentDebt > 0) {
+                uint256 repayAmount = lendAmount > currentDebt ? currentDebt : lendAmount;
+                SafeERC20.forceApprove(IERC20(lendAsset), address(vault), repayAmount);
+                vault.repay(tokenId, repayAmount, false);
+            }
+        } else {
+            // Target is NOT lend token: repay first with lend tokens, then swap remaining to target
+            uint256 lendAmount = lendIsToken0 ? amount0 : amount1;
+
+            if (lendAmount > 0 && currentDebt > 0) {
+                uint256 repayAmount = lendAmount > currentDebt ? currentDebt : lendAmount;
+                SafeERC20.forceApprove(IERC20(lendAsset), address(vault), repayAmount);
+                vault.repay(tokenId, repayAmount, false);
+            }
+
+            // Swap remaining lend tokens (if any) to target token
+            uint256 remainingLend = lendToken.balanceOfSelf();
+            if (remainingLend > 0) {
+                PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
+                _executeSwap(swapPool, lendIsToken0, remainingLend, tokenId);
+            }
+        }
+
+        _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
         _disablePosition(tokenId);
 
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);

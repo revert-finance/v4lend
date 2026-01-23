@@ -369,6 +369,26 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         }
     }
 
+    /// @notice Swaps tokens to the lend token
+    function _swapToLendToken(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        Currency lendToken,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1
+    ) internal returns (uint256) {
+        PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
+        if (lendToken == currency0) {
+            if (amount1 > 0) _executeSwap(swapPool, false, amount1, tokenId);
+            return currency0.balanceOfSelf();
+        } else {
+            if (amount0 > 0) _executeSwap(swapPool, true, amount0, tokenId);
+            return currency1.balanceOfSelf();
+        }
+    }
+
     // ==================== Balance Delta Helpers ====================
 
     /// @notice Applies a balance delta to amounts
