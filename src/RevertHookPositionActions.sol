@@ -95,21 +95,11 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         if (targetIsLendToken) {
             // Target IS lend token: swap all to lend token first, then repay
             uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
-
-            if (lendAmount > 0 && currentDebt > 0) {
-                uint256 repayAmount = lendAmount > currentDebt ? currentDebt : lendAmount;
-                SafeERC20.forceApprove(IERC20(lendAsset), address(vault), repayAmount);
-                vault.repay(tokenId, repayAmount, false);
-            }
+            _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
         } else {
             // Target is NOT lend token: repay first with lend tokens, then swap remaining to target
             uint256 lendAmount = lendIsToken0 ? amount0 : amount1;
-
-            if (lendAmount > 0 && currentDebt > 0) {
-                uint256 repayAmount = lendAmount > currentDebt ? currentDebt : lendAmount;
-                SafeERC20.forceApprove(IERC20(lendAsset), address(vault), repayAmount);
-                vault.repay(tokenId, repayAmount, false);
-            }
+            _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
 
             // Swap remaining lend tokens (if any) to target token
             uint256 remainingLend = lendToken.balanceOfSelf();

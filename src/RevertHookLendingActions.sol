@@ -133,11 +133,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
         uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
 
         // Repay debt
-        if (lendAmount > 0) {
-            if (lendAmount > currentDebt) lendAmount = currentDebt;
-            SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), msg.sender, lendAmount);
-            vault.repay(tokenId, lendAmount, false);
-        }
+        _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);
 
         _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
     }
