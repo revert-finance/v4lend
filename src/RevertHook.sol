@@ -210,29 +210,18 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     function _setPositionConfig(uint256 tokenId, PositionConfig memory config, bool checkImmediateExecution) internal {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
 
-        // Validate config
-        if (config.autoExitTickLower % poolKey.tickSpacing != 0 && config.autoExitTickLower != type(int24).min) {
-            revert InvalidConfig();
-        }
-        if (config.autoExitTickUpper % poolKey.tickSpacing != 0 && config.autoExitTickUpper != type(int24).max) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeLowerLimit % poolKey.tickSpacing != 0 && config.autoRangeLowerLimit != type(int24).min) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeUpperLimit % poolKey.tickSpacing != 0 && config.autoRangeUpperLimit != type(int24).max) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeLowerDelta % poolKey.tickSpacing != 0) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeUpperDelta % poolKey.tickSpacing != 0) {
-            revert InvalidConfig();
-        }
-        if (config.autoLendToleranceTick % poolKey.tickSpacing != 0) {
-            revert InvalidConfig();
-        }
-        if (config.autoLeverageTargetBps >= 10000) {
+        // Validate tick configs are aligned to tick spacing (or are sentinel values)
+        int24 ts = poolKey.tickSpacing;
+        if (
+            !_isValidTickConfig(config.autoExitTickLower, ts, type(int24).min) ||
+            !_isValidTickConfig(config.autoExitTickUpper, ts, type(int24).max) ||
+            !_isValidTickConfig(config.autoRangeLowerLimit, ts, type(int24).min) ||
+            !_isValidTickConfig(config.autoRangeUpperLimit, ts, type(int24).max) ||
+            !_isValidTickConfig(config.autoRangeLowerDelta, ts, 0) ||
+            !_isValidTickConfig(config.autoRangeUpperDelta, ts, 0) ||
+            !_isValidTickConfig(config.autoLendToleranceTick, ts, 0) ||
+            config.autoLeverageTargetBps >= 10000
+        ) {
             revert InvalidConfig();
         }
 
@@ -577,21 +566,20 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     ) internal {
         PositionConfig storage config = positionConfigs[tokenId];
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        int24 tickLower = posInfo.tickLower();
-        int24 tickUpper = posInfo.tickUpper();
 
         // Compute AUTO_RANGE trigger ticks
-        int24 rangeLower = config.autoRangeLowerLimit != type(int24).min
-            ? tickLower - config.autoRangeLowerLimit
-            : type(int24).min;
-        int24 rangeUpper = config.autoRangeUpperLimit != type(int24).max
-            ? tickUpper + config.autoRangeUpperLimit
-            : type(int24).max;
+        (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
+            posInfo.tickLower(),
+            posInfo.tickUpper(),
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit
+        );
 
         // Compute AUTO_LEVERAGE trigger ticks
-        int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
-        int24 leverageLower = baseTick - 10 * poolKey.tickSpacing;
-        int24 leverageUpper = baseTick + 10 * poolKey.tickSpacing;
+        (int24 leverageLower, int24 leverageUpper) = _calculateLeverageTriggerTicks(
+            positionStates[tokenId].autoLeverageBaseTick,
+            poolKey.tickSpacing
+        );
 
         // Determine which trigger fires first:
         // - Going UP (upper trigger): lower tick value fires first

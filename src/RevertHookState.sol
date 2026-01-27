@@ -141,6 +141,9 @@ abstract contract RevertHookState is Transformer {
     // fees for auto compound execution 1% reward - of fees autocompounded / harvested
     uint16 public constant autoCompoundRewardBps = 100;
 
+    // auto-leverage triggers at baseTick ± (LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing)
+    int24 public constant LEVERAGE_TICK_OFFSET_MULTIPLIER = 10;
+
     // protocol fees (taken from the fees collected while position is active)
     uint16 public protocolFeeBps = 200;
     address public protocolFeeRecipient;
