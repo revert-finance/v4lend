@@ -210,29 +210,18 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     function _setPositionConfig(uint256 tokenId, PositionConfig memory config, bool checkImmediateExecution) internal {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
 
-        // Validate config
-        if (config.autoExitTickLower % poolKey.tickSpacing != 0 && config.autoExitTickLower != type(int24).min) {
-            revert InvalidConfig();
-        }
-        if (config.autoExitTickUpper % poolKey.tickSpacing != 0 && config.autoExitTickUpper != type(int24).max) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeLowerLimit % poolKey.tickSpacing != 0 && config.autoRangeLowerLimit != type(int24).min) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeUpperLimit % poolKey.tickSpacing != 0 && config.autoRangeUpperLimit != type(int24).max) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeLowerDelta % poolKey.tickSpacing != 0) {
-            revert InvalidConfig();
-        }
-        if (config.autoRangeUpperDelta % poolKey.tickSpacing != 0) {
-            revert InvalidConfig();
-        }
-        if (config.autoLendToleranceTick % poolKey.tickSpacing != 0) {
-            revert InvalidConfig();
-        }
-        if (config.autoLeverageTargetBps >= 10000) {
+        // Validate tick configs are aligned to tick spacing (or are sentinel values)
+        int24 ts = poolKey.tickSpacing;
+        if (
+            !_isValidTickConfig(config.autoExitTickLower, ts, type(int24).min) ||
+            !_isValidTickConfig(config.autoExitTickUpper, ts, type(int24).max) ||
+            !_isValidTickConfig(config.autoRangeLowerLimit, ts, type(int24).min) ||
+            !_isValidTickConfig(config.autoRangeUpperLimit, ts, type(int24).max) ||
+            !_isValidTickConfig(config.autoRangeLowerDelta, ts, 0) ||
+            !_isValidTickConfig(config.autoRangeUpperDelta, ts, 0) ||
+            !_isValidTickConfig(config.autoLendToleranceTick, ts, 0) ||
+            config.autoLeverageTargetBps >= 10000
+        ) {
             revert InvalidConfig();
         }
 
@@ -441,42 +430,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
 
         // When both AUTO_RANGE and AUTO_LEVERAGE are enabled, determine which action to take
-        // based on which trigger was actually hit
         if (hasAutoRange && hasAutoLeverage) {
-            (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-            int24 tickLower = posInfo.tickLower();
-            int24 tickUpper = posInfo.tickUpper();
-
-            // Compute individual trigger ticks
-            int24 rangeLower = config.autoRangeLowerLimit != type(int24).min
-                ? tickLower - config.autoRangeLowerLimit
-                : type(int24).min;
-            int24 rangeUpper = config.autoRangeUpperLimit != type(int24).max
-                ? tickUpper + config.autoRangeUpperLimit
-                : type(int24).max;
-
-            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
-            int24 leverageLower = baseTick - 10 * poolKey.tickSpacing;
-            int24 leverageUpper = baseTick + 10 * poolKey.tickSpacing;
-
-            // The shared trigger is the one that fires first. Now determine which mode to execute:
-            // - If range trigger is closer (fires first), execute AUTO_RANGE
-            // - If leverage trigger is closer (fires first), execute AUTO_LEVERAGE
-            if (isUpperTrigger) {
-                // Price went up - lower tick value fires first
-                if (rangeUpper <= leverageUpper) {
-                    _handleAutoRange(poolKey, poolId, tokenId);
-                } else {
-                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
-                }
-            } else {
-                // Price went down - higher tick value fires first
-                if (rangeLower >= leverageLower) {
-                    _handleAutoRange(poolKey, poolId, tokenId);
-                } else {
-                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
-                }
-            }
+            _handleAutoRangeOrLeverage(poolKey, poolId, tokenId, isUpperTrigger);
             return;
         }
 
@@ -507,22 +462,45 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         bool isUpperTrigger,
         int24 tick
     ) internal view returns (bool) {
-        int24 exitTick;
-        if (config.autoExitIsRelative) {
+        int24 exitTick = _calculateExitTick(
+            tokenId,
+            isUpperTrigger,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper
+        );
+        return tick == exitTick;
+    }
+
+    /// @notice Calculates the exit tick based on configuration
+    /// @dev Handles both absolute and relative exit tick configurations
+    /// @param tokenId The position token ID
+    /// @param isUpperTrigger True if upper trigger, false if lower trigger
+    /// @param autoExitIsRelative Whether exit ticks are relative to position range
+    /// @param autoExitTickLower Lower exit tick (absolute or relative delta)
+    /// @param autoExitTickUpper Upper exit tick (absolute or relative delta)
+    /// @return exitTick The calculated exit tick
+    function _calculateExitTick(
+        uint256 tokenId,
+        bool isUpperTrigger,
+        bool autoExitIsRelative,
+        int24 autoExitTickLower,
+        int24 autoExitTickUpper
+    ) internal view returns (int24 exitTick) {
+        if (autoExitIsRelative) {
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
             if (isUpperTrigger) {
-                exitTick = config.autoExitTickUpper != type(int24).max
-                    ? posInfo.tickUpper() + config.autoExitTickUpper
+                exitTick = autoExitTickUpper != type(int24).max
+                    ? posInfo.tickUpper() + autoExitTickUpper
                     : type(int24).max;
             } else {
-                exitTick = config.autoExitTickLower != type(int24).min
-                    ? posInfo.tickLower() - config.autoExitTickLower
+                exitTick = autoExitTickLower != type(int24).min
+                    ? posInfo.tickLower() - autoExitTickLower
                     : type(int24).min;
             }
         } else {
-            exitTick = isUpperTrigger ? config.autoExitTickUpper : config.autoExitTickLower;
+            exitTick = isUpperTrigger ? autoExitTickUpper : autoExitTickLower;
         }
-        return tick == exitTick;
     }
 
     function _handleAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
@@ -576,6 +554,49 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             address(this),
             abi.encodeCall(this.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
         );
+    }
+
+    /// @notice Handles case when both AUTO_RANGE and AUTO_LEVERAGE are enabled
+    /// @dev Determines which action to take based on which trigger fires first
+    function _handleAutoRangeOrLeverage(
+        PoolKey memory poolKey,
+        PoolId poolId,
+        uint256 tokenId,
+        bool isUpperTrigger
+    ) internal {
+        PositionConfig storage config = positionConfigs[tokenId];
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Compute AUTO_RANGE trigger ticks
+        (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
+            posInfo.tickLower(),
+            posInfo.tickUpper(),
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit
+        );
+
+        // Compute AUTO_LEVERAGE trigger ticks
+        (int24 leverageLower, int24 leverageUpper) = _calculateLeverageTriggerTicks(
+            positionStates[tokenId].autoLeverageBaseTick,
+            poolKey.tickSpacing
+        );
+
+        // Determine which trigger fires first:
+        // - Going UP (upper trigger): lower tick value fires first
+        // - Going DOWN (lower trigger): higher tick value fires first
+        if (isUpperTrigger) {
+            if (rangeUpper <= leverageUpper) {
+                _handleAutoRange(poolKey, poolId, tokenId);
+            } else {
+                _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+            }
+        } else {
+            if (rangeLower >= leverageLower) {
+                _handleAutoRange(poolKey, poolId, tokenId);
+            } else {
+                _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+            }
+        }
     }
 
     function _beforeAddLiquidity(
@@ -878,23 +899,10 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         // Priority 1: AUTO_EXIT (check if this is an exit trigger)
         if (PositionModeFlags.hasAutoExit(modeFlags)) {
-            int24 exitTick;
-            if (autoExitIsRelative) {
-                (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-                if (isUpperTrigger) {
-                    exitTick = autoExitTickUpper != type(int24).max
-                        ? posInfo.tickUpper() + autoExitTickUpper
-                        : type(int24).max;
-                } else {
-                    exitTick = autoExitTickLower != type(int24).min
-                        ? posInfo.tickLower() - autoExitTickLower
-                        : type(int24).min;
-                }
-            } else {
-                exitTick = isUpperTrigger ? autoExitTickUpper : autoExitTickLower;
-            }
-            bool isAutoExitTriggered = tick == exitTick;
-            if (isAutoExitTriggered) {
+            int24 exitTick = _calculateExitTick(
+                tokenId, isUpperTrigger, autoExitIsRelative, autoExitTickLower, autoExitTickUpper
+            );
+            if (tick == exitTick) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
                 return;
             }
@@ -905,36 +913,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         // When both AUTO_RANGE and AUTO_LEVERAGE are enabled, determine which action to take
         if (hasAutoRange && hasAutoLeverage) {
-            PositionConfig storage config = positionConfigs[tokenId];
-            (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-            int24 tickLower = posInfo.tickLower();
-            int24 tickUpper = posInfo.tickUpper();
-
-            // Compute individual trigger ticks
-            int24 rangeLower = config.autoRangeLowerLimit != type(int24).min
-                ? tickLower - config.autoRangeLowerLimit
-                : type(int24).min;
-            int24 rangeUpper = config.autoRangeUpperLimit != type(int24).max
-                ? tickUpper + config.autoRangeUpperLimit
-                : type(int24).max;
-
-            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
-            int24 leverageLower = baseTick - 10 * poolKey.tickSpacing;
-            int24 leverageUpper = baseTick + 10 * poolKey.tickSpacing;
-
-            if (isUpperTrigger) {
-                if (rangeUpper <= leverageUpper) {
-                    _handleAutoRange(poolKey, poolId, tokenId);
-                } else {
-                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
-                }
-            } else {
-                if (rangeLower >= leverageLower) {
-                    _handleAutoRange(poolKey, poolId, tokenId);
-                } else {
-                    _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
-                }
-            }
+            _handleAutoRangeOrLeverage(poolKey, poolId, tokenId, isUpperTrigger);
             return;
         }
 

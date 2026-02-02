@@ -389,6 +389,27 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         }
     }
 
+    /// @notice Repays debt to a vault up to the available amount
+    /// @param tokenId The position token ID
+    /// @param vault The vault to repay to
+    /// @param lendAsset The address of the lend asset
+    /// @param availableAmount The amount available for repayment
+    /// @param currentDebt The current debt amount
+    /// @return repaidAmount The amount that was actually repaid
+    function _repayDebtToVault(
+        uint256 tokenId,
+        IVault vault,
+        address lendAsset,
+        uint256 availableAmount,
+        uint256 currentDebt
+    ) internal returns (uint256 repaidAmount) {
+        if (availableAmount > 0 && currentDebt > 0) {
+            repaidAmount = availableAmount > currentDebt ? currentDebt : availableAmount;
+            SafeERC20.forceApprove(IERC20(lendAsset), address(vault), repaidAmount);
+            vault.repay(tokenId, repaidAmount, false);
+        }
+    }
+
     // ==================== Balance Delta Helpers ====================
 
     /// @notice Applies a balance delta to amounts

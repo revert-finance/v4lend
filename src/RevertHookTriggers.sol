@@ -34,6 +34,49 @@ abstract contract RevertHookTriggers is RevertHookState {
         return compressed * tickSpacing;
     }
 
+    /// @notice Validates that a tick config is aligned to tick spacing (unless it's a sentinel value)
+    /// @param tick The tick value to validate
+    /// @param tickSpacing The pool's tick spacing
+    /// @param sentinel The sentinel value that bypasses validation (type(int24).min or type(int24).max)
+    /// @return valid True if tick is valid (aligned to spacing or equals sentinel)
+    function _isValidTickConfig(int24 tick, int24 tickSpacing, int24 sentinel) internal pure returns (bool valid) {
+        return tick == sentinel || tick % tickSpacing == 0;
+    }
+
+    /// @notice Calculates AUTO_RANGE trigger ticks based on position range and limits
+    /// @param tickLower Position's lower tick
+    /// @param tickUpper Position's upper tick
+    /// @param autoRangeLowerLimit Lower limit config (type(int24).min means disabled)
+    /// @param autoRangeUpperLimit Upper limit config (type(int24).max means disabled)
+    /// @return rangeLower Lower trigger tick (type(int24).min if disabled)
+    /// @return rangeUpper Upper trigger tick (type(int24).max if disabled)
+    function _calculateRangeTriggerTicks(
+        int24 tickLower,
+        int24 tickUpper,
+        int24 autoRangeLowerLimit,
+        int24 autoRangeUpperLimit
+    ) internal pure returns (int24 rangeLower, int24 rangeUpper) {
+        rangeLower = autoRangeLowerLimit != type(int24).min
+            ? tickLower - autoRangeLowerLimit
+            : type(int24).min;
+        rangeUpper = autoRangeUpperLimit != type(int24).max
+            ? tickUpper + autoRangeUpperLimit
+            : type(int24).max;
+    }
+
+    /// @notice Calculates AUTO_LEVERAGE trigger ticks based on base tick
+    /// @param baseTick The base tick for leverage triggers
+    /// @param tickSpacing The pool's tick spacing
+    /// @return leverageLower Lower trigger tick
+    /// @return leverageUpper Upper trigger tick
+    function _calculateLeverageTriggerTicks(
+        int24 baseTick,
+        int24 tickSpacing
+    ) internal pure returns (int24 leverageLower, int24 leverageUpper) {
+        leverageLower = baseTick - LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
+        leverageUpper = baseTick + LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
+    }
+
     // ==================== Position Config Helpers ====================
 
     /// @notice Disables a position by setting its config to NONE
@@ -258,12 +301,9 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 rangeLower = type(int24).min;
         int24 rangeUpper = type(int24).max;
         if (hasAutoRange) {
-            if (autoRangeLowerLimit != type(int24).min) {
-                rangeLower = tickLower - autoRangeLowerLimit;
-            }
-            if (autoRangeUpperLimit != type(int24).max) {
-                rangeUpper = tickUpper + autoRangeUpperLimit;
-            }
+            (rangeLower, rangeUpper) = _calculateRangeTriggerTicks(
+                tickLower, tickUpper, autoRangeLowerLimit, autoRangeUpperLimit
+            );
         }
 
         // Compute AUTO_LEVERAGE trigger ticks
@@ -271,8 +311,7 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 leverageUpper = type(int24).max;
         if (hasAutoLeverage) {
             int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
-            leverageLower = baseTick - 10 * poolKey.tickSpacing;
-            leverageUpper = baseTick + 10 * poolKey.tickSpacing;
+            (leverageLower, leverageUpper) = _calculateLeverageTriggerTicks(baseTick, poolKey.tickSpacing);
         }
 
         // When both AUTO_RANGE and AUTO_LEVERAGE are set, use the trigger that fires first in each direction:
