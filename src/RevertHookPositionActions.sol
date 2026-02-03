@@ -217,6 +217,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             // Swap token0 to token1
             (fees0, fees1) = _applyBalanceDelta(_executeSwap(poolKey, true, fees0, tokenId), fees0, fees1);
         }
+        // HARVEST_TOKENS mode: no swap needed, fees are sent directly to owner
 
         // Pay rewards to caller
         (fees0, fees1) = _payCompoundRewards(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, caller);
