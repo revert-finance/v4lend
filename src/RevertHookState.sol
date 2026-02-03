@@ -21,7 +21,8 @@ abstract contract RevertHookState is Transformer {
         NONE,
         AUTO_COMPOUND,
         HARVEST_TOKEN_0,
-        HARVEST_TOKEN_1
+        HARVEST_TOKEN_1,
+        HARVEST_TOKENS
     }
 
     // ==================== Structs ====================

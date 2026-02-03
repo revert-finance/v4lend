@@ -497,6 +497,46 @@ contract RevertHookTest is BaseTest {
         assertGt(protocolFee1, 0, "ProtocolFeeRecipient should have received fees in token1");
     }
 
+    function testBasicAutoHarvestTokens() public {
+        uint128 token2Liquidity = _setupAutoCompoundTest(RevertHookState.AutoCompoundMode.HARVEST_TOKENS);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCompound();
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+        hook.autoCompound(params);
+
+        uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
+        // Position liquidity should NOT increase (unlike auto-compound)
+        assertEq(token2LiquidityAfter, token2Liquidity, "token2Id liquidity should remain the same after harvest");
+
+        _verifyNoLeftoverBalances("harvest");
+
+        // Verify executor received fees in both tokens (reward for harvesting)
+        uint256 executorBalance0After = currency0.balanceOf(address(this));
+        uint256 executorBalance1After = currency1.balanceOf(address(this));
+        uint256 executorFee0 = executorBalance0After - before.executorBalance0;
+        uint256 executorFee1 = executorBalance1After - before.executorBalance1;
+        assertGt(executorFee0, 0, "Executor should have received fees in token0");
+        assertGt(executorFee1, 0, "Executor should have received fees in token1");
+
+        // Verify owner received both tokens (after fees)
+        uint256 ownerBalance0After = currency0.balanceOf(address(this));
+        uint256 ownerBalance1After = currency1.balanceOf(address(this));
+        uint256 ownerReceived0 = ownerBalance0After - before.ownerBalance0;
+        uint256 ownerReceived1 = ownerBalance1After - before.ownerBalance1;
+        assertGt(ownerReceived0, 0, "Owner should have received harvested token0");
+        assertGt(ownerReceived1, 0, "Owner should have received harvested token1");
+
+        // Verify protocolFeeRecipient received fees in both tokens
+        address feeRecipient = hook.protocolFeeRecipient();
+        uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
+        uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
+        uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
+        uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
+        assertGt(protocolFee0, 0, "ProtocolFeeRecipient should have received fees in token0");
+        assertGt(protocolFee1, 0, "ProtocolFeeRecipient should have received fees in token1");
+    }
+
     function testBasicAutoExit() public {
 
         hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
