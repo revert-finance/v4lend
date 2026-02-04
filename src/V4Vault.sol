@@ -967,12 +967,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice Sets or updates the allow list for a hook (onlyOwner)
-    /// @param hook Hook to configure
+    /// @param hook Hook to configure (address(0) for positions without hooks)
     /// @param isAllowed Whether the hook is allowed
     function setHookAllowList(address hook, bool isAllowed) external onlyOwner {
-        if (hook == address(0)) {
-            revert InvalidConfig();
-        }
         hookAllowList[hook] = isAllowed;
         emit SetHookAllowList(hook, isAllowed);
     }
@@ -1489,7 +1486,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     function _checkHookAllowed(uint256 tokenId) internal view {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        if (address(poolKey.hooks) != address(0) && !hookAllowList[address(poolKey.hooks)]) {
+        if (!hookAllowList[address(poolKey.hooks)]) {
             revert HookNotAllowed();
         }
     }

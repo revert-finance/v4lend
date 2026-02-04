@@ -71,6 +71,9 @@ contract V4VaultTest is V4ForkTestBase {
         // without reserve for now
         vault.setReserveFactor(0);
 
+        // allow positions without hooks (address(0))
+        vault.setHookAllowList(address(0), true);
+
         vault.setTransformer(address(v4Utils), true);
         v4Utils.setVault(address(vault));
     }
