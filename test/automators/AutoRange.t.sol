@@ -1,0 +1,537 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.0;
+
+import {console} from "forge-std/console.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+
+import {AutoRange} from "../../src/automators/AutoRange.sol";
+import {Constants} from "../../src/utils/Constants.sol";
+import {AutomatorTestBase} from "./AutomatorTestBase.sol";
+
+contract AutoRangeTest is AutomatorTestBase {
+    AutoRange public autoRange;
+
+    function setUp() public override {
+        super.setUp();
+
+        autoRange = new AutoRange(positionManager, address(swapRouter), EX0x, permit2, operator, withdrawer);
+        autoRange.setVault(address(vault));
+        vault.setTransformer(address(autoRange), true);
+    }
+
+    // --- Access Control ---
+
+    function test_RevertWhenNonOperatorCallsExecute() public {
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: 1,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: 0,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        address randomUser = makeAddr("random");
+        vm.prank(randomUser);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoRange.execute(params);
+    }
+
+    // --- Config Tests ---
+
+    function test_ConfigToken() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 0,
+            upperTickLimit: 0,
+            lowerTickDelta: -120,
+            upperTickDelta: 120,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+
+        (int32 lowerTickLimit,,,,,,,) = autoRange.positionConfigs(tokenId);
+        assertEq(lowerTickLimit, 0);
+    }
+
+    function test_RevertWhenNonOwnerConfigures() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 0,
+            upperTickLimit: 0,
+            lowerTickDelta: -120,
+            upperTickDelta: 120,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        address randomUser = makeAddr("random");
+        vm.prank(randomUser);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoRange.configToken(tokenId, address(0), config);
+    }
+
+    // --- Execute Tests ---
+
+    function test_ExecuteRangeChange() public {
+        PoolKey memory poolKey = _createPool();
+        // Need full-range position for swap liquidity
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        int24 tickLowerBefore = posInfo.tickLower();
+        int24 tickUpperBefore = posInfo.tickUpper();
+
+        // Configure auto-range: trigger when 1 tick out of range
+        // New range: above current tick (one-sided token0 position, no swap needed)
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60, // +1 tick spacing above current
+            upperTickDelta: 300, // +5 tick spacings above current
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+
+        // Approve NFT
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        // Move price to trigger range change (large swap to move tick far enough)
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        // Execute range change
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200),
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        // Verify original position has 0 liquidity
+        uint128 oldLiquidity = positionManager.getPositionLiquidity(tokenId);
+        assertEq(oldLiquidity, 0, "Old position should have 0 liquidity");
+
+        // Verify new position was created
+        uint256 newTokenId = positionManager.nextTokenId() - 1;
+        assertGt(newTokenId, tokenId, "New tokenId should be greater");
+
+        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertGt(newLiquidity, 0, "New position should have liquidity");
+
+        // Verify new position is owned by original owner
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT);
+
+        // Verify config was copied to new position
+        (int32 lowerTickLimit,,,,,,,) = autoRange.positionConfigs(newTokenId);
+        assertEq(lowerTickLimit, 1, "Config should be copied to new position");
+    }
+
+    function test_RevertWhenNotReady() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        // Configure with large tick limits (position needs to be very out of range)
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 10000,
+            upperTickLimit: 10000,
+            lowerTickDelta: -120,
+            upperTickDelta: 120,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoRange), tokenId);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: 0,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.NotReady.selector);
+        autoRange.execute(params);
+    }
+
+    function test_RevertWhenSameRange() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Move price out of range first (so NotReady check passes)
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        int24 currentTick = _getCurrentTick(poolKey);
+        int24 tickSpacing = poolKey.tickSpacing;
+        int24 baseTick = (currentTick / tickSpacing) * tickSpacing;
+        if (currentTick < 0 && currentTick % tickSpacing != 0) {
+            baseTick -= tickSpacing;
+        }
+
+        // Configure deltas so that new range (baseTick + delta) equals old range
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: int32(posInfo.tickLower() - baseTick),
+            upperTickDelta: int32(posInfo.tickUpper() - baseTick),
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoRange), tokenId);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: 0,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.SameRange.selector);
+        autoRange.execute(params);
+    }
+
+    // --- onlyFees Tests ---
+
+    function test_ExecuteOnlyFeesFalse() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        // Generate fees so onlyFees produces a different result
+        _generateFees(poolKey);
+
+        // Configure auto-range with onlyFees=false (reward from total amounts)
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100) // 1%
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        // Move price out of range
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 100), // 1%
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        // Old position should be empty, new position created
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Old position should be empty");
+        uint256 newTokenId = positionManager.nextTokenId() - 1;
+        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertGt(newLiquidity, 0, "New position should have liquidity");
+
+        // With onlyFees=false, reward is taken from TOTAL (fees + principal),
+        // so new position should have LESS liquidity than the onlyFees=true case
+        // We log for comparison with the onlyFees=true test
+        console.log("onlyFees=false new liquidity:", newLiquidity);
+    }
+
+    function test_ExecuteOnlyFeesTrue() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        // Generate fees so onlyFees produces a different result
+        _generateFees(poolKey);
+
+        // Configure auto-range with onlyFees=true (reward from fees only)
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: true,
+            maxRewardX64: uint64(Q64 / 100) // 1%
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        // Move price out of range
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 100), // 1%
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        // Old position should be empty, new position created
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Old position should be empty");
+        uint256 newTokenId = positionManager.nextTokenId() - 1;
+        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertGt(newLiquidity, 0, "New position should have liquidity");
+
+        // With onlyFees=true, reward is taken from FEES only (much smaller),
+        // so new position should have MORE liquidity than the onlyFees=false case
+        console.log("onlyFees=true new liquidity:", newLiquidity);
+    }
+
+    /// @notice Verify that onlyFees=true results in more liquidity than onlyFees=false
+    /// by running both scenarios with identical setup using vm.snapshot
+    function test_OnlyFeesComparison() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        // Generate fees so onlyFees has something to differentiate
+        _generateFees(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        // Move price out of range
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        // Snapshot state before executing
+        uint256 snapshotId = vm.snapshot();
+
+        // --- Run onlyFees=false scenario ---
+        AutoRange.PositionConfig memory configFalse = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), configFalse);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 100),
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        uint256 newTokenIdFalse = positionManager.nextTokenId() - 1;
+        uint128 liquidityFalse = positionManager.getPositionLiquidity(newTokenIdFalse);
+
+        // --- Revert to snapshot and run onlyFees=true scenario ---
+        vm.revertTo(snapshotId);
+
+        AutoRange.PositionConfig memory configTrue = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: true,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), configTrue);
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        uint256 newTokenIdTrue = positionManager.nextTokenId() - 1;
+        uint128 liquidityTrue = positionManager.getPositionLiquidity(newTokenIdTrue);
+
+        // onlyFees=true should result in MORE liquidity because reward is smaller (from fees only)
+        console.log("onlyFees=false liquidity:", liquidityFalse);
+        console.log("onlyFees=true liquidity:", liquidityTrue);
+        assertGt(liquidityTrue, liquidityFalse, "onlyFees=true should have more liquidity (smaller reward)");
+    }
+
+    // --- Vault Tests ---
+
+    function test_ExecuteWithVault() public {
+        // Increase oracle tolerance for large swap price impact
+        v4Oracle.setMaxPoolPriceDifference(10000);
+
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        // Add to vault
+        _depositToVault(200000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        // Approve transform
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoRange), true);
+
+        // Configure auto-range (one-sided range above current tick, no swap needed)
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(vault), config);
+
+        // Move price out of range (large swap)
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200),
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.executeWithVault(params, address(vault));
+
+        // Old position should have 0 liquidity
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0);
+
+        // New position should be owned by vault
+        uint256 newTokenId = positionManager.nextTokenId() - 1;
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault));
+    }
+}
