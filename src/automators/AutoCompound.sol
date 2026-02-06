@@ -21,9 +21,9 @@ import {Automator} from "./Automator.sol";
 /// Positions need to be approved (approve or setApprovalForAll) for the contract when outside vault.
 /// When position is inside Vault - owner needs to approve the position to be transformed by the contract.
 contract AutoCompound is Automator {
-    event AutoCompounded(
+    event AutoCompound(
+        uint256 indexed tokenId,
         address account,
-        uint256 tokenId,
         uint256 amount0,
         uint256 amount1,
         uint256 reward0,
@@ -49,7 +49,7 @@ contract AutoCompound is Automator {
     /// @notice Per-position leftover balances (tokenId 0 = protocol rewards)
     mapping(uint256 => mapping(address => uint256)) public positionBalances;
 
-    uint64 public constant MAX_REWARD_X64 = uint64(Q64 * 5 / 100); // 5% max fee
+    uint64 public constant MAX_REWARD_X64 = uint64(Q64 * 2 / 100); // 2% max fee
     uint64 public totalRewardX64 = 0; // Start at 0%, owner can set up to 5%
 
     constructor(
@@ -77,7 +77,7 @@ contract AutoCompound is Automator {
         if (!operators[msg.sender] || !vaults[vault]) {
             revert Unauthorized();
         }
-        IVault(vault).transform(params.tokenId, address(this), abi.encodeCall(AutoCompound.execute, (params)));
+        IVault(vault).transform(params.tokenId, address(this), abi.encodeCall(this.execute, (params)));
     }
 
     /// @notice Adjust token directly or via vault transform
@@ -116,9 +116,9 @@ contract AutoCompound is Automator {
             (a0, a1, r0, r1) = _executeHarvest(params, token0, token1, token0Addr, token1Addr, amount0, amount1);
         }
 
-        emit AutoCompounded(
-            msg.sender,
+        emit AutoCompound(
             params.tokenId,
+            msg.sender,
             a0, a1,
             r0, r1,
             token0Addr,

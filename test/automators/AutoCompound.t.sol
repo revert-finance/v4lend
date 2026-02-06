@@ -68,13 +68,13 @@ contract AutoCompoundTest is AutomatorTestBase {
     }
 
     function test_SetReward() public {
-        uint64 rewardX64 = uint64(Q64 * 3 / 100); // 3%
+        uint64 rewardX64 = uint64(Q64 * 1 / 100); // 1%
         autoCompound.setReward(rewardX64);
         assertEq(autoCompound.totalRewardX64(), rewardX64);
     }
 
     function test_RevertWhenRewardTooHigh() public {
-        uint64 rewardX64 = uint64(Q64 * 6 / 100); // 6% > 5% max
+        uint64 rewardX64 = uint64(Q64 * 3 / 100); // 3% > 2% max
         vm.expectRevert(Constants.InvalidConfig.selector);
         autoCompound.setReward(rewardX64);
     }
@@ -295,7 +295,7 @@ contract AutoCompoundTest is AutomatorTestBase {
         uint256 tokenId = _createFullRangePosition(poolKey);
 
         // Set reward to accumulate protocol fees
-        autoCompound.setReward(uint64(Q64 * 5 / 100)); // 5%
+        autoCompound.setReward(uint64(Q64 * 2 / 100)); // 2%
 
         _generateFees(poolKey);
 
@@ -423,8 +423,8 @@ contract AutoCompoundTest is AutomatorTestBase {
         PoolKey memory poolKey = _createETHPool();
         uint256 tokenId = _createFullRangePositionETH(poolKey);
 
-        // Set 5% reward
-        autoCompound.setReward(uint64(Q64 * 5 / 100));
+        // Set 2% reward
+        autoCompound.setReward(uint64(Q64 * 2 / 100));
 
         // Generate fees with native ETH swaps
         _generateFeesETH(poolKey);

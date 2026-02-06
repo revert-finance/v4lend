@@ -23,7 +23,7 @@ import {Automator} from "./Automator.sol";
 /// When executed, a new position is created and automatically configured the same way as the original position.
 /// Positions need to be approved (setApprovalForAll) for the contract and configured with configToken method.
 contract AutoRange is Automator {
-    event RangeChanged(uint256 indexed oldTokenId, uint256 indexed newTokenId);
+    event AutoRange(uint256 indexed oldTokenId, uint256 indexed newTokenId);
     event PositionConfigured(
         uint256 indexed tokenId,
         int32 lowerTickLimit,
@@ -79,7 +79,7 @@ contract AutoRange is Automator {
         if (!operators[msg.sender] || !vaults[vault]) {
             revert Unauthorized();
         }
-        IVault(vault).transform(params.tokenId, address(this), abi.encodeCall(AutoRange.execute, (params)));
+        IVault(vault).transform(params.tokenId, address(this), abi.encodeCall(this.execute, (params)));
     }
 
     /// @notice Execute range change
@@ -236,7 +236,7 @@ contract AutoRange is Automator {
         _transferToken(owner, token0, leftover0, true);
         _transferToken(owner, token1, leftover1, true);
 
-        emit RangeChanged(params.tokenId, newTokenId);
+        emit AutoRange(params.tokenId, newTokenId);
     }
 
     function _mintNewPosition(
