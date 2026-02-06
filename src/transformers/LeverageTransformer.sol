@@ -124,7 +124,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             params.increaseLiquidityHookData
         );
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(abi.encode(actions, params_array), params.deadline);
+        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, params_array), params.deadline);
 
         _leverageUpFinalize(params, token, token0, token1, amount0, amount1);
     }
@@ -428,7 +428,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint128 liquidity = _calculateLiquidity(dummyTickLower, dummyTickUpper, poolKey, amount0, amount1);
 
         // Mint the dummy position
-        _mintDummyPosition(poolKey, dummyTickLower, dummyTickUpper, liquidity, amount0, amount1, params);
+        _mintDummyPosition(poolKey, dummyTickLower, dummyTickUpper, liquidity, params);
 
         // Get the newly minted token ID
         tokenId = positionManager.nextTokenId() - 1;
@@ -477,8 +477,6 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         int24 tickLower,
         int24 tickUpper,
         uint128 liquidity,
-        uint256 amount0,
-        uint256 amount1,
         LeverageInParams calldata params
     ) internal {
         (bytes memory actions, bytes[] memory mintParams) = _buildActionsForIncreasingLiquidity(
@@ -498,7 +496,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             params.mintHookData
         );
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)}(
+        positionManager.modifyLiquidities{value: address(this).balance}(
             abi.encode(actions, mintParams),
             params.deadline
         );
@@ -672,7 +670,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             params.mintHookData
         );
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(params.token0, params.token1, amount0, amount1)}(
+        positionManager.modifyLiquidities{value: address(this).balance}(
             abi.encode(actions, mintParams),
             params.deadline
         );

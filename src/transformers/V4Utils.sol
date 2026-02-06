@@ -733,7 +733,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             params.mintHookData // hookData
         );
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(params.token0, params.token1, total0, total1)}(
+        positionManager.modifyLiquidities{value: address(this).balance}(
             abi.encode(actions, params_array), params.deadline
         );
 
@@ -762,7 +762,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
 
         params_array[0] = abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, total0, total1)}(
+        positionManager.modifyLiquidities{value: address(this).balance}(
             abi.encode(actions, params_array), params.deadline
         );
 
