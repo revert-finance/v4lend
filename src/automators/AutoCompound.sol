@@ -24,12 +24,13 @@ contract AutoCompound is Automator {
     event AutoCompounded(
         address account,
         uint256 tokenId,
-        uint256 amountAdded0,
-        uint256 amountAdded1,
+        uint256 amount0,
+        uint256 amount1,
         uint256 reward0,
         uint256 reward1,
         address token0,
-        address token1
+        address token1,
+        bool harvest
     );
 
     event RewardUpdated(address account, uint64 totalRewardX64);
@@ -105,20 +106,24 @@ contract AutoCompound is Automator {
 
         if (amount0 == 0 && amount1 == 0) return;
 
+        uint256 a0;
+        uint256 a1;
+        uint256 r0;
+        uint256 r1;
         if (params.mode == CompoundMode.AUTO_COMPOUND) {
-            _executeAutoCompound(params, poolKey, positionInfo, token0, token1, token0Addr, token1Addr, amount0, amount1);
+            (a0, a1, r0, r1) = _executeAutoCompound(params, poolKey, positionInfo, token0, token1, token0Addr, token1Addr, amount0, amount1);
         } else {
-            _executeHarvest(params, token0, token1, token0Addr, token1Addr, amount0, amount1);
+            (a0, a1, r0, r1) = _executeHarvest(params, token0, token1, token0Addr, token1Addr, amount0, amount1);
         }
 
         emit AutoCompounded(
             msg.sender,
             params.tokenId,
-            params.mode == CompoundMode.AUTO_COMPOUND ? amount0 : 0,
-            params.mode == CompoundMode.AUTO_COMPOUND ? amount1 : 0,
-            0, 0,
+            a0, a1,
+            r0, r1,
             token0Addr,
-            token1Addr
+            token1Addr,
+            params.mode != CompoundMode.AUTO_COMPOUND
         );
     }
 
@@ -132,7 +137,7 @@ contract AutoCompound is Automator {
         address token1Addr,
         uint256 amount0,
         uint256 amount1
-    ) internal {
+    ) internal returns (uint256 compounded0, uint256 compounded1, uint256 fees0, uint256 fees1) {
         // Optional swap to rebalance
         if (params.amountIn != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
@@ -156,9 +161,6 @@ contract AutoCompound is Automator {
         uint64 rewardX64 = totalRewardX64;
         uint256 maxAddAmount0 = amount0 * Q64 / (rewardX64 + Q64);
         uint256 maxAddAmount1 = amount1 * Q64 / (rewardX64 + Q64);
-
-        uint256 compounded0;
-        uint256 compounded1;
 
         if (maxAddAmount0 != 0 || maxAddAmount1 != 0) {
             _handleApproval(permit2, token0, maxAddAmount0);
@@ -186,8 +188,8 @@ contract AutoCompound is Automator {
         }
 
         // Protocol fees = reserved amount (not added as liquidity)
-        uint256 fees0 = amount0 - maxAddAmount0;
-        uint256 fees1 = amount1 - maxAddAmount1;
+        fees0 = amount0 - maxAddAmount0;
+        fees1 = amount1 - maxAddAmount1;
 
         // Store leftover (slippage diff) for position owner
         _setBalance(params.tokenId, token0Addr, maxAddAmount0 - compounded0);
@@ -206,7 +208,7 @@ contract AutoCompound is Automator {
         address token1Addr,
         uint256 amount0,
         uint256 amount1
-    ) internal {
+    ) internal returns (uint256, uint256, uint256, uint256) {
         // Perform swap based on harvest mode
         if (params.mode == CompoundMode.HARVEST_TOKEN_0 && amount1 != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
@@ -239,8 +241,12 @@ contract AutoCompound is Automator {
         }
 
         // Send tokens to owner (after deducting reward which stays in contract)
-        _transferToken(owner, token0, amount0 - reward0, true);
-        _transferToken(owner, token1, amount1 - reward1, true);
+        uint256 sent0 = amount0 - reward0;
+        uint256 sent1 = amount1 - reward1;
+        _transferToken(owner, token0, sent0, true);
+        _transferToken(owner, token1, sent1, true);
+
+        return (sent0, sent1, reward0, reward1);
     }
 
     /// @notice Withdraws leftover token balance for a position
