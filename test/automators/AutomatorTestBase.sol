@@ -7,7 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
@@ -268,5 +268,137 @@ contract AutomatorTestBase is Test {
         swapData = abi.encode(
             address(swapRouter), abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp))
         );
+    }
+
+    // --- Native ETH Pool Helpers ---
+
+    /// @notice Create an ETH/USDC pool (native ETH as currency0, USDC as currency1)
+    /// Uses fee=7777, tickSpacing=60 to avoid conflict with existing mainnet V4 pools
+    function _createETHPool() internal returns (PoolKey memory poolKey) {
+        // address(0) < USDC_ADDRESS, so ETH is always currency0
+        poolKey = PoolKey({
+            currency0: CurrencyLibrary.ADDRESS_ZERO, // Native ETH
+            currency1: Currency.wrap(address(usdc)),
+            fee: 7777,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+
+        // Initialize the pool at ~1 ETH = 4318 USDC (matching Chainlink at fork block 23248232)
+        // price = token1/token0 = USDC/ETH = 4318e6 / 1e18 = 4.318e-9
+        // sqrtPrice = sqrt(4.318e-9) ≈ 6.571e-5
+        // sqrtPriceX96 = 6.571e-5 * 2^96 ≈ 5206259495888489151463424
+        poolManager.initialize(poolKey, 5206259495888489151463424);
+    }
+
+    function _approveWhaleTokensETH() internal {
+        vm.prank(WHALE_ACCOUNT);
+        usdc.approve(address(permit2), type(uint256).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(positionManager), type(uint160).max, type(uint48).max);
+        // No approval needed for native ETH
+    }
+
+    function _createFullRangePositionETH(PoolKey memory poolKey) internal returns (uint256 tokenId) {
+        _approveWhaleTokensETH();
+        tokenId = _mintPositionETH(poolKey, -887220, 887220, 1e14);
+    }
+
+    function _createNarrowPositionETH(PoolKey memory poolKey) internal returns (uint256 tokenId) {
+        _approveWhaleTokensETH();
+        int24 currentTick = _getCurrentTick(poolKey);
+        int24 tickSpacing = poolKey.tickSpacing;
+        int24 tickLower = (currentTick / tickSpacing - 2) * tickSpacing;
+        int24 tickUpper = (currentTick / tickSpacing + 2) * tickSpacing;
+        tokenId = _mintPositionETH(poolKey, tickLower, tickUpper, 1e13);
+    }
+
+    function _mintPositionETH(PoolKey memory poolKey, int24 tickLower, int24 tickUpper, uint128 liquidity)
+        internal
+        returns (uint256 tokenId)
+    {
+        // For native ETH, need SETTLE_PAIR + SWEEP to handle excess ETH
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
+        bytes[] memory params_array = new bytes[](3);
+        params_array[0] = abi.encode(
+            poolKey, tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max, WHALE_ACCOUNT, bytes("")
+        );
+        params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, WHALE_ACCOUNT);
+        params_array[2] = abi.encode(address(0), WHALE_ACCOUNT); // Sweep leftover ETH back to whale
+
+        // Fund whale with ETH and send value
+        vm.deal(WHALE_ACCOUNT, 1000 ether);
+        vm.prank(WHALE_ACCOUNT);
+        positionManager.modifyLiquidities{value: 100 ether}(abi.encode(actions, params_array), block.timestamp);
+        tokenId = positionManager.nextTokenId() - 1;
+    }
+
+    function _swapExactInputSingleETH(PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 minAmountOut)
+        internal
+    {
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        bytes memory commands = hex"10";
+        bytes[] memory inputs = new bytes[](1);
+        bytes memory actions;
+        bytes[] memory params;
+
+        if (zeroForOne) {
+            // ETH → USDC: need SETTLE for ETH (native), TAKE_ALL for USDC
+            actions = abi.encodePacked(
+                uint8(Actions.SWAP_EXACT_IN_SINGLE),
+                uint8(Actions.SETTLE),
+                uint8(Actions.TAKE_ALL)
+            );
+            params = new bytes[](3);
+            params[0] = abi.encode(
+                IV4Router.ExactInputSingleParams({
+                    poolKey: key,
+                    zeroForOne: true,
+                    amountIn: amountIn,
+                    amountOutMinimum: minAmountOut,
+                    hookData: bytes("")
+                })
+            );
+            params[1] = abi.encode(key.currency0, amountIn, true); // SETTLE native ETH
+            params[2] = abi.encode(key.currency1, minAmountOut); // TAKE_ALL USDC
+        } else {
+            // USDC → ETH: need SETTLE_ALL for USDC, TAKE_ALL for ETH
+            actions = abi.encodePacked(
+                uint8(Actions.SWAP_EXACT_IN_SINGLE),
+                uint8(Actions.SETTLE_ALL),
+                uint8(Actions.TAKE_ALL)
+            );
+            params = new bytes[](3);
+            params[0] = abi.encode(
+                IV4Router.ExactInputSingleParams({
+                    poolKey: key,
+                    zeroForOne: false,
+                    amountIn: amountIn,
+                    amountOutMinimum: minAmountOut,
+                    hookData: bytes("")
+                })
+            );
+            params[1] = abi.encode(key.currency1, amountIn); // SETTLE_ALL USDC
+            params[2] = abi.encode(key.currency0, minAmountOut); // TAKE_ALL ETH (native)
+        }
+
+        inputs[0] = abi.encode(actions, params);
+
+        if (zeroForOne) {
+            vm.deal(WHALE_ACCOUNT, WHALE_ACCOUNT.balance + amountIn);
+            vm.prank(WHALE_ACCOUNT);
+            IUniversalRouter(address(swapRouter)).execute{value: amountIn}(commands, inputs, block.timestamp);
+        } else {
+            vm.prank(WHALE_ACCOUNT);
+            IUniversalRouter(address(swapRouter)).execute(commands, inputs, block.timestamp);
+        }
+    }
+
+    function _generateFeesETH(PoolKey memory poolKey) internal {
+        // Swap ETH → USDC then USDC → ETH to generate fees
+        _swapExactInputSingleETH(poolKey, true, 1e16, 0); // 0.01 ETH → USDC
+        _swapExactInputSingleETH(poolKey, false, 10e6, 0); // 10 USDC → ETH
     }
 }

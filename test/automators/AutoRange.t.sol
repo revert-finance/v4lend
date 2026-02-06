@@ -472,6 +472,212 @@ contract AutoRangeTest is AutomatorTestBase {
         assertGt(liquidityTrue, liquidityFalse, "onlyFees=true should have more liquidity (smaller reward)");
     }
 
+    // --- Native ETH Position Tests ---
+
+    function test_ExecuteRangeChangeETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createNarrowPositionETH(poolKey);
+
+        // Configure auto-range: trigger when 1 tick out of range
+        // New range above current tick (one-sided, no swap needed)
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        // Move price out of range (large ETH sell)
+        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200),
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        // Verify original position has 0 liquidity
+        uint128 oldLiquidity = positionManager.getPositionLiquidity(tokenId);
+        assertEq(oldLiquidity, 0, "Old ETH position should have 0 liquidity");
+
+        // Verify new position was created with liquidity
+        uint256 newTokenId = positionManager.nextTokenId() - 1;
+        assertGt(newTokenId, tokenId, "New tokenId should be greater");
+        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
+        assertGt(newLiquidity, 0, "New ETH position should have liquidity");
+
+        // Verify new position owned by original owner
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT);
+    }
+
+    /// @notice Verify that reward deduction works with native ETH positions,
+    /// comparing liquidity with and without reward using vm.snapshot
+    function test_ExecuteRangeChangeETHWithReward() public {
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createNarrowPositionETH(poolKey);
+
+        // Generate fees
+        _generateFeesETH(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        // Move price out of range (large ETH sell)
+        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+
+        // Snapshot state before executing
+        uint256 snapshotId = vm.snapshot();
+
+        // --- Run WITHOUT reward ---
+        AutoRange.PositionConfig memory configNoReward = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), configNoReward);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: 0, // No reward
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        uint256 newTokenIdNoReward = positionManager.nextTokenId() - 1;
+        uint128 liquidityNoReward = positionManager.getPositionLiquidity(newTokenIdNoReward);
+
+        // --- Revert and run WITH reward ---
+        vm.revertTo(snapshotId);
+
+        AutoRange.PositionConfig memory configWithReward = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), configWithReward);
+
+        // Reuse same params struct but set rewardX64
+        params.rewardX64 = uint64(Q64 / 100); // 1%
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        uint256 newTokenIdWithReward = positionManager.nextTokenId() - 1;
+        uint128 liquidityWithReward = positionManager.getPositionLiquidity(newTokenIdWithReward);
+
+        // With reward deducted, new position should have LESS liquidity
+        assertGt(liquidityNoReward, liquidityWithReward, "Reward should reduce new position liquidity for ETH pair");
+        assertGt(liquidityWithReward, 0, "New ETH position should still have liquidity");
+    }
+
+    function test_ExecuteWithVaultETH() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createNarrowPositionETH(poolKey);
+
+        // Add to vault
+        _depositToVault(200000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoRange), true);
+
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(vault), config);
+
+        // Move price out of range
+        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200),
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoRange.executeWithVault(params, address(vault));
+
+        // Old position should have 0 liquidity
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0);
+
+        // New position should be owned by vault
+        uint256 newTokenId = positionManager.nextTokenId() - 1;
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault));
+    }
+
     // --- Vault Tests ---
 
     function test_ExecuteWithVault() public {

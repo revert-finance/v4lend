@@ -264,7 +264,7 @@ contract AutoRange is Automator {
             poolKey, tickLower, tickUpper, liquidity, type(uint128).max, type(uint128).max, address(this), params.mintHookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
             abi.encode(actions, params_array), params.deadline
         );
 

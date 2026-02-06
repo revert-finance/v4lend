@@ -342,4 +342,220 @@ contract AutoCompoundTest is AutomatorTestBase {
         vm.expectRevert(Constants.Unauthorized.selector);
         autoCompound.withdrawLeftoverBalances(tokenId, randomUser);
     }
+
+    // --- Native ETH Position Tests ---
+
+    function test_AutoCompoundETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        // Generate fees with native ETH swaps
+        _generateFeesETH(poolKey);
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
+
+        // Approve NFT to autoCompound
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
+
+        // Execute auto-compound
+        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoCompound.execute(params);
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
+        assertGt(liquidityAfter, liquidityBefore, "Liquidity should increase after ETH auto-compound");
+    }
+
+    function test_AutoCompoundETHWithVault() public {
+        // Increase oracle tolerance for custom pool price
+        v4Oracle.setMaxPoolPriceDifference(10000);
+
+        PoolKey memory poolKey = _createETHPool();
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        // Generate fees
+        _generateFeesETH(poolKey);
+
+        // Add position to vault
+        _depositToVault(200000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        // Approve autoCompound to transform
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoCompound), true);
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
+
+        // Execute via vault
+        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoCompound.executeWithVault(params, address(vault));
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
+        assertGt(liquidityAfter, liquidityBefore, "Liquidity should increase after ETH vault auto-compound");
+
+        // Verify position still owned by vault
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId), address(vault));
+    }
+
+    function test_AutoCompoundETHWithReward() public {
+        PoolKey memory poolKey = _createETHPool();
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        // Set 5% reward
+        autoCompound.setReward(uint64(Q64 * 5 / 100));
+
+        // Generate fees with native ETH swaps
+        _generateFeesETH(poolKey);
+
+        // Approve NFT to autoCompound
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
+
+        // Execute auto-compound
+        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoCompound.execute(params);
+
+        // Check protocol fees accumulated for native ETH (address(0))
+        uint256 protocolFeesETH = autoCompound.positionBalances(0, address(0));
+        uint256 protocolFeesUSDC = autoCompound.positionBalances(0, address(usdc));
+        assertTrue(protocolFeesETH > 0 || protocolFeesUSDC > 0, "Protocol fees should accumulate for ETH position");
+
+        // Verify withdrawer can withdraw protocol fees including native ETH
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(0);
+        tokens[1] = address(usdc);
+
+        uint256 withdrawerETHBefore = withdrawer.balance;
+        uint256 withdrawerUSDCBefore = usdc.balanceOf(withdrawer);
+
+        vm.prank(withdrawer);
+        autoCompound.withdrawBalances(tokens, withdrawer);
+
+        // Verify protocol fees were withdrawn
+        if (protocolFeesETH > 0) {
+            assertEq(withdrawer.balance - withdrawerETHBefore, protocolFeesETH, "Withdrawer should receive ETH protocol fees");
+        }
+        if (protocolFeesUSDC > 0) {
+            assertEq(usdc.balanceOf(withdrawer) - withdrawerUSDCBefore, protocolFeesUSDC, "Withdrawer should receive USDC protocol fees");
+        }
+
+        // Verify balances zeroed out
+        assertEq(autoCompound.positionBalances(0, address(0)), 0, "ETH protocol balance should be 0 after withdrawal");
+        assertEq(autoCompound.positionBalances(0, address(usdc)), 0, "USDC protocol balance should be 0 after withdrawal");
+    }
+
+    function test_WithdrawLeftoverBalancesETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        _generateFeesETH(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
+
+        // Auto-compound to potentially create leftovers
+        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoCompound.execute(params);
+
+        // Check leftover balances
+        uint256 leftoverETH = autoCompound.positionBalances(tokenId, address(0));
+        uint256 leftoverUSDC = autoCompound.positionBalances(tokenId, address(usdc));
+
+        uint256 ownerETHBefore = WHALE_ACCOUNT.balance;
+        uint256 ownerUSDCBefore = usdc.balanceOf(WHALE_ACCOUNT);
+
+        // Owner can withdraw leftover balances including native ETH
+        vm.prank(WHALE_ACCOUNT);
+        autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
+
+        // Verify leftovers were withdrawn
+        if (leftoverETH > 0) {
+            assertEq(WHALE_ACCOUNT.balance - ownerETHBefore, leftoverETH, "Owner should receive ETH leftovers");
+        }
+        if (leftoverUSDC > 0) {
+            assertEq(usdc.balanceOf(WHALE_ACCOUNT) - ownerUSDCBefore, leftoverUSDC, "Owner should receive USDC leftovers");
+        }
+
+        // Verify balances zeroed out
+        assertEq(autoCompound.positionBalances(tokenId, address(0)), 0, "ETH leftover should be 0");
+        assertEq(autoCompound.positionBalances(tokenId, address(usdc)), 0, "USDC leftover should be 0");
+    }
+
+    function test_HarvestTokensETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        autoCompound.setReward(uint64(Q64 * 1 / 100)); // 1%
+        _generateFeesETH(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
+
+        uint256 ethBefore = WHALE_ACCOUNT.balance;
+        uint256 usdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+
+        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCompound.CompoundMode.HARVEST_TOKENS,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoCompound.execute(params);
+
+        uint256 ethAfter = WHALE_ACCOUNT.balance;
+        uint256 usdcAfter = usdc.balanceOf(WHALE_ACCOUNT);
+
+        // Owner should receive harvested tokens (ETH and/or USDC)
+        assertTrue(ethAfter > ethBefore || usdcAfter > usdcBefore, "Owner should receive harvested ETH/USDC tokens");
+    }
 }

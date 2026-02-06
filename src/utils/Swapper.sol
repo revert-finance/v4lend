@@ -199,6 +199,15 @@ abstract contract Swapper is Constants {
     }
 
 
+    /// @dev Returns the ETH value to send for native token settlement
+    function _getNativeAmount(Currency token0, Currency token1, uint256 amount0, uint256 amount1)
+        internal pure returns (uint256)
+    {
+        if (token0.isAddressZero()) return amount0;
+        if (token1.isAddressZero()) return amount1;
+        return 0;
+    }
+
     function _calculateLiquidity(
         int24 tickLower,
         int24 tickUpper,

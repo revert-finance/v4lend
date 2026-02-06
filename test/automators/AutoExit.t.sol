@@ -486,6 +486,192 @@ contract AutoExitTest is AutomatorTestBase {
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Position should be empty");
     }
 
+    // --- Native ETH Position Tests ---
+
+    function test_ExecuteLimitOrderETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createNarrowPositionETH(poolKey);
+
+        int24 tick = _getCurrentTick(poolKey);
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Set trigger ticks so exit triggers when price moves
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoExit), tokenId);
+
+        // Move price below range (large ETH sell)
+        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+
+        // Execute exit
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200), // 0.5%
+            hookData: bytes("")
+        });
+
+        uint256 ethBefore = WHALE_ACCOUNT.balance;
+        uint256 usdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+
+        vm.prank(operator);
+        autoExit.execute(params);
+
+        // Position should have 0 liquidity
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
+        assertEq(liquidityAfter, 0, "Position should have 0 liquidity after ETH exit");
+
+        // Owner should receive tokens (ETH as native, not WETH)
+        uint256 ethAfter = WHALE_ACCOUNT.balance;
+        uint256 usdcAfter = usdc.balanceOf(WHALE_ACCOUNT);
+        assertTrue(ethAfter > ethBefore || usdcAfter > usdcBefore, "Owner should receive ETH/USDC after exit");
+    }
+
+    function test_ExecuteLimitOrderETHWithReward() public {
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createNarrowPositionETH(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Set trigger ticks so exit triggers when price moves
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100) // 1%
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoExit), tokenId);
+
+        // Move price below range (large ETH sell) — position holds only USDC (token1)
+        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+
+        // Track contract balances before execution
+        uint256 contractETHBefore = address(autoExit).balance;
+        uint256 contractUSDCBefore = usdc.balanceOf(address(autoExit));
+
+        // Execute exit with 1% reward
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 100), // 1%
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoExit.execute(params);
+
+        // Reward should accumulate as ETH or USDC balance in the contract
+        uint256 contractETHAfter = address(autoExit).balance;
+        uint256 contractUSDCAfter = usdc.balanceOf(address(autoExit));
+
+        uint256 ethReward = contractETHAfter - contractETHBefore;
+        uint256 usdcReward = contractUSDCAfter - contractUSDCBefore;
+        assertTrue(ethReward > 0 || usdcReward > 0, "Contract should accumulate rewards from ETH position exit");
+
+        // Verify withdrawer can withdraw ETH rewards via withdrawETH()
+        if (ethReward > 0) {
+            uint256 withdrawerETHBefore = withdrawer.balance;
+            vm.prank(withdrawer);
+            autoExit.withdrawETH(withdrawer);
+            assertEq(withdrawer.balance - withdrawerETHBefore, ethReward, "Withdrawer should receive ETH rewards");
+        }
+
+        // Verify withdrawer can withdraw USDC rewards via withdrawBalances()
+        if (usdcReward > 0) {
+            address[] memory tokens = new address[](1);
+            tokens[0] = address(usdc);
+            uint256 withdrawerUSDCBefore = usdc.balanceOf(withdrawer);
+            vm.prank(withdrawer);
+            autoExit.withdrawBalances(tokens, withdrawer);
+            assertEq(usdc.balanceOf(withdrawer) - withdrawerUSDCBefore, usdcReward, "Withdrawer should receive USDC rewards");
+        }
+    }
+
+    function test_ExecuteWithVaultETH() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createNarrowPositionETH(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Add position to vault
+        _depositToVault(200000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageX64: 0,
+            token1SlippageX64: 0,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoExit), true);
+
+        // Move price out of range
+        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200),
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoExit.executeWithVault(params, address(vault));
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
+        assertEq(liquidityAfter, 0, "Position should have 0 liquidity after ETH vault exit");
+    }
+
     // --- Vault Exit Test ---
 
     function test_ExecuteWithVault() public {

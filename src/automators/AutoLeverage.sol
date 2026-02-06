@@ -201,7 +201,7 @@ contract AutoLeverage is Automator {
             params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.increaseLiquidityHookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
             abi.encode(actions, params_array), params.deadline
         );
 

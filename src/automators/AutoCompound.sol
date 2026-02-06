@@ -177,7 +177,7 @@ contract AutoCompound is Automator {
             uint256 balance0Before = token0.balanceOfSelf();
             uint256 balance1Before = token1.balanceOfSelf();
 
-            positionManager.modifyLiquidities{value: address(this).balance}(
+            positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, maxAddAmount0, maxAddAmount1)}(
                 abi.encode(actions, params_array), params.deadline
             );
 
@@ -318,7 +318,7 @@ contract AutoCompound is Automator {
     function _withdrawBalanceInternal(uint256 tokenId, address token, address to, uint256 amount) internal {
         positionBalances[tokenId][token] -= amount;
         emit BalanceRemoved(tokenId, token, amount);
-        SafeERC20.safeTransfer(IERC20(token), to, amount);
+        _transferToken(to, Currency.wrap(token), amount, false);
         emit BalanceWithdrawn(tokenId, token, to, amount);
     }
 }

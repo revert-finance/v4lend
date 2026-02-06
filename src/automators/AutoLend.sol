@@ -308,7 +308,7 @@ contract AutoLend is Automator {
         params_array[0] =
             abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, hookData);
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)}(
             abi.encode(actions, params_array), deadline
         );
     }
@@ -331,7 +331,7 @@ contract AutoLend is Automator {
             poolKey, tickLower, tickUpper, liquidity, type(uint128).max, type(uint128).max, address(this), hookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)}(
             abi.encode(actions, params_array), deadline
         );
 

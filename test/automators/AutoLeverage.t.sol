@@ -539,6 +539,209 @@ contract AutoLeverageTest is AutomatorTestBase {
         assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down (onlyFees=true)");
     }
 
+    // --- Native ETH Position Tests ---
+
+    function test_LeverageUpETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        // Setup vault position
+        _depositToVault(50000000000, WHALE_ACCOUNT); // 50k USDC
+        _addPositionToVault(tokenId);
+
+        // Borrow small amount (10% of collateral)
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 borrowAmount = collateralValue * 10 / 100;
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, borrowAmount);
+
+        // Configure for 50% target leverage
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 5000,
+            rebalanceThresholdBps: 100,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: true,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertGt(debtAfter, debtBefore, "Debt should increase after ETH leverage up");
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId), address(vault));
+    }
+
+    /// @notice Verify that reward deduction works with native ETH positions,
+    /// comparing liquidity with and without reward using vm.snapshot
+    function test_LeverageUpETHWithReward() public {
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        // Generate fees so there's something to take reward from
+        _generateFeesETH(poolKey);
+
+        // Setup vault position
+        _depositToVault(50000000000, WHALE_ACCOUNT); // 50k USDC
+        _addPositionToVault(tokenId);
+
+        // Borrow small amount (10% of collateral)
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 borrowAmount = collateralValue * 10 / 100;
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, borrowAmount);
+
+        // Configure for 50% target leverage with reward
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 5000,
+            rebalanceThresholdBps: 100,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100) // 1%
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        // Snapshot state
+        uint256 snapshotId = vm.snapshot();
+
+        // --- Run WITHOUT reward ---
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: true,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: 0, // No reward
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        uint128 liquidityNoReward = positionManager.getPositionLiquidity(tokenId);
+        (uint256 debtNoReward,,,,) = vault.loanInfo(tokenId);
+
+        // --- Revert and run WITH reward ---
+        vm.revertTo(snapshotId);
+
+        params.rewardX64 = uint64(Q64 / 100); // 1%
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        uint128 liquidityWithReward = positionManager.getPositionLiquidity(tokenId);
+        (uint256 debtWithReward,,,,) = vault.loanInfo(tokenId);
+
+        // Both should increase debt
+        assertGt(debtNoReward, debtBefore, "Debt should increase without reward");
+        assertGt(debtWithReward, debtBefore, "Debt should increase with reward");
+
+        // With reward, less liquidity should be added (reward deducted before increase)
+        assertGt(liquidityNoReward, liquidityWithReward, "Reward should reduce added liquidity for ETH leverage up");
+    }
+
+    function test_LeverageDownETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        // Setup vault position with high leverage
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 borrowAmount = collateralValue * 70 / 100;
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, borrowAmount);
+
+        // Configure for 30% target
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 3000,
+            rebalanceThresholdBps: 100,
+            onlyFees: false,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: false,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: uint64(Q64 / 200),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertLt(debtAfter, debtBefore, "Debt should decrease after ETH leverage down");
+    }
+
     // --- Revert Tests ---
 
     function test_RevertWhenNotReady() public {
