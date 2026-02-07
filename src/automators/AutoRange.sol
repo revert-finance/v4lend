@@ -30,8 +30,6 @@ contract AutoRange is Automator {
         int32 upperTickLimit,
         int32 lowerTickDelta,
         int32 upperTickDelta,
-        uint64 token0SlippageX64,
-        uint64 token1SlippageX64,
         bool onlyFees,
         uint64 maxRewardX64
     );
@@ -41,8 +39,6 @@ contract AutoRange is Automator {
         int32 upperTickLimit;
         int32 lowerTickDelta;
         int32 upperTickDelta;
-        uint64 token0SlippageX64;
-        uint64 token1SlippageX64;
         bool onlyFees;
         uint64 maxRewardX64;
     }
@@ -290,8 +286,6 @@ contract AutoRange is Automator {
             config.upperTickLimit,
             config.lowerTickDelta,
             config.upperTickDelta,
-            config.token0SlippageX64,
-            config.token1SlippageX64,
             config.onlyFees,
             config.maxRewardX64
         );

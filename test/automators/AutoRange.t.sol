@@ -60,8 +60,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 0,
             lowerTickDelta: -120,
             upperTickDelta: 120,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -69,7 +67,7 @@ contract AutoRangeTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         autoRange.configToken(tokenId, address(0), config);
 
-        (int32 lowerTickLimit,,,,,,,) = autoRange.positionConfigs(tokenId);
+        (int32 lowerTickLimit,,,,,) = autoRange.positionConfigs(tokenId);
         assertEq(lowerTickLimit, 0);
     }
 
@@ -82,8 +80,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 0,
             lowerTickDelta: -120,
             upperTickDelta: 120,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -113,8 +109,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60, // +1 tick spacing above current
             upperTickDelta: 300, // +5 tick spacings above current
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -164,7 +158,7 @@ contract AutoRangeTest is AutomatorTestBase {
         assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT);
 
         // Verify config was copied to new position
-        (int32 lowerTickLimit,,,,,,,) = autoRange.positionConfigs(newTokenId);
+        (int32 lowerTickLimit,,,,,) = autoRange.positionConfigs(newTokenId);
         assertEq(lowerTickLimit, 1, "Config should be copied to new position");
     }
 
@@ -179,8 +173,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 10000,
             lowerTickDelta: -120,
             upperTickDelta: 120,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -235,8 +227,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: int32(posInfo.tickLower() - baseTick),
             upperTickDelta: int32(posInfo.tickUpper() - baseTick),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -284,8 +274,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -343,8 +331,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: true,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -412,8 +398,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -451,8 +435,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: true,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -486,8 +468,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -558,8 +538,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -597,8 +575,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -639,8 +615,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -702,8 +676,6 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });

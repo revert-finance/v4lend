@@ -20,6 +20,8 @@ import {IVault} from "../interfaces/IVault.sol";
 abstract contract Automator is Transformer, Swapper, IERC721Receiver, ReentrancyGuard {
     event OperatorChanged(address newOperator, bool active);
     event WithdrawerChanged(address newWithdrawer);
+    event BalancesWithdrawn(address[] tokens, address to);
+    event ETHWithdrawn(address to, uint256 amount);
 
     /// @notice Permit2 contract for token approvals
     IPermit2 public immutable permit2;
@@ -75,6 +77,8 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
                 _transferToken(to, Currency.wrap(token), balance, true);
             }
         }
+
+        emit BalancesWithdrawn(tokens, to);
     }
 
     /// @notice Withdraws ETH balance
@@ -90,6 +94,7 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
             if (!sent) {
                 revert EtherSendFailed();
             }
+            emit ETHWithdrawn(to, balance);
         }
     }
 

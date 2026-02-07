@@ -58,8 +58,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: tick - 1000,
             token1TriggerTick: tick + 1000,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -67,7 +65,7 @@ contract AutoExitTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         autoExit.configToken(tokenId, config);
 
-        (bool isActive,,,,,,,,) = autoExit.positionConfigs(tokenId);
+        (bool isActive,,,,,,) = autoExit.positionConfigs(tokenId);
         assertTrue(isActive);
     }
 
@@ -81,8 +79,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: -1000,
             token1TriggerTick: 1000,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -104,8 +100,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: 1000,
             token1TriggerTick: 500,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -131,8 +125,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -171,7 +163,7 @@ contract AutoExitTest is AutomatorTestBase {
         assertEq(liquidityAfter, 0, "Position should have 0 liquidity after exit");
 
         // Config should be deleted
-        (bool isActive,,,,,,,,) = autoExit.positionConfigs(tokenId);
+        (bool isActive,,,,,,) = autoExit.positionConfigs(tokenId);
         assertFalse(isActive, "Config should be deleted after exit");
     }
 
@@ -188,8 +180,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: tick - 100000,
             token1TriggerTick: tick + 100000,
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -228,8 +218,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -275,8 +263,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -329,8 +315,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: true,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -382,8 +366,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: uint64(Q64 / 5), // 20% slippage
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -442,8 +424,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: uint64(Q64 / 5), // 20% slippage
-            token1SlippageX64: 0,
             onlyFees: true,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -503,8 +483,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -560,8 +538,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100) // 1%
         });
@@ -640,8 +616,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });
@@ -696,8 +670,6 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
-            token0SlippageX64: 0,
-            token1SlippageX64: 0,
             onlyFees: false,
             maxRewardX64: uint64(Q64 / 100)
         });

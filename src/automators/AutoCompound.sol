@@ -50,7 +50,7 @@ contract AutoCompound is Automator {
     mapping(uint256 => mapping(address => uint256)) public positionBalances;
 
     uint64 public constant MAX_REWARD_X64 = uint64(Q64 * 2 / 100); // 2% max fee
-    uint64 public totalRewardX64 = 0; // Start at 0%, owner can set up to 5%
+    uint64 public totalRewardX64 = 0; // Start at 0%, owner can set up to 2%
 
     constructor(
         IPositionManager _positionManager,

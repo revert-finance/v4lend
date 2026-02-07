@@ -36,8 +36,6 @@ contract AutoExit is Automator {
         bool token1Swap,
         int24 token0TriggerTick,
         int24 token1TriggerTick,
-        uint64 token0SlippageX64,
-        uint64 token1SlippageX64,
         bool onlyFees,
         uint64 maxRewardX64
     );
@@ -48,8 +46,6 @@ contract AutoExit is Automator {
         bool token1Swap;
         int24 token0TriggerTick;
         int24 token1TriggerTick;
-        uint64 token0SlippageX64;
-        uint64 token1SlippageX64;
         bool onlyFees;
         uint64 maxRewardX64;
     }
@@ -213,7 +209,7 @@ contract AutoExit is Automator {
 
         // Delete config
         delete positionConfigs[params.tokenId];
-        emit PositionConfigured(params.tokenId, false, false, false, 0, 0, 0, 0, false, 0);
+        emit PositionConfigured(params.tokenId, false, false, false, 0, 0, false, 0);
 
         emit AutoExit(
             params.tokenId,
@@ -251,8 +247,6 @@ contract AutoExit is Automator {
             config.token1Swap,
             config.token0TriggerTick,
             config.token1TriggerTick,
-            config.token0SlippageX64,
-            config.token1SlippageX64,
             config.onlyFees,
             config.maxRewardX64
         );
