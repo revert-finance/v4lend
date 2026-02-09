@@ -226,11 +226,15 @@ contract AutoRange is Automator {
         positionConfigs[newTokenId] = config;
         delete positionConfigs[params.tokenId];
 
-        // Send leftover tokens to owner
+        // Send leftover tokens to owner (excluding protocol rewards which stay in contract)
         uint256 leftover0 = token0.balanceOfSelf();
         uint256 leftover1 = token1.balanceOfSelf();
-        _transferToken(owner, token0, leftover0, true);
-        _transferToken(owner, token1, leftover1, true);
+        if (leftover0 > protocolReward0) {
+            _transferToken(owner, token0, leftover0 - protocolReward0, true);
+        }
+        if (leftover1 > protocolReward1) {
+            _transferToken(owner, token1, leftover1 - protocolReward1, true);
+        }
 
         emit AutoRange(params.tokenId, newTokenId);
     }
