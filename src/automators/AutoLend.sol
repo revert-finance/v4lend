@@ -214,11 +214,9 @@ contract AutoLend is Automator {
         // Redeem shares from ERC4626 vault
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
 
-        // Process gain - reward on gain kept in contract
-        if (redeemedAmount > state.amount) {
-            // Gain stays in contract as protocol reward (will be withdrawn by withdrawer)
-            // No explicit action needed - the gain portion stays in contract balance
-        }
+        // Protocol reward is the vault yield gain
+        uint256 protocolReward = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
+        uint256 depositAmount = redeemedAmount - protocolReward;
 
         // Cannot be vault-owned
         address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
@@ -230,18 +228,18 @@ contract AutoLend is Automator {
             // Token0 was lent. Need to check if we can add it back.
             if (baseTick < tickLower) {
                 // Current tick below position - can add token0 to existing position
-                _handleApproval(permit2, poolKey.currency0, redeemedAmount);
+                _handleApproval(permit2, poolKey.currency0, depositAmount);
                 _increaseLiquidityOnExisting(
-                    params.tokenId, poolKey, positionInfo, redeemedAmount, 0, params.deadline, params.hookData
+                    params.tokenId, poolKey, positionInfo, depositAmount, 0, params.deadline, params.hookData
                 );
             } else {
                 // Current tick within/above position - mint new one-sided position above current tick
-                _handleApproval(permit2, poolKey.currency0, redeemedAmount);
+                _handleApproval(permit2, poolKey.currency0, depositAmount);
                 newTokenId = _mintOneSidedPosition(
                     poolKey,
                     baseTick + tickSpacing,
                     baseTick + tickSpacing + tickWidth,
-                    redeemedAmount,
+                    depositAmount,
                     0,
                     params.deadline,
                     params.hookData
@@ -251,19 +249,19 @@ contract AutoLend is Automator {
             // Token1 was lent. Need to check if we can add it back.
             if (baseTick >= tickUpper) {
                 // Current tick above position - can add token1 to existing position
-                _handleApproval(permit2, poolKey.currency1, redeemedAmount);
+                _handleApproval(permit2, poolKey.currency1, depositAmount);
                 _increaseLiquidityOnExisting(
-                    params.tokenId, poolKey, positionInfo, 0, redeemedAmount, params.deadline, params.hookData
+                    params.tokenId, poolKey, positionInfo, 0, depositAmount, params.deadline, params.hookData
                 );
             } else {
                 // Current tick within/below position - mint new one-sided position below current tick
-                _handleApproval(permit2, poolKey.currency1, redeemedAmount);
+                _handleApproval(permit2, poolKey.currency1, depositAmount);
                 newTokenId = _mintOneSidedPosition(
                     poolKey,
                     baseTick - tickWidth,
                     baseTick,
                     0,
-                    redeemedAmount,
+                    depositAmount,
                     params.deadline,
                     params.hookData
                 );
@@ -281,11 +279,17 @@ contract AutoLend is Automator {
             IERC721(address(positionManager)).safeTransferFrom(address(this), posOwner, newTokenId);
         }
 
-        // Send leftover tokens to owner
+        // Send leftover tokens to owner (excluding protocol rewards which stay in contract)
         uint256 leftover0 = poolKey.currency0.balanceOfSelf();
         uint256 leftover1 = poolKey.currency1.balanceOfSelf();
-        _transferToken(posOwner, poolKey.currency0, leftover0, true);
-        _transferToken(posOwner, poolKey.currency1, leftover1, true);
+        uint256 reward0 = isToken0Lent ? protocolReward : 0;
+        uint256 reward1 = isToken0Lent ? 0 : protocolReward;
+        if (leftover0 > reward0) {
+            _transferToken(posOwner, poolKey.currency0, leftover0 - reward0, true);
+        }
+        if (leftover1 > reward1) {
+            _transferToken(posOwner, poolKey.currency1, leftover1 - reward1, true);
+        }
 
         emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
     }
