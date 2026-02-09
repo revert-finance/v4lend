@@ -118,17 +118,15 @@ contract AutoExit is Automator {
         bool isAbove = tick >= config.token1TriggerTick;
         bool isSwap = (!isAbove && config.token0Swap) || (isAbove && config.token1Swap);
 
-        // Remove all liquidity and collect fees
-        // Decrease returns total amounts (liquidity + fees combined in V4)
-        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(
+        // Collect fees first (decrease by 0), then remove all liquidity
+        (uint256 feeAmount0, uint256 feeAmount1) =
+            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
+        (uint256 liquidityAmount0, uint256 liquidityAmount1) = _decreaseLiquidity(
             params.tokenId, liquidity, params.amountRemoveMin0, params.amountRemoveMin1, params.deadline, params.hookData
         );
 
-        // We need fee amounts for onlyFees reward calculation
-        // In V4, fees are included in decrease output. We approximate by also collecting with 0 decrease.
-        // For simplicity, we treat all amounts as total (liquidity + fees).
-        uint256 feeAmount0 = amount0;
-        uint256 feeAmount1 = amount1;
+        uint256 amount0 = feeAmount0 + liquidityAmount0;
+        uint256 amount1 = feeAmount1 + liquidityAmount1;
 
         if (isSwap) {
             if (params.swapData.length == 0) {
