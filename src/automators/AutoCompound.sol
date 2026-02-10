@@ -297,6 +297,18 @@ contract AutoCompound is Automator {
         }
     }
 
+    /// @notice Withdraws ETH balance (only protocol fee portion tracked in positionBalances[0])
+    /// @param to Address to send to
+    function withdrawETH(address to) external override nonReentrant {
+        if (msg.sender != withdrawer) {
+            revert Unauthorized();
+        }
+        uint256 balance = positionBalances[0][address(0)];
+        if (balance != 0) {
+            _withdrawBalanceInternal(0, address(0), to, balance);
+        }
+    }
+
     /// @notice Management method to set reward fee (onlyOwner)
     /// @param _totalRewardX64 new total reward (max 5%)
     function setReward(uint64 _totalRewardX64) external onlyOwner {

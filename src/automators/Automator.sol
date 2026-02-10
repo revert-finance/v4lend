@@ -83,7 +83,7 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
 
     /// @notice Withdraws ETH balance
     /// @param to Address to send to
-    function withdrawETH(address to) external {
+    function withdrawETH(address to) external virtual {
         if (msg.sender != withdrawer) {
             revert Unauthorized();
         }

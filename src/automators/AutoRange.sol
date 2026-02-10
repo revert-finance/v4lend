@@ -183,17 +183,22 @@ contract AutoRange is Automator {
         uint256 amount1 = feeAmount1 + liquidityAmount1;
 
         // Deduct reward — onlyFees takes reward from fees only, otherwise from total
-        uint256 protocolReward0;
-        uint256 protocolReward1;
-        if (config.onlyFees) {
-            protocolReward0 = feeAmount0 * params.rewardX64 / Q64;
-            protocolReward1 = feeAmount1 * params.rewardX64 / Q64;
-        } else {
-            protocolReward0 = amount0 * params.rewardX64 / Q64;
-            protocolReward1 = amount1 * params.rewardX64 / Q64;
+        // Add reward to balanceBefore so leftover delta excludes it
+        {
+            uint256 protocolReward0;
+            uint256 protocolReward1;
+            if (config.onlyFees) {
+                protocolReward0 = feeAmount0 * params.rewardX64 / Q64;
+                protocolReward1 = feeAmount1 * params.rewardX64 / Q64;
+            } else {
+                protocolReward0 = amount0 * params.rewardX64 / Q64;
+                protocolReward1 = amount1 * params.rewardX64 / Q64;
+            }
+            amount0 -= protocolReward0;
+            amount1 -= protocolReward1;
+            balance0Before += protocolReward0;
+            balance1Before += protocolReward1;
         }
-        amount0 -= protocolReward0;
-        amount1 -= protocolReward1;
 
         // Swap to rebalance for new range
         if (params.amountIn != 0) {

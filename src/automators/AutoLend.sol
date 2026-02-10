@@ -219,9 +219,14 @@ contract AutoLend is Automator {
         // Redeem shares from ERC4626 vault
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
 
-        // Protocol reward is the vault yield gain
+        // Protocol reward is the vault yield gain — add to balanceBefore so leftover delta excludes it
         uint256 protocolReward = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
         uint256 depositAmount = redeemedAmount - protocolReward;
+        if (isToken0Lent) {
+            balance0Before += protocolReward;
+        } else {
+            balance1Before += protocolReward;
+        }
 
         // Cannot be vault-owned
         address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
@@ -284,7 +289,7 @@ contract AutoLend is Automator {
             IERC721(address(positionManager)).safeTransferFrom(address(this), posOwner, newTokenId);
         }
 
-        // Send leftover tokens to owner (only delta from this execution)
+        // Send leftover tokens to owner (only delta from this execution, excluding protocol rewards)
         uint256 balance0After = poolKey.currency0.balanceOfSelf();
         uint256 balance1After = poolKey.currency1.balanceOfSelf();
         uint256 leftover0 = balance0After > balance0Before ? balance0After - balance0Before : 0;

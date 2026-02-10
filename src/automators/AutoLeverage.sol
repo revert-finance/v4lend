@@ -147,21 +147,26 @@ contract AutoLeverage is Automator {
         uint256 balance0Before,
         uint256 balance1Before
     ) internal {
-        uint16 targetBps = config.targetLeverageBps;
-        if (currentDebt * 10000 >= collateralValue * targetBps) return;
+        uint256 amount0;
+        uint256 amount1;
 
-        uint256 denominator = 10000 - uint256(targetBps);
-        if (denominator == 0) return;
+        {
+            uint16 targetBps = config.targetLeverageBps;
+            if (currentDebt * 10000 >= collateralValue * targetBps) return;
 
-        uint256 borrowAmount = (uint256(targetBps) * collateralValue - currentDebt * 10000) / denominator;
-        if (borrowAmount == 0) return;
+            uint256 denominator = 10000 - uint256(targetBps);
+            if (denominator == 0) return;
 
-        // Borrow from vault
-        vault.borrow(params.tokenId, borrowAmount);
+            uint256 borrowAmount = (uint256(targetBps) * collateralValue - currentDebt * 10000) / denominator;
+            if (borrowAmount == 0) return;
 
-        uint256 amount0 = token0.balanceOfSelf() - balance0Before;
-        uint256 amount1 = token1.balanceOfSelf() - balance1Before;
-        // Note: amount0/amount1 include collected fees + borrowed tokens (snapshot was before fee collection)
+            // Borrow from vault
+            vault.borrow(params.tokenId, borrowAmount);
+
+            amount0 = token0.balanceOfSelf() - balance0Before;
+            amount1 = token1.balanceOfSelf() - balance1Before;
+            // Note: amount0/amount1 include collected fees + borrowed tokens (snapshot was before fee collection)
+        }
 
         // Swap borrowed lend token to position tokens
         if (params.amountIn0 != 0) {
@@ -180,50 +185,57 @@ contract AutoLeverage is Automator {
         }
 
         // Deduct reward before adding liquidity
-        if (config.onlyFees) {
-            // Reward only from collected fees
-            uint256 reward0 = feeAmount0 * params.rewardX64 / Q64;
-            uint256 reward1 = feeAmount1 * params.rewardX64 / Q64;
-            if (reward0 > amount0) reward0 = amount0;
-            if (reward1 > amount1) reward1 = amount1;
+        // Add reward to balance0Before/balance1Before so leftover delta excludes it
+        {
+            uint256 reward0;
+            uint256 reward1;
+            if (config.onlyFees) {
+                reward0 = feeAmount0 * params.rewardX64 / Q64;
+                reward1 = feeAmount1 * params.rewardX64 / Q64;
+                if (reward0 > amount0) reward0 = amount0;
+                if (reward1 > amount1) reward1 = amount1;
+            } else {
+                reward0 = amount0 * params.rewardX64 / Q64;
+                reward1 = amount1 * params.rewardX64 / Q64;
+            }
             amount0 -= reward0;
             amount1 -= reward1;
-        } else {
-            // Reward from total amounts
-            amount0 = _deductReward(amount0, params.rewardX64);
-            amount1 = _deductReward(amount1, params.rewardX64);
+            balance0Before += reward0;
+            balance1Before += reward1;
         }
 
         // Increase liquidity
         _handleApproval(permit2, token0, amount0);
         _handleApproval(permit2, token1, amount1);
 
-        uint128 liquidity = _calculateLiquidity(
-            positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1
-        );
+        {
+            uint128 liquidity = _calculateLiquidity(
+                positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1
+            );
 
-        // Track balances before increase to check minimum amounts added
-        uint256 balanceBeforeAdd0 = token0.balanceOfSelf();
-        uint256 balanceBeforeAdd1 = token1.balanceOfSelf();
+            // Track balances before increase to check minimum amounts added
+            uint256 balanceBeforeAdd0 = token0.balanceOfSelf();
+            uint256 balanceBeforeAdd1 = token1.balanceOfSelf();
 
-        (bytes memory actions, bytes[] memory params_array) =
-            _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
-        params_array[0] = abi.encode(
-            params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.increaseLiquidityHookData
-        );
+            (bytes memory actions, bytes[] memory params_array) =
+                _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
+            params_array[0] = abi.encode(
+                params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.increaseLiquidityHookData
+            );
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
-            abi.encode(actions, params_array), params.deadline
-        );
+            positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
+                abi.encode(actions, params_array), params.deadline
+            );
 
-        // Enforce minimum amounts added
-        uint256 added0 = balanceBeforeAdd0 - token0.balanceOfSelf();
-        uint256 added1 = balanceBeforeAdd1 - token1.balanceOfSelf();
-        if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
-            revert InsufficientAmountAdded();
+            // Enforce minimum amounts added
+            uint256 added0 = balanceBeforeAdd0 - token0.balanceOfSelf();
+            uint256 added1 = balanceBeforeAdd1 - token1.balanceOfSelf();
+            if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
+                revert InsufficientAmountAdded();
+            }
         }
 
-        // Send leftover to owner (only delta from this execution)
+        // Send leftover to owner (only delta from this execution, excluding protocol rewards)
         address owner = vault.ownerOf(params.tokenId);
         uint256 leftover0 = token0.balanceOfSelf();
         uint256 leftover1 = token1.balanceOfSelf();
@@ -297,19 +309,26 @@ contract AutoLeverage is Automator {
             lendAmount += amountOut;
         }
 
-        // Deduct reward
-        if (config.onlyFees) {
-            // Reward only from fee portion in lend token
-            uint256 feeReward;
-            if (Currency.unwrap(lendToken) == Currency.unwrap(token0)) {
-                feeReward = feeAmount0 * params.rewardX64 / Q64;
-            } else if (Currency.unwrap(lendToken) == Currency.unwrap(token1)) {
-                feeReward = feeAmount1 * params.rewardX64 / Q64;
+        // Deduct reward and add to balanceBefore so leftover delta excludes it
+        {
+            uint256 protocolReward;
+            if (config.onlyFees) {
+                // Reward only from fee portion in lend token
+                if (Currency.unwrap(lendToken) == Currency.unwrap(token0)) {
+                    protocolReward = feeAmount0 * params.rewardX64 / Q64;
+                } else if (Currency.unwrap(lendToken) == Currency.unwrap(token1)) {
+                    protocolReward = feeAmount1 * params.rewardX64 / Q64;
+                }
+                if (protocolReward > lendAmount) protocolReward = lendAmount;
+            } else {
+                protocolReward = lendAmount * params.rewardX64 / Q64;
             }
-            if (feeReward > lendAmount) feeReward = lendAmount;
-            lendAmount -= feeReward;
-        } else {
-            lendAmount = _deductReward(lendAmount, params.rewardX64);
+            lendAmount -= protocolReward;
+            if (Currency.unwrap(lendToken) == Currency.unwrap(token0)) {
+                balance0Before += protocolReward;
+            } else if (Currency.unwrap(lendToken) == Currency.unwrap(token1)) {
+                balance1Before += protocolReward;
+            }
         }
 
         // Repay debt
@@ -319,7 +338,7 @@ contract AutoLeverage is Automator {
             vault.repay(params.tokenId, lendAmount, false);
         }
 
-        // Send leftover to owner (only delta from this execution)
+        // Send leftover to owner (only delta from this execution, excluding protocol rewards)
         address owner = vault.ownerOf(params.tokenId);
         uint256 leftover0 = token0.balanceOfSelf();
         uint256 leftover1 = token1.balanceOfSelf();
