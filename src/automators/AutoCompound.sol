@@ -240,7 +240,11 @@ contract AutoCompound is Automator {
             owner = IVault(owner).ownerOf(params.tokenId);
         }
 
-        // Send tokens to owner (after deducting reward which stays in contract)
+        // Store protocol fees
+        _increaseBalance(0, token0Addr, reward0);
+        _increaseBalance(0, token1Addr, reward1);
+
+        // Send tokens to owner (after deducting reward)
         uint256 sent0 = amount0 - reward0;
         uint256 sent1 = amount1 - reward1;
         _transferToken(owner, token0, sent0, true);
