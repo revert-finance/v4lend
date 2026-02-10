@@ -168,6 +168,9 @@ contract AutoLend is Automator {
         SafeERC20.forceApprove(IERC20(idleTokenAddr), address(lendVault), idleAmount);
         uint256 shares = lendVault.deposit(idleAmount, address(this));
         SafeERC20.forceApprove(IERC20(idleTokenAddr), address(lendVault), 0);
+        if (shares == 0) {
+            revert InvalidConfig();
+        }
 
         // Store lend state and track vault reference
         lendStates[params.tokenId] = LendState({
@@ -302,8 +305,8 @@ contract AutoLend is Automator {
             // Copy config to new position
             positionConfigs[newTokenId] = config;
             delete positionConfigs[params.tokenId];
-            // Send new NFT to owner
-            IERC721(address(positionManager)).safeTransferFrom(address(this), posOwner, newTokenId);
+            // Send new NFT to owner (use transferFrom to avoid reverting for contracts without onERC721Received)
+            IERC721(address(positionManager)).transferFrom(address(this), posOwner, newTokenId);
         }
 
         // Send leftover tokens to owner (only delta from this execution, excluding protocol rewards)
