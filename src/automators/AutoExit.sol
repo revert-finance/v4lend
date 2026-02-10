@@ -141,6 +141,11 @@ contract AutoExit is Automator {
             owner = vault.ownerOf(params.tokenId);
             Currency lendToken = Currency.wrap(vault.asset());
 
+            // Vault asset must be one of the pool tokens for debt repayment to work
+            if (!(lendToken == token0) && !(lendToken == token1)) {
+                revert InvalidConfig();
+            }
+
             // Swap sells (isAbove ? token1 : token0) and buys the other
             // Repay before swap when lend token is on the sell side (or no swap)
             bool repayBeforeSwap = !isSwap || (isAbove ? (lendToken == token1) : (lendToken == token0));

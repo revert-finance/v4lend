@@ -299,6 +299,16 @@ contract AutoRange is Automator {
     function configToken(uint256 tokenId, address vault, PositionConfig calldata config) external {
         _validateOwner(positionManager, tokenId, vault);
 
+        // Validate int32 values fit within int24 range (execution casts to int24)
+        if (
+            config.lowerTickLimit > type(int24).max || config.lowerTickLimit < type(int24).min
+                || config.upperTickLimit > type(int24).max || config.upperTickLimit < type(int24).min
+                || config.lowerTickDelta > type(int24).max || config.lowerTickDelta < type(int24).min
+                || config.upperTickDelta > type(int24).max || config.upperTickDelta < type(int24).min
+        ) {
+            revert InvalidConfig();
+        }
+
         positionConfigs[tokenId] = config;
 
         emit PositionConfigured(
