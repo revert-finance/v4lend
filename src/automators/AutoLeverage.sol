@@ -115,6 +115,9 @@ contract AutoLeverage is Automator {
         // Snapshot balances before execution to avoid paying out prior protocol rewards
         uint256 balance0Before = token0.balanceOfSelf();
         uint256 balance1Before = token1.balanceOfSelf();
+        // Snapshot lend token separately when it's a third token (not in the pool pair)
+        bool isThirdToken = !(lendToken == token0) && !(lendToken == token1);
+        uint256 lendBalanceBefore = isThirdToken ? lendToken.balanceOfSelf() : 0;
 
         // Collect fees first and track amounts
         (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
@@ -124,7 +127,17 @@ contract AutoLeverage is Automator {
         if (params.leverageUp) {
             _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1, balance0Before, balance1Before);
         } else {
-            _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1, balance0Before, balance1Before);
+            uint256 lendReward = _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1, balance0Before, balance1Before);
+            lendBalanceBefore += lendReward;
+        }
+
+        // Return residual lend token when it's a third token (not token0 or token1)
+        // This handles cases like capping repayment to currentDebt or unswapped leftovers
+        if (isThirdToken) {
+            uint256 lendBalance = lendToken.balanceOfSelf();
+            if (lendBalance > lendBalanceBefore) {
+                _transferToken(vault.ownerOf(params.tokenId), lendToken, lendBalance - lendBalanceBefore, true);
+            }
         }
 
         (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
@@ -247,6 +260,7 @@ contract AutoLeverage is Automator {
         }
     }
 
+    /// @return lendReward Protocol reward amount when lendToken is a third token (0 otherwise)
     function _leverageDown(
         ExecuteParams calldata params,
         IVault vault,
@@ -260,26 +274,28 @@ contract AutoLeverage is Automator {
         uint256 feeAmount1,
         uint256 balance0Before,
         uint256 balance1Before
-    ) internal {
-        uint16 targetBps = config.targetLeverageBps;
-        if (currentDebt * 10000 <= collateralValue * targetBps) return;
-
-        uint256 denominator = 10000 - uint256(targetBps);
-        if (denominator == 0) return;
-
-        uint256 repayAmount = (currentDebt * 10000 - uint256(targetBps) * collateralValue) / denominator;
-
-        uint128 currentLiquidity = positionManager.getPositionLiquidity(params.tokenId);
-        if (currentLiquidity == 0) return;
-
-        // Calculate proportional liquidity to remove
-        // Use collateralValue as proxy for total position value
+    ) internal returns (uint256 lendReward) {
         uint128 liquidityToRemove;
-        if (collateralValue > 0) {
-            liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / collateralValue);
+        {
+            uint16 targetBps = config.targetLeverageBps;
+            if (currentDebt * 10000 <= collateralValue * targetBps) return 0;
+
+            uint256 denominator = 10000 - uint256(targetBps);
+            if (denominator == 0) return 0;
+
+            uint256 repayAmount = (currentDebt * 10000 - uint256(targetBps) * collateralValue) / denominator;
+
+            uint128 currentLiquidity = positionManager.getPositionLiquidity(params.tokenId);
+            if (currentLiquidity == 0) return 0;
+
+            // Calculate proportional liquidity to remove
+            // Use collateralValue as proxy for total position value
+            if (collateralValue > 0) {
+                liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / collateralValue);
+            }
+            if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
+            if (liquidityToRemove == 0) return 0;
         }
-        if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
-        if (liquidityToRemove == 0) return;
 
         // Remove partial liquidity
         (uint256 amount0, uint256 amount1) = _decreaseLiquidity(
@@ -328,6 +344,8 @@ contract AutoLeverage is Automator {
                 balance0Before += protocolReward;
             } else if (Currency.unwrap(lendToken) == Currency.unwrap(token1)) {
                 balance1Before += protocolReward;
+            } else {
+                lendReward = protocolReward;
             }
         }
 
