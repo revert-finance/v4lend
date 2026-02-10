@@ -100,12 +100,6 @@ contract AutoCompound is Automator {
         (uint256 amount0, uint256 amount1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
 
-        // Add previous leftover balances
-        amount0 += positionBalances[params.tokenId][token0Addr];
-        amount1 += positionBalances[params.tokenId][token1Addr];
-
-        if (amount0 == 0 && amount1 == 0) return;
-
         uint256 a0;
         uint256 a1;
         uint256 r0;
@@ -138,6 +132,17 @@ contract AutoCompound is Automator {
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256 compounded0, uint256 compounded1, uint256 fees0, uint256 fees1) {
+        // Compute protocol fees only on newly collected fees (not on prior leftovers)
+        uint64 rewardX64 = totalRewardX64;
+        fees0 = amount0 * rewardX64 / (rewardX64 + Q64);
+        fees1 = amount1 * rewardX64 / (rewardX64 + Q64);
+        amount0 -= fees0;
+        amount1 -= fees1;
+
+        // Add previous leftover balances (already fee-processed from prior runs)
+        amount0 += positionBalances[params.tokenId][token0Addr];
+        amount1 += positionBalances[params.tokenId][token1Addr];
+
         // Optional swap to rebalance
         if (params.amountIn != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
@@ -158,16 +163,12 @@ contract AutoCompound is Automator {
             }
         }
 
-        uint64 rewardX64 = totalRewardX64;
-        uint256 maxAddAmount0 = amount0 * Q64 / (rewardX64 + Q64);
-        uint256 maxAddAmount1 = amount1 * Q64 / (rewardX64 + Q64);
-
-        if (maxAddAmount0 != 0 || maxAddAmount1 != 0) {
-            _handleApproval(permit2, token0, maxAddAmount0);
-            _handleApproval(permit2, token1, maxAddAmount1);
+        if (amount0 != 0 || amount1 != 0) {
+            _handleApproval(permit2, token0, amount0);
+            _handleApproval(permit2, token1, amount1);
 
             uint128 liquidity = _calculateLiquidity(
-                positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, maxAddAmount0, maxAddAmount1
+                positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1
             );
 
             (bytes memory actions, bytes[] memory params_array) =
@@ -179,7 +180,7 @@ contract AutoCompound is Automator {
             uint256 balance0Before = token0.balanceOfSelf();
             uint256 balance1Before = token1.balanceOfSelf();
 
-            positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, maxAddAmount0, maxAddAmount1)}(
+            positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
                 abi.encode(actions, params_array), params.deadline
             );
 
@@ -187,13 +188,9 @@ contract AutoCompound is Automator {
             compounded1 = balance1Before - token1.balanceOfSelf();
         }
 
-        // Protocol fees = reserved amount (not added as liquidity)
-        fees0 = amount0 - maxAddAmount0;
-        fees1 = amount1 - maxAddAmount1;
-
         // Store leftover (slippage diff) for position owner
-        _setBalance(params.tokenId, token0Addr, maxAddAmount0 - compounded0);
-        _setBalance(params.tokenId, token1Addr, maxAddAmount1 - compounded1);
+        _setBalance(params.tokenId, token0Addr, amount0 - compounded0);
+        _setBalance(params.tokenId, token1Addr, amount1 - compounded1);
 
         // Store protocol fees
         _increaseBalance(0, token0Addr, fees0);
@@ -209,6 +206,17 @@ contract AutoCompound is Automator {
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256, uint256, uint256, uint256) {
+        // Compute protocol fees only on newly collected fees (not on prior leftovers)
+        uint64 rewardX64 = totalRewardX64;
+        uint256 reward0 = amount0 * rewardX64 / (rewardX64 + Q64);
+        uint256 reward1 = amount1 * rewardX64 / (rewardX64 + Q64);
+        amount0 -= reward0;
+        amount1 -= reward1;
+
+        // Add previous leftover balances (already fee-processed from prior runs)
+        amount0 += positionBalances[params.tokenId][token0Addr];
+        amount1 += positionBalances[params.tokenId][token1Addr];
+
         // Perform swap based on harvest mode
         if (params.mode == CompoundMode.HARVEST_TOKEN_0 && amount1 != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
@@ -225,11 +233,6 @@ contract AutoCompound is Automator {
         }
         // HARVEST_TOKENS: no swap
 
-        // Deduct reward
-        uint64 rewardX64 = totalRewardX64;
-        uint256 reward0 = amount0 * rewardX64 / (rewardX64 + Q64);
-        uint256 reward1 = amount1 * rewardX64 / (rewardX64 + Q64);
-
         // Clear leftover balances
         _setBalance(params.tokenId, token0Addr, 0);
         _setBalance(params.tokenId, token1Addr, 0);
@@ -244,13 +247,11 @@ contract AutoCompound is Automator {
         _increaseBalance(0, token0Addr, reward0);
         _increaseBalance(0, token1Addr, reward1);
 
-        // Send tokens to owner (after deducting reward)
-        uint256 sent0 = amount0 - reward0;
-        uint256 sent1 = amount1 - reward1;
-        _transferToken(owner, token0, sent0, true);
-        _transferToken(owner, token1, sent1, true);
+        // Send tokens to owner (rewards already deducted, leftovers already included)
+        _transferToken(owner, token0, amount0, true);
+        _transferToken(owner, token1, amount1, true);
 
-        return (sent0, sent1, reward0, reward1);
+        return (amount0, amount1, reward0, reward1);
     }
 
     /// @notice Withdraws leftover token balance for a position
