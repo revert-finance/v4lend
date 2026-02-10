@@ -170,10 +170,12 @@ contract AutoExit is Automator {
                 revert MissingSwapData();
             }
 
-            // If onlyFees, deduct reward before swap
+            // If onlyFees, deduct reward before swap (cap to remaining balance after debt repayment)
             if (config.onlyFees) {
-                amount0 -= feeAmount0 * params.rewardX64 / Q64;
-                amount1 -= feeAmount1 * params.rewardX64 / Q64;
+                uint256 reward0 = feeAmount0 * params.rewardX64 / Q64;
+                uint256 reward1 = feeAmount1 * params.rewardX64 / Q64;
+                amount0 -= reward0 > amount0 ? amount0 : reward0;
+                amount1 -= reward1 > amount1 ? amount1 : reward1;
             }
 
             uint256 swapAmount = isAbove ? amount1 : amount0;
@@ -201,9 +203,11 @@ contract AutoExit is Automator {
                 }
             }
         } else {
-            // No swap - reward from configured source
-            amount0 -= (config.onlyFees ? feeAmount0 : amount0) * params.rewardX64 / Q64;
-            amount1 -= (config.onlyFees ? feeAmount1 : amount1) * params.rewardX64 / Q64;
+            // No swap - reward from configured source (cap to remaining balance after debt repayment)
+            uint256 reward0 = (config.onlyFees ? feeAmount0 : amount0) * params.rewardX64 / Q64;
+            uint256 reward1 = (config.onlyFees ? feeAmount1 : amount1) * params.rewardX64 / Q64;
+            amount0 -= reward0 > amount0 ? amount0 : reward0;
+            amount1 -= reward1 > amount1 ? amount1 : reward1;
         }
 
         // Send remaining tokens to owner
