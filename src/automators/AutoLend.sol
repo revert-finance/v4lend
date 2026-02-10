@@ -113,6 +113,9 @@ contract AutoLend is Automator {
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
+        if (lendStates[params.tokenId].shares != 0) {
+            revert InvalidConfig();
+        }
 
         // Cannot be vault-owned
         address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);

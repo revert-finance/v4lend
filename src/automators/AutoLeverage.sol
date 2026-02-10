@@ -107,6 +107,14 @@ contract AutoLeverage is Automator {
             revert NotReady();
         }
 
+        // Validate direction matches current state before collecting fees
+        if (params.leverageUp && currentRatio >= targetRatio) {
+            revert InvalidConfig();
+        }
+        if (!params.leverageUp && currentRatio <= targetRatio) {
+            revert InvalidConfig();
+        }
+
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
