@@ -186,14 +186,7 @@ contract AutoExit is Automator {
                 amount1 = isAbove ? amount1 - amountInDelta : amount1 + amountOutDelta;
             }
 
-            // When swap and !onlyFees - reward from target token only
-            if (!config.onlyFees) {
-                if (isAbove) {
-                    amount0 -= amount0 * params.rewardX64 / Q64;
-                } else {
-                    amount1 -= amount1 * params.rewardX64 / Q64;
-                }
-            }
+            // When swap and onlyFees already deducted above; !onlyFees deducted after vault repayment below
         } else {
             // No swap - reward from configured source (cap to remaining balance after debt repayment)
             uint256 reward0 = (config.onlyFees ? feeAmount0 : amount0) * params.rewardX64 / Q64;
@@ -210,6 +203,15 @@ contract AutoExit is Automator {
             if (repayAfterSwap) {
                 (amount0, amount1) =
                     _repayVaultDebt(vault, params.tokenId, lendToken, token0, token1, amount0, amount1);
+            }
+        }
+
+        // When swap and !onlyFees - deduct reward after vault repayment so debt gets full proceeds
+        if (isSwap && !config.onlyFees) {
+            if (isAbove) {
+                amount0 -= amount0 * params.rewardX64 / Q64;
+            } else {
+                amount1 -= amount1 * params.rewardX64 / Q64;
             }
         }
 

@@ -243,8 +243,9 @@ contract AutoLend is Automator {
             weth.withdraw(redeemedAmount);
         }
 
-        // Protocol reward is the vault yield gain — add to balanceBefore so leftover delta excludes it
-        uint256 protocolReward = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
+        // Protocol reward is a fraction of the vault yield gain
+        uint256 yieldGain = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
+        uint256 protocolReward = yieldGain * config.maxRewardX64 / Q64;
         uint256 depositAmount = redeemedAmount - protocolReward;
         if (isToken0Lent) {
             balance0Before += protocolReward;
