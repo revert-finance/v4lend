@@ -376,11 +376,6 @@ contract AutoLeverage is Automator {
         }
     }
 
-    function _deductReward(uint256 amount, uint64 rewardX64) internal pure returns (uint256) {
-        if (rewardX64 == 0 || amount == 0) return amount;
-        return amount - (amount * rewardX64 / Q64);
-    }
-
     /// @notice Position owner configures auto-leverage
     function configToken(uint256 tokenId, PositionConfig calldata config) external {
         if (config.isActive) {

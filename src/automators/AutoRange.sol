@@ -157,6 +157,9 @@ contract AutoRange is Automator {
         int24 newTickLower = baseTick + int24(config.lowerTickDelta);
         int24 newTickUpper = baseTick + int24(config.upperTickDelta);
 
+        if (newTickLower >= newTickUpper) {
+            revert InvalidConfig();
+        }
         if (newTickLower == tickLower && newTickUpper == tickUpper) {
             revert SameRange();
         }

@@ -311,7 +311,7 @@ contract AutoCompound is Automator {
     }
 
     /// @notice Management method to set reward fee (onlyOwner)
-    /// @param _totalRewardX64 new total reward (max 5%)
+    /// @param _totalRewardX64 new total reward (max 2%)
     function setReward(uint64 _totalRewardX64) external onlyOwner {
         if (_totalRewardX64 > MAX_REWARD_X64) {
             revert InvalidConfig();

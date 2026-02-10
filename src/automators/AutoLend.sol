@@ -226,14 +226,14 @@ contract AutoLend is Automator {
         // Check withdrawal trigger zones
         bool isToken0Lent = state.lentToken == Currency.unwrap(poolKey.currency0);
         if (isToken0Lent) {
-            // Token0 was lent (tick was above range). Withdraw when tick comes back near range.
-            if (currentTick >= tickUpper + config.upperTickZoneWithdraw) {
-                revert NotReady(); // Still too far above
-            }
-        } else {
-            // Token1 was lent (tick was below range). Withdraw when tick comes back near range.
+            // Token0 was lent (tick was below range). Withdraw when tick comes back up near range.
             if (currentTick < tickLower - config.lowerTickZoneWithdraw) {
                 revert NotReady(); // Still too far below
+            }
+        } else {
+            // Token1 was lent (tick was above range). Withdraw when tick comes back down near range.
+            if (currentTick >= tickUpper + config.upperTickZoneWithdraw) {
+                revert NotReady(); // Still too far above
             }
         }
 
