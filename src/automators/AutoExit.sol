@@ -134,6 +134,37 @@ contract AutoExit is Automator {
         uint256 amount0 = feeAmount0 + liquidityAmount0;
         uint256 amount1 = feeAmount1 + liquidityAmount1;
 
+        // For vault positions, repay debt before swapping to ensure lend token is available
+        address owner;
+        if (isVaultCall) {
+            IVault vault = IVault(msg.sender);
+            owner = vault.ownerOf(params.tokenId);
+
+            Currency lendToken = Currency.wrap(vault.asset());
+            uint256 lendAmount;
+            if (lendToken == token0) {
+                lendAmount = amount0;
+            } else if (lendToken == token1) {
+                lendAmount = amount1;
+            }
+
+            if (lendAmount > 0) {
+                (uint256 debt,,,,) = vault.loanInfo(params.tokenId);
+                if (debt > 0) {
+                    uint256 repayAmount = lendAmount > debt ? debt : lendAmount;
+                    SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), msg.sender, repayAmount);
+                    (uint256 repaid,) = vault.repay(params.tokenId, repayAmount, false);
+                    if (lendToken == token0) {
+                        amount0 -= repaid;
+                    } else {
+                        amount1 -= repaid;
+                    }
+                }
+            }
+        } else {
+            owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
+        }
+
         if (isSwap) {
             if (params.swapData.length == 0) {
                 revert MissingSwapData();
@@ -173,38 +204,6 @@ contract AutoExit is Automator {
             // No swap - reward from configured source
             amount0 -= (config.onlyFees ? feeAmount0 : amount0) * params.rewardX64 / Q64;
             amount1 -= (config.onlyFees ? feeAmount1 : amount1) * params.rewardX64 / Q64;
-        }
-
-        // Determine owner and handle vault debt repayment
-        address owner;
-        if (isVaultCall) {
-            IVault vault = IVault(msg.sender);
-            owner = vault.ownerOf(params.tokenId);
-
-            // For vault positions, repay debt with lend token
-            Currency lendToken = Currency.wrap(vault.asset());
-            uint256 lendAmount;
-            if (lendToken == token0) {
-                lendAmount = amount0;
-            } else if (lendToken == token1) {
-                lendAmount = amount1;
-            }
-
-            if (lendAmount > 0) {
-                (uint256 debt,,,,) = vault.loanInfo(params.tokenId);
-                if (debt > 0) {
-                    uint256 repayAmount = lendAmount > debt ? debt : lendAmount;
-                    SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), msg.sender, repayAmount);
-                    (uint256 repaid,) = vault.repay(params.tokenId, repayAmount, false);
-                    if (lendToken == token0) {
-                        amount0 -= repaid;
-                    } else {
-                        amount1 -= repaid;
-                    }
-                }
-            }
-        } else {
-            owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
         }
 
         // Send remaining tokens to owner
