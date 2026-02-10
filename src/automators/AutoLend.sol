@@ -55,6 +55,9 @@ contract AutoLend is Automator {
     /// @notice Owner-configured ERC4626 vaults per token address
     mapping(address => IERC4626) public autoLendVaults;
 
+    /// @notice Tracks which addresses are active lend vault (share token) addresses
+    mapping(address => bool) public isLendVault;
+
     /// @notice Per-position configuration
     mapping(uint256 => PositionConfig) public positionConfigs;
 
@@ -87,7 +90,16 @@ contract AutoLend is Automator {
 
     /// @notice Owner configures which ERC4626 vault to use per token
     function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
+        // Remove old vault from tracking
+        address oldVault = address(autoLendVaults[token]);
+        if (oldVault != address(0)) {
+            isLendVault[oldVault] = false;
+        }
+        // Set new vault
         autoLendVaults[token] = vault;
+        if (address(vault) != address(0)) {
+            isLendVault[address(vault)] = true;
+        }
         emit SetAutoLendVault(token, vault);
     }
 
@@ -352,6 +364,26 @@ contract AutoLend is Automator {
         newTokenId = positionManager.nextTokenId() - 1;
     }
 
+    /// @notice Withdraws token balance (accumulated protocol rewards), skipping lend vault share tokens
+    function withdrawBalances(address[] calldata tokens, address to) external override {
+        if (msg.sender != withdrawer) {
+            revert Unauthorized();
+        }
+
+        uint256 i;
+        uint256 count = tokens.length;
+        for (; i < count; ++i) {
+            address token = tokens[i];
+            if (isLendVault[token]) {
+                continue;
+            }
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance != 0) {
+                _transferToken(to, Currency.wrap(token), balance, true);
+            }
+        }
+    }
+
     /// @notice Position owner configures auto-lend
     function configToken(uint256 tokenId, PositionConfig calldata config) external {
         address owner = IERC721(address(positionManager)).ownerOf(tokenId);
@@ -361,6 +393,14 @@ contract AutoLend is Automator {
         }
         if (owner != msg.sender) {
             revert Unauthorized();
+        }
+
+        // Disallow positions where pool tokens are lend vault share tokens
+        if (config.isActive) {
+            (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+            if (isLendVault[Currency.unwrap(poolKey.currency0)] || isLendVault[Currency.unwrap(poolKey.currency1)]) {
+                revert InvalidConfig();
+            }
         }
 
         positionConfigs[tokenId] = config;
