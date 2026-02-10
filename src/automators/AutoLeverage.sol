@@ -173,13 +173,13 @@ contract AutoLeverage is Automator {
 
         {
             uint16 targetBps = config.targetLeverageBps;
-            if (currentDebt * 10000 >= collateralValue * targetBps) return;
+            if (currentDebt * 10000 >= collateralValue * targetBps) revert NotReady();
 
             uint256 denominator = 10000 - uint256(targetBps);
-            if (denominator == 0) return;
+            if (denominator == 0) revert NotReady();
 
             uint256 borrowAmount = (uint256(targetBps) * collateralValue - currentDebt * 10000) / denominator;
-            if (borrowAmount == 0) return;
+            if (borrowAmount == 0) revert NotReady();
 
             // Borrow from vault
             vault.borrow(params.tokenId, borrowAmount);
@@ -286,15 +286,15 @@ contract AutoLeverage is Automator {
         uint128 liquidityToRemove;
         {
             uint16 targetBps = config.targetLeverageBps;
-            if (currentDebt * 10000 <= collateralValue * targetBps) return 0;
+            if (currentDebt * 10000 <= collateralValue * targetBps) revert NotReady();
 
             uint256 denominator = 10000 - uint256(targetBps);
-            if (denominator == 0) return 0;
+            if (denominator == 0) revert NotReady();
 
             uint256 repayAmount = (currentDebt * 10000 - uint256(targetBps) * collateralValue) / denominator;
 
             uint128 currentLiquidity = positionManager.getPositionLiquidity(params.tokenId);
-            if (currentLiquidity == 0) return 0;
+            if (currentLiquidity == 0) revert NoLiquidity();
 
             // Calculate proportional liquidity to remove
             // Use collateralValue as proxy for total position value
@@ -302,7 +302,7 @@ contract AutoLeverage is Automator {
                 liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / collateralValue);
             }
             if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
-            if (liquidityToRemove == 0) return 0;
+            if (liquidityToRemove == 0) revert NotReady();
         }
 
         // Remove partial liquidity

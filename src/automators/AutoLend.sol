@@ -164,10 +164,15 @@ contract AutoLend is Automator {
         uint256 reward = idleAmount * params.rewardX64 / Q64;
         idleAmount -= reward;
 
-        // Deposit into ERC4626 vault
-        SafeERC20.forceApprove(IERC20(idleTokenAddr), address(lendVault), idleAmount);
+        // Deposit into ERC4626 vault (wrap native ETH to WETH first if needed)
+        address depositTokenAddr = idleTokenAddr;
+        if (idleTokenAddr == address(0)) {
+            weth.deposit{value: idleAmount}();
+            depositTokenAddr = address(weth);
+        }
+        SafeERC20.forceApprove(IERC20(depositTokenAddr), address(lendVault), idleAmount);
         uint256 shares = lendVault.deposit(idleAmount, address(this));
-        SafeERC20.forceApprove(IERC20(idleTokenAddr), address(lendVault), 0);
+        SafeERC20.forceApprove(IERC20(depositTokenAddr), address(lendVault), 0);
         if (shares == 0) {
             revert InvalidConfig();
         }
@@ -232,8 +237,11 @@ contract AutoLend is Automator {
             }
         }
 
-        // Redeem shares from ERC4626 vault
+        // Redeem shares from ERC4626 vault (unwrap WETH to ETH if lent token was native)
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
+        if (state.lentToken == address(0)) {
+            weth.withdraw(redeemedAmount);
+        }
 
         // Protocol reward is the vault yield gain — add to balanceBefore so leftover delta excludes it
         uint256 protocolReward = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
@@ -382,7 +390,8 @@ contract AutoLend is Automator {
         uint256 count = tokens.length;
         for (; i < count; ++i) {
             address token = tokens[i];
-            if (vaultPositionCount[token] > 0) {
+            // Skip native ETH (use withdrawETH instead) and active vault share tokens
+            if (token == address(0) || vaultPositionCount[token] > 0) {
                 continue;
             }
             uint256 balance = IERC20(token).balanceOf(address(this));

@@ -219,6 +219,87 @@ contract AutoLendTest is AutomatorTestBase {
         autoLend.deposit(params);
     }
 
+    // --- Native ETH Pool Tests ---
+
+    function test_DepositAndWithdrawNativeETH() public {
+        PoolKey memory poolKey = _createETHPool();
+        // Need full range for swap liquidity
+        _createFullRangePositionETH(poolKey);
+        uint256 tokenId = _createNarrowPositionETH(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Configure WETH lending vault for native ETH (address(0))
+        autoLend.setAutoLendVault(address(0), IERC4626(address(wethLendVault)));
+
+        // Configure auto-lend with wide withdrawal zone
+        AutoLend.PositionConfig memory config = AutoLend.PositionConfig({
+            isActive: true,
+            lowerTickZone: 0,
+            upperTickZone: 0,
+            lowerTickZoneWithdraw: 10000,
+            upperTickZoneWithdraw: 10000,
+            maxRewardX64: uint64(Q64 / 100)
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.configToken(tokenId, config);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoLend), true);
+
+        // Move price below range (sell ETH for USDC → tick decreases)
+        // When tick is below position range, idle token = currency0 = native ETH
+        _swapExactInputSingleETH(poolKey, true, 10 ether, 0);
+
+        int24 newTick = _getCurrentTick(poolKey);
+        console.log("ETH pool tick after swap:", newTick);
+        console.log("Position tickLower:", posInfo.tickLower());
+        assertTrue(newTick < posInfo.tickLower(), "Tick should be below position range");
+
+        // Execute deposit - this should wrap ETH to WETH and deposit to ERC4626
+        AutoLend.DepositParams memory depositParams = AutoLend.DepositParams({
+            tokenId: tokenId,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            rewardX64: 0,
+            hookData: bytes("")
+        });
+
+        vm.prank(operator);
+        autoLend.deposit(depositParams);
+
+        // Position should have 0 liquidity
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
+        assertEq(liquidityAfter, 0, "Position should have 0 liquidity after lend deposit");
+
+        // Lend state should be set with address(0) as lent token
+        (address lentToken, uint256 shares, uint256 amount, address lendVault) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "Should have lending shares");
+        assertGt(amount, 0, "Should have lending amount");
+        assertEq(lentToken, address(0), "Lent token should be native ETH (address(0))");
+        assertEq(lendVault, address(wethLendVault), "Lend vault should be WETH vault");
+
+        // WETH vault should have received WETH
+        assertGt(IERC20(address(weth)).balanceOf(address(wethLendVault)), 0, "WETH vault should hold WETH");
+
+        // Move price back towards range (buy ETH with USDC → tick increases)
+        // Small swap to bring tick near position range without overshooting
+        _swapExactInputSingleETH(poolKey, false, 5000e6, 0);
+
+        // Withdraw - this should redeem WETH from ERC4626, unwrap to ETH, add liquidity
+        AutoLend.WithdrawParams memory withdrawParams =
+            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes("")});
+
+        vm.prank(operator);
+        autoLend.withdraw(withdrawParams);
+
+        // Lend state should be cleared
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "Shares should be 0 after withdraw");
+    }
+
     // --- Deposit + Withdraw Flow ---
 
     function test_DepositAndWithdraw() public {
