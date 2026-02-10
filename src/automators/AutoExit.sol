@@ -88,6 +88,12 @@ contract AutoExit is Automator {
         }
         if (isVaultCall) {
             _validateCaller(positionManager, params.tokenId);
+        } else {
+            // Vault-owned positions must use executeWithVault to ensure debt repayment
+            address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
+            if (vaults[posOwner]) {
+                revert Unauthorized();
+            }
         }
 
         PositionConfig memory config = positionConfigs[params.tokenId];

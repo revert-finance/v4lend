@@ -310,7 +310,7 @@ contract AutoLeverage is Automator {
             if (config.targetLeverageBps > 9900) {
                 revert InvalidConfig();
             }
-            if (config.rebalanceThresholdBps == 0) {
+            if (config.rebalanceThresholdBps == 0 || config.rebalanceThresholdBps > config.targetLeverageBps) {
                 revert InvalidConfig();
             }
         }
