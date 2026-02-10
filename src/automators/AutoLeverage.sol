@@ -112,15 +112,19 @@ contract AutoLeverage is Automator {
         Currency token1 = poolKey.currency1;
         Currency lendToken = Currency.wrap(vault.asset());
 
+        // Snapshot balances before execution to avoid paying out prior protocol rewards
+        uint256 balance0Before = token0.balanceOfSelf();
+        uint256 balance1Before = token1.balanceOfSelf();
+
         // Collect fees first and track amounts
         (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
             params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData
         );
 
         if (params.leverageUp) {
-            _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1);
+            _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1, balance0Before, balance1Before);
         } else {
-            _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1);
+            _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1, balance0Before, balance1Before);
         }
 
         (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
@@ -139,7 +143,9 @@ contract AutoLeverage is Automator {
         uint256 collateralValue,
         PositionConfig memory config,
         uint256 feeAmount0,
-        uint256 feeAmount1
+        uint256 feeAmount1,
+        uint256 balance0Before,
+        uint256 balance1Before
     ) internal {
         uint16 targetBps = config.targetLeverageBps;
         if (currentDebt * 10000 >= collateralValue * targetBps) return;
@@ -153,8 +159,9 @@ contract AutoLeverage is Automator {
         // Borrow from vault
         vault.borrow(params.tokenId, borrowAmount);
 
-        uint256 amount0 = token0.balanceOfSelf();
-        uint256 amount1 = token1.balanceOfSelf();
+        uint256 amount0 = token0.balanceOfSelf() - balance0Before;
+        uint256 amount1 = token1.balanceOfSelf() - balance1Before;
+        // Note: amount0/amount1 include collected fees + borrowed tokens (snapshot was before fee collection)
 
         // Swap borrowed lend token to position tokens
         if (params.amountIn0 != 0) {
@@ -195,6 +202,10 @@ contract AutoLeverage is Automator {
             positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1
         );
 
+        // Track balances before increase to check minimum amounts added
+        uint256 balanceBeforeAdd0 = token0.balanceOfSelf();
+        uint256 balanceBeforeAdd1 = token1.balanceOfSelf();
+
         (bytes memory actions, bytes[] memory params_array) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
         params_array[0] = abi.encode(
@@ -205,10 +216,23 @@ contract AutoLeverage is Automator {
             abi.encode(actions, params_array), params.deadline
         );
 
-        // Send leftover to owner
+        // Enforce minimum amounts added
+        uint256 added0 = balanceBeforeAdd0 - token0.balanceOfSelf();
+        uint256 added1 = balanceBeforeAdd1 - token1.balanceOfSelf();
+        if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
+            revert InsufficientAmountAdded();
+        }
+
+        // Send leftover to owner (only delta from this execution)
         address owner = vault.ownerOf(params.tokenId);
-        _transferToken(owner, token0, token0.balanceOfSelf(), true);
-        _transferToken(owner, token1, token1.balanceOfSelf(), true);
+        uint256 leftover0 = token0.balanceOfSelf();
+        uint256 leftover1 = token1.balanceOfSelf();
+        if (leftover0 > balance0Before) {
+            _transferToken(owner, token0, leftover0 - balance0Before, true);
+        }
+        if (leftover1 > balance1Before) {
+            _transferToken(owner, token1, leftover1 - balance1Before, true);
+        }
     }
 
     function _leverageDown(
@@ -221,7 +245,9 @@ contract AutoLeverage is Automator {
         uint256 collateralValue,
         PositionConfig memory config,
         uint256 feeAmount0,
-        uint256 feeAmount1
+        uint256 feeAmount1,
+        uint256 balance0Before,
+        uint256 balance1Before
     ) internal {
         uint16 targetBps = config.targetLeverageBps;
         if (currentDebt * 10000 <= collateralValue * targetBps) return;
@@ -293,10 +319,16 @@ contract AutoLeverage is Automator {
             vault.repay(params.tokenId, lendAmount, false);
         }
 
-        // Send leftover to owner
+        // Send leftover to owner (only delta from this execution)
         address owner = vault.ownerOf(params.tokenId);
-        _transferToken(owner, token0, token0.balanceOfSelf(), true);
-        _transferToken(owner, token1, token1.balanceOfSelf(), true);
+        uint256 leftover0 = token0.balanceOfSelf();
+        uint256 leftover1 = token1.balanceOfSelf();
+        if (leftover0 > balance0Before) {
+            _transferToken(owner, token0, leftover0 - balance0Before, true);
+        }
+        if (leftover1 > balance1Before) {
+            _transferToken(owner, token1, leftover1 - balance1Before, true);
+        }
     }
 
     function _deductReward(uint256 amount, uint64 rewardX64) internal pure returns (uint256) {

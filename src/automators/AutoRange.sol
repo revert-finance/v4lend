@@ -117,6 +117,10 @@ contract AutoRange is Automator {
         Currency token1 = poolKey.currency1;
         int24 tickSpacing = poolKey.tickSpacing;
 
+        // Snapshot balances before execution to avoid paying out prior protocol rewards
+        uint256 balance0Before = token0.balanceOfSelf();
+        uint256 balance1Before = token1.balanceOfSelf();
+
         // Get current tick
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
         int24 tickLower = positionInfo.tickLower();
@@ -232,14 +236,16 @@ contract AutoRange is Automator {
         positionConfigs[newTokenId] = config;
         delete positionConfigs[params.tokenId];
 
-        // Send leftover tokens to owner (excluding protocol rewards which stay in contract)
-        uint256 leftover0 = token0.balanceOfSelf();
-        uint256 leftover1 = token1.balanceOfSelf();
-        if (leftover0 > protocolReward0) {
-            _transferToken(owner, token0, leftover0 - protocolReward0, true);
+        // Send leftover tokens to owner (only the delta from this execution, excluding protocol rewards)
+        uint256 balance0After = token0.balanceOfSelf();
+        uint256 balance1After = token1.balanceOfSelf();
+        uint256 leftover0 = balance0After > balance0Before ? balance0After - balance0Before : 0;
+        uint256 leftover1 = balance1After > balance1Before ? balance1After - balance1Before : 0;
+        if (leftover0 > 0) {
+            _transferToken(owner, token0, leftover0, true);
         }
-        if (leftover1 > protocolReward1) {
-            _transferToken(owner, token1, leftover1 - protocolReward1, true);
+        if (leftover1 > 0) {
+            _transferToken(owner, token1, leftover1, true);
         }
 
         emit AutoRange(params.tokenId, newTokenId);

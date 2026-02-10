@@ -185,6 +185,11 @@ contract AutoLend is Automator {
         PositionConfig memory config = positionConfigs[params.tokenId];
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
+
+        // Snapshot balances before execution to avoid paying out prior protocol rewards
+        uint256 balance0Before = poolKey.currency0.balanceOfSelf();
+        uint256 balance1Before = poolKey.currency1.balanceOfSelf();
+
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
         int24 tickWidth = tickUpper - tickLower;
@@ -279,16 +284,16 @@ contract AutoLend is Automator {
             IERC721(address(positionManager)).safeTransferFrom(address(this), posOwner, newTokenId);
         }
 
-        // Send leftover tokens to owner (excluding protocol rewards which stay in contract)
-        uint256 leftover0 = poolKey.currency0.balanceOfSelf();
-        uint256 leftover1 = poolKey.currency1.balanceOfSelf();
-        uint256 reward0 = isToken0Lent ? protocolReward : 0;
-        uint256 reward1 = isToken0Lent ? 0 : protocolReward;
-        if (leftover0 > reward0) {
-            _transferToken(posOwner, poolKey.currency0, leftover0 - reward0, true);
+        // Send leftover tokens to owner (only delta from this execution)
+        uint256 balance0After = poolKey.currency0.balanceOfSelf();
+        uint256 balance1After = poolKey.currency1.balanceOfSelf();
+        uint256 leftover0 = balance0After > balance0Before ? balance0After - balance0Before : 0;
+        uint256 leftover1 = balance1After > balance1Before ? balance1After - balance1Before : 0;
+        if (leftover0 > 0) {
+            _transferToken(posOwner, poolKey.currency0, leftover0, true);
         }
-        if (leftover1 > reward1) {
-            _transferToken(posOwner, poolKey.currency1, leftover1 - reward1, true);
+        if (leftover1 > 0) {
+            _transferToken(posOwner, poolKey.currency1, leftover1, true);
         }
 
         emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
