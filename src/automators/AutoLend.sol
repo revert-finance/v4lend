@@ -79,6 +79,7 @@ contract AutoLend is Automator {
     struct WithdrawParams {
         uint256 tokenId;
         uint256 deadline;
+        uint64 rewardX64;
         bytes hookData;
     }
 
@@ -204,6 +205,9 @@ contract AutoLend is Automator {
         }
 
         PositionConfig memory config = positionConfigs[params.tokenId];
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
@@ -245,7 +249,7 @@ contract AutoLend is Automator {
 
         // Protocol reward is a fraction of the vault yield gain
         uint256 yieldGain = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
-        uint256 protocolReward = yieldGain * config.maxRewardX64 / Q64;
+        uint256 protocolReward = yieldGain * params.rewardX64 / Q64;
         uint256 depositAmount = redeemedAmount - protocolReward;
         if (isToken0Lent) {
             balance0Before += protocolReward;

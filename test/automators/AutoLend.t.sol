@@ -290,7 +290,7 @@ contract AutoLendTest is AutomatorTestBase {
 
         // Withdraw - this should redeem WETH from ERC4626, unwrap to ETH, add liquidity
         AutoLend.WithdrawParams memory withdrawParams =
-            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes("")});
+            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, rewardX64: 0, hookData: bytes("")});
 
         vm.prank(operator);
         autoLend.withdraw(withdrawParams);
@@ -350,7 +350,7 @@ contract AutoLendTest is AutomatorTestBase {
 
         // Withdraw
         AutoLend.WithdrawParams memory withdrawParams =
-            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes("")});
+            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, rewardX64: 0, hookData: bytes("")});
 
         vm.prank(operator);
         autoLend.withdraw(withdrawParams);
