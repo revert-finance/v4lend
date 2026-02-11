@@ -9,6 +9,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -276,15 +277,13 @@ contract AutoLend is Automator {
                 );
             } else {
                 // Current tick within/above position - mint new one-sided position above current tick
+                int24 newLower = baseTick + tickSpacing;
+                int24 newUpper = baseTick + tickSpacing + tickWidth;
+                if (newUpper > TickMath.MAX_TICK) newUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
+                if (newLower >= newUpper) revert InvalidConfig();
                 _handleApproval(permit2, poolKey.currency0, depositAmount);
                 newTokenId = _mintOneSidedPosition(
-                    poolKey,
-                    baseTick + tickSpacing,
-                    baseTick + tickSpacing + tickWidth,
-                    depositAmount,
-                    0,
-                    params.deadline,
-                    params.hookData
+                    poolKey, newLower, newUpper, depositAmount, 0, params.deadline, params.hookData
                 );
             }
         } else {
@@ -297,15 +296,13 @@ contract AutoLend is Automator {
                 );
             } else {
                 // Current tick within/below position - mint new one-sided position below current tick
+                int24 newLower = baseTick - tickWidth;
+                int24 newUpper = baseTick;
+                if (newLower < TickMath.MIN_TICK) newLower = (TickMath.MIN_TICK / tickSpacing + 1) * tickSpacing;
+                if (newLower >= newUpper) revert InvalidConfig();
                 _handleApproval(permit2, poolKey.currency1, depositAmount);
                 newTokenId = _mintOneSidedPosition(
-                    poolKey,
-                    baseTick - tickWidth,
-                    baseTick,
-                    0,
-                    depositAmount,
-                    params.deadline,
-                    params.hookData
+                    poolKey, newLower, newUpper, 0, depositAmount, params.deadline, params.hookData
                 );
             }
         }

@@ -334,23 +334,22 @@ contract AutoLeverage is Automator {
         }
 
         // Deduct reward and add to balanceBefore so leftover delta excludes it
-        {
-            uint256 protocolReward;
-            if (config.onlyFees) {
-                // Reward only from fee portion in lend token
-                if (Currency.unwrap(lendToken) == Currency.unwrap(token0)) {
-                    protocolReward = feeAmount0 * params.rewardX64 / Q64;
-                } else if (Currency.unwrap(lendToken) == Currency.unwrap(token1)) {
-                    protocolReward = feeAmount1 * params.rewardX64 / Q64;
-                }
-                if (protocolReward > lendAmount) protocolReward = lendAmount;
-            } else {
-                protocolReward = lendAmount * params.rewardX64 / Q64;
-            }
+        if (config.onlyFees) {
+            // Reward from fee portion in pool tokens (works for all lend token types)
+            uint256 reward0 = feeAmount0 * params.rewardX64 / Q64;
+            uint256 reward1 = feeAmount1 * params.rewardX64 / Q64;
+            if (reward0 > amount0) reward0 = amount0;
+            if (reward1 > amount1) reward1 = amount1;
+            amount0 -= reward0;
+            amount1 -= reward1;
+            balance0Before += reward0;
+            balance1Before += reward1;
+        } else {
+            uint256 protocolReward = lendAmount * params.rewardX64 / Q64;
             lendAmount -= protocolReward;
-            if (Currency.unwrap(lendToken) == Currency.unwrap(token0)) {
+            if (lendToken == token0) {
                 balance0Before += protocolReward;
-            } else if (Currency.unwrap(lendToken) == Currency.unwrap(token1)) {
+            } else if (lendToken == token1) {
                 balance1Before += protocolReward;
             } else {
                 lendReward = protocolReward;

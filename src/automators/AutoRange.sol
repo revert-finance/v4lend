@@ -312,6 +312,11 @@ contract AutoRange is Automator {
             revert InvalidConfig();
         }
 
+        // New range must have lower < upper (execution would revert anyway, but fail early)
+        if (config.lowerTickDelta >= config.upperTickDelta) {
+            revert InvalidConfig();
+        }
+
         positionConfigs[tokenId] = config;
 
         emit PositionConfigured(
