@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
@@ -200,7 +199,6 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         // Record debt before
         (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
-        console.log("Debt before leverage up:", debtBefore);
 
         // Execute leverage up
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
@@ -228,7 +226,6 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         // Debt should have increased
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
-        console.log("Debt after leverage up:", debtAfter);
         assertGt(debtAfter, debtBefore, "Debt should increase after leverage up");
 
         // Position should still be owned by vault
@@ -265,7 +262,6 @@ contract AutoLeverageTest is AutomatorTestBase {
         vault.approveTransform(tokenId, address(autoLeverage), true);
 
         (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
-        console.log("Debt before leverage down:", debtBefore);
 
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
@@ -291,7 +287,6 @@ contract AutoLeverageTest is AutomatorTestBase {
         autoLeverage.execute(params);
 
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
-        console.log("Debt after leverage down:", debtAfter);
         assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down");
     }
 
@@ -466,6 +461,94 @@ contract AutoLeverageTest is AutomatorTestBase {
         // Inner NotReady() gets wrapped by vault.transform() as TransformFailed()
         vm.expectRevert(Constants.TransformFailed.selector);
         autoLeverage.execute(params);
+    }
+
+    // --- Reward Retention Test ---
+
+    function test_RewardStaysInContract() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        // Setup vault position with high leverage
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        // Borrow 70% of collateral — above the 30% target, triggers leverage down
+        uint256 borrowAmount = collateralValue * 70 / 100;
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, borrowAmount);
+
+        // Generate fees with moderate swaps (avoid large price impact)
+        _swapExactInputSingle(poolKey, true, 100e6, 0);
+        _swapExactInputSingle(poolKey, false, 0.1e18, 0);
+        _swapExactInputSingle(poolKey, true, 100e6, 0);
+        _swapExactInputSingle(poolKey, false, 0.1e18, 0);
+
+        // Configure for 30% target (current ~70% → need leverage down) with 50% reward
+        uint64 maxReward = uint64(Q64 * 50 / 100);
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 3000,
+            rebalanceThresholdBps: 100,
+            maxRewardX64: maxReward
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        // Check contract balances before
+        uint256 contractUsdcBefore = usdc.balanceOf(address(autoLeverage));
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: false,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        // Contract should retain reward (fees collected in both tokens)
+        uint256 contractUsdcAfter = usdc.balanceOf(address(autoLeverage));
+        uint256 contractWethAfter = weth.balanceOf(address(autoLeverage));
+        assertTrue(
+            contractUsdcAfter > contractUsdcBefore || contractWethAfter > 0,
+            "Contract should retain protocol reward"
+        );
+
+        // Withdrawer can collect the reward
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(usdc);
+        tokens[1] = address(weth);
+
+        uint256 withdrawerUsdcBefore = usdc.balanceOf(withdrawer);
+        uint256 withdrawerWethBefore = weth.balanceOf(withdrawer);
+
+        vm.prank(withdrawer);
+        autoLeverage.withdrawBalances(tokens, withdrawer);
+
+        assertTrue(
+            usdc.balanceOf(withdrawer) > withdrawerUsdcBefore || weth.balanceOf(withdrawer) > withdrawerWethBefore,
+            "Withdrawer should be able to collect reward"
+        );
     }
 
     // --- Deactivation Test ---

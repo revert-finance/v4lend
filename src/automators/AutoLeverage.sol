@@ -39,6 +39,14 @@ contract AutoLeverage is Automator {
 
     mapping(uint256 => PositionConfig) public positionConfigs;
 
+    /// @dev Internal struct to avoid stack-too-deep — tracks execution context for leftover calculation
+    struct ExecuteState {
+        uint256 balance0Start;
+        uint256 balance1Start;
+        uint256 reward0;
+        uint256 reward1;
+    }
+
     struct ExecuteParams {
         uint256 tokenId;
         address vault;
@@ -115,6 +123,12 @@ contract AutoLeverage is Automator {
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
         Currency lendToken = Currency.wrap(vault.asset());
+        bool isThirdToken = !(lendToken == token0) && !(lendToken == token1);
+
+        ExecuteState memory state;
+        state.balance0Start = token0.balanceOfSelf();
+        state.balance1Start = token1.balanceOfSelf();
+        uint256 lendBalanceBefore = isThirdToken ? lendToken.balanceOfSelf() : 0;
 
         // Collect fees first and deduct protocol reward
         // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively)
@@ -124,18 +138,21 @@ contract AutoLeverage is Automator {
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
+        state.reward0 = feeAmount0;
+        state.reward1 = feeAmount1;
         (feeAmount0, feeAmount1) = _deductReward(feeAmount0, feeAmount1, feeAmount0, feeAmount1, true, params.rewardX64);
+        state.reward0 -= feeAmount0;
+        state.reward1 -= feeAmount1;
 
         if (params.leverageUp) {
-            _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config);
+            _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, state);
         } else {
-            _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config);
+            _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, state);
         }
 
-        // Return residual lend token when it's a third token (not token0 or token1)
-        bool isThirdToken = !(lendToken == token0) && !(lendToken == token1);
+        // Return residual lend token when it's a third token (excludes protocol reward and pre-existing balances)
         if (isThirdToken) {
-            uint256 lendBalance = lendToken.balanceOfSelf();
+            uint256 lendBalance = lendToken.balanceOfSelf() - lendBalanceBefore;
             if (lendBalance > 0) {
                 _transferToken(vault.ownerOf(params.tokenId), lendToken, lendBalance, true);
             }
@@ -155,7 +172,8 @@ contract AutoLeverage is Automator {
         Currency lendToken,
         uint256 currentDebt,
         uint256 collateralValue,
-        PositionConfig memory config
+        PositionConfig memory config,
+        ExecuteState memory state
     ) internal {
         uint256 amount0;
         uint256 amount1;
@@ -229,10 +247,10 @@ contract AutoLeverage is Automator {
             }
         }
 
-        // Send leftover to owner
+        // Send leftover to owner (excludes protocol reward and pre-existing balances)
         address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = token0.balanceOfSelf();
-        uint256 leftover1 = token1.balanceOfSelf();
+        uint256 leftover0 = token0.balanceOfSelf() - state.balance0Start - state.reward0;
+        uint256 leftover1 = token1.balanceOfSelf() - state.balance1Start - state.reward1;
         if (leftover0 > 0) {
             _transferToken(owner, token0, leftover0, true);
         }
@@ -249,7 +267,8 @@ contract AutoLeverage is Automator {
         Currency lendToken,
         uint256 currentDebt,
         uint256 collateralValue,
-        PositionConfig memory config
+        PositionConfig memory config,
+        ExecuteState memory state
     ) internal {
         uint128 liquidityToRemove;
         {
@@ -308,10 +327,10 @@ contract AutoLeverage is Automator {
             vault.repay(params.tokenId, lendAmount, false);
         }
 
-        // Send leftover to owner
+        // Send leftover to owner (excludes protocol reward and pre-existing balances)
         address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = token0.balanceOfSelf();
-        uint256 leftover1 = token1.balanceOfSelf();
+        uint256 leftover0 = token0.balanceOfSelf() - state.balance0Start - state.reward0;
+        uint256 leftover1 = token1.balanceOfSelf() - state.balance1Start - state.reward1;
         if (leftover0 > 0) {
             _transferToken(owner, token0, leftover0, true);
         }

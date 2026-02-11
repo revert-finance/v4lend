@@ -373,6 +373,83 @@ contract AutoRangeTest is AutomatorTestBase {
         assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault));
     }
 
+    // --- Reward Retention Test ---
+
+    function test_RewardStaysInContract() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        // Generate fees so there's something to take reward from
+        _generateFees(poolKey);
+
+        // Configure with reward enabled (10% reward on total = Q64 * 10 / 100)
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            maxRewardX64: maxReward,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        // Move price to trigger range change
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        // Check contract balances before
+        uint256 contractUsdcBefore = usdc.balanceOf(address(autoRange));
+        uint256 contractWethBefore = weth.balanceOf(address(autoRange));
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        // Contract should retain reward (at least one token should have increased)
+        uint256 contractUsdcAfter = usdc.balanceOf(address(autoRange));
+        uint256 contractWethAfter = weth.balanceOf(address(autoRange));
+        assertTrue(
+            contractUsdcAfter > contractUsdcBefore || contractWethAfter > contractWethBefore,
+            "Contract should retain protocol reward"
+        );
+
+        // Withdrawer can collect the reward
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(usdc);
+        tokens[1] = address(weth);
+
+        uint256 withdrawerUsdcBefore = usdc.balanceOf(withdrawer);
+        uint256 withdrawerWethBefore = weth.balanceOf(withdrawer);
+
+        vm.prank(withdrawer);
+        autoRange.withdrawBalances(tokens, withdrawer);
+
+        assertTrue(
+            usdc.balanceOf(withdrawer) > withdrawerUsdcBefore || weth.balanceOf(withdrawer) > withdrawerWethBefore,
+            "Withdrawer should be able to collect reward"
+        );
+    }
+
     // --- Vault Tests ---
 
     function test_ExecuteWithVault() public {

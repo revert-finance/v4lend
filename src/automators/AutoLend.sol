@@ -215,6 +215,10 @@ contract AutoLend is Automator {
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
+        // Snapshot balances before any operation (reward from _deductReward stays before this point)
+        uint256 balance0Before = poolKey.currency0.balanceOfSelf();
+        uint256 balance1Before = poolKey.currency1.balanceOfSelf();
+
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
         int24 tickWidth = tickUpper - tickLower;
@@ -244,16 +248,17 @@ contract AutoLend is Automator {
         // Redeem shares from ERC4626 vault (unwrap WETH to ETH if lent token was native)
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
 
-        // Deduct protocol reward on redeemed amount
+        // Deduct protocol reward on redeemed amount (reward stays in contract for withdrawer)
+        uint256 rewardAmount;
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
         {
             uint256 yieldAmount = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
             uint256 feeBase = config.onlyFees ? yieldAmount : redeemedAmount;
-            uint256 reward = feeBase * params.rewardX64 / Q64;
-            if (reward > redeemedAmount) reward = redeemedAmount;
-            redeemedAmount -= reward;
+            rewardAmount = feeBase * params.rewardX64 / Q64;
+            if (rewardAmount > redeemedAmount) rewardAmount = redeemedAmount;
+            redeemedAmount -= rewardAmount;
         }
 
         if (state.lentToken == address(0)) {
@@ -322,9 +327,14 @@ contract AutoLend is Automator {
             IERC721(address(positionManager)).transferFrom(address(this), posOwner, newTokenId);
         }
 
-        // Send leftover tokens to owner
-        uint256 leftover0 = poolKey.currency0.balanceOfSelf();
-        uint256 leftover1 = poolKey.currency1.balanceOfSelf();
+        // Send leftover tokens to owner (excludes protocol reward and pre-existing balances)
+        // Reward is in the lent token (WETH for native ETH positions, ERC20 otherwise)
+        // For native ETH: reward stays as WETH, not in ETH balance — snapshot delta is clean
+        // For ERC20: reward is in the same token balance — subtract it from the delta
+        uint256 reward0 = isToken0Lent ? (state.lentToken == address(0) ? 0 : rewardAmount) : 0;
+        uint256 reward1 = isToken0Lent ? 0 : rewardAmount;
+        uint256 leftover0 = poolKey.currency0.balanceOfSelf() - balance0Before - reward0;
+        uint256 leftover1 = poolKey.currency1.balanceOfSelf() - balance1Before - reward1;
         if (leftover0 > 0) {
             _transferToken(posOwner, poolKey.currency0, leftover0, true);
         }

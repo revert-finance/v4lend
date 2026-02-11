@@ -114,6 +114,10 @@ contract AutoRange is Automator {
         Currency token1 = poolKey.currency1;
         int24 tickSpacing = poolKey.tickSpacing;
 
+        // Snapshot balances before any operation to isolate this execution's tokens
+        uint256 balance0Before = token0.balanceOfSelf();
+        uint256 balance1Before = token1.balanceOfSelf();
+
         // Get current tick
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
         int24 tickLower = positionInfo.tickLower();
@@ -182,7 +186,15 @@ contract AutoRange is Automator {
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
+        // Track rewards by updating balance snapshots — adding reward to "before" baseline
+        // so the delta (balanceOfSelf - balance0Before) excludes reward
+        {
+            uint256 amount0Pre = amount0;
+            uint256 amount1Pre = amount1;
+            (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
+            balance0Before += (amount0Pre - amount0);
+            balance1Before += (amount1Pre - amount1);
+        }
 
         // Swap to rebalance for new range
         if (params.amountIn != 0) {
@@ -225,9 +237,9 @@ contract AutoRange is Automator {
         positionConfigs[newTokenId] = config;
         delete positionConfigs[params.tokenId];
 
-        // Send leftover tokens to owner
-        uint256 leftover0 = token0.balanceOfSelf();
-        uint256 leftover1 = token1.balanceOfSelf();
+        // Send leftover tokens to owner (excludes protocol reward and pre-existing balances)
+        uint256 leftover0 = token0.balanceOfSelf() - balance0Before;
+        uint256 leftover1 = token1.balanceOfSelf() - balance1Before;
         if (leftover0 > 0) {
             _transferToken(owner, token0, leftover0, true);
         }

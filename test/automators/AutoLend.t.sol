@@ -305,6 +305,95 @@ contract AutoLendTest is AutomatorTestBase {
         assertEq(sharesAfter, 0, "Shares should be 0 after withdraw");
     }
 
+    // --- Reward Retention Test ---
+
+    function test_WithdrawRewardStaysInContract() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        // Generate fees for deposit reward
+        _generateFees(poolKey);
+
+        // Configure with reward enabled (10% reward)
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+        AutoLend.PositionConfig memory config = AutoLend.PositionConfig({
+            isActive: true,
+            lowerTickZone: 0,
+            upperTickZone: 0,
+            lowerTickZoneWithdraw: 10000,
+            upperTickZoneWithdraw: 10000,
+            maxRewardX64: maxReward,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoLend), true);
+
+        // Move price below range
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        // Deposit with reward
+        AutoLend.DepositParams memory depositParams = AutoLend.DepositParams({
+            tokenId: tokenId,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        // Check contract balances before deposit
+        uint256 contractUsdcBeforeDeposit = usdc.balanceOf(address(autoLend));
+        uint256 contractWethBeforeDeposit = weth.balanceOf(address(autoLend));
+
+        vm.prank(operator);
+        autoLend.deposit(depositParams);
+
+        // Contract should retain deposit reward
+        uint256 contractUsdcAfterDeposit = usdc.balanceOf(address(autoLend));
+        uint256 contractWethAfterDeposit = weth.balanceOf(address(autoLend));
+        assertTrue(
+            contractUsdcAfterDeposit > contractUsdcBeforeDeposit || contractWethAfterDeposit > contractWethBeforeDeposit,
+            "Contract should retain deposit reward"
+        );
+
+        // Move price back towards range
+        _swapExactInputSingle(poolKey, false, 2e18, 0);
+
+        // Withdraw with reward
+        AutoLend.WithdrawParams memory withdrawParams =
+            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes(""), rewardX64: maxReward});
+
+        // Record contract balances before withdraw
+        uint256 contractUsdcBeforeWithdraw = usdc.balanceOf(address(autoLend));
+
+        vm.prank(operator);
+        autoLend.withdraw(withdrawParams);
+
+        // Lend state should be cleared
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "Shares should be 0 after withdraw");
+
+        // Withdrawer can collect the accumulated rewards
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(usdc);
+        tokens[1] = address(weth);
+
+        uint256 withdrawerUsdcBefore = usdc.balanceOf(withdrawer);
+        uint256 withdrawerWethBefore = weth.balanceOf(withdrawer);
+
+        vm.prank(withdrawer);
+        autoLend.withdrawBalances(tokens, withdrawer);
+
+        assertTrue(
+            usdc.balanceOf(withdrawer) > withdrawerUsdcBefore || weth.balanceOf(withdrawer) > withdrawerWethBefore,
+            "Withdrawer should be able to collect reward"
+        );
+    }
+
     // --- Deposit + Withdraw Flow ---
 
     function test_DepositAndWithdraw() public {
