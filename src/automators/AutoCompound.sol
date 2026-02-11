@@ -54,6 +54,9 @@ contract AutoCompound is Automator {
     /// @notice Per-position leftover balances
     mapping(uint256 => mapping(address => uint256)) public positionBalances;
 
+    /// @notice Total leftover balances across all positions, per token
+    mapping(address => uint256) public totalPositionBalances;
+
     constructor(
         IPositionManager _positionManager,
         address _universalRouter,
@@ -265,13 +268,54 @@ contract AutoCompound is Automator {
         }
     }
 
+    /// @notice Withdraws ETH balance excluding reserved position leftovers
+    function withdrawETH(address to) external override {
+        if (msg.sender != withdrawer) {
+            revert Unauthorized();
+        }
+
+        uint256 balance = address(this).balance;
+        uint256 reserved = totalPositionBalances[address(0)];
+        uint256 available = balance > reserved ? balance - reserved : 0;
+        if (available != 0) {
+            (bool sent,) = to.call{value: available}("");
+            if (!sent) {
+                revert EtherSendFailed();
+            }
+            emit ETHWithdrawn(to, available);
+        }
+    }
+
+    /// @notice Withdraws token balances excluding reserved position leftovers
+    function withdrawBalances(address[] calldata tokens, address to) external override {
+        if (msg.sender != withdrawer) {
+            revert Unauthorized();
+        }
+
+        uint256 i;
+        uint256 count = tokens.length;
+        for (; i < count; ++i) {
+            address token = tokens[i];
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            uint256 reserved = totalPositionBalances[token];
+            uint256 available = balance > reserved ? balance - reserved : 0;
+            if (available != 0) {
+                _transferToken(to, Currency.wrap(token), available, true);
+            }
+        }
+
+        emit BalancesWithdrawn(tokens, to);
+    }
+
     function _setBalance(uint256 tokenId, address token, uint256 amount) internal {
         uint256 currentBalance = positionBalances[tokenId][token];
         if (amount != currentBalance) {
             positionBalances[tokenId][token] = amount;
             if (amount > currentBalance) {
+                totalPositionBalances[token] += (amount - currentBalance);
                 emit BalanceAdded(tokenId, token, amount - currentBalance);
             } else {
+                totalPositionBalances[token] -= (currentBalance - amount);
                 emit BalanceRemoved(tokenId, token, currentBalance - amount);
             }
         }
@@ -279,6 +323,7 @@ contract AutoCompound is Automator {
 
     function _withdrawBalanceInternal(uint256 tokenId, address token, address to, uint256 amount) internal {
         positionBalances[tokenId][token] -= amount;
+        totalPositionBalances[token] -= amount;
         emit BalanceRemoved(tokenId, token, amount);
         _transferToken(to, Currency.wrap(token), amount, false);
         emit BalanceWithdrawn(tokenId, token, to, amount);

@@ -390,6 +390,136 @@ contract AutoCompoundTest is AutomatorTestBase {
         autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
     }
 
+    // --- Withdraw preserves leftover balances ---
+
+    function test_WithdrawETHPreservesLeftovers() public {
+        PoolKey memory poolKey = _createETHPool();
+        uint256 tokenId = _createFullRangePositionETH(poolKey);
+
+        // Generate fees
+        _generateFeesETH(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
+
+        // Configure with reward so protocol reward accumulates in contract
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+        vm.prank(WHALE_ACCOUNT);
+        autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
+
+        // Auto-compound (no swap → one side will have leftovers)
+        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoCompound.execute(params);
+
+        // Check that native ETH leftovers exist (address(0) is token0 in ETH pool)
+        uint256 ethLeftover = autoCompound.positionBalances(tokenId, address(0));
+        uint256 usdcLeftover = autoCompound.positionBalances(tokenId, address(usdc));
+        assertTrue(ethLeftover > 0 || usdcLeftover > 0, "Should have some leftover after no-swap compound");
+
+        // Withdrawer calls withdrawETH — should NOT drain position leftover
+        vm.prank(withdrawer);
+        autoCompound.withdrawETH(withdrawer);
+
+        // Contract should still have at least the reserved amount
+        assertGe(address(autoCompound).balance, ethLeftover, "ETH leftovers should be preserved after withdrawETH");
+
+        // Position owner can still claim their leftovers
+        uint256 ownerEthBefore = WHALE_ACCOUNT.balance;
+        vm.prank(WHALE_ACCOUNT);
+        autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
+
+        if (ethLeftover > 0) {
+            assertEq(WHALE_ACCOUNT.balance - ownerEthBefore, ethLeftover, "Owner should receive exact ETH leftover");
+        }
+    }
+
+    function test_WithdrawBalancesPreservesLeftovers() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        // Generate fees
+        _generateFees(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
+
+        // Configure with reward
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+        vm.prank(WHALE_ACCOUNT);
+        autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
+
+        // Auto-compound (no swap → leftovers will exist)
+        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoCompound.execute(params);
+
+        // Check leftovers exist
+        uint256 usdcLeftover = autoCompound.positionBalances(tokenId, address(usdc));
+        uint256 wethLeftover = autoCompound.positionBalances(tokenId, address(weth));
+        assertTrue(usdcLeftover > 0 || wethLeftover > 0, "Should have some leftover after no-swap compound");
+
+        // Withdrawer calls withdrawBalances — should NOT drain position leftovers
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(usdc);
+        tokens[1] = address(weth);
+
+        vm.prank(withdrawer);
+        autoCompound.withdrawBalances(tokens, withdrawer);
+
+        // Contract should still have at least the reserved amounts
+        assertGe(
+            usdc.balanceOf(address(autoCompound)), usdcLeftover, "USDC leftovers should be preserved after withdrawBalances"
+        );
+        assertGe(
+            weth.balanceOf(address(autoCompound)), wethLeftover, "WETH leftovers should be preserved after withdrawBalances"
+        );
+
+        // Position owner can still claim their leftovers
+        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+        uint256 ownerWethBefore = weth.balanceOf(WHALE_ACCOUNT);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
+
+        if (usdcLeftover > 0) {
+            assertEq(
+                usdc.balanceOf(WHALE_ACCOUNT) - ownerUsdcBefore,
+                usdcLeftover,
+                "Owner should receive exact USDC leftover"
+            );
+        }
+        if (wethLeftover > 0) {
+            assertEq(
+                weth.balanceOf(WHALE_ACCOUNT) - ownerWethBefore,
+                wethLeftover,
+                "Owner should receive exact WETH leftover"
+            );
+        }
+    }
+
     function test_HarvestTokensETH() public {
         PoolKey memory poolKey = _createETHPool();
         uint256 tokenId = _createFullRangePositionETH(poolKey);
