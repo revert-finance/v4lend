@@ -26,15 +26,14 @@ contract AutoLeverage is Automator {
         bool isActive,
         uint16 targetLeverageBps,
         uint16 rebalanceThresholdBps,
-        bool onlyFees,
         uint64 maxRewardX64
     );
 
+    /// @dev No `onlyFees` flag — AutoLeverage only collects fees (liquidity=0), so fee==total and the flag would have no effect
     struct PositionConfig {
         bool isActive;
         uint16 targetLeverageBps;
         uint16 rebalanceThresholdBps;
-        bool onlyFees;
         uint64 maxRewardX64;
     }
 
@@ -55,9 +54,9 @@ contract AutoLeverage is Automator {
         uint256 amountRemoveMin0;
         uint256 amountRemoveMin1;
         uint256 deadline;
-        uint64 rewardX64;
         bytes decreaseLiquidityHookData;
         bytes increaseLiquidityHookData;
+        uint64 rewardX64;
     }
 
     constructor(
@@ -91,9 +90,6 @@ contract AutoLeverage is Automator {
         if (!config.isActive) {
             revert NotConfigured();
         }
-        if (params.rewardX64 > config.maxRewardX64) {
-            revert ExceedsMaxReward();
-        }
 
         IVault vault = IVault(msg.sender);
         (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(params.tokenId);
@@ -120,31 +116,28 @@ contract AutoLeverage is Automator {
         Currency token1 = poolKey.currency1;
         Currency lendToken = Currency.wrap(vault.asset());
 
-        // Snapshot balances before execution to avoid paying out prior protocol rewards
-        uint256 balance0Before = token0.balanceOfSelf();
-        uint256 balance1Before = token1.balanceOfSelf();
-        // Snapshot lend token separately when it's a third token (not in the pool pair)
-        bool isThirdToken = !(lendToken == token0) && !(lendToken == token1);
-        uint256 lendBalanceBefore = isThirdToken ? lendToken.balanceOfSelf() : 0;
-
-        // Collect fees first and track amounts
+        // Collect fees first and deduct protocol reward
+        // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively)
         (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
             params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData
         );
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
+        (feeAmount0, feeAmount1) = _deductReward(feeAmount0, feeAmount1, feeAmount0, feeAmount1, true, params.rewardX64);
 
         if (params.leverageUp) {
-            _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1, balance0Before, balance1Before);
+            _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config);
         } else {
-            uint256 lendReward = _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, feeAmount0, feeAmount1, balance0Before, balance1Before);
-            lendBalanceBefore += lendReward;
+            _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config);
         }
 
         // Return residual lend token when it's a third token (not token0 or token1)
-        // This handles cases like capping repayment to currentDebt or unswapped leftovers
+        bool isThirdToken = !(lendToken == token0) && !(lendToken == token1);
         if (isThirdToken) {
             uint256 lendBalance = lendToken.balanceOfSelf();
-            if (lendBalance > lendBalanceBefore) {
-                _transferToken(vault.ownerOf(params.tokenId), lendToken, lendBalance - lendBalanceBefore, true);
+            if (lendBalance > 0) {
+                _transferToken(vault.ownerOf(params.tokenId), lendToken, lendBalance, true);
             }
         }
 
@@ -162,11 +155,7 @@ contract AutoLeverage is Automator {
         Currency lendToken,
         uint256 currentDebt,
         uint256 collateralValue,
-        PositionConfig memory config,
-        uint256 feeAmount0,
-        uint256 feeAmount1,
-        uint256 balance0Before,
-        uint256 balance1Before
+        PositionConfig memory config
     ) internal {
         uint256 amount0;
         uint256 amount1;
@@ -181,12 +170,16 @@ contract AutoLeverage is Automator {
             uint256 borrowAmount = (uint256(targetBps) * collateralValue - currentDebt * 10000) / denominator;
             if (borrowAmount == 0) revert NotReady();
 
+            // Snapshot balances before borrow to calculate received amounts
+            uint256 balance0Before = token0.balanceOfSelf();
+            uint256 balance1Before = token1.balanceOfSelf();
+
             // Borrow from vault
             vault.borrow(params.tokenId, borrowAmount);
 
             amount0 = token0.balanceOfSelf() - balance0Before;
             amount1 = token1.balanceOfSelf() - balance1Before;
-            // Note: amount0/amount1 include collected fees + borrowed tokens (snapshot was before fee collection)
+            // Note: amount0/amount1 include collected fees + borrowed tokens (fee collection was before borrow)
         }
 
         // Swap borrowed lend token to position tokens
@@ -203,26 +196,6 @@ contract AutoLeverage is Automator {
             );
             if (lendToken == token0) amount0 -= amountIn;
             amount1 += amountOut;
-        }
-
-        // Deduct reward before adding liquidity
-        // Add reward to balance0Before/balance1Before so leftover delta excludes it
-        {
-            uint256 reward0;
-            uint256 reward1;
-            if (config.onlyFees) {
-                reward0 = feeAmount0 * params.rewardX64 / Q64;
-                reward1 = feeAmount1 * params.rewardX64 / Q64;
-                if (reward0 > amount0) reward0 = amount0;
-                if (reward1 > amount1) reward1 = amount1;
-            } else {
-                reward0 = amount0 * params.rewardX64 / Q64;
-                reward1 = amount1 * params.rewardX64 / Q64;
-            }
-            amount0 -= reward0;
-            amount1 -= reward1;
-            balance0Before += reward0;
-            balance1Before += reward1;
         }
 
         // Increase liquidity
@@ -256,19 +229,18 @@ contract AutoLeverage is Automator {
             }
         }
 
-        // Send leftover to owner (only delta from this execution, excluding protocol rewards)
+        // Send leftover to owner
         address owner = vault.ownerOf(params.tokenId);
         uint256 leftover0 = token0.balanceOfSelf();
         uint256 leftover1 = token1.balanceOfSelf();
-        if (leftover0 > balance0Before) {
-            _transferToken(owner, token0, leftover0 - balance0Before, true);
+        if (leftover0 > 0) {
+            _transferToken(owner, token0, leftover0, true);
         }
-        if (leftover1 > balance1Before) {
-            _transferToken(owner, token1, leftover1 - balance1Before, true);
+        if (leftover1 > 0) {
+            _transferToken(owner, token1, leftover1, true);
         }
     }
 
-    /// @return lendReward Protocol reward amount when lendToken is a third token (0 otherwise)
     function _leverageDown(
         ExecuteParams calldata params,
         IVault vault,
@@ -277,12 +249,8 @@ contract AutoLeverage is Automator {
         Currency lendToken,
         uint256 currentDebt,
         uint256 collateralValue,
-        PositionConfig memory config,
-        uint256 feeAmount0,
-        uint256 feeAmount1,
-        uint256 balance0Before,
-        uint256 balance1Before
-    ) internal returns (uint256 lendReward) {
+        PositionConfig memory config
+    ) internal {
         uint128 liquidityToRemove;
         {
             uint16 targetBps = config.targetLeverageBps;
@@ -333,29 +301,6 @@ contract AutoLeverage is Automator {
             lendAmount += amountOut;
         }
 
-        // Deduct reward and add to balanceBefore so leftover delta excludes it
-        if (config.onlyFees) {
-            // Reward from fee portion in pool tokens (works for all lend token types)
-            uint256 reward0 = feeAmount0 * params.rewardX64 / Q64;
-            uint256 reward1 = feeAmount1 * params.rewardX64 / Q64;
-            if (reward0 > amount0) reward0 = amount0;
-            if (reward1 > amount1) reward1 = amount1;
-            amount0 -= reward0;
-            amount1 -= reward1;
-            balance0Before += reward0;
-            balance1Before += reward1;
-        } else {
-            uint256 protocolReward = lendAmount * params.rewardX64 / Q64;
-            lendAmount -= protocolReward;
-            if (lendToken == token0) {
-                balance0Before += protocolReward;
-            } else if (lendToken == token1) {
-                balance1Before += protocolReward;
-            } else {
-                lendReward = protocolReward;
-            }
-        }
-
         // Repay debt
         if (lendAmount > 0) {
             if (lendAmount > currentDebt) lendAmount = currentDebt;
@@ -363,15 +308,15 @@ contract AutoLeverage is Automator {
             vault.repay(params.tokenId, lendAmount, false);
         }
 
-        // Send leftover to owner (only delta from this execution, excluding protocol rewards)
+        // Send leftover to owner
         address owner = vault.ownerOf(params.tokenId);
         uint256 leftover0 = token0.balanceOfSelf();
         uint256 leftover1 = token1.balanceOfSelf();
-        if (leftover0 > balance0Before) {
-            _transferToken(owner, token0, leftover0 - balance0Before, true);
+        if (leftover0 > 0) {
+            _transferToken(owner, token0, leftover0, true);
         }
-        if (leftover1 > balance1Before) {
-            _transferToken(owner, token1, leftover1 - balance1Before, true);
+        if (leftover1 > 0) {
+            _transferToken(owner, token1, leftover1, true);
         }
     }
 
@@ -403,7 +348,6 @@ contract AutoLeverage is Automator {
             config.isActive,
             config.targetLeverageBps,
             config.rebalanceThresholdBps,
-            config.onlyFees,
             config.maxRewardX64
         );
     }

@@ -16,7 +16,7 @@ import {IVault} from "../interfaces/IVault.sol";
 
 /// @title Automator
 /// @notice Base contract for V4 position automation. Provides operator access control,
-/// reward withdrawal, and shared infrastructure for all automator contracts.
+/// emergency withdrawal, and shared infrastructure for all automator contracts.
 abstract contract Automator is Transformer, Swapper, IERC721Receiver, ReentrancyGuard {
     event OperatorChanged(address newOperator, bool active);
     event WithdrawerChanged(address newWithdrawer);
@@ -29,7 +29,7 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     /// @notice Authorized operators that can execute automations
     mapping(address => bool) public operators;
 
-    /// @notice Address authorized to withdraw accumulated protocol rewards
+    /// @notice Address authorized to withdraw accumulated token balances
     address public withdrawer;
 
     constructor(
@@ -60,7 +60,7 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         withdrawer = _withdrawer;
     }
 
-    /// @notice Withdraws token balance (accumulated protocol rewards)
+    /// @notice Withdraws token balance
     /// @param tokens Addresses of tokens to withdraw
     /// @param to Address to send to
     function withdrawBalances(address[] calldata tokens, address to) external virtual {
@@ -96,6 +96,31 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
             }
             emit ETHWithdrawn(to, balance);
         }
+    }
+
+    /// @notice Deducts protocol reward from amounts. Reward stays in contract for withdrawer.
+    /// @param feeAmount0 Fee portion of token0
+    /// @param feeAmount1 Fee portion of token1
+    /// @param totalAmount0 Total token0 (fees + principal)
+    /// @param totalAmount1 Total token1 (fees + principal)
+    /// @param onlyFees If true, reward is calculated on fees only; otherwise on total
+    /// @param rewardX64 Reward rate in Q64 format
+    /// @return Remaining amounts after reward deduction (token0, token1)
+    function _deductReward(
+        uint256 feeAmount0,
+        uint256 feeAmount1,
+        uint256 totalAmount0,
+        uint256 totalAmount1,
+        bool onlyFees,
+        uint64 rewardX64
+    ) internal pure returns (uint256, uint256) {
+        uint256 base0 = onlyFees ? feeAmount0 : totalAmount0;
+        uint256 base1 = onlyFees ? feeAmount1 : totalAmount1;
+        uint256 reward0 = base0 * rewardX64 / Q64;
+        uint256 reward1 = base1 * rewardX64 / Q64;
+        if (reward0 > totalAmount0) reward0 = totalAmount0;
+        if (reward1 > totalAmount1) reward1 = totalAmount1;
+        return (totalAmount0 - reward0, totalAmount1 - reward1);
     }
 
     /// @notice Transfers token to address, optionally unwrapping WETH to ETH

@@ -30,8 +30,8 @@ contract AutoRange is Automator {
         int32 upperTickLimit,
         int32 lowerTickDelta,
         int32 upperTickDelta,
-        bool onlyFees,
-        uint64 maxRewardX64
+        uint64 maxRewardX64,
+        bool onlyFees
     );
 
     struct PositionConfig {
@@ -39,8 +39,8 @@ contract AutoRange is Automator {
         int32 upperTickLimit;
         int32 lowerTickDelta;
         int32 upperTickDelta;
-        bool onlyFees;
         uint64 maxRewardX64;
+        bool onlyFees;
     }
 
     mapping(uint256 => PositionConfig) public positionConfigs;
@@ -56,9 +56,9 @@ contract AutoRange is Automator {
         uint256 amountAddMin0;
         uint256 amountAddMin1;
         uint256 deadline;
-        uint64 rewardX64;
         bytes decreaseLiquidityHookData;
         bytes mintHookData;
+        uint64 rewardX64;
     }
 
     constructor(
@@ -98,9 +98,6 @@ contract AutoRange is Automator {
         if (config.lowerTickDelta == 0 && config.upperTickDelta == 0) {
             revert NotConfigured();
         }
-        if (params.rewardX64 > config.maxRewardX64) {
-            revert ExceedsMaxReward();
-        }
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
@@ -116,10 +113,6 @@ contract AutoRange is Automator {
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
         int24 tickSpacing = poolKey.tickSpacing;
-
-        // Snapshot balances before execution to avoid paying out prior protocol rewards
-        uint256 balance0Before = token0.balanceOfSelf();
-        uint256 balance1Before = token1.balanceOfSelf();
 
         // Get current tick
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
@@ -185,23 +178,11 @@ contract AutoRange is Automator {
         uint256 amount0 = feeAmount0 + liquidityAmount0;
         uint256 amount1 = feeAmount1 + liquidityAmount1;
 
-        // Deduct reward — onlyFees takes reward from fees only, otherwise from total
-        // Add reward to balanceBefore so leftover delta excludes it
-        {
-            uint256 protocolReward0;
-            uint256 protocolReward1;
-            if (config.onlyFees) {
-                protocolReward0 = feeAmount0 * params.rewardX64 / Q64;
-                protocolReward1 = feeAmount1 * params.rewardX64 / Q64;
-            } else {
-                protocolReward0 = amount0 * params.rewardX64 / Q64;
-                protocolReward1 = amount1 * params.rewardX64 / Q64;
-            }
-            amount0 -= protocolReward0;
-            amount1 -= protocolReward1;
-            balance0Before += protocolReward0;
-            balance1Before += protocolReward1;
+        // Deduct protocol reward (stays in contract for withdrawer)
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
         }
+        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
 
         // Swap to rebalance for new range
         if (params.amountIn != 0) {
@@ -244,11 +225,9 @@ contract AutoRange is Automator {
         positionConfigs[newTokenId] = config;
         delete positionConfigs[params.tokenId];
 
-        // Send leftover tokens to owner (only the delta from this execution, excluding protocol rewards)
-        uint256 balance0After = token0.balanceOfSelf();
-        uint256 balance1After = token1.balanceOfSelf();
-        uint256 leftover0 = balance0After > balance0Before ? balance0After - balance0Before : 0;
-        uint256 leftover1 = balance1After > balance1Before ? balance1After - balance1Before : 0;
+        // Send leftover tokens to owner
+        uint256 leftover0 = token0.balanceOfSelf();
+        uint256 leftover1 = token1.balanceOfSelf();
         if (leftover0 > 0) {
             _transferToken(owner, token0, leftover0, true);
         }
@@ -290,7 +269,7 @@ contract AutoRange is Automator {
 
         newTokenId = positionManager.nextTokenId() - 1;
 
-        // Check minimum amounts added (using delta to handle protocol reward in balance)
+        // Check minimum amounts added
         uint256 added0 = balance0Before - token0.balanceOfSelf();
         uint256 added1 = balance1Before - token1.balanceOfSelf();
         if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
@@ -325,8 +304,8 @@ contract AutoRange is Automator {
             config.upperTickLimit,
             config.lowerTickDelta,
             config.upperTickDelta,
-            config.onlyFees,
-            config.maxRewardX64
+            config.maxRewardX64,
+            config.onlyFees
         );
     }
 }

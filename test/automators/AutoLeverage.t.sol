@@ -46,9 +46,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
             decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
         });
 
         address randomUser = makeAddr("random");
@@ -73,9 +73,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
             decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -97,14 +97,13 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 500,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
         autoLeverage.configToken(tokenId, config);
 
-        (bool isActive, uint16 targetBps, uint16 threshold, bool onlyFees, uint64 maxReward) =
+        (bool isActive, uint16 targetBps, uint16 threshold,) =
             autoLeverage.positionConfigs(tokenId);
         assertTrue(isActive);
         assertEq(targetBps, 5000);
@@ -120,8 +119,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 500,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -140,8 +138,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 10000, // 100% - invalid
             rebalanceThresholdBps: 500,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -160,8 +157,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 0, // Zero threshold - invalid
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -192,8 +188,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 100, // 1% threshold - easily triggered
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -223,9 +218,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -260,8 +255,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 3000,
             rebalanceThresholdBps: 100,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -288,9 +282,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -299,244 +293,6 @@ contract AutoLeverageTest is AutomatorTestBase {
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
         console.log("Debt after leverage down:", debtAfter);
         assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down");
-    }
-
-    // --- onlyFees Tests ---
-
-    function test_LeverageUpOnlyFeesFalse() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createFullRangePosition(poolKey);
-
-        // Generate fees so onlyFees has something to differentiate
-        _generateFees(poolKey);
-
-        _depositToVault(50000000000, WHALE_ACCOUNT);
-        _addPositionToVault(tokenId);
-
-        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        uint256 borrowAmount = collateralValue * 10 / 100;
-        vm.prank(WHALE_ACCOUNT);
-        vault.borrow(tokenId, borrowAmount);
-
-        // Configure with onlyFees=false (reward from total amounts)
-        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
-            isActive: true,
-            targetLeverageBps: 5000,
-            rebalanceThresholdBps: 100,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoLeverage.configToken(tokenId, config);
-        vm.prank(WHALE_ACCOUNT);
-        vault.approveTransform(tokenId, address(autoLeverage), true);
-
-        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
-
-        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
-            tokenId: tokenId,
-            vault: address(vault),
-            leverageUp: true,
-            amountIn0: 0,
-            amountOut0Min: 0,
-            swapData0: bytes(""),
-            amountIn1: 0,
-            amountOut1Min: 0,
-            swapData1: bytes(""),
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
-            decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoLeverage.execute(params);
-
-        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
-        assertGt(debtAfter, debtBefore, "Debt should increase after leverage up (onlyFees=false)");
-    }
-
-    function test_LeverageUpOnlyFeesTrue() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createFullRangePosition(poolKey);
-
-        // Generate fees so onlyFees has something to differentiate
-        _generateFees(poolKey);
-
-        _depositToVault(50000000000, WHALE_ACCOUNT);
-        _addPositionToVault(tokenId);
-
-        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        uint256 borrowAmount = collateralValue * 10 / 100;
-        vm.prank(WHALE_ACCOUNT);
-        vault.borrow(tokenId, borrowAmount);
-
-        // Configure with onlyFees=true (reward from fees only — smaller reward)
-        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
-            isActive: true,
-            targetLeverageBps: 5000,
-            rebalanceThresholdBps: 100,
-            onlyFees: true,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoLeverage.configToken(tokenId, config);
-        vm.prank(WHALE_ACCOUNT);
-        vault.approveTransform(tokenId, address(autoLeverage), true);
-
-        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
-
-        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
-            tokenId: tokenId,
-            vault: address(vault),
-            leverageUp: true,
-            amountIn0: 0,
-            amountOut0Min: 0,
-            swapData0: bytes(""),
-            amountIn1: 0,
-            amountOut1Min: 0,
-            swapData1: bytes(""),
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
-            decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoLeverage.execute(params);
-
-        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
-        assertGt(debtAfter, debtBefore, "Debt should increase after leverage up (onlyFees=true)");
-    }
-
-    function test_LeverageDownOnlyFeesFalse() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createFullRangePosition(poolKey);
-
-        // Generate fees so onlyFees has something to differentiate
-        _generateFees(poolKey);
-
-        _depositToVault(50000000000, WHALE_ACCOUNT);
-        _addPositionToVault(tokenId);
-
-        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        uint256 borrowAmount = collateralValue * 70 / 100;
-        vm.prank(WHALE_ACCOUNT);
-        vault.borrow(tokenId, borrowAmount);
-
-        // Configure for leverage down with onlyFees=false (reward from total)
-        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
-            isActive: true,
-            targetLeverageBps: 3000,
-            rebalanceThresholdBps: 100,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoLeverage.configToken(tokenId, config);
-        vm.prank(WHALE_ACCOUNT);
-        vault.approveTransform(tokenId, address(autoLeverage), true);
-
-        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
-
-        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
-            tokenId: tokenId,
-            vault: address(vault),
-            leverageUp: false,
-            amountIn0: 0,
-            amountOut0Min: 0,
-            swapData0: bytes(""),
-            amountIn1: 0,
-            amountOut1Min: 0,
-            swapData1: bytes(""),
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
-            decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoLeverage.execute(params);
-
-        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
-        assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down (onlyFees=false)");
-    }
-
-    function test_LeverageDownOnlyFeesTrue() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createFullRangePosition(poolKey);
-
-        // Generate fees so onlyFees has something to differentiate
-        _generateFees(poolKey);
-
-        _depositToVault(50000000000, WHALE_ACCOUNT);
-        _addPositionToVault(tokenId);
-
-        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        uint256 borrowAmount = collateralValue * 70 / 100;
-        vm.prank(WHALE_ACCOUNT);
-        vault.borrow(tokenId, borrowAmount);
-
-        // Configure for leverage down with onlyFees=true (reward from fees only — smaller reward)
-        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
-            isActive: true,
-            targetLeverageBps: 3000,
-            rebalanceThresholdBps: 100,
-            onlyFees: true,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoLeverage.configToken(tokenId, config);
-        vm.prank(WHALE_ACCOUNT);
-        vault.approveTransform(tokenId, address(autoLeverage), true);
-
-        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
-
-        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
-            tokenId: tokenId,
-            vault: address(vault),
-            leverageUp: false,
-            amountIn0: 0,
-            amountOut0Min: 0,
-            swapData0: bytes(""),
-            amountIn1: 0,
-            amountOut1Min: 0,
-            swapData1: bytes(""),
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
-            decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoLeverage.execute(params);
-
-        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
-        assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down (onlyFees=true)");
     }
 
     // --- Native ETH Position Tests ---
@@ -561,8 +317,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 100,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -587,9 +342,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -598,91 +353,6 @@ contract AutoLeverageTest is AutomatorTestBase {
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
         assertGt(debtAfter, debtBefore, "Debt should increase after ETH leverage up");
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId), address(vault));
-    }
-
-    /// @notice Verify that reward deduction works with native ETH positions,
-    /// comparing liquidity with and without reward using vm.snapshot
-    function test_LeverageUpETHWithReward() public {
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
-
-        // Generate fees so there's something to take reward from
-        _generateFeesETH(poolKey);
-
-        // Setup vault position
-        _depositToVault(50000000000, WHALE_ACCOUNT); // 50k USDC
-        _addPositionToVault(tokenId);
-
-        // Borrow small amount (10% of collateral)
-        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        uint256 borrowAmount = collateralValue * 10 / 100;
-        vm.prank(WHALE_ACCOUNT);
-        vault.borrow(tokenId, borrowAmount);
-
-        // Configure for 50% target leverage with reward
-        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
-            isActive: true,
-            targetLeverageBps: 5000,
-            rebalanceThresholdBps: 100,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100) // 1%
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoLeverage.configToken(tokenId, config);
-        vm.prank(WHALE_ACCOUNT);
-        vault.approveTransform(tokenId, address(autoLeverage), true);
-
-        // Snapshot state
-        uint256 snapshotId = vm.snapshot();
-
-        // --- Run WITHOUT reward ---
-        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
-
-        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
-            tokenId: tokenId,
-            vault: address(vault),
-            leverageUp: true,
-            amountIn0: 0,
-            amountOut0Min: 0,
-            swapData0: bytes(""),
-            amountIn1: 0,
-            amountOut1Min: 0,
-            swapData1: bytes(""),
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: 0, // No reward
-            decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoLeverage.execute(params);
-
-        uint128 liquidityNoReward = positionManager.getPositionLiquidity(tokenId);
-        (uint256 debtNoReward,,,,) = vault.loanInfo(tokenId);
-
-        // --- Revert and run WITH reward ---
-        vm.revertTo(snapshotId);
-
-        params.rewardX64 = uint64(Q64 / 100); // 1%
-
-        vm.prank(operator);
-        autoLeverage.execute(params);
-
-        uint128 liquidityWithReward = positionManager.getPositionLiquidity(tokenId);
-        (uint256 debtWithReward,,,,) = vault.loanInfo(tokenId);
-
-        // Both should increase debt
-        assertGt(debtNoReward, debtBefore, "Debt should increase without reward");
-        assertGt(debtWithReward, debtBefore, "Debt should increase with reward");
-
-        // With reward, less liquidity should be added (reward deducted before increase)
-        assertGt(liquidityNoReward, liquidityWithReward, "Reward should reduce added liquidity for ETH leverage up");
     }
 
     function test_LeverageDownETH() public {
@@ -704,8 +374,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 3000,
             rebalanceThresholdBps: 100,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -730,9 +399,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -763,8 +432,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 1000, // 10% threshold
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -789,65 +457,13 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
             decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
         // Inner NotReady() gets wrapped by vault.transform() as TransformFailed()
-        vm.expectRevert(Constants.TransformFailed.selector);
-        autoLeverage.execute(params);
-    }
-
-    function test_RevertWhenExceedsMaxReward() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createFullRangePosition(poolKey);
-
-        _depositToVault(50000000000, WHALE_ACCOUNT);
-        _addPositionToVault(tokenId);
-
-        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        vm.prank(WHALE_ACCOUNT);
-        vault.borrow(tokenId, collateralValue * 10 / 100);
-
-        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
-            isActive: true,
-            targetLeverageBps: 5000,
-            rebalanceThresholdBps: 100,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100) // 1%
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoLeverage.configToken(tokenId, config);
-
-        vm.prank(WHALE_ACCOUNT);
-        vault.approveTransform(tokenId, address(autoLeverage), true);
-
-        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
-            tokenId: tokenId,
-            vault: address(vault),
-            leverageUp: true,
-            amountIn0: 0,
-            amountOut0Min: 0,
-            swapData0: bytes(""),
-            amountIn1: 0,
-            amountOut1Min: 0,
-            swapData1: bytes(""),
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 10), // 10% > 1% max
-            decreaseLiquidityHookData: bytes(""),
-            increaseLiquidityHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        // Inner ExceedsMaxReward() gets wrapped by vault.transform() as TransformFailed()
         vm.expectRevert(Constants.TransformFailed.selector);
         autoLeverage.execute(params);
     }
@@ -866,14 +482,13 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 500,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
         autoLeverage.configToken(tokenId, config);
 
-        (bool isActiveBefore,,,,) = autoLeverage.positionConfigs(tokenId);
+        (bool isActiveBefore,,,) = autoLeverage.positionConfigs(tokenId);
         assertTrue(isActiveBefore);
 
         // Deactivate
@@ -881,7 +496,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         autoLeverage.configToken(tokenId, config);
 
-        (bool isActiveAfter,,,,) = autoLeverage.positionConfigs(tokenId);
+        (bool isActiveAfter,,,) = autoLeverage.positionConfigs(tokenId);
         assertFalse(isActiveAfter);
     }
 }

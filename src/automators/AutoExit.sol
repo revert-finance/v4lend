@@ -36,8 +36,8 @@ contract AutoExit is Automator {
         bool token1Swap,
         int24 token0TriggerTick,
         int24 token1TriggerTick,
-        bool onlyFees,
-        uint64 maxRewardX64
+        uint64 maxRewardX64,
+        bool onlyFees
     );
 
     struct PositionConfig {
@@ -46,8 +46,8 @@ contract AutoExit is Automator {
         bool token1Swap;
         int24 token0TriggerTick;
         int24 token1TriggerTick;
-        bool onlyFees;
         uint64 maxRewardX64;
+        bool onlyFees;
     }
 
     mapping(uint256 => PositionConfig) public positionConfigs;
@@ -59,8 +59,8 @@ contract AutoExit is Automator {
         uint256 amountRemoveMin1;
         uint256 amountOutMin;
         uint256 deadline;
-        uint64 rewardX64;
         bytes hookData;
+        uint64 rewardX64;
     }
 
     constructor(
@@ -100,9 +100,6 @@ contract AutoExit is Automator {
         if (!config.isActive) {
             revert NotConfigured();
         }
-        if (params.rewardX64 > config.maxRewardX64) {
-            revert ExceedsMaxReward();
-        }
 
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
@@ -134,7 +131,13 @@ contract AutoExit is Automator {
         uint256 amount0 = feeAmount0 + liquidityAmount0;
         uint256 amount1 = feeAmount1 + liquidityAmount1;
 
-        // Resolve owner; for vault positions, determine repayment timing based on swap direction
+        // Deduct protocol reward (stays in contract for withdrawer)
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
+        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
+
+        // Resolve owner; for vault positions, repay debt before swap
         address owner;
         if (isVaultCall) {
             IVault vault = IVault(msg.sender);
@@ -162,14 +165,6 @@ contract AutoExit is Automator {
                 revert MissingSwapData();
             }
 
-            // If onlyFees, deduct reward before swap (cap to remaining balance after debt repayment)
-            if (config.onlyFees) {
-                uint256 reward0 = feeAmount0 * params.rewardX64 / Q64;
-                uint256 reward1 = feeAmount1 * params.rewardX64 / Q64;
-                amount0 -= reward0 > amount0 ? amount0 : reward0;
-                amount1 -= reward1 > amount1 ? amount1 : reward1;
-            }
-
             uint256 swapAmount = isAbove ? amount1 : amount0;
             if (swapAmount != 0) {
                 (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
@@ -185,14 +180,6 @@ contract AutoExit is Automator {
                 amount0 = isAbove ? amount0 + amountOutDelta : amount0 - amountInDelta;
                 amount1 = isAbove ? amount1 - amountInDelta : amount1 + amountOutDelta;
             }
-
-            // When swap and onlyFees already deducted above; !onlyFees deducted after vault repayment below
-        } else {
-            // No swap - reward from configured source (cap to remaining balance after debt repayment)
-            uint256 reward0 = (config.onlyFees ? feeAmount0 : amount0) * params.rewardX64 / Q64;
-            uint256 reward1 = (config.onlyFees ? feeAmount1 : amount1) * params.rewardX64 / Q64;
-            amount0 -= reward0 > amount0 ? amount0 : reward0;
-            amount1 -= reward1 > amount1 ? amount1 : reward1;
         }
 
         // Post-swap repayment: when swap produced the lend token, repay remaining debt
@@ -206,22 +193,13 @@ contract AutoExit is Automator {
             }
         }
 
-        // When swap and !onlyFees - deduct reward after vault repayment so debt gets full proceeds
-        if (isSwap && !config.onlyFees) {
-            if (isAbove) {
-                amount0 -= amount0 * params.rewardX64 / Q64;
-            } else {
-                amount1 -= amount1 * params.rewardX64 / Q64;
-            }
-        }
-
         // Send remaining tokens to owner
         _transferToken(owner, token0, amount0, true);
         _transferToken(owner, token1, amount1, true);
 
         // Delete config
         delete positionConfigs[params.tokenId];
-        emit PositionConfigured(params.tokenId, false, false, false, 0, 0, false, 0);
+        emit PositionConfigured(params.tokenId, false, false, false, 0, 0, 0, false);
 
         emit AutoExit(
             params.tokenId,
@@ -292,8 +270,8 @@ contract AutoExit is Automator {
             config.token1Swap,
             config.token0TriggerTick,
             config.token1TriggerTick,
-            config.onlyFees,
-            config.maxRewardX64
+            config.maxRewardX64,
+            config.onlyFees
         );
     }
 }

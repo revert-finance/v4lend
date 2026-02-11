@@ -26,18 +26,23 @@ contract AutoCompound is Automator {
         address account,
         uint256 amount0,
         uint256 amount1,
-        uint256 reward0,
-        uint256 reward1,
         address token0,
         address token1,
         bool harvest
     );
 
-    event RewardUpdated(address account, uint64 totalRewardX64);
+    event PositionConfigured(uint256 indexed tokenId, uint64 maxRewardX64, bool onlyFees);
 
     event BalanceAdded(uint256 tokenId, address token, uint256 amount);
     event BalanceRemoved(uint256 tokenId, address token, uint256 amount);
     event BalanceWithdrawn(uint256 tokenId, address token, address to, uint256 amount);
+
+    struct PositionConfig {
+        uint64 maxRewardX64;
+        bool onlyFees;
+    }
+
+    mapping(uint256 => PositionConfig) public positionConfigs;
 
     enum CompoundMode {
         AUTO_COMPOUND,
@@ -46,11 +51,8 @@ contract AutoCompound is Automator {
         HARVEST_TOKEN_1
     }
 
-    /// @notice Per-position leftover balances (tokenId 0 = protocol rewards)
+    /// @notice Per-position leftover balances
     mapping(uint256 => mapping(address => uint256)) public positionBalances;
-
-    uint64 public constant MAX_REWARD_X64 = uint64(Q64 * 2 / 100); // 2% max fee
-    uint64 public totalRewardX64 = 0; // Start at 0%, owner can set up to 2%
 
     constructor(
         IPositionManager _positionManager,
@@ -70,6 +72,7 @@ contract AutoCompound is Automator {
         bytes swapData;
         uint256 deadline;
         bytes hookData;
+        uint64 rewardX64;
     }
 
     /// @notice Adjust token (which is in a Vault) - via transform method
@@ -100,21 +103,25 @@ contract AutoCompound is Automator {
         (uint256 amount0, uint256 amount1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
 
+        // Deduct protocol reward (stays in contract for withdrawer)
+        PositionConfig memory config = positionConfigs[params.tokenId];
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
+        (amount0, amount1) = _deductReward(amount0, amount1, amount0, amount1, config.onlyFees, params.rewardX64);
+
         uint256 a0;
         uint256 a1;
-        uint256 r0;
-        uint256 r1;
         if (params.mode == CompoundMode.AUTO_COMPOUND) {
-            (a0, a1, r0, r1) = _executeAutoCompound(params, poolKey, positionInfo, token0, token1, token0Addr, token1Addr, amount0, amount1);
+            (a0, a1) = _executeAutoCompound(params, poolKey, positionInfo, token0, token1, token0Addr, token1Addr, amount0, amount1);
         } else {
-            (a0, a1, r0, r1) = _executeHarvest(params, token0, token1, token0Addr, token1Addr, amount0, amount1);
+            (a0, a1) = _executeHarvest(params, token0, token1, token0Addr, token1Addr, amount0, amount1);
         }
 
         emit AutoCompound(
             params.tokenId,
             msg.sender,
             a0, a1,
-            r0, r1,
             token0Addr,
             token1Addr,
             params.mode != CompoundMode.AUTO_COMPOUND
@@ -131,15 +138,8 @@ contract AutoCompound is Automator {
         address token1Addr,
         uint256 amount0,
         uint256 amount1
-    ) internal returns (uint256 compounded0, uint256 compounded1, uint256 fees0, uint256 fees1) {
-        // Compute protocol fees only on newly collected fees (not on prior leftovers)
-        uint64 rewardX64 = totalRewardX64;
-        fees0 = amount0 * rewardX64 / (rewardX64 + Q64);
-        fees1 = amount1 * rewardX64 / (rewardX64 + Q64);
-        amount0 -= fees0;
-        amount1 -= fees1;
-
-        // Add previous leftover balances (already fee-processed from prior runs)
+    ) internal returns (uint256 compounded0, uint256 compounded1) {
+        // Add previous leftover balances
         amount0 += positionBalances[params.tokenId][token0Addr];
         amount1 += positionBalances[params.tokenId][token1Addr];
 
@@ -191,10 +191,6 @@ contract AutoCompound is Automator {
         // Store leftover (slippage diff) for position owner
         _setBalance(params.tokenId, token0Addr, amount0 - compounded0);
         _setBalance(params.tokenId, token1Addr, amount1 - compounded1);
-
-        // Store protocol fees
-        _increaseBalance(0, token0Addr, fees0);
-        _increaseBalance(0, token1Addr, fees1);
     }
 
     function _executeHarvest(
@@ -205,15 +201,8 @@ contract AutoCompound is Automator {
         address token1Addr,
         uint256 amount0,
         uint256 amount1
-    ) internal returns (uint256, uint256, uint256, uint256) {
-        // Compute protocol fees only on newly collected fees (not on prior leftovers)
-        uint64 rewardX64 = totalRewardX64;
-        uint256 reward0 = amount0 * rewardX64 / (rewardX64 + Q64);
-        uint256 reward1 = amount1 * rewardX64 / (rewardX64 + Q64);
-        amount0 -= reward0;
-        amount1 -= reward1;
-
-        // Add previous leftover balances (already fee-processed from prior runs)
+    ) internal returns (uint256, uint256) {
+        // Add previous leftover balances
         amount0 += positionBalances[params.tokenId][token0Addr];
         amount1 += positionBalances[params.tokenId][token1Addr];
 
@@ -243,15 +232,11 @@ contract AutoCompound is Automator {
             owner = IVault(owner).ownerOf(params.tokenId);
         }
 
-        // Store protocol fees
-        _increaseBalance(0, token0Addr, reward0);
-        _increaseBalance(0, token1Addr, reward1);
-
-        // Send tokens to owner (rewards already deducted, leftovers already included)
+        // Send tokens to owner
         _transferToken(owner, token0, amount0, true);
         _transferToken(owner, token1, amount1, true);
 
-        return (amount0, amount1, reward0, reward1);
+        return (amount0, amount1);
     }
 
     /// @notice Withdraws leftover token balance for a position
@@ -280,52 +265,6 @@ contract AutoCompound is Automator {
         }
     }
 
-    /// @notice Withdraws token balance (accumulated protocol fee)
-    /// @param tokens Addresses of tokens to withdraw
-    /// @param to Address to send to
-    function withdrawBalances(address[] calldata tokens, address to) external override nonReentrant {
-        if (msg.sender != withdrawer) {
-            revert Unauthorized();
-        }
-        uint256 i;
-        uint256 count = tokens.length;
-        for (; i < count; ++i) {
-            address token = tokens[i];
-            uint256 balance = positionBalances[0][token];
-            if (balance != 0) {
-                _withdrawBalanceInternal(0, token, to, balance);
-            }
-        }
-    }
-
-    /// @notice Withdraws ETH balance (only protocol fee portion tracked in positionBalances[0])
-    /// @param to Address to send to
-    function withdrawETH(address to) external override nonReentrant {
-        if (msg.sender != withdrawer) {
-            revert Unauthorized();
-        }
-        uint256 balance = positionBalances[0][address(0)];
-        if (balance != 0) {
-            _withdrawBalanceInternal(0, address(0), to, balance);
-        }
-    }
-
-    /// @notice Management method to set reward fee (onlyOwner)
-    /// @param _totalRewardX64 new total reward (max 2%)
-    function setReward(uint64 _totalRewardX64) external onlyOwner {
-        if (_totalRewardX64 > MAX_REWARD_X64) {
-            revert InvalidConfig();
-        }
-        totalRewardX64 = _totalRewardX64;
-        emit RewardUpdated(msg.sender, _totalRewardX64);
-    }
-
-    function _increaseBalance(uint256 tokenId, address token, uint256 amount) internal {
-        if (amount == 0) return;
-        positionBalances[tokenId][token] += amount;
-        emit BalanceAdded(tokenId, token, amount);
-    }
-
     function _setBalance(uint256 tokenId, address token, uint256 amount) internal {
         uint256 currentBalance = positionBalances[tokenId][token];
         if (amount != currentBalance) {
@@ -343,5 +282,19 @@ contract AutoCompound is Automator {
         emit BalanceRemoved(tokenId, token, amount);
         _transferToken(to, Currency.wrap(token), amount, false);
         emit BalanceWithdrawn(tokenId, token, to, amount);
+    }
+
+    /// @notice Configure fee parameters for a position
+    function configToken(uint256 tokenId, PositionConfig calldata config) external {
+        address owner = IERC721(address(positionManager)).ownerOf(tokenId);
+        if (vaults[owner]) {
+            owner = IVault(owner).ownerOf(tokenId);
+        }
+        if (owner != msg.sender) {
+            revert Unauthorized();
+        }
+
+        positionConfigs[tokenId] = config;
+        emit PositionConfigured(tokenId, config.maxRewardX64, config.onlyFees);
     }
 }

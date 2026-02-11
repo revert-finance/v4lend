@@ -34,7 +34,8 @@ contract AutoLend is Automator {
         int24 upperTickZone,
         int24 lowerTickZoneWithdraw,
         int24 upperTickZoneWithdraw,
-        uint64 maxRewardX64
+        uint64 maxRewardX64,
+        bool onlyFees
     );
 
     struct PositionConfig {
@@ -44,6 +45,7 @@ contract AutoLend is Automator {
         int24 lowerTickZoneWithdraw;
         int24 upperTickZoneWithdraw;
         uint64 maxRewardX64;
+        bool onlyFees;
     }
 
     struct LendState {
@@ -73,15 +75,15 @@ contract AutoLend is Automator {
         uint256 amountRemoveMin0;
         uint256 amountRemoveMin1;
         uint256 deadline;
-        uint64 rewardX64;
         bytes hookData;
+        uint64 rewardX64;
     }
 
     struct WithdrawParams {
         uint256 tokenId;
         uint256 deadline;
-        uint64 rewardX64;
         bytes hookData;
+        uint64 rewardX64;
     }
 
     constructor(
@@ -111,9 +113,6 @@ contract AutoLend is Automator {
         PositionConfig memory config = positionConfigs[params.tokenId];
         if (!config.isActive) {
             revert NotConfigured();
-        }
-        if (params.rewardX64 > config.maxRewardX64) {
-            revert ExceedsMaxReward();
         }
         if (lendStates[params.tokenId].shares != 0) {
             revert InvalidConfig();
@@ -145,10 +144,21 @@ contract AutoLend is Automator {
             revert NoLiquidity();
         }
 
-        // Remove all liquidity
-        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(
+        // Collect fees first (decrease by 0), then remove all liquidity
+        (uint256 feeAmount0, uint256 feeAmount1) =
+            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
+        (uint256 liquidityAmount0, uint256 liquidityAmount1) = _decreaseLiquidity(
             params.tokenId, liquidity, params.amountRemoveMin0, params.amountRemoveMin1, params.deadline, params.hookData
         );
+
+        uint256 amount0 = feeAmount0 + liquidityAmount0;
+        uint256 amount1 = feeAmount1 + liquidityAmount1;
+
+        // Deduct protocol reward (stays in contract for withdrawer)
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
+        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
 
         // Determine idle token (token0 if tick above range, token1 if below)
         Currency idleToken = isAbove ? poolKey.currency1 : poolKey.currency0;
@@ -161,10 +171,6 @@ contract AutoLend is Automator {
         if (address(lendVault) == address(0)) {
             revert NotConfigured();
         }
-
-        // Deduct reward
-        uint256 reward = idleAmount * params.rewardX64 / Q64;
-        idleAmount -= reward;
 
         // Deposit into ERC4626 vault (wrap native ETH to WETH first if needed)
         address depositTokenAddr = idleTokenAddr;
@@ -206,15 +212,8 @@ contract AutoLend is Automator {
         }
 
         PositionConfig memory config = positionConfigs[params.tokenId];
-        if (params.rewardX64 > config.maxRewardX64) {
-            revert ExceedsMaxReward();
-        }
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
-
-        // Snapshot balances before execution to avoid paying out prior protocol rewards
-        uint256 balance0Before = poolKey.currency0.balanceOfSelf();
-        uint256 balance1Before = poolKey.currency1.balanceOfSelf();
 
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
@@ -244,18 +243,22 @@ contract AutoLend is Automator {
 
         // Redeem shares from ERC4626 vault (unwrap WETH to ETH if lent token was native)
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
-        if (state.lentToken == address(0)) {
-            weth.withdraw(redeemedAmount);
+
+        // Deduct protocol reward on redeemed amount
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
+        {
+            uint256 yieldAmount = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
+            uint256 feeBase = config.onlyFees ? yieldAmount : redeemedAmount;
+            uint256 reward = feeBase * params.rewardX64 / Q64;
+            if (reward > redeemedAmount) reward = redeemedAmount;
+            redeemedAmount -= reward;
         }
 
-        // Protocol reward is a fraction of the vault yield gain
-        uint256 yieldGain = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
-        uint256 protocolReward = yieldGain * params.rewardX64 / Q64;
-        uint256 depositAmount = redeemedAmount - protocolReward;
-        if (isToken0Lent) {
-            balance0Before += protocolReward;
-        } else {
-            balance1Before += protocolReward;
+        if (state.lentToken == address(0)) {
+            weth.withdraw(redeemedAmount);
+            // Any remaining WETH (reward) stays in contract for withdrawer
         }
 
         // Cannot be vault-owned
@@ -271,9 +274,9 @@ contract AutoLend is Automator {
             // Token0 was lent. Need to check if we can add it back.
             if (baseTick < tickLower) {
                 // Current tick below position - can add token0 to existing position
-                _handleApproval(permit2, poolKey.currency0, depositAmount);
+                _handleApproval(permit2, poolKey.currency0, redeemedAmount);
                 _increaseLiquidityOnExisting(
-                    params.tokenId, poolKey, positionInfo, depositAmount, 0, params.deadline, params.hookData
+                    params.tokenId, poolKey, positionInfo, redeemedAmount, 0, params.deadline, params.hookData
                 );
             } else {
                 // Current tick within/above position - mint new one-sided position above current tick
@@ -281,28 +284,28 @@ contract AutoLend is Automator {
                 int24 newUpper = baseTick + tickSpacing + tickWidth;
                 if (newUpper > TickMath.MAX_TICK) newUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
                 if (newLower >= newUpper) revert InvalidConfig();
-                _handleApproval(permit2, poolKey.currency0, depositAmount);
+                _handleApproval(permit2, poolKey.currency0, redeemedAmount);
                 newTokenId = _mintOneSidedPosition(
-                    poolKey, newLower, newUpper, depositAmount, 0, params.deadline, params.hookData
+                    poolKey, newLower, newUpper, redeemedAmount, 0, params.deadline, params.hookData
                 );
             }
         } else {
             // Token1 was lent. Need to check if we can add it back.
             if (baseTick >= tickUpper) {
                 // Current tick above position - can add token1 to existing position
-                _handleApproval(permit2, poolKey.currency1, depositAmount);
+                _handleApproval(permit2, poolKey.currency1, redeemedAmount);
                 _increaseLiquidityOnExisting(
-                    params.tokenId, poolKey, positionInfo, 0, depositAmount, params.deadline, params.hookData
+                    params.tokenId, poolKey, positionInfo, 0, redeemedAmount, params.deadline, params.hookData
                 );
             } else {
                 // Current tick within/below position - mint new one-sided position below current tick
                 int24 newLower = baseTick - tickWidth;
                 int24 newUpper = baseTick;
-                if (newLower < TickMath.MIN_TICK) newLower = (TickMath.MIN_TICK / tickSpacing + 1) * tickSpacing;
+                if (newLower < TickMath.MIN_TICK) newLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
                 if (newLower >= newUpper) revert InvalidConfig();
-                _handleApproval(permit2, poolKey.currency1, depositAmount);
+                _handleApproval(permit2, poolKey.currency1, redeemedAmount);
                 newTokenId = _mintOneSidedPosition(
-                    poolKey, newLower, newUpper, 0, depositAmount, params.deadline, params.hookData
+                    poolKey, newLower, newUpper, 0, redeemedAmount, params.deadline, params.hookData
                 );
             }
         }
@@ -319,11 +322,9 @@ contract AutoLend is Automator {
             IERC721(address(positionManager)).transferFrom(address(this), posOwner, newTokenId);
         }
 
-        // Send leftover tokens to owner (only delta from this execution, excluding protocol rewards)
-        uint256 balance0After = poolKey.currency0.balanceOfSelf();
-        uint256 balance1After = poolKey.currency1.balanceOfSelf();
-        uint256 leftover0 = balance0After > balance0Before ? balance0After - balance0Before : 0;
-        uint256 leftover1 = balance1After > balance1Before ? balance1After - balance1Before : 0;
+        // Send leftover tokens to owner
+        uint256 leftover0 = poolKey.currency0.balanceOfSelf();
+        uint256 leftover1 = poolKey.currency1.balanceOfSelf();
         if (leftover0 > 0) {
             _transferToken(posOwner, poolKey.currency0, leftover0, true);
         }
@@ -382,7 +383,7 @@ contract AutoLend is Automator {
         newTokenId = positionManager.nextTokenId() - 1;
     }
 
-    /// @notice Withdraws token balance (accumulated protocol rewards), skipping lend vault share tokens
+    /// @notice Withdraws token balance, skipping active vault share tokens
     function withdrawBalances(address[] calldata tokens, address to) external override {
         if (msg.sender != withdrawer) {
             revert Unauthorized();
@@ -431,7 +432,8 @@ contract AutoLend is Automator {
             config.upperTickZone,
             config.lowerTickZoneWithdraw,
             config.upperTickZoneWithdraw,
-            config.maxRewardX64
+            config.maxRewardX64,
+            config.onlyFees
         );
     }
 }

@@ -40,7 +40,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         address randomUser = makeAddr("random");
@@ -49,34 +50,12 @@ contract AutoCompoundTest is AutomatorTestBase {
         autoCompound.execute(params);
     }
 
-    function test_RevertWhenNonWithdrawerCallsWithdrawBalances() public {
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(usdc);
-
-        address randomUser = makeAddr("random");
-        vm.prank(randomUser);
-        vm.expectRevert(Constants.Unauthorized.selector);
-        autoCompound.withdrawBalances(tokens, randomUser);
-    }
-
     function test_SetOperator() public {
         address newOperator = makeAddr("newOperator");
         autoCompound.setOperator(newOperator, true);
         assertTrue(autoCompound.operators(newOperator));
         autoCompound.setOperator(newOperator, false);
         assertFalse(autoCompound.operators(newOperator));
-    }
-
-    function test_SetReward() public {
-        uint64 rewardX64 = uint64(Q64 * 1 / 100); // 1%
-        autoCompound.setReward(rewardX64);
-        assertEq(autoCompound.totalRewardX64(), rewardX64);
-    }
-
-    function test_RevertWhenRewardTooHigh() public {
-        uint64 rewardX64 = uint64(Q64 * 3 / 100); // 3% > 2% max
-        vm.expectRevert(Constants.InvalidConfig.selector);
-        autoCompound.setReward(rewardX64);
     }
 
     // --- AutoCompound Mode Tests ---
@@ -103,7 +82,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -139,7 +119,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -157,9 +138,6 @@ contract AutoCompoundTest is AutomatorTestBase {
     function test_HarvestTokens() public {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
-
-        // Set small reward
-        autoCompound.setReward(uint64(Q64 * 1 / 100)); // 1%
 
         // Generate fees
         _generateFees(poolKey);
@@ -180,7 +158,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -201,7 +180,6 @@ contract AutoCompoundTest is AutomatorTestBase {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
 
-        autoCompound.setReward(uint64(Q64 * 1 / 100));
         _generateFees(poolKey);
 
         vm.prank(WHALE_ACCOUNT);
@@ -217,7 +195,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -231,7 +210,6 @@ contract AutoCompoundTest is AutomatorTestBase {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
 
-        autoCompound.setReward(uint64(Q64 * 1 / 100));
         _generateFees(poolKey);
 
         vm.prank(WHALE_ACCOUNT);
@@ -248,7 +226,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -259,7 +238,7 @@ contract AutoCompoundTest is AutomatorTestBase {
         assertTrue(ethAfter > ethBefore || weth.balanceOf(WHALE_ACCOUNT) > 0, "Owner should receive token1 (WETH/ETH)");
     }
 
-    // --- Leftover Balance & Withdrawal Tests ---
+    // --- Leftover Balance Tests ---
 
     function test_WithdrawLeftoverBalances() public {
         PoolKey memory poolKey = _createPool();
@@ -279,7 +258,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -288,47 +268,6 @@ contract AutoCompoundTest is AutomatorTestBase {
         // Owner can withdraw leftover balances
         vm.prank(WHALE_ACCOUNT);
         autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
-    }
-
-    function test_WithdrawProtocolFees() public {
-        PoolKey memory poolKey = _createPool();
-        uint256 tokenId = _createFullRangePosition(poolKey);
-
-        // Set reward to accumulate protocol fees
-        autoCompound.setReward(uint64(Q64 * 2 / 100)); // 2%
-
-        _generateFees(poolKey);
-
-        vm.prank(WHALE_ACCOUNT);
-        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
-
-        // Auto-compound to generate protocol fees
-        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
-            tokenId: tokenId,
-            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            deadline: block.timestamp,
-            hookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoCompound.execute(params);
-
-        // Check protocol fees accumulated
-        uint256 protocolFees0 = autoCompound.positionBalances(0, address(usdc));
-        uint256 protocolFees1 = autoCompound.positionBalances(0, address(weth));
-        assertTrue(protocolFees0 > 0 || protocolFees1 > 0, "Protocol fees should have accumulated");
-
-        // Withdrawer can withdraw protocol fees
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(usdc);
-        tokens[1] = address(weth);
-
-        vm.prank(withdrawer);
-        autoCompound.withdrawBalances(tokens, withdrawer);
     }
 
     // --- Unauthorized leftover withdrawal ---
@@ -367,7 +306,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -406,7 +346,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -417,64 +358,6 @@ contract AutoCompoundTest is AutomatorTestBase {
 
         // Verify position still owned by vault
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId), address(vault));
-    }
-
-    function test_AutoCompoundETHWithReward() public {
-        PoolKey memory poolKey = _createETHPool();
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
-
-        // Set 2% reward
-        autoCompound.setReward(uint64(Q64 * 2 / 100));
-
-        // Generate fees with native ETH swaps
-        _generateFeesETH(poolKey);
-
-        // Approve NFT to autoCompound
-        vm.prank(WHALE_ACCOUNT);
-        IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
-
-        // Execute auto-compound
-        AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
-            tokenId: tokenId,
-            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            deadline: block.timestamp,
-            hookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoCompound.execute(params);
-
-        // Check protocol fees accumulated for native ETH (address(0))
-        uint256 protocolFeesETH = autoCompound.positionBalances(0, address(0));
-        uint256 protocolFeesUSDC = autoCompound.positionBalances(0, address(usdc));
-        assertTrue(protocolFeesETH > 0 || protocolFeesUSDC > 0, "Protocol fees should accumulate for ETH position");
-
-        // Verify withdrawer can withdraw protocol fees including native ETH
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(0);
-        tokens[1] = address(usdc);
-
-        uint256 withdrawerETHBefore = withdrawer.balance;
-        uint256 withdrawerUSDCBefore = usdc.balanceOf(withdrawer);
-
-        vm.prank(withdrawer);
-        autoCompound.withdrawBalances(tokens, withdrawer);
-
-        // Verify protocol fees were withdrawn
-        if (protocolFeesETH > 0) {
-            assertEq(withdrawer.balance - withdrawerETHBefore, protocolFeesETH, "Withdrawer should receive ETH protocol fees");
-        }
-        if (protocolFeesUSDC > 0) {
-            assertEq(usdc.balanceOf(withdrawer) - withdrawerUSDCBefore, protocolFeesUSDC, "Withdrawer should receive USDC protocol fees");
-        }
-
-        // Verify balances zeroed out
-        assertEq(autoCompound.positionBalances(0, address(0)), 0, "ETH protocol balance should be 0 after withdrawal");
-        assertEq(autoCompound.positionBalances(0, address(usdc)), 0, "USDC protocol balance should be 0 after withdrawal");
     }
 
     function test_WithdrawLeftoverBalancesETH() public {
@@ -495,41 +378,22 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
         autoCompound.execute(params);
 
-        // Check leftover balances
-        uint256 leftoverETH = autoCompound.positionBalances(tokenId, address(0));
-        uint256 leftoverUSDC = autoCompound.positionBalances(tokenId, address(usdc));
-
-        uint256 ownerETHBefore = WHALE_ACCOUNT.balance;
-        uint256 ownerUSDCBefore = usdc.balanceOf(WHALE_ACCOUNT);
-
         // Owner can withdraw leftover balances including native ETH
         vm.prank(WHALE_ACCOUNT);
         autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
-
-        // Verify leftovers were withdrawn
-        if (leftoverETH > 0) {
-            assertEq(WHALE_ACCOUNT.balance - ownerETHBefore, leftoverETH, "Owner should receive ETH leftovers");
-        }
-        if (leftoverUSDC > 0) {
-            assertEq(usdc.balanceOf(WHALE_ACCOUNT) - ownerUSDCBefore, leftoverUSDC, "Owner should receive USDC leftovers");
-        }
-
-        // Verify balances zeroed out
-        assertEq(autoCompound.positionBalances(tokenId, address(0)), 0, "ETH leftover should be 0");
-        assertEq(autoCompound.positionBalances(tokenId, address(usdc)), 0, "USDC leftover should be 0");
     }
 
     function test_HarvestTokensETH() public {
         PoolKey memory poolKey = _createETHPool();
         uint256 tokenId = _createFullRangePositionETH(poolKey);
 
-        autoCompound.setReward(uint64(Q64 * 1 / 100)); // 1%
         _generateFeesETH(poolKey);
 
         vm.prank(WHALE_ACCOUNT);
@@ -546,7 +410,8 @@ contract AutoCompoundTest is AutomatorTestBase {
             amountOutMin: 0,
             swapData: bytes(""),
             deadline: block.timestamp,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);

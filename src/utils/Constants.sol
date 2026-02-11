@@ -22,8 +22,8 @@ abstract contract Constants {
     error MissingSwapData();
     error SwapAmountTooLarge();
     error PriceImpactExceeded();
-
     error ExceedsMaxReward();
+
     error ChainlinkPriceError();
     error PriceDifferenceExceeded();
     error SequencerDown();

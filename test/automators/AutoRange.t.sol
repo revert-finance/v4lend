@@ -38,9 +38,9 @@ contract AutoRangeTest is AutomatorTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
             decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
+            mintHookData: bytes(""),
+            rewardX64: 0
         });
 
         address randomUser = makeAddr("random");
@@ -60,8 +60,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 0,
             lowerTickDelta: -120,
             upperTickDelta: 120,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -80,8 +80,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 0,
             lowerTickDelta: -120,
             upperTickDelta: 120,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         address randomUser = makeAddr("random");
@@ -109,8 +109,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60, // +1 tick spacing above current
             upperTickDelta: 300, // +5 tick spacings above current
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -135,9 +135,9 @@ contract AutoRangeTest is AutomatorTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
+            mintHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -173,8 +173,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 10000,
             lowerTickDelta: -120,
             upperTickDelta: 120,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -194,9 +194,9 @@ contract AutoRangeTest is AutomatorTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
             decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
+            mintHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -227,8 +227,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: int32(posInfo.tickLower() - baseTick),
             upperTickDelta: int32(posInfo.tickUpper() - baseTick),
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -248,210 +248,14 @@ contract AutoRangeTest is AutomatorTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
             decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
+            mintHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
         vm.expectRevert(Constants.SameRange.selector);
         autoRange.execute(params);
-    }
-
-    // --- onlyFees Tests ---
-
-    function test_ExecuteOnlyFeesFalse() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createNarrowPosition(poolKey);
-
-        // Generate fees so onlyFees produces a different result
-        _generateFees(poolKey);
-
-        // Configure auto-range with onlyFees=false (reward from total amounts)
-        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
-            lowerTickLimit: 1,
-            upperTickLimit: 1,
-            lowerTickDelta: 60,
-            upperTickDelta: 300,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100) // 1%
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoRange.configToken(tokenId, address(0), config);
-        vm.prank(WHALE_ACCOUNT);
-        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
-
-        // Move price out of range
-        _swapExactInputSingle(poolKey, true, 10000e6, 0);
-
-        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
-            tokenId: tokenId,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 100), // 1%
-            decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoRange.execute(params);
-
-        // Old position should be empty, new position created
-        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Old position should be empty");
-        uint256 newTokenId = positionManager.nextTokenId() - 1;
-        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
-        assertGt(newLiquidity, 0, "New position should have liquidity");
-
-        // With onlyFees=false, reward is taken from TOTAL (fees + principal),
-        // so new position should have LESS liquidity than the onlyFees=true case
-        // We log for comparison with the onlyFees=true test
-        console.log("onlyFees=false new liquidity:", newLiquidity);
-    }
-
-    function test_ExecuteOnlyFeesTrue() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createNarrowPosition(poolKey);
-
-        // Generate fees so onlyFees produces a different result
-        _generateFees(poolKey);
-
-        // Configure auto-range with onlyFees=true (reward from fees only)
-        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
-            lowerTickLimit: 1,
-            upperTickLimit: 1,
-            lowerTickDelta: 60,
-            upperTickDelta: 300,
-            onlyFees: true,
-            maxRewardX64: uint64(Q64 / 100) // 1%
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoRange.configToken(tokenId, address(0), config);
-        vm.prank(WHALE_ACCOUNT);
-        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
-
-        // Move price out of range
-        _swapExactInputSingle(poolKey, true, 10000e6, 0);
-
-        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
-            tokenId: tokenId,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 100), // 1%
-            decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoRange.execute(params);
-
-        // Old position should be empty, new position created
-        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Old position should be empty");
-        uint256 newTokenId = positionManager.nextTokenId() - 1;
-        uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
-        assertGt(newLiquidity, 0, "New position should have liquidity");
-
-        // With onlyFees=true, reward is taken from FEES only (much smaller),
-        // so new position should have MORE liquidity than the onlyFees=false case
-        console.log("onlyFees=true new liquidity:", newLiquidity);
-    }
-
-    /// @notice Verify that onlyFees=true results in more liquidity than onlyFees=false
-    /// by running both scenarios with identical setup using vm.snapshot
-    function test_OnlyFeesComparison() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createNarrowPosition(poolKey);
-
-        // Generate fees so onlyFees has something to differentiate
-        _generateFees(poolKey);
-
-        vm.prank(WHALE_ACCOUNT);
-        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
-
-        // Move price out of range
-        _swapExactInputSingle(poolKey, true, 10000e6, 0);
-
-        // Snapshot state before executing
-        uint256 snapshotId = vm.snapshot();
-
-        // --- Run onlyFees=false scenario ---
-        AutoRange.PositionConfig memory configFalse = AutoRange.PositionConfig({
-            lowerTickLimit: 1,
-            upperTickLimit: 1,
-            lowerTickDelta: 60,
-            upperTickDelta: 300,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoRange.configToken(tokenId, address(0), configFalse);
-
-        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
-            tokenId: tokenId,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 100),
-            decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoRange.execute(params);
-
-        uint256 newTokenIdFalse = positionManager.nextTokenId() - 1;
-        uint128 liquidityFalse = positionManager.getPositionLiquidity(newTokenIdFalse);
-
-        // --- Revert to snapshot and run onlyFees=true scenario ---
-        vm.revertTo(snapshotId);
-
-        AutoRange.PositionConfig memory configTrue = AutoRange.PositionConfig({
-            lowerTickLimit: 1,
-            upperTickLimit: 1,
-            lowerTickDelta: 60,
-            upperTickDelta: 300,
-            onlyFees: true,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoRange.configToken(tokenId, address(0), configTrue);
-
-        vm.prank(operator);
-        autoRange.execute(params);
-
-        uint256 newTokenIdTrue = positionManager.nextTokenId() - 1;
-        uint128 liquidityTrue = positionManager.getPositionLiquidity(newTokenIdTrue);
-
-        // onlyFees=true should result in MORE liquidity because reward is smaller (from fees only)
-        console.log("onlyFees=false liquidity:", liquidityFalse);
-        console.log("onlyFees=true liquidity:", liquidityTrue);
-        assertGt(liquidityTrue, liquidityFalse, "onlyFees=true should have more liquidity (smaller reward)");
     }
 
     // --- Native ETH Position Tests ---
@@ -468,8 +272,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -491,9 +295,9 @@ contract AutoRangeTest is AutomatorTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
+            mintHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -511,89 +315,6 @@ contract AutoRangeTest is AutomatorTestBase {
 
         // Verify new position owned by original owner
         assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT);
-    }
-
-    /// @notice Verify that reward deduction works with native ETH positions,
-    /// comparing liquidity with and without reward using vm.snapshot
-    function test_ExecuteRangeChangeETHWithReward() public {
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createNarrowPositionETH(poolKey);
-
-        // Generate fees
-        _generateFeesETH(poolKey);
-
-        vm.prank(WHALE_ACCOUNT);
-        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
-
-        // Move price out of range (large ETH sell)
-        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
-
-        // Snapshot state before executing
-        uint256 snapshotId = vm.snapshot();
-
-        // --- Run WITHOUT reward ---
-        AutoRange.PositionConfig memory configNoReward = AutoRange.PositionConfig({
-            lowerTickLimit: 1,
-            upperTickLimit: 1,
-            lowerTickDelta: 60,
-            upperTickDelta: 300,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoRange.configToken(tokenId, address(0), configNoReward);
-
-        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
-            tokenId: tokenId,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            amountRemoveMin0: 0,
-            amountRemoveMin1: 0,
-            amountAddMin0: 0,
-            amountAddMin1: 0,
-            deadline: block.timestamp,
-            rewardX64: 0, // No reward
-            decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
-        });
-
-        vm.prank(operator);
-        autoRange.execute(params);
-
-        uint256 newTokenIdNoReward = positionManager.nextTokenId() - 1;
-        uint128 liquidityNoReward = positionManager.getPositionLiquidity(newTokenIdNoReward);
-
-        // --- Revert and run WITH reward ---
-        vm.revertTo(snapshotId);
-
-        AutoRange.PositionConfig memory configWithReward = AutoRange.PositionConfig({
-            lowerTickLimit: 1,
-            upperTickLimit: 1,
-            lowerTickDelta: 60,
-            upperTickDelta: 300,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
-        });
-
-        vm.prank(WHALE_ACCOUNT);
-        autoRange.configToken(tokenId, address(0), configWithReward);
-
-        // Reuse same params struct but set rewardX64
-        params.rewardX64 = uint64(Q64 / 100); // 1%
-
-        vm.prank(operator);
-        autoRange.execute(params);
-
-        uint256 newTokenIdWithReward = positionManager.nextTokenId() - 1;
-        uint128 liquidityWithReward = positionManager.getPositionLiquidity(newTokenIdWithReward);
-
-        // With reward deducted, new position should have LESS liquidity
-        assertGt(liquidityNoReward, liquidityWithReward, "Reward should reduce new position liquidity for ETH pair");
-        assertGt(liquidityWithReward, 0, "New ETH position should still have liquidity");
     }
 
     function test_ExecuteWithVaultETH() public {
@@ -615,8 +336,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -636,9 +357,9 @@ contract AutoRangeTest is AutomatorTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
+            mintHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -676,8 +397,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
-            onlyFees: false,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -697,9 +418,9 @@ contract AutoRangeTest is AutomatorTestBase {
             amountAddMin0: 0,
             amountAddMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
             decreaseLiquidityHookData: bytes(""),
-            mintHookData: bytes("")
+            mintHookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);

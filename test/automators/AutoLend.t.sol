@@ -42,8 +42,8 @@ contract AutoLendTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         address randomUser = makeAddr("random");
@@ -71,13 +71,14 @@ contract AutoLendTest is AutomatorTestBase {
             upperTickZone: 120,
             lowerTickZoneWithdraw: 60,
             upperTickZoneWithdraw: 60,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
         autoLend.configToken(tokenId, config);
 
-        (bool isActive,,,,,) = autoLend.positionConfigs(tokenId);
+        (bool isActive,,,,,,) = autoLend.positionConfigs(tokenId);
         assertTrue(isActive);
     }
 
@@ -96,7 +97,8 @@ contract AutoLendTest is AutomatorTestBase {
             upperTickZone: 120,
             lowerTickZoneWithdraw: 60,
             upperTickZoneWithdraw: 60,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -121,7 +123,8 @@ contract AutoLendTest is AutomatorTestBase {
             upperTickZone: 0,
             lowerTickZoneWithdraw: 0,
             upperTickZoneWithdraw: 0,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -144,8 +147,8 @@ contract AutoLendTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: uint64(Q64 / 200),
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -172,7 +175,8 @@ contract AutoLendTest is AutomatorTestBase {
             upperTickZone: 0,
             lowerTickZoneWithdraw: 0,
             upperTickZoneWithdraw: 0,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -186,8 +190,8 @@ contract AutoLendTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -210,8 +214,8 @@ contract AutoLendTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -239,7 +243,8 @@ contract AutoLendTest is AutomatorTestBase {
             upperTickZone: 0,
             lowerTickZoneWithdraw: 10000,
             upperTickZoneWithdraw: 10000,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -263,8 +268,8 @@ contract AutoLendTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -290,7 +295,7 @@ contract AutoLendTest is AutomatorTestBase {
 
         // Withdraw - this should redeem WETH from ERC4626, unwrap to ETH, add liquidity
         AutoLend.WithdrawParams memory withdrawParams =
-            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, rewardX64: 0, hookData: bytes("")});
+            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes(""), rewardX64: 0});
 
         vm.prank(operator);
         autoLend.withdraw(withdrawParams);
@@ -316,7 +321,8 @@ contract AutoLendTest is AutomatorTestBase {
             upperTickZone: 0,
             lowerTickZoneWithdraw: 10000, // very wide
             upperTickZoneWithdraw: 10000,
-            maxRewardX64: uint64(Q64 / 100)
+            maxRewardX64: 0,
+            onlyFees: false
         });
 
         vm.prank(WHALE_ACCOUNT);
@@ -334,8 +340,8 @@ contract AutoLendTest is AutomatorTestBase {
             amountRemoveMin0: 0,
             amountRemoveMin1: 0,
             deadline: block.timestamp,
-            rewardX64: 0,
-            hookData: bytes("")
+            hookData: bytes(""),
+            rewardX64: 0
         });
 
         vm.prank(operator);
@@ -350,7 +356,7 @@ contract AutoLendTest is AutomatorTestBase {
 
         // Withdraw
         AutoLend.WithdrawParams memory withdrawParams =
-            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, rewardX64: 0, hookData: bytes("")});
+            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes(""), rewardX64: 0});
 
         vm.prank(operator);
         autoLend.withdraw(withdrawParams);
