@@ -45,6 +45,8 @@ contract AutoLeverage is Automator {
         uint256 balance1Start;
         uint256 reward0;
         uint256 reward1;
+        uint256 netFee0;
+        uint256 netFee1;
     }
 
     struct ExecuteParams {
@@ -143,6 +145,15 @@ contract AutoLeverage is Automator {
         (feeAmount0, feeAmount1) = _deductReward(feeAmount0, feeAmount1, feeAmount0, feeAmount1, true, params.rewardX64);
         state.reward0 -= feeAmount0;
         state.reward1 -= feeAmount1;
+        state.netFee0 = feeAmount0;
+        state.netFee1 = feeAmount1;
+
+        // Adjust collateral: deduct only the reward value (net fees are reused)
+        {
+            uint256 postCollateral;
+            (currentDebt,, postCollateral,,) = vault.loanInfo(params.tokenId);
+            collateralValue = postCollateral + (collateralValue - postCollateral) * (Q64 - params.rewardX64) / Q64;
+        }
 
         if (params.leverageUp) {
             _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, state);
@@ -195,9 +206,8 @@ contract AutoLeverage is Automator {
             // Borrow from vault
             vault.borrow(params.tokenId, borrowAmount);
 
-            amount0 = token0.balanceOfSelf() - balance0Before;
-            amount1 = token1.balanceOfSelf() - balance1Before;
-            // Note: amount0/amount1 include collected fees + borrowed tokens (fee collection was before borrow)
+            amount0 = token0.balanceOfSelf() - balance0Before + state.netFee0;
+            amount1 = token1.balanceOfSelf() - balance1Before + state.netFee1;
         }
 
         // Swap borrowed lend token to position tokens
@@ -271,6 +281,7 @@ contract AutoLeverage is Automator {
         ExecuteState memory state
     ) internal {
         uint128 liquidityToRemove;
+        uint256 netFeeLendValue;
         {
             uint16 targetBps = config.targetLeverageBps;
             if (currentDebt * 10000 <= collateralValue * targetBps) revert NotReady();
@@ -280,27 +291,39 @@ contract AutoLeverage is Automator {
 
             uint256 repayAmount = (currentDebt * 10000 - uint256(targetBps) * collateralValue) / denominator;
 
-            uint128 currentLiquidity = positionManager.getPositionLiquidity(params.tokenId);
-            if (currentLiquidity == 0) revert NoLiquidity();
+            // Net fees in lend token reduce how much liquidity must be removed
+            netFeeLendValue = (lendToken == token0) ? state.netFee0 : ((lendToken == token1) ? state.netFee1 : 0);
+            repayAmount = repayAmount > netFeeLendValue ? repayAmount - netFeeLendValue : 0;
 
-            // Calculate proportional liquidity to remove
-            // Use collateralValue as proxy for total position value
-            if (collateralValue > 0) {
-                liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / collateralValue);
+            if (repayAmount > 0) {
+                uint128 currentLiquidity = positionManager.getPositionLiquidity(params.tokenId);
+                if (currentLiquidity == 0) revert NoLiquidity();
+
+                // Calculate proportional liquidity to remove
+                // Use collateralValue as proxy for total position value
+                if (collateralValue > 0) {
+                    liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / collateralValue);
+                }
+                if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
             }
-            if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
-            if (liquidityToRemove == 0) revert NotReady();
+            if (liquidityToRemove == 0 && netFeeLendValue == 0) revert NotReady();
         }
 
-        // Remove partial liquidity
-        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(
-            params.tokenId,
-            liquidityToRemove,
-            params.amountRemoveMin0,
-            params.amountRemoveMin1,
-            params.deadline,
-            params.decreaseLiquidityHookData
-        );
+        uint256 amount0;
+        uint256 amount1;
+        if (liquidityToRemove > 0) {
+            (amount0, amount1) = _decreaseLiquidity(
+                params.tokenId,
+                liquidityToRemove,
+                params.amountRemoveMin0,
+                params.amountRemoveMin1,
+                params.deadline,
+                params.decreaseLiquidityHookData
+            );
+        }
+        // Include net fees in available amounts for swap/repay
+        amount0 += state.netFee0;
+        amount1 += state.netFee1;
 
         // Swap position tokens to lend token
         uint256 lendAmount = lendToken == token0 ? amount0 : (lendToken == token1 ? amount1 : 0);
