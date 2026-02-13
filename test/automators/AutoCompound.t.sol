@@ -282,6 +282,107 @@ contract AutoCompoundTest is AutomatorTestBase {
         autoCompound.withdrawLeftoverBalances(tokenId, randomUser);
     }
 
+    function test_OnlyFeesFlagAffectsRewardOnLeftovers() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenIdOnlyFees = _createFullRangePosition(poolKey);
+        uint256 tokenIdTotal = _createFullRangePosition(poolKey);
+
+        _generateFees(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoCompound), true);
+
+        AutoCompound.ExecuteParams memory compoundParams = AutoCompound.ExecuteParams({
+            tokenId: tokenIdOnlyFees,
+            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        autoCompound.execute(compoundParams);
+
+        compoundParams.tokenId = tokenIdTotal;
+        vm.prank(operator);
+        autoCompound.execute(compoundParams);
+
+        bool hasLeftoversOnlyFees = autoCompound.positionBalances(tokenIdOnlyFees, address(usdc)) > 0
+            || autoCompound.positionBalances(tokenIdOnlyFees, address(weth)) > 0;
+        bool hasLeftoversTotal =
+            autoCompound.positionBalances(tokenIdTotal, address(usdc)) > 0
+                || autoCompound.positionBalances(tokenIdTotal, address(weth)) > 0;
+        assertTrue(hasLeftoversOnlyFees && hasLeftoversTotal, "Setup should create leftovers");
+
+        uint64 maxReward = type(uint64).max;
+
+        vm.startPrank(WHALE_ACCOUNT);
+        autoCompound.configToken(tokenIdOnlyFees, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: true}));
+        autoCompound.configToken(tokenIdTotal, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
+        vm.stopPrank();
+
+        AutoCompound.ExecuteParams memory harvestParams = AutoCompound.ExecuteParams({
+            tokenId: tokenIdOnlyFees,
+            mode: AutoCompound.CompoundMode.HARVEST_TOKENS,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        uint256 balanceUsdc = usdc.balanceOf(address(autoCompound));
+        uint256 balanceWeth = weth.balanceOf(address(autoCompound));
+        uint256 reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
+        uint256 reservedWeth = autoCompound.totalPositionBalances(address(weth));
+        uint256 availableUsdcBefore = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
+        uint256 availableWethBefore = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
+        vm.prank(operator);
+        autoCompound.execute(harvestParams);
+        balanceUsdc = usdc.balanceOf(address(autoCompound));
+        balanceWeth = weth.balanceOf(address(autoCompound));
+        reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
+        reservedWeth = autoCompound.totalPositionBalances(address(weth));
+        uint256 availableUsdcAfter = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
+        uint256 availableWethAfter = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
+        uint256 onlyFeesRewardUsdc =
+            availableUsdcAfter > availableUsdcBefore ? availableUsdcAfter - availableUsdcBefore : 0;
+        uint256 onlyFeesRewardWeth =
+            availableWethAfter > availableWethBefore ? availableWethAfter - availableWethBefore : 0;
+
+        harvestParams.tokenId = tokenIdTotal;
+        balanceUsdc = usdc.balanceOf(address(autoCompound));
+        balanceWeth = weth.balanceOf(address(autoCompound));
+        reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
+        reservedWeth = autoCompound.totalPositionBalances(address(weth));
+        availableUsdcBefore = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
+        availableWethBefore = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
+        vm.prank(operator);
+        autoCompound.execute(harvestParams);
+        balanceUsdc = usdc.balanceOf(address(autoCompound));
+        balanceWeth = weth.balanceOf(address(autoCompound));
+        reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
+        reservedWeth = autoCompound.totalPositionBalances(address(weth));
+        availableUsdcAfter = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
+        availableWethAfter = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
+        uint256 totalRewardUsdc =
+            availableUsdcAfter > availableUsdcBefore ? availableUsdcAfter - availableUsdcBefore : 0;
+        uint256 totalRewardWeth =
+            availableWethAfter > availableWethBefore ? availableWethAfter - availableWethBefore : 0;
+
+        assertTrue(totalRewardUsdc > 0 || totalRewardWeth > 0, "onlyFees=false should collect leftover reward");
+        assertTrue(
+            totalRewardUsdc > onlyFeesRewardUsdc || totalRewardWeth > onlyFeesRewardWeth,
+            "onlyFees=false should collect more reward than onlyFees=true on leftover-only runs"
+        );
+    }
+
     // --- Native ETH Position Tests ---
 
     function test_AutoCompoundETH() public {

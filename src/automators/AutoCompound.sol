@@ -103,7 +103,7 @@ contract AutoCompound is Automator {
         address token1Addr = Currency.unwrap(token1);
 
         // Collect fees (decrease liquidity by 0)
-        (uint256 amount0, uint256 amount1) =
+        (uint256 feeAmount0, uint256 feeAmount1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
 
         // Deduct protocol reward (stays in contract for withdrawer)
@@ -111,7 +111,9 @@ contract AutoCompound is Automator {
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        (amount0, amount1) = _deductReward(amount0, amount1, amount0, amount1, config.onlyFees, params.rewardX64);
+        uint256 amount0 = feeAmount0 + positionBalances[params.tokenId][token0Addr];
+        uint256 amount1 = feeAmount1 + positionBalances[params.tokenId][token1Addr];
+        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
 
         uint256 a0;
         uint256 a1;
@@ -142,10 +144,6 @@ contract AutoCompound is Automator {
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256 compounded0, uint256 compounded1) {
-        // Add previous leftover balances
-        amount0 += positionBalances[params.tokenId][token0Addr];
-        amount1 += positionBalances[params.tokenId][token1Addr];
-
         // Optional swap to rebalance
         if (params.amountIn != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
@@ -205,10 +203,6 @@ contract AutoCompound is Automator {
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256, uint256) {
-        // Add previous leftover balances
-        amount0 += positionBalances[params.tokenId][token0Addr];
-        amount1 += positionBalances[params.tokenId][token1Addr];
-
         // Perform swap based on harvest mode
         if (params.mode == CompoundMode.HARVEST_TOKEN_0 && amount1 != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
