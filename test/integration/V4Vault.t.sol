@@ -158,6 +158,16 @@ contract V4VaultTest is V4ForkTestBase {
         vault.multicall(calls);
     }
 
+    function test_HooklessPoolBlockedWhenZeroHookIsNotAllowlisted() external {
+        vault.setHookAllowList(address(0), false);
+
+        vm.prank(nft1Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
+        vm.expectRevert(Constants.HookNotAllowed.selector);
+        vm.prank(nft1Owner);
+        vault.create(nft1TokenId, nft1Owner);
+    }
+
     function testMinLoanSize() external {
         uint256 minLoanSize = 1000000;
 
