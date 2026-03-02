@@ -316,10 +316,6 @@ contract DeployUnichain is Script {
         //     vault.setReserveFactor(uint32(Q32 * 10 / 100)); // 10% reserve factor
         //     vault.setReserveProtectionFactor(uint32(Q32 * 5 / 100)); // 5% reserve protection
 
-        //     // Set up auto-lend vault in RevertHook
-        //     if (USDC != address(0)) {
-        //         revertHook.setAutoLendVault(USDC, vault);
-        //     }
         // }
 
         // // ==================== Step 5: Deploy Transformers ====================

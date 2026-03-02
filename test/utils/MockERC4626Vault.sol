@@ -9,7 +9,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title MockERC4626Vault
-/// @notice A simple ERC4626 vault implementation for testing autolend functionality
+/// @notice A simple ERC4626 vault implementation for testing lending flows
 /// @dev Uses 1:1 asset to share ratio for simplicity (can be extended with yield if needed)
 contract MockERC4626Vault is ERC20, IERC4626 {
     using SafeERC20 for IERC20;
@@ -211,4 +211,3 @@ contract MockERC4626Vault is ERC20, IERC4626 {
         emit ExchangeRateUpdated(oldRate, exchangeRate);
     }
 }
-
