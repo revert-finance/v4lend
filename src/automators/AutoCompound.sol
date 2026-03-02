@@ -30,14 +30,13 @@ contract AutoCompound is Automator {
     );
 
     event PositionConfigured(
-        uint256 indexed tokenId, uint64 maxRewardX64, uint16 token0SlippageBps, uint16 token1SlippageBps, bool onlyFees
+        uint256 indexed tokenId, uint64 maxRewardX64, uint16 token0SlippageBps, uint16 token1SlippageBps
     );
 
     struct PositionConfig {
         uint64 maxRewardX64;
         uint16 token0SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
         uint16 token1SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
-        bool onlyFees;
     }
 
     mapping(uint256 => PositionConfig) public positionConfigs;
@@ -106,7 +105,8 @@ contract AutoCompound is Automator {
         }
         uint256 amount0 = feeAmount0;
         uint256 amount1 = feeAmount1;
-        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
+        // AutoCompound only collects fees (liquidity=0), so reward base is always fee-only.
+        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, true, params.rewardX64);
 
         address owner = _positionOwner(params.tokenId);
 
@@ -237,7 +237,7 @@ contract AutoCompound is Automator {
 
         positionConfigs[tokenId] = config;
         emit PositionConfigured(
-            tokenId, config.maxRewardX64, config.token0SlippageBps, config.token1SlippageBps, config.onlyFees
+            tokenId, config.maxRewardX64, config.token0SlippageBps, config.token1SlippageBps
         );
     }
 
