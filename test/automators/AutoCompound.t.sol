@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {console} from "forge-std/console.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -238,9 +236,9 @@ contract AutoCompoundTest is AutomatorTestBase {
         assertTrue(ethAfter > ethBefore || weth.balanceOf(WHALE_ACCOUNT) > 0, "Owner should receive token1 (WETH/ETH)");
     }
 
-    // --- Leftover Balance Tests ---
+    // --- Leftovers paid out immediately ---
 
-    function test_WithdrawLeftoverBalances() public {
+    function test_AutoCompoundDoesNotRetainPositionBalances() public {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
 
@@ -249,7 +247,10 @@ contract AutoCompoundTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
 
-        // Auto-compound to potentially create leftovers
+        uint256 contractUsdcBefore = usdc.balanceOf(address(autoCompound));
+        uint256 contractWethBefore = weth.balanceOf(address(autoCompound));
+        uint256 contractEthBefore = address(autoCompound).balance;
+
         AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
             tokenId: tokenId,
             mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
@@ -265,122 +266,10 @@ contract AutoCompoundTest is AutomatorTestBase {
         vm.prank(operator);
         autoCompound.execute(params);
 
-        // Owner can withdraw leftover balances
-        vm.prank(WHALE_ACCOUNT);
-        autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
-    }
-
-    // --- Unauthorized leftover withdrawal ---
-
-    function test_RevertWhenNonOwnerWithdrawsLeftovers() public {
-        PoolKey memory poolKey = _createPool();
-        uint256 tokenId = _createFullRangePosition(poolKey);
-
-        address randomUser = makeAddr("random");
-        vm.prank(randomUser);
-        vm.expectRevert(Constants.Unauthorized.selector);
-        autoCompound.withdrawLeftoverBalances(tokenId, randomUser);
-    }
-
-    function test_OnlyFeesFlagAffectsRewardOnLeftovers() public {
-        PoolKey memory poolKey = _createPool();
-        uint256 tokenIdOnlyFees = _createFullRangePosition(poolKey);
-        uint256 tokenIdTotal = _createFullRangePosition(poolKey);
-
-        _generateFees(poolKey);
-
-        vm.prank(WHALE_ACCOUNT);
-        IERC721(address(positionManager)).setApprovalForAll(address(autoCompound), true);
-
-        AutoCompound.ExecuteParams memory compoundParams = AutoCompound.ExecuteParams({
-            tokenId: tokenIdOnlyFees,
-            mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            deadline: block.timestamp,
-            hookData: bytes(""),
-            rewardX64: 0
-        });
-
-        vm.prank(operator);
-        autoCompound.execute(compoundParams);
-
-        compoundParams.tokenId = tokenIdTotal;
-        vm.prank(operator);
-        autoCompound.execute(compoundParams);
-
-        bool hasLeftoversOnlyFees = autoCompound.positionBalances(tokenIdOnlyFees, address(usdc)) > 0
-            || autoCompound.positionBalances(tokenIdOnlyFees, address(weth)) > 0;
-        bool hasLeftoversTotal =
-            autoCompound.positionBalances(tokenIdTotal, address(usdc)) > 0
-                || autoCompound.positionBalances(tokenIdTotal, address(weth)) > 0;
-        assertTrue(hasLeftoversOnlyFees && hasLeftoversTotal, "Setup should create leftovers");
-
-        uint64 maxReward = type(uint64).max;
-
-        vm.startPrank(WHALE_ACCOUNT);
-        autoCompound.configToken(tokenIdOnlyFees, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: true}));
-        autoCompound.configToken(tokenIdTotal, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
-        vm.stopPrank();
-
-        AutoCompound.ExecuteParams memory harvestParams = AutoCompound.ExecuteParams({
-            tokenId: tokenIdOnlyFees,
-            mode: AutoCompound.CompoundMode.HARVEST_TOKENS,
-            swap0To1: false,
-            amountIn: 0,
-            amountOutMin: 0,
-            swapData: bytes(""),
-            deadline: block.timestamp,
-            hookData: bytes(""),
-            rewardX64: maxReward
-        });
-
-        uint256 balanceUsdc = usdc.balanceOf(address(autoCompound));
-        uint256 balanceWeth = weth.balanceOf(address(autoCompound));
-        uint256 reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
-        uint256 reservedWeth = autoCompound.totalPositionBalances(address(weth));
-        uint256 availableUsdcBefore = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
-        uint256 availableWethBefore = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
-        vm.prank(operator);
-        autoCompound.execute(harvestParams);
-        balanceUsdc = usdc.balanceOf(address(autoCompound));
-        balanceWeth = weth.balanceOf(address(autoCompound));
-        reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
-        reservedWeth = autoCompound.totalPositionBalances(address(weth));
-        uint256 availableUsdcAfter = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
-        uint256 availableWethAfter = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
-        uint256 onlyFeesRewardUsdc =
-            availableUsdcAfter > availableUsdcBefore ? availableUsdcAfter - availableUsdcBefore : 0;
-        uint256 onlyFeesRewardWeth =
-            availableWethAfter > availableWethBefore ? availableWethAfter - availableWethBefore : 0;
-
-        harvestParams.tokenId = tokenIdTotal;
-        balanceUsdc = usdc.balanceOf(address(autoCompound));
-        balanceWeth = weth.balanceOf(address(autoCompound));
-        reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
-        reservedWeth = autoCompound.totalPositionBalances(address(weth));
-        availableUsdcBefore = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
-        availableWethBefore = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
-        vm.prank(operator);
-        autoCompound.execute(harvestParams);
-        balanceUsdc = usdc.balanceOf(address(autoCompound));
-        balanceWeth = weth.balanceOf(address(autoCompound));
-        reservedUsdc = autoCompound.totalPositionBalances(address(usdc));
-        reservedWeth = autoCompound.totalPositionBalances(address(weth));
-        availableUsdcAfter = balanceUsdc > reservedUsdc ? balanceUsdc - reservedUsdc : 0;
-        availableWethAfter = balanceWeth > reservedWeth ? balanceWeth - reservedWeth : 0;
-        uint256 totalRewardUsdc =
-            availableUsdcAfter > availableUsdcBefore ? availableUsdcAfter - availableUsdcBefore : 0;
-        uint256 totalRewardWeth =
-            availableWethAfter > availableWethBefore ? availableWethAfter - availableWethBefore : 0;
-
-        assertTrue(totalRewardUsdc > 0 || totalRewardWeth > 0, "onlyFees=false should collect leftover reward");
-        assertTrue(
-            totalRewardUsdc > onlyFeesRewardUsdc || totalRewardWeth > onlyFeesRewardWeth,
-            "onlyFees=false should collect more reward than onlyFees=true on leftover-only runs"
-        );
+        // No protocol reward configured: contract must not keep position leftovers.
+        assertEq(usdc.balanceOf(address(autoCompound)), contractUsdcBefore);
+        assertEq(weth.balanceOf(address(autoCompound)), contractWethBefore);
+        assertEq(address(autoCompound).balance, contractEthBefore);
     }
 
     // --- Native ETH Position Tests ---
@@ -461,7 +350,7 @@ contract AutoCompoundTest is AutomatorTestBase {
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId), address(vault));
     }
 
-    function test_WithdrawLeftoverBalancesETH() public {
+    function test_AutoCompoundDoesNotRetainPositionBalancesETH() public {
         PoolKey memory poolKey = _createETHPool();
         uint256 tokenId = _createFullRangePositionETH(poolKey);
 
@@ -470,7 +359,9 @@ contract AutoCompoundTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
 
-        // Auto-compound to potentially create leftovers
+        uint256 contractUsdcBefore = usdc.balanceOf(address(autoCompound));
+        uint256 contractEthBefore = address(autoCompound).balance;
+
         AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
             tokenId: tokenId,
             mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
@@ -486,14 +377,14 @@ contract AutoCompoundTest is AutomatorTestBase {
         vm.prank(operator);
         autoCompound.execute(params);
 
-        // Owner can withdraw leftover balances including native ETH
-        vm.prank(WHALE_ACCOUNT);
-        autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
+        // No protocol reward configured: contract must not keep position leftovers.
+        assertEq(usdc.balanceOf(address(autoCompound)), contractUsdcBefore);
+        assertEq(address(autoCompound).balance, contractEthBefore);
     }
 
-    // --- Withdraw preserves leftover balances ---
+    // --- Withdraw protocol fees ---
 
-    function test_WithdrawETHPreservesLeftovers() public {
+    function test_WithdrawETHCollectsProtocolFees() public {
         PoolKey memory poolKey = _createETHPool();
         uint256 tokenId = _createFullRangePositionETH(poolKey);
 
@@ -504,11 +395,11 @@ contract AutoCompoundTest is AutomatorTestBase {
         IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
 
         // Configure with reward so protocol reward accumulates in contract
-        uint64 maxReward = uint64(Q64 * 10 / 100);
+        uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
         autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
 
-        // Auto-compound (no swap → one side will have leftovers)
+        // Take 100% of collected fees as protocol reward.
         AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
             tokenId: tokenId,
             mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
@@ -518,35 +409,25 @@ contract AutoCompoundTest is AutomatorTestBase {
             swapData: bytes(""),
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: maxReward
+            rewardX64: type(uint64).max
         });
 
+        uint256 contractEthBefore = address(autoCompound).balance;
         vm.prank(operator);
         autoCompound.execute(params);
 
-        // Check that native ETH leftovers exist (address(0) is token0 in ETH pool)
-        uint256 ethLeftover = autoCompound.positionBalances(tokenId, address(0));
-        uint256 usdcLeftover = autoCompound.positionBalances(tokenId, address(usdc));
-        assertTrue(ethLeftover > 0 || usdcLeftover > 0, "Should have some leftover after no-swap compound");
+        uint256 contractEthAfter = address(autoCompound).balance;
+        assertGt(contractEthAfter, contractEthBefore, "Contract should retain ETH protocol fees");
 
-        // Withdrawer calls withdrawETH — should NOT drain position leftover
+        uint256 withdrawerEthBefore = withdrawer.balance;
         vm.prank(withdrawer);
         autoCompound.withdrawETH(withdrawer);
 
-        // Contract should still have at least the reserved amount
-        assertGe(address(autoCompound).balance, ethLeftover, "ETH leftovers should be preserved after withdrawETH");
-
-        // Position owner can still claim their leftovers
-        uint256 ownerEthBefore = WHALE_ACCOUNT.balance;
-        vm.prank(WHALE_ACCOUNT);
-        autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
-
-        if (ethLeftover > 0) {
-            assertEq(WHALE_ACCOUNT.balance - ownerEthBefore, ethLeftover, "Owner should receive exact ETH leftover");
-        }
+        assertEq(address(autoCompound).balance, 0, "Withdrawer should be able to collect all ETH protocol fees");
+        assertGt(withdrawer.balance, withdrawerEthBefore, "Withdrawer should receive ETH protocol fees");
     }
 
-    function test_WithdrawBalancesPreservesLeftovers() public {
+    function test_WithdrawBalancesCollectsProtocolFees() public {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
 
@@ -557,11 +438,11 @@ contract AutoCompoundTest is AutomatorTestBase {
         IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
 
         // Configure with reward
-        uint64 maxReward = uint64(Q64 * 10 / 100);
+        uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
         autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
 
-        // Auto-compound (no swap → leftovers will exist)
+        // Take 100% of collected fees as protocol reward.
         AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
             tokenId: tokenId,
             mode: AutoCompound.CompoundMode.AUTO_COMPOUND,
@@ -571,18 +452,16 @@ contract AutoCompoundTest is AutomatorTestBase {
             swapData: bytes(""),
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: maxReward
+            rewardX64: type(uint64).max
         });
 
         vm.prank(operator);
         autoCompound.execute(params);
 
-        // Check leftovers exist
-        uint256 usdcLeftover = autoCompound.positionBalances(tokenId, address(usdc));
-        uint256 wethLeftover = autoCompound.positionBalances(tokenId, address(weth));
-        assertTrue(usdcLeftover > 0 || wethLeftover > 0, "Should have some leftover after no-swap compound");
+        uint256 contractUsdcAfter = usdc.balanceOf(address(autoCompound));
+        uint256 contractWethAfter = weth.balanceOf(address(autoCompound));
+        assertTrue(contractUsdcAfter > 0 || contractWethAfter > 0, "Contract should retain protocol fees");
 
-        // Withdrawer calls withdrawBalances — should NOT drain position leftovers
         address[] memory tokens = new address[](2);
         tokens[0] = address(usdc);
         tokens[1] = address(weth);
@@ -590,35 +469,8 @@ contract AutoCompoundTest is AutomatorTestBase {
         vm.prank(withdrawer);
         autoCompound.withdrawBalances(tokens, withdrawer);
 
-        // Contract should still have at least the reserved amounts
-        assertGe(
-            usdc.balanceOf(address(autoCompound)), usdcLeftover, "USDC leftovers should be preserved after withdrawBalances"
-        );
-        assertGe(
-            weth.balanceOf(address(autoCompound)), wethLeftover, "WETH leftovers should be preserved after withdrawBalances"
-        );
-
-        // Position owner can still claim their leftovers
-        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
-        uint256 ownerWethBefore = weth.balanceOf(WHALE_ACCOUNT);
-
-        vm.prank(WHALE_ACCOUNT);
-        autoCompound.withdrawLeftoverBalances(tokenId, WHALE_ACCOUNT);
-
-        if (usdcLeftover > 0) {
-            assertEq(
-                usdc.balanceOf(WHALE_ACCOUNT) - ownerUsdcBefore,
-                usdcLeftover,
-                "Owner should receive exact USDC leftover"
-            );
-        }
-        if (wethLeftover > 0) {
-            assertEq(
-                weth.balanceOf(WHALE_ACCOUNT) - ownerWethBefore,
-                wethLeftover,
-                "Owner should receive exact WETH leftover"
-            );
-        }
+        assertEq(usdc.balanceOf(address(autoCompound)), 0, "Withdrawer should collect all USDC protocol fees");
+        assertEq(weth.balanceOf(address(autoCompound)), 0, "Withdrawer should collect all WETH protocol fees");
     }
 
     function test_HarvestTokensETH() public {

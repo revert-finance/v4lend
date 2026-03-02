@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -33,10 +30,6 @@ contract AutoCompound is Automator {
 
     event PositionConfigured(uint256 indexed tokenId, uint64 maxRewardX64, bool onlyFees);
 
-    event BalanceAdded(uint256 tokenId, address token, uint256 amount);
-    event BalanceRemoved(uint256 tokenId, address token, uint256 amount);
-    event BalanceWithdrawn(uint256 tokenId, address token, address to, uint256 amount);
-
     struct PositionConfig {
         uint64 maxRewardX64;
         bool onlyFees;
@@ -50,12 +43,6 @@ contract AutoCompound is Automator {
         HARVEST_TOKEN_0,
         HARVEST_TOKEN_1
     }
-
-    /// @notice Per-position leftover balances
-    mapping(uint256 => mapping(address => uint256)) public positionBalances;
-
-    /// @notice Total leftover balances across all positions, per token
-    mapping(address => uint256) public totalPositionBalances;
 
     constructor(
         IPositionManager _positionManager,
@@ -111,16 +98,18 @@ contract AutoCompound is Automator {
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        uint256 amount0 = feeAmount0 + positionBalances[params.tokenId][token0Addr];
-        uint256 amount1 = feeAmount1 + positionBalances[params.tokenId][token1Addr];
+        uint256 amount0 = feeAmount0;
+        uint256 amount1 = feeAmount1;
         (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
+
+        address owner = _positionOwner(params.tokenId);
 
         uint256 a0;
         uint256 a1;
         if (params.mode == CompoundMode.AUTO_COMPOUND) {
-            (a0, a1) = _executeAutoCompound(params, poolKey, positionInfo, token0, token1, token0Addr, token1Addr, amount0, amount1);
+            (a0, a1) = _executeAutoCompound(params, poolKey, positionInfo, token0, token1, owner, amount0, amount1);
         } else {
-            (a0, a1) = _executeHarvest(params, token0, token1, token0Addr, token1Addr, amount0, amount1);
+            (a0, a1) = _executeHarvest(params, token0, token1, owner, amount0, amount1);
         }
 
         emit AutoCompound(
@@ -139,8 +128,7 @@ contract AutoCompound is Automator {
         PositionInfo positionInfo,
         Currency token0,
         Currency token1,
-        address token0Addr,
-        address token1Addr,
+        address owner,
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256 compounded0, uint256 compounded1) {
@@ -189,17 +177,16 @@ contract AutoCompound is Automator {
             compounded1 = balance1Before - token1.balanceOfSelf();
         }
 
-        // Store leftover (slippage diff) for position owner
-        _setBalance(params.tokenId, token0Addr, amount0 - compounded0);
-        _setBalance(params.tokenId, token1Addr, amount1 - compounded1);
+        // Send leftover (slippage diff) to position owner immediately.
+        _transferToken(owner, token0, amount0 - compounded0, true);
+        _transferToken(owner, token1, amount1 - compounded1, true);
     }
 
     function _executeHarvest(
         ExecuteParams calldata params,
         Currency token0,
         Currency token1,
-        address token0Addr,
-        address token1Addr,
+        address owner,
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256, uint256) {
@@ -219,16 +206,6 @@ contract AutoCompound is Automator {
         }
         // HARVEST_TOKENS: no swap
 
-        // Clear leftover balances
-        _setBalance(params.tokenId, token0Addr, 0);
-        _setBalance(params.tokenId, token1Addr, 0);
-
-        // Get position owner
-        address owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
-        if (vaults[owner]) {
-            owner = IVault(owner).ownerOf(params.tokenId);
-        }
-
         // Send tokens to owner
         _transferToken(owner, token0, amount0, true);
         _transferToken(owner, token1, amount1, true);
@@ -236,104 +213,21 @@ contract AutoCompound is Automator {
         return (amount0, amount1);
     }
 
-    /// @notice Withdraws leftover token balance for a position
-    /// @param tokenId Id of position to withdraw
-    /// @param to Address to send to
-    function withdrawLeftoverBalances(uint256 tokenId, address to) external nonReentrant {
-        address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-        if (vaults[owner]) {
-            owner = IVault(owner).ownerOf(tokenId);
-        }
-        if (owner != msg.sender) {
-            revert Unauthorized();
-        }
-
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        address token0Addr = Currency.unwrap(poolKey.currency0);
-        address token1Addr = Currency.unwrap(poolKey.currency1);
-
-        uint256 balance0 = positionBalances[tokenId][token0Addr];
-        if (balance0 != 0) {
-            _withdrawBalanceInternal(tokenId, token0Addr, to, balance0);
-        }
-        uint256 balance1 = positionBalances[tokenId][token1Addr];
-        if (balance1 != 0) {
-            _withdrawBalanceInternal(tokenId, token1Addr, to, balance1);
-        }
-    }
-
-    /// @notice Withdraws ETH balance excluding reserved position leftovers
-    function withdrawETH(address to) external override {
-        if (msg.sender != withdrawer) {
-            revert Unauthorized();
-        }
-
-        uint256 balance = address(this).balance;
-        uint256 reserved = totalPositionBalances[address(0)];
-        uint256 available = balance > reserved ? balance - reserved : 0;
-        if (available != 0) {
-            (bool sent,) = to.call{value: available}("");
-            if (!sent) {
-                revert EtherSendFailed();
-            }
-            emit ETHWithdrawn(to, available);
-        }
-    }
-
-    /// @notice Withdraws token balances excluding reserved position leftovers
-    function withdrawBalances(address[] calldata tokens, address to) external override {
-        if (msg.sender != withdrawer) {
-            revert Unauthorized();
-        }
-
-        uint256 i;
-        uint256 count = tokens.length;
-        for (; i < count; ++i) {
-            address token = tokens[i];
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            uint256 reserved = totalPositionBalances[token];
-            uint256 available = balance > reserved ? balance - reserved : 0;
-            if (available != 0) {
-                _transferToken(to, Currency.wrap(token), available, true);
-            }
-        }
-
-        emit BalancesWithdrawn(tokens, to);
-    }
-
-    function _setBalance(uint256 tokenId, address token, uint256 amount) internal {
-        uint256 currentBalance = positionBalances[tokenId][token];
-        if (amount != currentBalance) {
-            positionBalances[tokenId][token] = amount;
-            if (amount > currentBalance) {
-                totalPositionBalances[token] += (amount - currentBalance);
-                emit BalanceAdded(tokenId, token, amount - currentBalance);
-            } else {
-                totalPositionBalances[token] -= (currentBalance - amount);
-                emit BalanceRemoved(tokenId, token, currentBalance - amount);
-            }
-        }
-    }
-
-    function _withdrawBalanceInternal(uint256 tokenId, address token, address to, uint256 amount) internal {
-        positionBalances[tokenId][token] -= amount;
-        totalPositionBalances[token] -= amount;
-        emit BalanceRemoved(tokenId, token, amount);
-        _transferToken(to, Currency.wrap(token), amount, false);
-        emit BalanceWithdrawn(tokenId, token, to, amount);
-    }
-
     /// @notice Configure fee parameters for a position
     function configToken(uint256 tokenId, PositionConfig calldata config) external {
-        address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-        if (vaults[owner]) {
-            owner = IVault(owner).ownerOf(tokenId);
-        }
+        address owner = _positionOwner(tokenId);
         if (owner != msg.sender) {
             revert Unauthorized();
         }
 
         positionConfigs[tokenId] = config;
         emit PositionConfigured(tokenId, config.maxRewardX64, config.onlyFees);
+    }
+
+    function _positionOwner(uint256 tokenId) internal view returns (address owner) {
+        owner = IERC721(address(positionManager)).ownerOf(tokenId);
+        if (vaults[owner]) {
+            owner = IVault(owner).ownerOf(tokenId);
+        }
     }
 }
