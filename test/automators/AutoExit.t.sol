@@ -58,6 +58,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: tick - 1000,
             token1TriggerTick: tick + 1000,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -65,7 +67,7 @@ contract AutoExitTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         autoExit.configToken(tokenId, config);
 
-        (bool isActive,,,,,,) = autoExit.positionConfigs(tokenId);
+        (bool isActive,,,,,,,,) = autoExit.positionConfigs(tokenId);
         assertTrue(isActive);
     }
 
@@ -79,6 +81,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: -1000,
             token1TriggerTick: 1000,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -100,6 +104,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: 1000,
             token1TriggerTick: 500,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -125,6 +131,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -163,7 +171,7 @@ contract AutoExitTest is AutomatorTestBase {
         assertEq(liquidityAfter, 0, "Position should have 0 liquidity after exit");
 
         // Config should be deleted
-        (bool isActive,,,,,,) = autoExit.positionConfigs(tokenId);
+        (bool isActive,,,,,,,,) = autoExit.positionConfigs(tokenId);
         assertFalse(isActive, "Config should be deleted after exit");
     }
 
@@ -180,6 +188,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: tick - 100000,
             token1TriggerTick: tick + 100000,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -220,6 +230,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -265,6 +277,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -275,7 +289,10 @@ contract AutoExitTest is AutomatorTestBase {
         IERC721(address(positionManager)).approve(address(autoExit), tokenId);
 
         // Make oracle slippage guard stricter than pool fee so swap must fail.
-        autoExit.setMaxSwapSlippageBps(1);
+        config.token0SlippageBps = 1;
+        config.token1SlippageBps = 1;
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
 
         _swapExactInputSingle(poolKey, true, 10000e6, 0);
 
@@ -314,6 +331,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -374,6 +393,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -428,6 +449,8 @@ contract AutoExitTest is AutomatorTestBase {
             token1Swap: false,
             token0TriggerTick: posInfo.tickLower(),
             token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });

@@ -397,7 +397,7 @@ contract AutoCompoundTest is AutomatorTestBase {
         // Configure with reward so protocol reward accumulates in contract
         uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
-        autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
+        autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, token0SlippageBps: 10000, token1SlippageBps: 10000, onlyFees: false}));
 
         // Take 100% of collected fees as protocol reward.
         AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({
@@ -440,7 +440,7 @@ contract AutoCompoundTest is AutomatorTestBase {
         // Configure with reward
         uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
-        autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, onlyFees: false}));
+        autoCompound.configToken(tokenId, AutoCompound.PositionConfig({maxRewardX64: maxReward, token0SlippageBps: 10000, token1SlippageBps: 10000, onlyFees: false}));
 
         // Take 100% of collected fees as protocol reward.
         AutoCompound.ExecuteParams memory params = AutoCompound.ExecuteParams({

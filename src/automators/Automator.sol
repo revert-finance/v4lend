@@ -22,7 +22,6 @@ import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
 abstract contract Automator is Transformer, Swapper, IERC721Receiver, ReentrancyGuard {
     event OperatorChanged(address newOperator, bool active);
     event WithdrawerChanged(address newWithdrawer);
-    event MaxSwapSlippageBpsChanged(uint16 maxSwapSlippageBps);
     event BalancesWithdrawn(address[] tokens, address to);
     event ETHWithdrawn(address to, uint256 amount);
 
@@ -38,10 +37,6 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     /// @notice Address authorized to withdraw accumulated token balances
     address public withdrawer;
 
-    /// @notice Max allowed swap slippage versus oracle quote in basis points
-    /// @dev 10000 means disabled, 0 means exact-or-better oracle execution
-    uint16 public maxSwapSlippageBps;
-
     constructor(
         IPositionManager _positionManager,
         address _universalRouter,
@@ -53,7 +48,6 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     ) Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) Ownable(msg.sender) {
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
-        maxSwapSlippageBps = 10000;
         setOperator(_operator, true);
         setWithdrawer(_withdrawer);
     }
@@ -71,16 +65,6 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     function setWithdrawer(address _withdrawer) public onlyOwner {
         emit WithdrawerChanged(_withdrawer);
         withdrawer = _withdrawer;
-    }
-
-    /// @notice Owner controlled function to set max swap slippage vs oracle quote
-    /// @param _maxSwapSlippageBps max slippage in bps, 10000 disables the oracle slippage check
-    function setMaxSwapSlippageBps(uint16 _maxSwapSlippageBps) public onlyOwner {
-        if (_maxSwapSlippageBps > 10000) {
-            revert InvalidConfig();
-        }
-        maxSwapSlippageBps = _maxSwapSlippageBps;
-        emit MaxSwapSlippageBpsChanged(_maxSwapSlippageBps);
     }
 
     /// @notice Withdraws token balance
@@ -173,11 +157,17 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
 
     /// @notice Executes router swap and enforces oracle-based slippage floor when enabled.
     /// @dev The effective minimum output is max(user amountOutMin, oracle floor).
-    function _routerSwapWithSlippageCheck(RouterSwapParams memory params)
+    function _routerSwapWithSlippageCheck(RouterSwapParams memory params, uint16 maxSwapSlippageBps)
         internal
         returns (uint256 amountInDelta, uint256 amountOutDelta)
     {
-        if (params.amountIn != 0 && maxSwapSlippageBps < 10000) {
+        if (params.amountIn != 0) {
+            if (maxSwapSlippageBps > 10000) {
+                revert InvalidConfig();
+            }
+            if (maxSwapSlippageBps == 10000) {
+                return _routerSwap(params);
+            }
             uint160 oracleSqrtPriceX96 =
                 v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(params.tokenIn), Currency.unwrap(params.tokenOut));
             uint256 oraclePriceX96 =

@@ -60,6 +60,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 0,
             lowerTickDelta: -120,
             upperTickDelta: 120,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -67,7 +69,7 @@ contract AutoRangeTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         autoRange.configToken(tokenId, address(0), config);
 
-        (int32 lowerTickLimit,,,,,) = autoRange.positionConfigs(tokenId);
+        (int32 lowerTickLimit,,,,,,,) = autoRange.positionConfigs(tokenId);
         assertEq(lowerTickLimit, 0);
     }
 
@@ -80,6 +82,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 0,
             lowerTickDelta: -120,
             upperTickDelta: 120,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -109,6 +113,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60, // +1 tick spacing above current
             upperTickDelta: 300, // +5 tick spacings above current
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -158,7 +164,7 @@ contract AutoRangeTest is AutomatorTestBase {
         assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT);
 
         // Verify config was copied to new position
-        (int32 lowerTickLimit,,,,,) = autoRange.positionConfigs(newTokenId);
+        (int32 lowerTickLimit,,,,,,,) = autoRange.positionConfigs(newTokenId);
         assertEq(lowerTickLimit, 1, "Config should be copied to new position");
     }
 
@@ -172,6 +178,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -182,7 +190,10 @@ contract AutoRangeTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
 
-        autoRange.setMaxSwapSlippageBps(1);
+        config.token0SlippageBps = 1;
+        config.token1SlippageBps = 1;
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
 
         _swapExactInputSingle(poolKey, true, 10000e6, 0);
 
@@ -220,6 +231,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 10000,
             lowerTickDelta: -120,
             upperTickDelta: 120,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -274,6 +287,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: int32(posInfo.tickLower() - baseTick),
             upperTickDelta: int32(posInfo.tickUpper() - baseTick),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -319,6 +334,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -383,6 +400,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });
@@ -437,6 +456,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: maxReward,
             onlyFees: false
         });
@@ -521,6 +542,8 @@ contract AutoRangeTest is AutomatorTestBase {
             upperTickLimit: 1,
             lowerTickDelta: 60,
             upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
             maxRewardX64: 0,
             onlyFees: false
         });

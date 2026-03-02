@@ -27,6 +27,7 @@ contract AutoLeverage is Automator {
         bool isActive,
         uint16 targetLeverageBps,
         uint16 rebalanceThresholdBps,
+        uint16 maxSwapSlippageBps,
         uint64 maxRewardX64
     );
 
@@ -35,6 +36,7 @@ contract AutoLeverage is Automator {
         bool isActive;
         uint16 targetLeverageBps;
         uint16 rebalanceThresholdBps;
+        uint16 maxSwapSlippageBps;
         uint64 maxRewardX64;
     }
 
@@ -215,14 +217,16 @@ contract AutoLeverage is Automator {
         // Swap borrowed lend token to position tokens
         if (params.amountIn0 != 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(lendToken, token0, params.amountIn0, params.amountOut0Min, params.swapData0)
+                RouterSwapParams(lendToken, token0, params.amountIn0, params.amountOut0Min, params.swapData0),
+                config.maxSwapSlippageBps
             );
             if (lendToken == token1) amount1 -= amountIn;
             amount0 += amountOut;
         }
         if (params.amountIn1 != 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(lendToken, token1, params.amountIn1, params.amountOut1Min, params.swapData1)
+                RouterSwapParams(lendToken, token1, params.amountIn1, params.amountOut1Min, params.swapData1),
+                config.maxSwapSlippageBps
             );
             if (lendToken == token0) amount0 -= amountIn;
             amount1 += amountOut;
@@ -332,14 +336,16 @@ contract AutoLeverage is Automator {
 
         if (params.amountIn0 != 0 && !(lendToken == token0)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(token0, lendToken, params.amountIn0, params.amountOut0Min, params.swapData0)
+                RouterSwapParams(token0, lendToken, params.amountIn0, params.amountOut0Min, params.swapData0),
+                config.maxSwapSlippageBps
             );
             amount0 -= amountIn;
             lendAmount += amountOut;
         }
         if (params.amountIn1 != 0 && !(lendToken == token1)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(token1, lendToken, params.amountIn1, params.amountOut1Min, params.swapData1)
+                RouterSwapParams(token1, lendToken, params.amountIn1, params.amountOut1Min, params.swapData1),
+                config.maxSwapSlippageBps
             );
             amount1 -= amountIn;
             lendAmount += amountOut;
@@ -374,6 +380,9 @@ contract AutoLeverage is Automator {
                 revert InvalidConfig();
             }
         }
+        if (config.maxSwapSlippageBps > 10000) {
+            revert InvalidConfig();
+        }
 
         // Must be vault-owned position
         address posOwner = IERC721(address(positionManager)).ownerOf(tokenId);
@@ -392,6 +401,7 @@ contract AutoLeverage is Automator {
             config.isActive,
             config.targetLeverageBps,
             config.rebalanceThresholdBps,
+            config.maxSwapSlippageBps,
             config.maxRewardX64
         );
     }

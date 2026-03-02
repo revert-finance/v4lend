@@ -31,6 +31,8 @@ contract AutoRange is Automator {
         int32 upperTickLimit,
         int32 lowerTickDelta,
         int32 upperTickDelta,
+        uint16 token0SlippageBps,
+        uint16 token1SlippageBps,
         uint64 maxRewardX64,
         bool onlyFees
     );
@@ -40,6 +42,8 @@ contract AutoRange is Automator {
         int32 upperTickLimit;
         int32 lowerTickDelta;
         int32 upperTickDelta;
+        uint16 token0SlippageBps;
+        uint16 token1SlippageBps;
         uint64 maxRewardX64;
         bool onlyFees;
     }
@@ -207,7 +211,8 @@ contract AutoRange is Automator {
                     params.amountIn,
                     params.amountOutMin,
                     params.swapData
-                )
+                ),
+                params.swap0To1 ? config.token0SlippageBps : config.token1SlippageBps
             );
             if (params.swap0To1) {
                 amount0 -= amountInDelta;
@@ -309,6 +314,9 @@ contract AutoRange is Automator {
         if (config.lowerTickDelta >= config.upperTickDelta) {
             revert InvalidConfig();
         }
+        if (config.token0SlippageBps > 10000 || config.token1SlippageBps > 10000) {
+            revert InvalidConfig();
+        }
 
         positionConfigs[tokenId] = config;
 
@@ -318,6 +326,8 @@ contract AutoRange is Automator {
             config.upperTickLimit,
             config.lowerTickDelta,
             config.upperTickDelta,
+            config.token0SlippageBps,
+            config.token1SlippageBps,
             config.maxRewardX64,
             config.onlyFees
         );

@@ -96,13 +96,14 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 500,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
         autoLeverage.configToken(tokenId, config);
 
-        (bool isActive, uint16 targetBps, uint16 threshold,) =
+        (bool isActive, uint16 targetBps, uint16 threshold,,) =
             autoLeverage.positionConfigs(tokenId);
         assertTrue(isActive);
         assertEq(targetBps, 5000);
@@ -118,6 +119,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 500,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -137,6 +139,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 10000, // 100% - invalid
             rebalanceThresholdBps: 500,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -156,6 +159,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 0, // Zero threshold - invalid
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -187,6 +191,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 100, // 1% threshold - easily triggered
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -252,6 +257,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 3000,
             rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -312,6 +318,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -369,6 +376,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 3000,
             rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -427,6 +435,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 1000, // 10% threshold
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
@@ -492,6 +501,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 3000,
             rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: maxReward
         });
 
@@ -565,13 +575,14 @@ contract AutoLeverageTest is AutomatorTestBase {
             isActive: true,
             targetLeverageBps: 5000,
             rebalanceThresholdBps: 500,
+            maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
 
         vm.prank(WHALE_ACCOUNT);
         autoLeverage.configToken(tokenId, config);
 
-        (bool isActiveBefore,,,) = autoLeverage.positionConfigs(tokenId);
+        (bool isActiveBefore,,,,) = autoLeverage.positionConfigs(tokenId);
         assertTrue(isActiveBefore);
 
         // Deactivate
@@ -579,7 +590,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         autoLeverage.configToken(tokenId, config);
 
-        (bool isActiveAfter,,,) = autoLeverage.positionConfigs(tokenId);
+        (bool isActiveAfter,,,,) = autoLeverage.positionConfigs(tokenId);
         assertFalse(isActiveAfter);
     }
 }

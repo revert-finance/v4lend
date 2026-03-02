@@ -29,10 +29,14 @@ contract AutoCompound is Automator {
         bool harvest
     );
 
-    event PositionConfigured(uint256 indexed tokenId, uint64 maxRewardX64, bool onlyFees);
+    event PositionConfigured(
+        uint256 indexed tokenId, uint64 maxRewardX64, uint16 token0SlippageBps, uint16 token1SlippageBps, bool onlyFees
+    );
 
     struct PositionConfig {
         uint64 maxRewardX64;
+        uint16 token0SlippageBps;
+        uint16 token1SlippageBps;
         bool onlyFees;
     }
 
@@ -109,9 +113,9 @@ contract AutoCompound is Automator {
         uint256 a0;
         uint256 a1;
         if (params.mode == CompoundMode.AUTO_COMPOUND) {
-            (a0, a1) = _executeAutoCompound(params, poolKey, positionInfo, token0, token1, owner, amount0, amount1);
+            (a0, a1) = _executeAutoCompound(params, config, poolKey, positionInfo, token0, token1, owner, amount0, amount1);
         } else {
-            (a0, a1) = _executeHarvest(params, token0, token1, owner, amount0, amount1);
+            (a0, a1) = _executeHarvest(params, config, token0, token1, owner, amount0, amount1);
         }
 
         emit AutoCompound(
@@ -126,6 +130,7 @@ contract AutoCompound is Automator {
 
     function _executeAutoCompound(
         ExecuteParams calldata params,
+        PositionConfig memory config,
         PoolKey memory poolKey,
         PositionInfo positionInfo,
         Currency token0,
@@ -143,7 +148,8 @@ contract AutoCompound is Automator {
                     params.amountIn,
                     params.amountOutMin,
                     params.swapData
-                )
+                ),
+                params.swap0To1 ? config.token0SlippageBps : config.token1SlippageBps
             );
             if (params.swap0To1) {
                 amount0 -= amountInDelta;
@@ -186,6 +192,7 @@ contract AutoCompound is Automator {
 
     function _executeHarvest(
         ExecuteParams calldata params,
+        PositionConfig memory config,
         Currency token0,
         Currency token1,
         address owner,
@@ -195,13 +202,15 @@ contract AutoCompound is Automator {
         // Perform swap based on harvest mode
         if (params.mode == CompoundMode.HARVEST_TOKEN_0 && amount1 != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(token1, token0, params.amountIn, params.amountOutMin, params.swapData)
+                RouterSwapParams(token1, token0, params.amountIn, params.amountOutMin, params.swapData),
+                config.token1SlippageBps
             );
             amount1 -= amountInDelta;
             amount0 += amountOutDelta;
         } else if (params.mode == CompoundMode.HARVEST_TOKEN_1 && amount0 != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(token0, token1, params.amountIn, params.amountOutMin, params.swapData)
+                RouterSwapParams(token0, token1, params.amountIn, params.amountOutMin, params.swapData),
+                config.token0SlippageBps
             );
             amount0 -= amountInDelta;
             amount1 += amountOutDelta;
@@ -221,9 +230,14 @@ contract AutoCompound is Automator {
         if (owner != msg.sender) {
             revert Unauthorized();
         }
+        if (config.token0SlippageBps > 10000 || config.token1SlippageBps > 10000) {
+            revert InvalidConfig();
+        }
 
         positionConfigs[tokenId] = config;
-        emit PositionConfigured(tokenId, config.maxRewardX64, config.onlyFees);
+        emit PositionConfigured(
+            tokenId, config.maxRewardX64, config.token0SlippageBps, config.token1SlippageBps, config.onlyFees
+        );
     }
 
     function _positionOwner(uint256 tokenId) internal view returns (address owner) {

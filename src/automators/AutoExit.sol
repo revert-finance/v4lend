@@ -37,6 +37,8 @@ contract AutoExit is Automator {
         bool token1Swap,
         int24 token0TriggerTick,
         int24 token1TriggerTick,
+        uint16 token0SlippageBps,
+        uint16 token1SlippageBps,
         uint64 maxRewardX64,
         bool onlyFees
     );
@@ -47,6 +49,8 @@ contract AutoExit is Automator {
         bool token1Swap;
         int24 token0TriggerTick;
         int24 token1TriggerTick;
+        uint16 token0SlippageBps;
+        uint16 token1SlippageBps;
         uint64 maxRewardX64;
         bool onlyFees;
     }
@@ -176,7 +180,8 @@ contract AutoExit is Automator {
                         swapAmount,
                         params.amountOutMin,
                         params.swapData
-                    )
+                    ),
+                    isAbove ? config.token1SlippageBps : config.token0SlippageBps
                 );
 
                 amount0 = isAbove ? amount0 + amountOutDelta : amount0 - amountInDelta;
@@ -201,7 +206,7 @@ contract AutoExit is Automator {
 
         // Delete config
         delete positionConfigs[params.tokenId];
-        emit PositionConfigured(params.tokenId, false, false, false, 0, 0, 0, false);
+        emit PositionConfigured(params.tokenId, false, false, false, 0, 0, 0, 0, 0, false);
 
         emit AutoExit(
             params.tokenId,
@@ -262,6 +267,9 @@ contract AutoExit is Automator {
         if (owner != msg.sender) {
             revert Unauthorized();
         }
+        if (config.token0SlippageBps > 10000 || config.token1SlippageBps > 10000) {
+            revert InvalidConfig();
+        }
 
         positionConfigs[tokenId] = config;
 
@@ -272,6 +280,8 @@ contract AutoExit is Automator {
             config.token1Swap,
             config.token0TriggerTick,
             config.token1TriggerTick,
+            config.token0SlippageBps,
+            config.token1SlippageBps,
             config.maxRewardX64,
             config.onlyFees
         );
