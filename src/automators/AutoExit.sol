@@ -49,8 +49,8 @@ contract AutoExit is Automator {
         bool token1Swap;
         int24 token0TriggerTick;
         int24 token1TriggerTick;
-        uint16 token0SlippageBps;
-        uint16 token1SlippageBps;
+        uint16 token0SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
+        uint16 token1SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
         uint64 maxRewardX64;
         bool onlyFees;
     }
@@ -253,6 +253,7 @@ contract AutoExit is Automator {
     }
 
     /// @notice Configure a token for auto-exit
+    /// @dev Set token{0,1}SlippageBps to 10000 to allow automation for pairs without oracle support.
     function configToken(uint256 tokenId, PositionConfig calldata config) external {
         if (config.isActive) {
             if (config.token0TriggerTick >= config.token1TriggerTick) {

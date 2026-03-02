@@ -42,8 +42,8 @@ contract AutoRange is Automator {
         int32 upperTickLimit;
         int32 lowerTickDelta;
         int32 upperTickDelta;
-        uint16 token0SlippageBps;
-        uint16 token1SlippageBps;
+        uint16 token0SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
+        uint16 token1SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
         uint64 maxRewardX64;
         bool onlyFees;
     }
@@ -297,6 +297,7 @@ contract AutoRange is Automator {
     }
 
     /// @notice Configure a token for auto-range
+    /// @dev Set token{0,1}SlippageBps to 10000 to allow automation for pairs without oracle support.
     function configToken(uint256 tokenId, address vault, PositionConfig calldata config) external {
         _validateOwner(positionManager, tokenId, vault);
 

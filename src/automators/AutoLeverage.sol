@@ -36,7 +36,7 @@ contract AutoLeverage is Automator {
         bool isActive;
         uint16 targetLeverageBps;
         uint16 rebalanceThresholdBps;
-        uint16 maxSwapSlippageBps;
+        uint16 maxSwapSlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
         uint64 maxRewardX64;
     }
 
@@ -371,6 +371,7 @@ contract AutoLeverage is Automator {
     }
 
     /// @notice Position owner configures auto-leverage
+    /// @dev Set maxSwapSlippageBps to 10000 to allow automation for pairs without oracle support.
     function configToken(uint256 tokenId, PositionConfig calldata config) external {
         if (config.isActive) {
             if (config.targetLeverageBps > 9900) {

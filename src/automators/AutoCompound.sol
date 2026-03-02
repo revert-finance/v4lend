@@ -35,8 +35,8 @@ contract AutoCompound is Automator {
 
     struct PositionConfig {
         uint64 maxRewardX64;
-        uint16 token0SlippageBps;
-        uint16 token1SlippageBps;
+        uint16 token0SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
+        uint16 token1SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
         bool onlyFees;
     }
 
@@ -225,6 +225,7 @@ contract AutoCompound is Automator {
     }
 
     /// @notice Configure fee parameters for a position
+    /// @dev Set token{0,1}SlippageBps to 10000 to allow automation for pairs without oracle support.
     function configToken(uint256 tokenId, PositionConfig calldata config) external {
         address owner = _positionOwner(tokenId);
         if (owner != msg.sender) {
