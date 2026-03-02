@@ -13,6 +13,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {IVault} from "../interfaces/IVault.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoExit
@@ -68,9 +69,10 @@ contract AutoExit is Automator {
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2,
+        IV4Oracle _v4Oracle,
         address _operator,
         address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _operator, _withdrawer) {}
+    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
 
     /// @notice Execute exit for a vault-owned position
     function executeWithVault(ExecuteParams calldata params, address vault) external {
@@ -167,7 +169,7 @@ contract AutoExit is Automator {
 
             uint256 swapAmount = isAbove ? amount1 : amount0;
             if (swapAmount != 0) {
-                (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+                (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                     RouterSwapParams(
                         isAbove ? token1 : token0,
                         isAbove ? token0 : token1,

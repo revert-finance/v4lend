@@ -19,7 +19,7 @@ contract AutoExitTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoExit = new AutoExit(positionManager, address(swapRouter), EX0x, permit2, operator, withdrawer);
+        autoExit = new AutoExit(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
         autoExit.setVault(address(vault));
         vault.setTransformer(address(autoExit), true);
     }
@@ -250,6 +250,51 @@ contract AutoExitTest is AutomatorTestBase {
         autoExit.execute(params);
 
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Position should be empty");
+    }
+
+    function test_RevertWhenSwapExceedsMaxSlippage() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: true,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            maxRewardX64: 0,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoExit), tokenId);
+
+        // Make oracle slippage guard stricter than pool fee so swap must fail.
+        autoExit.setMaxSwapSlippageBps(1);
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        bytes memory swapData = _createSwapDataWithRecipient(USDC_ADDRESS, WETH_ADDRESS, address(autoExit));
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: swapData,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.SlippageError.selector);
+        autoExit.execute(params);
     }
 
     // --- Native ETH Position Tests ---

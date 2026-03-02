@@ -16,6 +16,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {IVault} from "../interfaces/IVault.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoRange
@@ -66,9 +67,10 @@ contract AutoRange is Automator {
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2,
+        IV4Oracle _v4Oracle,
         address _operator,
         address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _operator, _withdrawer) {}
+    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
 
     /// @notice Execute range change for a vault-owned position
     function executeWithVault(ExecuteParams calldata params, address vault) external {
@@ -198,7 +200,7 @@ contract AutoRange is Automator {
 
         // Swap to rebalance for new range
         if (params.amountIn != 0) {
-            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(
                     params.swap0To1 ? token0 : token1,
                     params.swap0To1 ? token1 : token0,

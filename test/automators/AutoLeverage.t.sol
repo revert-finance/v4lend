@@ -19,7 +19,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         super.setUp();
 
         autoLeverage =
-            new AutoLeverage(positionManager, address(swapRouter), EX0x, permit2, operator, withdrawer);
+            new AutoLeverage(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
         autoLeverage.setVault(address(vault));
         vault.setTransformer(address(autoLeverage), true);
 

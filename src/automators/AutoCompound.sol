@@ -11,6 +11,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {IVault} from "../interfaces/IVault.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoCompound
@@ -49,9 +50,10 @@ contract AutoCompound is Automator {
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2,
+        IV4Oracle _v4Oracle,
         address _operator,
         address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _operator, _withdrawer) {}
+    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
 
     struct ExecuteParams {
         uint256 tokenId;
@@ -134,7 +136,7 @@ contract AutoCompound is Automator {
     ) internal returns (uint256 compounded0, uint256 compounded1) {
         // Optional swap to rebalance
         if (params.amountIn != 0) {
-            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(
                     params.swap0To1 ? token0 : token1,
                     params.swap0To1 ? token1 : token0,
@@ -192,13 +194,13 @@ contract AutoCompound is Automator {
     ) internal returns (uint256, uint256) {
         // Perform swap based on harvest mode
         if (params.mode == CompoundMode.HARVEST_TOKEN_0 && amount1 != 0) {
-            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token1, token0, params.amountIn, params.amountOutMin, params.swapData)
             );
             amount1 -= amountInDelta;
             amount0 += amountOutDelta;
         } else if (params.mode == CompoundMode.HARVEST_TOKEN_1 && amount0 != 0) {
-            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwap(
+            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token0, token1, params.amountIn, params.amountOutMin, params.swapData)
             );
             amount0 -= amountInDelta;

@@ -17,7 +17,7 @@ contract AutoCompoundTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoCompound = new AutoCompound(positionManager, address(swapRouter), EX0x, permit2, operator, withdrawer);
+        autoCompound = new AutoCompound(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
 
         // Register vault
         autoCompound.setVault(address(vault));

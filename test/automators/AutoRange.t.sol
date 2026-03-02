@@ -19,7 +19,7 @@ contract AutoRangeTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoRange = new AutoRange(positionManager, address(swapRouter), EX0x, permit2, operator, withdrawer);
+        autoRange = new AutoRange(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
         autoRange.setVault(address(vault));
         vault.setTransformer(address(autoRange), true);
     }
@@ -160,6 +160,53 @@ contract AutoRangeTest is AutomatorTestBase {
         // Verify config was copied to new position
         (int32 lowerTickLimit,,,,,) = autoRange.positionConfigs(newTokenId);
         assertEq(lowerTickLimit, 1, "Config should be copied to new position");
+    }
+
+    function test_RevertWhenSwapExceedsMaxSlippage() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            maxRewardX64: 0,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        autoRange.setMaxSwapSlippageBps(1);
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        bytes memory swapData = _createSwapDataWithRecipient(USDC_ADDRESS, WETH_ADDRESS, address(autoRange));
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: true,
+            amountIn: 1e5,
+            amountOutMin: 0,
+            swapData: swapData,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.SlippageError.selector);
+        autoRange.execute(params);
     }
 
     function test_RevertWhenNotReady() public {

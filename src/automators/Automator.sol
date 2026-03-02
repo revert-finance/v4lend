@@ -6,6 +6,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -13,6 +14,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {Swapper} from "../utils/Swapper.sol";
 import {Transformer, Ownable} from "../transformers/Transformer.sol";
 import {IVault} from "../interfaces/IVault.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
 
 /// @title Automator
 /// @notice Base contract for V4 position automation. Provides operator access control,
@@ -20,11 +22,15 @@ import {IVault} from "../interfaces/IVault.sol";
 abstract contract Automator is Transformer, Swapper, IERC721Receiver, ReentrancyGuard {
     event OperatorChanged(address newOperator, bool active);
     event WithdrawerChanged(address newWithdrawer);
+    event MaxSwapSlippageBpsChanged(uint16 maxSwapSlippageBps);
     event BalancesWithdrawn(address[] tokens, address to);
     event ETHWithdrawn(address to, uint256 amount);
 
     /// @notice Permit2 contract for token approvals
     IPermit2 public immutable permit2;
+
+    /// @notice Oracle for chainlink-derived cross-token pricing
+    IV4Oracle public immutable v4Oracle;
 
     /// @notice Authorized operators that can execute automations
     mapping(address => bool) public operators;
@@ -32,15 +38,22 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     /// @notice Address authorized to withdraw accumulated token balances
     address public withdrawer;
 
+    /// @notice Max allowed swap slippage versus oracle quote in basis points
+    /// @dev 10000 means disabled, 0 means exact-or-better oracle execution
+    uint16 public maxSwapSlippageBps;
+
     constructor(
         IPositionManager _positionManager,
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2,
+        IV4Oracle _v4Oracle,
         address _operator,
         address _withdrawer
     ) Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) Ownable(msg.sender) {
         permit2 = _permit2;
+        v4Oracle = _v4Oracle;
+        maxSwapSlippageBps = 10000;
         setOperator(_operator, true);
         setWithdrawer(_withdrawer);
     }
@@ -58,6 +71,16 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     function setWithdrawer(address _withdrawer) public onlyOwner {
         emit WithdrawerChanged(_withdrawer);
         withdrawer = _withdrawer;
+    }
+
+    /// @notice Owner controlled function to set max swap slippage vs oracle quote
+    /// @param _maxSwapSlippageBps max slippage in bps, 10000 disables the oracle slippage check
+    function setMaxSwapSlippageBps(uint16 _maxSwapSlippageBps) public onlyOwner {
+        if (_maxSwapSlippageBps > 10000) {
+            revert InvalidConfig();
+        }
+        maxSwapSlippageBps = _maxSwapSlippageBps;
+        emit MaxSwapSlippageBpsChanged(_maxSwapSlippageBps);
     }
 
     /// @notice Withdraws token balance
@@ -146,6 +169,26 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
                 SafeERC20.safeTransfer(IERC20(Currency.unwrap(token)), to, amount);
             }
         }
+    }
+
+    /// @notice Executes router swap and enforces oracle-based slippage floor when enabled.
+    /// @dev The effective minimum output is max(user amountOutMin, oracle floor).
+    function _routerSwapWithSlippageCheck(RouterSwapParams memory params)
+        internal
+        returns (uint256 amountInDelta, uint256 amountOutDelta)
+    {
+        if (params.amountIn != 0 && maxSwapSlippageBps < 10000) {
+            uint160 oracleSqrtPriceX96 =
+                v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(params.tokenIn), Currency.unwrap(params.tokenOut));
+            uint256 oraclePriceX96 =
+                FullMath.mulDiv(uint256(oracleSqrtPriceX96), uint256(oracleSqrtPriceX96), Q96);
+            uint256 oracleOut = FullMath.mulDiv(params.amountIn, oraclePriceX96, Q96);
+            uint256 oracleMinOut = FullMath.mulDiv(oracleOut, 10000 - uint256(maxSwapSlippageBps), 10000);
+            if (oracleMinOut > params.amountOutMin) {
+                params.amountOutMin = oracleMinOut;
+            }
+        }
+        return _routerSwap(params);
     }
 
     /// @notice Callback for receiving ERC721 tokens

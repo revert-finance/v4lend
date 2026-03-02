@@ -14,6 +14,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {IVault} from "../interfaces/IVault.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoLeverage
@@ -74,9 +75,10 @@ contract AutoLeverage is Automator {
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2,
+        IV4Oracle _v4Oracle,
         address _operator,
         address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _operator, _withdrawer) {}
+    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
 
     /// @notice Execute leverage rebalancing (always via vault.transform)
     function execute(ExecuteParams calldata params) external {
@@ -212,14 +214,14 @@ contract AutoLeverage is Automator {
 
         // Swap borrowed lend token to position tokens
         if (params.amountIn0 != 0) {
-            (uint256 amountIn, uint256 amountOut) = _routerSwap(
+            (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(lendToken, token0, params.amountIn0, params.amountOut0Min, params.swapData0)
             );
             if (lendToken == token1) amount1 -= amountIn;
             amount0 += amountOut;
         }
         if (params.amountIn1 != 0) {
-            (uint256 amountIn, uint256 amountOut) = _routerSwap(
+            (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(lendToken, token1, params.amountIn1, params.amountOut1Min, params.swapData1)
             );
             if (lendToken == token0) amount0 -= amountIn;
@@ -329,14 +331,14 @@ contract AutoLeverage is Automator {
         uint256 lendAmount = lendToken == token0 ? amount0 : (lendToken == token1 ? amount1 : 0);
 
         if (params.amountIn0 != 0 && !(lendToken == token0)) {
-            (uint256 amountIn, uint256 amountOut) = _routerSwap(
+            (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token0, lendToken, params.amountIn0, params.amountOut0Min, params.swapData0)
             );
             amount0 -= amountIn;
             lendAmount += amountOut;
         }
         if (params.amountIn1 != 0 && !(lendToken == token1)) {
-            (uint256 amountIn, uint256 amountOut) = _routerSwap(
+            (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token1, lendToken, params.amountIn1, params.amountOut1Min, params.swapData1)
             );
             amount1 -= amountIn;
