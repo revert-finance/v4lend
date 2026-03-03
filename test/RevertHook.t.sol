@@ -98,10 +98,10 @@ contract RevertHookTest is BaseTest {
         liquidityCalculator = new LiquidityCalculator();
 
         // Deploy RevertHookPositionActions and RevertHookLendingActions
-        RevertHookPositionActions hookFunctions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookLendingActions hookFunctions2 = new RevertHookLendingActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookPositionActions hookFunctionsPositionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookLendingActions hookFunctionsLendingActions = new RevertHookLendingActions(permit2, v4Oracle, liquidityCalculator);
 
-        bytes memory constructorArgs = abi.encode(address(this), protocolFeeRecipient, permit2, v4Oracle, liquidityCalculator, hookFunctions, hookFunctions2);
+        bytes memory constructorArgs = abi.encode(address(this), protocolFeeRecipient, permit2, v4Oracle, liquidityCalculator, hookFunctionsPositionActions, hookFunctionsLendingActions);
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 

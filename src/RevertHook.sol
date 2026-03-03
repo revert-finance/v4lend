@@ -46,7 +46,7 @@ import {RevertHookLendingActions} from "./RevertHookLendingActions.sol";
 ///   - maxTicksFromOracle limits how far from oracle price actions can execute
 ///   - Prevents manipulation attacks by constraining execution to valid price ranges
 /// @custom:security Delegatecall Pattern:
-///   - Uses hookFunctions and hookFunctions2 via delegatecall to avoid contract size limits
+///   - Uses hookFunctionsPositionActions and hookFunctionsLendingActions via delegatecall to avoid contract size limits
 ///   - All state is maintained in this contract
 contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
@@ -60,10 +60,10 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     ILiquidityCalculator public immutable liquidityCalculator;
 
     /// @notice The RevertHookPositionActions contract for delegatecall (auto-exit, auto-range, auto-compound)
-    RevertHookPositionActions public immutable hookFunctions;
+    RevertHookPositionActions public immutable hookFunctionsPositionActions;
 
     /// @notice The RevertHookLendingActions contract for delegatecall (auto-leverage, auto-lend)
-    RevertHookLendingActions public immutable hookFunctions2;
+    RevertHookLendingActions public immutable hookFunctionsLendingActions;
 
     constructor(
         address owner_,
@@ -71,8 +71,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
-        RevertHookPositionActions _hookFunctions,
-        RevertHookLendingActions _hookFunctions2
+        RevertHookPositionActions _hookFunctionsPositionActions,
+        RevertHookLendingActions _hookFunctionsLendingActions
     ) BaseHook(_v4Oracle.poolManager()) Ownable(owner_) {
         positionManager = _v4Oracle.positionManager();
         protocolFeeRecipient = protocolFeeRecipient_;
@@ -81,14 +81,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         liquidityCalculator = _liquidityCalculator;
 
         // Use pre-deployed function contracts
-        hookFunctions = _hookFunctions;
-        hookFunctions2 = _hookFunctions2;
+        hookFunctionsPositionActions = _hookFunctionsPositionActions;
+        hookFunctionsLendingActions = _hookFunctionsLendingActions;
     }
 
     // ==================== Configuration Setters ====================
 
     /// @notice Sets the ERC4626 vault to use for auto-lend feature for a specific token (onlyOwner)
     /// @dev When AUTO_LEND mode triggers, idle position value is deposited into this vault
+    ///      This is effectively a token-level allowlist for AUTO_LEND target vaults.
     /// @param token The token address (typically stablecoin) that the vault accepts
     /// @param vault The ERC4626 vault contract to deposit into
     function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
@@ -174,6 +175,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice Sets the automation configuration for a position
     /// @dev Configures the automated behavior mode and parameters for a position.
     ///      Only callable by position owner. Position must meet minimum value requirement.
+    ///      Because value checks and trigger bounds use V4Oracle, position tokens must have oracle support.
     /// @param tokenId The position token ID to configure
     /// @param positionConfig Configuration struct containing mode and parameters for automation
     /// @custom:security Validates position meets minPositionValueNative to prevent dust position attacks
@@ -798,7 +800,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Executes auto-exit for a position, removing liquidity and swapping to single token
     /// @dev Called via vault transform for collateralized positions or directly for non-vault positions.
-    ///      Delegatecalls to hookFunctions contract.
+    ///      Delegatecalls to hookFunctionsPositionActions contract.
     /// @param poolKey The pool key for the position's pool
     /// @param poolId The pool ID
     /// @param tokenId The position token ID to auto-exit
@@ -814,7 +816,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Executes auto-range for a position, adjusting tick range around current price
     /// @dev Creates a new position with adjusted ticks and transfers debt if applicable.
-    ///      Delegatecalls to hookFunctions contract.
+    ///      Delegatecalls to hookFunctionsPositionActions contract.
     /// @param poolKey The pool key for the position's pool
     /// @param poolId The pool ID
     /// @param tokenId The position token ID to auto-range
@@ -824,7 +826,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Executes auto-leverage adjustment for a vault-owned position
     /// @dev Adjusts leverage based on price movement. Only works for vault-owned positions.
-    ///      Delegatecalls to hookFunctions2 contract.
+    ///      Delegatecalls to hookFunctionsLendingActions contract.
     /// @param poolKey The pool key for the position's pool
     /// @param poolId The pool ID
     /// @param tokenId The position token ID to adjust leverage
@@ -837,14 +839,14 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @dev Can be called to manually exit auto-lend before trigger conditions
     /// @param tokenId The position token ID to force exit
     function autoLendForceExit(uint256 tokenId) external {
-        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLendForceExit, (tokenId)));
+        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLendForceExit, (tokenId)));
     }
 
     /// @notice Manually triggers auto-compound for multiple positions
     /// @dev Collects fees and reinvests them as liquidity. Anyone can call this.
     /// @param tokenIds Array of position token IDs to compound
     function autoCompound(uint256[] memory tokenIds) external {
-        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoCompound, (tokenIds)));
+        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoCompound, (tokenIds)));
     }
 
     /// @notice Triggers auto-compound for a vault-owned position via transform
@@ -852,7 +854,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param tokenId The position token ID to compound
     /// @param caller The address initiating the compound (for reward distribution)
     function autoCompoundForVault(uint256 tokenId, address caller) external {
-        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoCompoundForVault, (tokenId, caller)));
+        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoCompoundForVault, (tokenId, caller)));
     }
 
     /// @notice Callback from pool manager during immediate execution of triggered actions
@@ -937,7 +939,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _executeAutoCompound(uint256 tokenId, address caller) internal {
-        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.executeAutoCompound, (tokenId, caller)));
+        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.executeAutoCompound, (tokenId, caller)));
     }
 
     function _getOracleMaxEndTick(PoolKey memory poolKey, bool up) internal view returns (int24 maxEndTick) {
@@ -962,22 +964,22 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _delegatecallAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoExit, (poolKey, poolId, tokenId, isUpper)));
+        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpper)));
     }
 
     function _delegatecallAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
-        _delegatecall(address(hookFunctions), abi.encodeCall(hookFunctions.autoRange, (poolKey, poolId, tokenId)));
+        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId)));
     }
 
     function _delegatecallAutoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
-        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger)));
+        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger)));
     }
 
     function _delegatecallAutoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLendDeposit, (poolKey, poolId, tokenId, isUpper)));
+        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpper)));
     }
 
     function _delegatecallAutoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) internal {
-        _delegatecall(address(hookFunctions2), abi.encodeCall(hookFunctions2.autoLendWithdraw, (poolKey, tokenId, shares)));
+        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLendWithdraw, (poolKey, tokenId, shares)));
     }
 }

@@ -216,33 +216,33 @@ contract DeployUnichain is Script {
         // ==================== Step 3: Deploy RevertHook action contracts ====================
 
         // Deploy RevertHookPositionActions separately to avoid initcode size limit
-        RevertHookPositionActions hookFunctions = new RevertHookPositionActions(
+        RevertHookPositionActions hookFunctionsPositionActions = new RevertHookPositionActions(
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator)
         );
-        console.log("RevertHookPositionActions deployed at:", address(hookFunctions));
+        console.log("RevertHookPositionActions deployed at:", address(hookFunctionsPositionActions));
 
         // Deploy RevertHookLendingActions separately to avoid initcode size limit
-        RevertHookLendingActions hookFunctions2 = new RevertHookLendingActions(
+        RevertHookLendingActions hookFunctionsLendingActions = new RevertHookLendingActions(
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator)
         );
-        console.log("RevertHookLendingActions deployed at:", address(hookFunctions2));
+        console.log("RevertHookLendingActions deployed at:", address(hookFunctionsLendingActions));
 
         // ==================== Step 4: Deploy RevertHook with CREATE2 ====================
 
         // Prepare constructor arguments for RevertHook
-        // Constructor: (owner_, protocolFeeRecipient_, permit2, v4Oracle, liquidityCalculator, hookFunctions, hookFunctions2)
+        // Constructor: (owner_, protocolFeeRecipient_, permit2, v4Oracle, liquidityCalculator, hookFunctionsPositionActions, hookFunctionsLendingActions)
         bytes memory constructorArgs = abi.encode(
             deployer,
             deployer,
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
-            hookFunctions,
-            hookFunctions2
+            hookFunctionsPositionActions,
+            hookFunctionsLendingActions
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
 
@@ -260,8 +260,8 @@ contract DeployUnichain is Script {
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
-            hookFunctions,
-            hookFunctions2
+            hookFunctionsPositionActions,
+            hookFunctionsLendingActions
         );
         require(address(revertHook) == expectedHookAddress, "Hook address mismatch");
         console.log("RevertHook deployed at:", address(revertHook));
@@ -370,8 +370,8 @@ contract DeployUnichain is Script {
         console.log("Chain: Unichain (130)");
         console.log("LiquidityCalculator:", address(liquidityCalculator));
         console.log("V4Oracle:", address(oracle));
-        console.log("RevertHookPositionActions:", address(hookFunctions));
-        console.log("RevertHookLendingActions:", address(hookFunctions2));
+        console.log("RevertHookPositionActions:", address(hookFunctionsPositionActions));
+        console.log("RevertHookLendingActions:", address(hookFunctionsLendingActions));
         console.log("RevertHook:", address(revertHook));
         console.log("=========================================\n");
     }
