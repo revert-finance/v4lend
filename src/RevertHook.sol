@@ -418,7 +418,19 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             uint256[] memory tokenIdsAtTick = list.tokenIds[tick];
             uint256 length = tokenIdsAtTick.length;
             for (uint256 i; i < length;) {
-                _handleTokenIdAfterSwap(key, poolId, tokenIdsAtTick[i], increasing, tick);
+                uint256 tokenId = tokenIdsAtTick[i];
+                PositionConfig storage config = positionConfigs[tokenId];
+                _dispatchAutomationAction(
+                    key,
+                    poolId,
+                    tokenId,
+                    config.modeFlags,
+                    increasing,
+                    tick,
+                    config.autoExitIsRelative,
+                    config.autoExitTickLower,
+                    config.autoExitTickUpper
+                );
                 unchecked {
                     ++i;
                 }
@@ -437,27 +449,6 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         tickLowerLasts[poolId] = tickEnd;
         return (this.afterSwap.selector, 0);
-    }
-
-    function _handleTokenIdAfterSwap(
-        PoolKey memory poolKey,
-        PoolId poolId,
-        uint256 tokenId,
-        bool isUpperTrigger,
-        int24 tick
-    ) internal {
-        PositionConfig storage config = positionConfigs[tokenId];
-        _dispatchAutomationAction(
-            poolKey,
-            poolId,
-            tokenId,
-            config.modeFlags,
-            isUpperTrigger,
-            tick,
-            config.autoExitIsRelative,
-            config.autoExitTickLower,
-            config.autoExitTickUpper
-        );
     }
 
     function _dispatchAutomationAction(

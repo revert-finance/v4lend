@@ -164,6 +164,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     /// @notice Auto-compounds fees from multiple positions
     /// @param tokenIds Array of token IDs to compound
     function autoCompound(uint256[] calldata tokenIds) external {
+        address caller = msg.sender;
         uint256 length = tokenIds.length;
         for (uint256 i; i < length;) {
             uint256 tokenId = tokenIds[i];
@@ -172,10 +173,10 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
                 IVault(owner).transform(
                     tokenId,
                     address(this),
-                    abi.encodeCall(this.autoCompoundForVault, (tokenId, msg.sender))
+                    abi.encodeCall(this.autoCompoundForVault, (tokenId, caller))
                 );
             } else {
-                poolManager.unlock(abi.encode(tokenId, msg.sender));
+                poolManager.unlock(abi.encode(tokenId, caller));
             }
             unchecked {
                 ++i;

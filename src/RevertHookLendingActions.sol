@@ -172,6 +172,8 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick
     function autoLendDeposit(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
+        address owner = _getOwner(tokenId, false);
+
         _removePositionTriggers(tokenId, poolKey);
 
         // Remove all liquidity
@@ -195,7 +197,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
             state.autoLendAmount = lendAmount;
             state.autoLendVault = address(lendVault);
 
-            _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
+            _sendLeftoverTokens(tokenId, currency0, currency1, owner);
             _addPositionTriggers(tokenId, poolKey);
 
             emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
