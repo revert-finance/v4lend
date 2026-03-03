@@ -26,6 +26,23 @@ Most tests use a forked state of Ethereum Mainnet. You can run all tests with:
 forge test
 ```
 
+## Token support notes
+
+Token support is feature-dependent:
+
+- Works with long-tail pairs (no oracle feed required):
+  - Automator swaps when per-position slippage is set to `10000` (oracle slippage disabled, only `amountOutMin` enforced).
+  - Typical paths: AutoCompound, AutoRange, AutoExit for non-vault positions.
+- Requires oracle token configuration:
+  - Vault loan valuation/health checks (`V4Vault.loanInfo`, `borrow`, liquidations).
+  - RevertHook automation configuration/execution (value checks and oracle tick bounds).
+  - Automator oracle slippage checks when slippage is configured below `10000`.
+- Requires additional protocol allowlists/config:
+  - `V4Vault.setTokenConfig(...)` for collateral token factors/limits.
+  - `V4Vault.setHookAllowList(...)` for accepted position hooks (including `address(0)` for hookless pools).
+  - `V4Vault.setTransformer(...)` for contracts allowed to transform vault positions.
+  - `RevertHook.setAutoLendVault(token, vault)` for AUTO_LEND token-specific vault routing.
+
 ## Deployment
 
 Example for Mainnet

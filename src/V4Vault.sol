@@ -249,6 +249,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @return collateralValue Current collateral value of the position priced as asset token
     /// @return liquidationCost If position is liquidatable - cost to liquidate position - otherwise 0
     /// @return liquidationValue If position is liquidatable - the value of the (partial) position which the liquidator recieves - otherwise 0
+    /// @dev Requires Oracle support for both position tokens and the vault asset token.
+    ///      If a required token feed is missing, oracle.getValue() reverts with NotConfigured().
     function loanInfo(uint256 tokenId)
         external
         view
@@ -626,6 +628,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @notice Borrows specified amount of the vault's asset using the position as collateral
     /// @dev Can be called by position owner directly, or by transformers during transform mode.
     ///      Checks global debt limits, daily limits, minimum loan size, and collateral health.
+    ///      Practical requirement: both position tokens must be configured in setTokenConfig(),
+    ///      and oracle feeds must exist for both position tokens plus the vault asset.
     /// @param tokenId The token ID of the position to use as collateral
     /// @param assets Amount of assets to borrow (in asset token decimals)
     /// @custom:security Validates sufficient collateralization after borrow (with 5% safety buffer when not in transform)
@@ -949,6 +953,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @notice Sets or updates the collateral configuration for a token (onlyOwner)
     /// @dev Collateral factor determines how much of a token's value counts toward borrowing capacity.
     ///      Value limit prevents over-concentration of risk in a single collateral type.
+    ///      Tokens not configured here are effectively non-borrowable collateral (factor defaults to 0 and value limit checks fail on debt increase).
     /// @param token Token address to configure (use address(0) for native ETH)
     /// @param collateralFactorX32 Collateral factor multiplied by Q32 (max 90%, e.g., 0.85 * Q32 for 85%)
     /// @param collateralValueLimitFactorX32 Max debt backed by this token as % of total lent, multiplied by Q32

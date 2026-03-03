@@ -94,7 +94,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     }
 
     /// @notice Calculates "pool price" using chainlink feeds
-    /// @dev Calculates price of a token in quote token terms using Chainlink feeds. Reverts if token or quoteToken is not configured.
+    /// @dev Calculates price of a token in quote token terms using Chainlink feeds.
+    ///      Reverts if token or quoteToken is not configured (except reference token shortcuts).
     /// @param token0 Token address to get price for (use address(0) for native ETH)
     /// @param token1 Token address to quote the price in (use address(0) for native ETH)
     /// @return priceX96 Price of token in quote token terms in X96
@@ -202,6 +203,9 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     /// @notice Sets or updates the Chainlink feed configuration for a token (requires owner privileges)
     /// @dev Configures oracle connection to Chainlink price feed with age verification
+    ///      This controls whether the token can be used in:
+    ///      - Vault loan valuation/health checks
+    ///      - Oracle slippage checks in automators/rehook (when slippage != 10000)
     /// @param token Token address to configure (use address(0) for native ETH)
     /// @param feed Valid Chainlink AggregatorV3Interface contract address for price data
     /// @param maxFeedAge Maximum age of Chainlink feed data in seconds before considering stale
