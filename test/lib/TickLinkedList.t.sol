@@ -613,7 +613,7 @@ contract TickLinkedListTest is Test {
 
     function test_remove_AllTokenIds_SingleElement() public {
         assertTrue(increasingList.insert(100, 1));
-        assertTrue(increasingList.remove(100, 0)); // Remove all tokenIds
+        assertTrue(increasingList.clearTick(100)); // Remove all tokenIds
         
         assertEq(increasingList.size, 0);
         assertEq(increasingList.tokenIds[100].length, 0);
@@ -629,7 +629,7 @@ contract TickLinkedListTest is Test {
         assertEq(increasingList.size, 1);
         assertEq(increasingList.tokenIds[100].length, 3);
         
-        assertTrue(increasingList.remove(100, 0)); // Remove all tokenIds
+        assertTrue(increasingList.clearTick(100)); // Remove all tokenIds
         
         assertEq(increasingList.size, 0);
         assertEq(increasingList.tokenIds[100].length, 0);
@@ -640,7 +640,7 @@ contract TickLinkedListTest is Test {
         assertTrue(increasingList.insert(200, 2));
         assertTrue(increasingList.insert(150, 3));
         
-        assertTrue(increasingList.remove(100, 0)); // Remove all tokenIds at head
+        assertTrue(increasingList.clearTick(100)); // Remove all tokenIds at head
         
         assertEq(increasingList.size, 2);
         (bool exists, int24 value) = increasingList.getFirst();
@@ -658,7 +658,7 @@ contract TickLinkedListTest is Test {
         assertEq(increasingList.size, 3);
         assertEq(increasingList.tokenIds[150].length, 2);
         
-        assertTrue(increasingList.remove(150, 0)); // Remove all tokenIds at middle
+        assertTrue(increasingList.clearTick(150)); // Remove all tokenIds at middle
         
         assertEq(increasingList.size, 2);
         assertEq(increasingList.next[100], 200);
@@ -674,7 +674,7 @@ contract TickLinkedListTest is Test {
         assertEq(increasingList.size, 3);
         assertEq(increasingList.tokenIds[200].length, 2);
         
-        assertTrue(increasingList.remove(200, 0)); // Remove all tokenIds at tail
+        assertTrue(increasingList.clearTick(200)); // Remove all tokenIds at tail
         
         assertEq(increasingList.size, 2);
         assertEq(increasingList.next[150], 0); // 150 is now tail
@@ -683,7 +683,7 @@ contract TickLinkedListTest is Test {
 
     function test_remove_AllTokenIds_NonExistentTick() public {
         assertTrue(increasingList.insert(100, 1));
-        assertFalse(increasingList.remove(200, 0)); // Tick doesn't exist
+        assertFalse(increasingList.clearTick(200)); // Tick doesn't exist
         assertEq(increasingList.size, 1);
     }
 
@@ -734,7 +734,7 @@ contract TickLinkedListTest is Test {
         assertEq(decreasingList.size, 3);
         assertEq(decreasingList.tokenIds[150].length, 2);
         
-        assertTrue(decreasingList.remove(150, 0)); // Remove all tokenIds at middle
+        assertTrue(decreasingList.clearTick(150)); // Remove all tokenIds at middle
         
         assertEq(decreasingList.size, 2);
         assertEq(decreasingList.next[200], 100);
@@ -1217,4 +1217,3 @@ contract TickLinkedListTest is Test {
         assertFalse(exists, "getFirst should return false for empty list");
     }
 }
-

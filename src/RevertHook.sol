@@ -65,6 +65,17 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice The RevertHookLendingActions contract for delegatecall (auto-leverage, auto-lend)
     RevertHookLendingActions public immutable hookFunctionsLendingActions;
 
+    struct ImmediateActionData {
+        uint256 tokenId;
+        PoolKey poolKey;
+        uint8 modeFlags;
+        bool isUpperTrigger;
+        int24 tick;
+        bool autoExitIsRelative;
+        int24 autoExitTickLower;
+        int24 autoExitTickUpper;
+    }
+
     constructor(
         address owner_,
         address protocolFeeRecipient_,
@@ -211,44 +222,59 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice Internal function to set position configuration
     function _setPositionConfig(uint256 tokenId, PositionConfig memory config, bool checkImmediateExecution) internal {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-
-        // Validate tick configs are aligned to tick spacing (or are sentinel values)
-        int24 ts = poolKey.tickSpacing;
-        if (
-            !_isValidTickConfig(config.autoExitTickLower, ts, type(int24).min) ||
-            !_isValidTickConfig(config.autoExitTickUpper, ts, type(int24).max) ||
-            !_isValidTickConfig(config.autoRangeLowerLimit, ts, type(int24).min) ||
-            !_isValidTickConfig(config.autoRangeUpperLimit, ts, type(int24).max) ||
-            !_isValidTickConfig(config.autoRangeLowerDelta, ts, 0) ||
-            !_isValidTickConfig(config.autoRangeUpperDelta, ts, 0) ||
-            !_isValidTickConfig(config.autoLendToleranceTick, ts, 0) ||
-            config.autoLeverageTargetBps >= 10000
-        ) {
-            revert InvalidConfig();
-        }
+        _validateTickAlignedConfig(config, poolKey.tickSpacing);
 
         // Validate mode flag combinations
         _validateModeFlags(config.modeFlags, tokenId, poolKey);
 
-        // AUTO_LEVERAGE requires setting base tick
-        if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
-            int24 currentTick = _getCurrentBaseTick(poolKey);
-            positionStates[tokenId].autoLeverageBaseTick = (currentTick / poolKey.tickSpacing) * poolKey.tickSpacing;
-        }
+        _prepareModeState(tokenId, poolKey, config.modeFlags);
 
         _updatePositionTriggers(tokenId, poolKey, config);
         positionConfigs[tokenId] = config;
 
-        if (!PositionModeFlags.isNone(config.modeFlags)) {
-            _activatePosition(tokenId);
-            if (checkImmediateExecution) {
-                _checkAndExecuteImmediate(tokenId, poolKey, config);
-            }
-        } else {
-            _deactivatePosition(tokenId);
-        }
+        _syncActivation(tokenId, poolKey, config, checkImmediateExecution);
 
         emit SetPositionConfig(tokenId, config);
+    }
+
+    function _validateTickAlignedConfig(PositionConfig memory config, int24 tickSpacing) internal pure {
+        if (
+            !_isValidTickConfig(config.autoExitTickLower, tickSpacing, type(int24).min)
+                || !_isValidTickConfig(config.autoExitTickUpper, tickSpacing, type(int24).max)
+                || !_isValidTickConfig(config.autoRangeLowerLimit, tickSpacing, type(int24).min)
+                || !_isValidTickConfig(config.autoRangeUpperLimit, tickSpacing, type(int24).max)
+                || !_isValidTickConfig(config.autoRangeLowerDelta, tickSpacing, 0)
+                || !_isValidTickConfig(config.autoRangeUpperDelta, tickSpacing, 0)
+                || !_isValidTickConfig(config.autoLendToleranceTick, tickSpacing, 0)
+                || config.autoLeverageTargetBps >= 10000
+        ) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _prepareModeState(uint256 tokenId, PoolKey memory poolKey, uint8 modeFlags) internal {
+        // AUTO_LEVERAGE requires setting base tick
+        if (PositionModeFlags.hasAutoLeverage(modeFlags)) {
+            int24 currentTick = _getCurrentBaseTick(poolKey);
+            positionStates[tokenId].autoLeverageBaseTick = (currentTick / poolKey.tickSpacing) * poolKey.tickSpacing;
+        }
+    }
+
+    function _syncActivation(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionConfig memory config,
+        bool checkImmediateExecution
+    ) internal {
+        if (PositionModeFlags.isNone(config.modeFlags)) {
+            _deactivatePosition(tokenId);
+            return;
+        }
+
+        _activatePosition(tokenId);
+        if (checkImmediateExecution) {
+            _checkAndExecuteImmediate(tokenId, poolKey, config);
+        }
     }
 
     // ==================== Mode Validation ====================
@@ -388,10 +414,13 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 }
             }
 
-            uint256 length = list.tokenIds[tick].length;
+            uint256[] memory tokenIdsAtTick = list.tokenIds[tick];
+            uint256 length = tokenIdsAtTick.length;
             for (uint256 i; i < length;) {
-                _handleTokenIdAfterSwap(key, poolId, list.tokenIds[tick][i], list.increasing, tick);
-                unchecked { ++i; }
+                _handleTokenIdAfterSwap(key, poolId, tokenIdsAtTick[i], list.increasing, tick);
+                unchecked {
+                    ++i;
+                }
             }
 
             tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
@@ -401,7 +430,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
             int24 nextTick;
             (exists, nextTick) = list.getNext(tick);
-            list.remove(tick, 0);
+            list.clearTick(tick);
             tick = nextTick;
         }
 
@@ -417,12 +446,40 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         int24 tick
     ) internal {
         PositionConfig storage config = positionConfigs[tokenId];
-        uint8 modeFlags = config.modeFlags;
+        _dispatchAutomationAction(
+            poolKey,
+            poolId,
+            tokenId,
+            config.modeFlags,
+            isUpperTrigger,
+            tick,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper
+        );
+    }
 
-        // Priority 1: AUTO_EXIT (check if this is an exit trigger)
+    function _dispatchAutomationAction(
+        PoolKey memory poolKey,
+        PoolId poolId,
+        uint256 tokenId,
+        uint8 modeFlags,
+        bool isUpperTrigger,
+        int24 tick,
+        bool autoExitIsRelative,
+        int24 autoExitTickLower,
+        int24 autoExitTickUpper
+    ) internal {
+        // Priority 1: AUTO_EXIT
         if (PositionModeFlags.hasAutoExit(modeFlags)) {
-            bool isAutoExitTriggered = _isExitTrigger(tokenId, config, isUpperTrigger, tick);
-            if (isAutoExitTriggered) {
+            int24 exitTick = _calculateExitTick(
+                tokenId,
+                isUpperTrigger,
+                autoExitIsRelative,
+                autoExitTickLower,
+                autoExitTickUpper
+            );
+            if (tick == exitTick) {
                 _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
                 return;
             }
@@ -437,13 +494,13 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             return;
         }
 
-        // Priority 2: AUTO_RANGE (when not combined with AUTO_LEVERAGE)
+        // Priority 2: AUTO_RANGE
         if (hasAutoRange) {
             _handleAutoRange(poolKey, poolId, tokenId);
             return;
         }
 
-        // Priority 3: AUTO_LEVERAGE (when not combined with AUTO_RANGE)
+        // Priority 3: AUTO_LEVERAGE
         if (hasAutoLeverage) {
             _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
             return;
@@ -452,26 +509,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         // Priority 4: AUTO_LEND
         if (PositionModeFlags.hasAutoLend(modeFlags)) {
             _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
-            return;
         }
-    }
-
-    /// @notice Checks if the triggered tick is an exit trigger
-    /// @dev Handles both absolute and relative exit tick configurations
-    function _isExitTrigger(
-        uint256 tokenId,
-        PositionConfig storage config,
-        bool isUpperTrigger,
-        int24 tick
-    ) internal view returns (bool) {
-        int24 exitTick = _calculateExitTick(
-            tokenId,
-            isUpperTrigger,
-            config.autoExitIsRelative,
-            config.autoExitTickLower,
-            config.autoExitTickUpper
-        );
-        return tick == exitTick;
     }
 
     /// @notice Calculates the exit tick based on configuration
@@ -515,7 +553,9 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
             );
         } else {
-            _delegatecallAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
+            _delegatecallPositionActions(
+                abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
+            );
         }
 
         _removePositionTriggers(tokenId, poolKey);
@@ -529,9 +569,13 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         uint256 shares = positionStates[tokenId].autoLendShares;
         if (shares > 0) {
-            _delegatecallAutoLendWithdraw(poolKey, tokenId, shares);
+            _delegatecallLendingActions(
+                abi.encodeCall(hookFunctionsLendingActions.autoLendWithdraw, (poolKey, tokenId, shares))
+            );
         } else {
-            _delegatecallAutoLendDeposit(poolKey, poolId, tokenId, isUpperTrigger);
+            _delegatecallLendingActions(
+                abi.encodeCall(hookFunctionsLendingActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger))
+            );
         }
     }
 
@@ -541,7 +585,9 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         if (vaults[owner]) {
             IVault(owner).transform(tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId)));
         } else {
-            _delegatecallAutoRange(poolKey, poolId, tokenId);
+            _delegatecallPositionActions(
+                abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId))
+            );
         }
     }
 
@@ -763,16 +809,17 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         bool isUpperTrigger,
         int24 tick
     ) internal {
-        poolManager.unlock(abi.encode(
-            tokenId,
-            poolKey,
-            config.modeFlags,
-            isUpperTrigger,
-            tick,
-            config.autoExitIsRelative,
-            config.autoExitTickLower,
-            config.autoExitTickUpper
-        ));
+        ImmediateActionData memory actionData = ImmediateActionData({
+            tokenId: tokenId,
+            poolKey: poolKey,
+            modeFlags: config.modeFlags,
+            isUpperTrigger: isUpperTrigger,
+            tick: tick,
+            autoExitIsRelative: config.autoExitIsRelative,
+            autoExitTickLower: config.autoExitTickLower,
+            autoExitTickUpper: config.autoExitTickUpper
+        });
+        poolManager.unlock(abi.encode(actionData));
     }
 
     function _getCrossedTicks(PoolId poolId, int24 tickSpacing)
@@ -811,7 +858,9 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         uint256 tokenId,
         bool isUpper
     ) public {
-        _delegatecallAutoExit(poolKey, poolId, tokenId, isUpper);
+        _delegatecallPositionActions(
+            abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpper))
+        );
     }
 
     /// @notice Executes auto-range for a position, adjusting tick range around current price
@@ -821,7 +870,9 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param poolId The pool ID
     /// @param tokenId The position token ID to auto-range
     function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) public {
-        _delegatecallAutoRange(poolKey, poolId, tokenId);
+        _delegatecallPositionActions(
+            abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId))
+        );
     }
 
     /// @notice Executes auto-leverage adjustment for a vault-owned position
@@ -832,21 +883,23 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param tokenId The position token ID to adjust leverage
     /// @param isUpperTrigger True if triggered by upper tick boundary, false for lower
     function autoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) public {
-        _delegatecallAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
+        _delegatecallLendingActions(
+            abi.encodeCall(hookFunctionsLendingActions.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
+        );
     }
 
     /// @notice Forces exit from auto-lend mode, withdrawing deposited tokens
     /// @dev Can be called to manually exit auto-lend before trigger conditions
     /// @param tokenId The position token ID to force exit
     function autoLendForceExit(uint256 tokenId) external {
-        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLendForceExit, (tokenId)));
+        _delegatecallLendingActions(abi.encodeCall(hookFunctionsLendingActions.autoLendForceExit, (tokenId)));
     }
 
     /// @notice Manually triggers auto-compound for multiple positions
     /// @dev Collects fees and reinvests them as liquidity. Anyone can call this.
     /// @param tokenIds Array of position token IDs to compound
     function autoCompound(uint256[] memory tokenIds) external {
-        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoCompound, (tokenIds)));
+        _delegatecallPositionActions(abi.encodeCall(hookFunctionsPositionActions.autoCompound, (tokenIds)));
     }
 
     /// @notice Triggers auto-compound for a vault-owned position via transform
@@ -854,7 +907,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param tokenId The position token ID to compound
     /// @param caller The address initiating the compound (for reward distribution)
     function autoCompoundForVault(uint256 tokenId, address caller) external {
-        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoCompoundForVault, (tokenId, caller)));
+        _delegatecallPositionActions(abi.encodeCall(hookFunctionsPositionActions.autoCompoundForVault, (tokenId, caller)));
     }
 
     /// @notice Callback from pool manager during immediate execution of triggered actions
@@ -868,18 +921,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
 
         if (data.length > 64) {
-            (
-                uint256 tokenId,
-                PoolKey memory poolKey,
-                uint8 modeFlags,
-                bool isUpperTrigger,
-                int24 tick,
-                bool autoExitIsRelative,
-                int24 autoExitTickLower,
-                int24 autoExitTickUpper
-            ) = abi.decode(data, (uint256, PoolKey, uint8, bool, int24, bool, int24, int24));
-
-            _executeImmediateActionUnlocked(poolKey, tokenId, modeFlags, isUpperTrigger, tick, autoExitIsRelative, autoExitTickLower, autoExitTickUpper);
+            ImmediateActionData memory actionData = abi.decode(data, (ImmediateActionData));
+            _executeImmediateActionUnlocked(actionData);
         } else {
             (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
             _executeAutoCompound(tokenId, caller);
@@ -887,59 +930,23 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         return bytes("");
     }
 
-    function _executeImmediateActionUnlocked(
-        PoolKey memory poolKey,
-        uint256 tokenId,
-        uint8 modeFlags,
-        bool isUpperTrigger,
-        int24 tick,
-        bool autoExitIsRelative,
-        int24 autoExitTickLower,
-        int24 autoExitTickUpper
-    ) internal {
-        PoolId poolId = poolKey.toId();
-
-        // Priority 1: AUTO_EXIT (check if this is an exit trigger)
-        if (PositionModeFlags.hasAutoExit(modeFlags)) {
-            int24 exitTick = _calculateExitTick(
-                tokenId, isUpperTrigger, autoExitIsRelative, autoExitTickLower, autoExitTickUpper
-            );
-            if (tick == exitTick) {
-                _handleAutoExit(poolKey, poolId, tokenId, isUpperTrigger);
-                return;
-            }
-        }
-
-        bool hasAutoRange = PositionModeFlags.hasAutoRange(modeFlags);
-        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
-
-        // When both AUTO_RANGE and AUTO_LEVERAGE are enabled, determine which action to take
-        if (hasAutoRange && hasAutoLeverage) {
-            _handleAutoRangeOrLeverage(poolKey, poolId, tokenId, isUpperTrigger);
-            return;
-        }
-
-        // Priority 2: AUTO_RANGE
-        if (hasAutoRange) {
-            _handleAutoRange(poolKey, poolId, tokenId);
-            return;
-        }
-
-        // Priority 3: AUTO_LEVERAGE
-        if (hasAutoLeverage) {
-            _handleAutoLeverage(poolKey, poolId, tokenId, isUpperTrigger);
-            return;
-        }
-
-        // Priority 4: AUTO_LEND
-        if (PositionModeFlags.hasAutoLend(modeFlags)) {
-            _handleAutoLend(poolKey, poolId, tokenId, isUpperTrigger);
-            return;
-        }
+    function _executeImmediateActionUnlocked(ImmediateActionData memory actionData) internal {
+        PoolId poolId = actionData.poolKey.toId();
+        _dispatchAutomationAction(
+            actionData.poolKey,
+            poolId,
+            actionData.tokenId,
+            actionData.modeFlags,
+            actionData.isUpperTrigger,
+            actionData.tick,
+            actionData.autoExitIsRelative,
+            actionData.autoExitTickLower,
+            actionData.autoExitTickUpper
+        );
     }
 
     function _executeAutoCompound(uint256 tokenId, address caller) internal {
-        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.executeAutoCompound, (tokenId, caller)));
+        _delegatecallPositionActions(abi.encodeCall(hookFunctionsPositionActions.executeAutoCompound, (tokenId, caller)));
     }
 
     function _getOracleMaxEndTick(PoolKey memory poolKey, bool up) internal view returns (int24 maxEndTick) {
@@ -963,23 +970,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
     }
 
-    function _delegatecallAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpper)));
+    function _delegatecallPositionActions(bytes memory data) internal {
+        _delegatecall(address(hookFunctionsPositionActions), data);
     }
 
-    function _delegatecallAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
-        _delegatecall(address(hookFunctionsPositionActions), abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId)));
-    }
-
-    function _delegatecallAutoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
-        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger)));
-    }
-
-    function _delegatecallAutoLendDeposit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpper) internal {
-        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpper)));
-    }
-
-    function _delegatecallAutoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) internal {
-        _delegatecall(address(hookFunctionsLendingActions), abi.encodeCall(hookFunctionsLendingActions.autoLendWithdraw, (poolKey, tokenId, shares)));
+    function _delegatecallLendingActions(bytes memory data) internal {
+        _delegatecall(address(hookFunctionsLendingActions), data);
     }
 }

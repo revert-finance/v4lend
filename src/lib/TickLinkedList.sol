@@ -153,78 +153,45 @@ library TickLinkedList {
     }
 
     /**
-     * @dev Removes a tokenId at a given tick value from the list. If the list is empty after removal, the tick is updated.
+     * @dev Removes a tokenId at a given tick value from the list.
      * @param self Stored linked list from contract.
      * @param _tick The tick value.
-     * @param _tokenId The tokenId to remove (or 0 to remove all tokenIds at this tick)
+     * @param _tokenId The tokenId to remove.
      * @return bool True if success, false if tokenid or tick doesn't exist.
      */
     function remove(List storage self, int24 _tick, uint256 _tokenId) internal returns (bool) {
-
-        if (self.size == 0) {
+        if (self.size == 0 || _tokenId == 0) {
             return false;
         }
 
+        bool removed;
         bool empty;
-
-        // special case to remove all tokenIds at this tick
-        if (_tokenId == 0) {
-            if (self.tokenIds[_tick].length > 0) {
-                delete self.tokenIds[_tick];
-                empty = true;
-            } else {
-                return false;
-            }
-        } else {
-            bool removed;
-            (removed, empty) = _removeFromTickMapping(self.tokenIds[_tick], _tokenId);
-            if (!removed) {
-                return false;
-            }
+        (removed, empty) = _removeFromTickMapping(self.tokenIds[_tick], _tokenId);
+        if (!removed) {
+            return false;
         }
-        
-        // If no more tokenIds at this tick, remove the tick from the list
+
+        // If no more tokenIds at this tick, remove the tick node from the linked list.
         if (empty) {
-            
-            int24 nextTick = self.next[_tick];
-
-            // Check if removing head
-            if (self.head == _tick) {
-                // If this was the only element, set head to 0
-                if (self.size == 1) {
-                    self.head = 0;
-                } else {
-                    self.head = nextTick;
-                    delete self.next[_tick];
-                }
-                self.size--;
-                return true;
-            }
-
-            // Find the previous node by traversing
-            int24 prevTick;
-            int24 current = self.head;
-            uint32 count = self.size;
-     
-            while (current != _tick && count > 0) {
-                prevTick = current;
-                current = self.next[current];
-                count--;
-            }
-
-            if (current != _tick) {
-                return false; // Not found
-            }
-
-            // Link prev and next together
-            self.next[prevTick] = nextTick;
-
-            // Clear the removed node's link
-            delete self.next[_tick];
-            self.size--;
+            return _unlinkTick(self, _tick);
         }
 
         return true;
+    }
+
+    /**
+     * @dev Clears all tokenIds at a given tick and removes the tick node from the list.
+     * @param self Stored linked list from contract.
+     * @param _tick The tick value.
+     * @return bool True if success, false if tick doesn't exist.
+     */
+    function clearTick(List storage self, int24 _tick) internal returns (bool) {
+        if (self.size == 0 || self.tokenIds[_tick].length == 0) {
+            return false;
+        }
+
+        delete self.tokenIds[_tick];
+        return _unlinkTick(self, _tick);
     }
 
     /// @notice Adds a tokenId to a tick mapping array if not already present
@@ -261,5 +228,44 @@ library TickLinkedList {
             unchecked { ++i; }
         }
         return (false, length == 0);
+    }
+
+    /// @notice Removes a tick node from the linked list
+    /// @param self Stored linked list from contract.
+    /// @param _tick The tick value to unlink.
+    /// @return bool True if success, false if tick doesn't exist.
+    function _unlinkTick(List storage self, int24 _tick) private returns (bool) {
+        int24 nextTick = self.next[_tick];
+
+        // Removing head
+        if (self.head == _tick) {
+            if (self.size == 1) {
+                self.head = 0;
+            } else {
+                self.head = nextTick;
+                delete self.next[_tick];
+            }
+            self.size--;
+            return true;
+        }
+
+        // Find previous node
+        int24 prevTick;
+        int24 current = self.head;
+        uint32 count = self.size;
+        while (current != _tick && count > 0) {
+            prevTick = current;
+            current = self.next[current];
+            count--;
+        }
+
+        if (current != _tick) {
+            return false;
+        }
+
+        self.next[prevTick] = nextTick;
+        delete self.next[_tick];
+        self.size--;
+        return true;
     }
 }
