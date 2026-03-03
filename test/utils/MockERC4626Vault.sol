@@ -210,4 +210,13 @@ contract MockERC4626Vault is ERC20, IERC4626 {
         exchangeRate = oldRate + (oldRate * yieldBps / 10000);
         emit ExchangeRateUpdated(oldRate, exchangeRate);
     }
+
+    /// @notice Simulate positive share value growth (assets per share increase)
+    /// @dev This lowers shares-per-asset exchangeRate in this mock's math convention.
+    /// @param yieldBps Yield in basis points (e.g., 100 = 1%)
+    function simulatePositiveYield(uint256 yieldBps) external {
+        uint256 oldRate = exchangeRate;
+        exchangeRate = oldRate * 10000 / (10000 + yieldBps);
+        emit ExchangeRateUpdated(oldRate, exchangeRate);
+    }
 }
