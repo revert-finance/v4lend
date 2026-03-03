@@ -36,17 +36,18 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick, false if lower tick
-    function autoExit(PoolKey memory poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) public {
+    function autoExit(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
         _requireAuthorization(tokenId);
 
         // Remove all liquidity and collect fees
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
 
         address owner = _getOwner(tokenId, false);
-        address realOwner = _getOwner(tokenId, true);
+        address realOwner = owner;
 
         // Check if this is a vault position with debt
         if (vaults[owner]) {
+            realOwner = IVault(owner).ownerOf(tokenId);
             uint256 debtShares = IVault(owner).loans(tokenId);
 
             if (debtShares > 0) {
@@ -121,7 +122,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param poolId The pool ID
     /// @param tokenId The token ID of the position
-    function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) public {
+    function autoRange(PoolKey calldata poolKey, PoolId poolId, uint256 tokenId) external {
         _requireAuthorization(tokenId);
 
         // Calculate new tick range based on current tick
@@ -135,6 +136,9 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         // Swap to optimal ratio for new range
         (amount0, amount1) = _calculateAndSwap(tokenId, poolKey, newTickLower, newTickUpper, amount0, amount1);
 
+        address owner = _getOwner(tokenId, false);
+        address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
+
         // Approve tokens and mint new position
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
@@ -144,11 +148,11 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             newTickUpper,
             uint128(amount0),
             uint128(amount1),
-            _getOwner(tokenId, false)
+            owner
         );
 
         // Send leftover tokens and copy config to new position
-        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
         _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
         _disablePosition(tokenId);
 
@@ -159,17 +163,19 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
 
     /// @notice Auto-compounds fees from multiple positions
     /// @param tokenIds Array of token IDs to compound
-    function autoCompound(uint256[] memory tokenIds) external {
-        for (uint256 i; i < tokenIds.length;) {
-            address owner = _getOwner(tokenIds[i], false);
+    function autoCompound(uint256[] calldata tokenIds) external {
+        uint256 length = tokenIds.length;
+        for (uint256 i; i < length;) {
+            uint256 tokenId = tokenIds[i];
+            address owner = _getOwner(tokenId, false);
             if (vaults[owner]) {
                 IVault(owner).transform(
-                    tokenIds[i],
+                    tokenId,
                     address(this),
-                    abi.encodeCall(this.autoCompoundForVault, (tokenIds[i], msg.sender))
+                    abi.encodeCall(this.autoCompoundForVault, (tokenId, msg.sender))
                 );
             } else {
-                poolManager.unlock(abi.encode(tokenIds[i], msg.sender));
+                poolManager.unlock(abi.encode(tokenId, msg.sender));
             }
             unchecked {
                 ++i;

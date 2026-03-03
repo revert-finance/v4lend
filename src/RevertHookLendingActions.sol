@@ -33,7 +33,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick
-    function autoLeverage(PoolKey memory poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) public {
+    function autoLeverage(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
         _requireAuthorization(tokenId);
 
         IVault vault = IVault(msg.sender);
@@ -95,7 +95,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
         _approveToken(poolKey.currency0, amount0);
         _approveToken(poolKey.currency1, amount1);
         _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
-        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, vault.ownerOf(tokenId));
     }
 
     /// @notice Decreases leverage by removing liquidity and repaying debt
@@ -135,7 +135,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
         // Repay debt
         _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);
 
-        _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, currency0, currency1, vault.ownerOf(tokenId));
     }
 
     // ==================== Auto Lend ====================
@@ -171,7 +171,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick
-    function autoLendDeposit(PoolKey memory poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
+    function autoLendDeposit(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
         _removePositionTriggers(tokenId, poolKey);
 
         // Remove all liquidity
@@ -189,10 +189,11 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
         SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), lendAmount);
         try lendVault.deposit(lendAmount, address(this)) returns (uint256 shares) {
             // Store lending state
-            positionStates[tokenId].autoLendShares = shares;
-            positionStates[tokenId].autoLendToken = tokenAddress;
-            positionStates[tokenId].autoLendAmount = lendAmount;
-            positionStates[tokenId].autoLendVault = address(lendVault);
+            PositionState storage state = positionStates[tokenId];
+            state.autoLendShares = shares;
+            state.autoLendToken = tokenAddress;
+            state.autoLendAmount = lendAmount;
+            state.autoLendVault = address(lendVault);
 
             _sendLeftoverTokens(tokenId, currency0, currency1, _getOwner(tokenId, true));
             _addPositionTriggers(tokenId, poolKey);
@@ -208,15 +209,13 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param shares The number of shares to redeem
-    function autoLendWithdraw(PoolKey memory poolKey, uint256 tokenId, uint256 shares) external {
+    function autoLendWithdraw(PoolKey calldata poolKey, uint256 tokenId, uint256 shares) external {
         PositionState storage state = positionStates[tokenId];
 
         try IERC4626(state.autoLendVault).redeem(shares, address(this), address(this)) returns (uint256 amount) {
             _processLendWithdraw(poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount);
         } catch (bytes memory reason) {
-            emit HookAutoLendFailed(
-                address(autoLendVaults[state.autoLendToken]), Currency.wrap(state.autoLendToken), reason
-            );
+            emit HookAutoLendFailed(state.autoLendVault, Currency.wrap(state.autoLendToken), reason);
         }
     }
 
@@ -228,6 +227,9 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
         uint256 redeemedAmount,
         uint256 originalLendAmount
     ) internal {
+        address owner = _getOwner(tokenId, false);
+        address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
+
         _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
 
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -250,7 +252,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
                     baseTick + poolKey.tickSpacing + tickWidth,
                     uint128(redeemedAmount),
                     0,
-                    _getOwner(tokenId, false)
+                    owner
                 );
             }
         } else {
@@ -260,12 +262,12 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
             } else {
                 // Current tick within/below position - mint new position below current tick
                 int24 tickWidth = positionInfo.tickUpper() - positionInfo.tickLower();
-                (newTokenId,,) = _mintPosition(poolKey, baseTick - tickWidth, baseTick, 0, uint128(redeemedAmount), _getOwner(tokenId, false));
+                (newTokenId,,) = _mintPosition(poolKey, baseTick - tickWidth, baseTick, 0, uint128(redeemedAmount), owner);
             }
         }
 
         _resetAutoLendState(tokenId);
-        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, _getOwner(tokenId, true));
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, realOwner);
 
         if (newTokenId > 0) {
             _copyPositionConfig(newTokenId, positionConfigs[tokenId]);

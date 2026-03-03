@@ -393,6 +393,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         TickLinkedList.List storage list =
             tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+        bool increasing = list.increasing;
 
         int24 oracleMaxEndTick = type(int24).min;
 
@@ -400,16 +401,16 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         (exists, tick) = list.searchFirstAfter(tick);
 
         while (true) {
-            if (!exists || (list.increasing ? tick > tickEnd : tick < tickEnd)) {
+            if (!exists || (increasing ? tick > tickEnd : tick < tickEnd)) {
                 break;
             }
 
             if (oracleMaxEndTick == type(int24).min) {
-                oracleMaxEndTick = _getOracleMaxEndTick(key, list.increasing);
-                tickEnd = list.increasing
+                oracleMaxEndTick = _getOracleMaxEndTick(key, increasing);
+                tickEnd = increasing
                     ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd)
                     : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
-                if (list.increasing ? tick > tickEnd : tick < tickEnd) {
+                if (increasing ? tick > tickEnd : tick < tickEnd) {
                     break;
                 }
             }
@@ -417,14 +418,14 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             uint256[] memory tokenIdsAtTick = list.tokenIds[tick];
             uint256 length = tokenIdsAtTick.length;
             for (uint256 i; i < length;) {
-                _handleTokenIdAfterSwap(key, poolId, tokenIdsAtTick[i], list.increasing, tick);
+                _handleTokenIdAfterSwap(key, poolId, tokenIdsAtTick[i], increasing, tick);
                 unchecked {
                     ++i;
                 }
             }
 
             tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
-            tickEnd = list.increasing
+            tickEnd = increasing
                 ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd)
                 : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
 
@@ -853,11 +854,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param tokenId The position token ID to auto-exit
     /// @param isUpper True if triggered by upper tick boundary, false for lower
     function autoExit(
-        PoolKey memory poolKey,
+        PoolKey calldata poolKey,
         PoolId poolId,
         uint256 tokenId,
         bool isUpper
-    ) public {
+    ) external {
         _delegatecallPositionActions(
             abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpper))
         );
@@ -869,7 +870,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param poolKey The pool key for the position's pool
     /// @param poolId The pool ID
     /// @param tokenId The position token ID to auto-range
-    function autoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) public {
+    function autoRange(PoolKey calldata poolKey, PoolId poolId, uint256 tokenId) external {
         _delegatecallPositionActions(
             abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId))
         );
@@ -882,7 +883,12 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param poolId The pool ID
     /// @param tokenId The position token ID to adjust leverage
     /// @param isUpperTrigger True if triggered by upper tick boundary, false for lower
-    function autoLeverage(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) public {
+    function autoLeverage(
+        PoolKey calldata poolKey,
+        PoolId poolId,
+        uint256 tokenId,
+        bool isUpperTrigger
+    ) external {
         _delegatecallLendingActions(
             abi.encodeCall(hookFunctionsLendingActions.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
         );
@@ -898,7 +904,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice Manually triggers auto-compound for multiple positions
     /// @dev Collects fees and reinvests them as liquidity. Anyone can call this.
     /// @param tokenIds Array of position token IDs to compound
-    function autoCompound(uint256[] memory tokenIds) external {
+    function autoCompound(uint256[] calldata tokenIds) external {
         _delegatecallPositionActions(abi.encodeCall(hookFunctionsPositionActions.autoCompound, (tokenIds)));
     }
 
