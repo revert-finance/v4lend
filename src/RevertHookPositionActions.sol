@@ -124,6 +124,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     /// @param tokenId The token ID of the position
     function autoRange(PoolKey calldata poolKey, PoolId poolId, uint256 tokenId) external {
         _requireAuthorization(tokenId);
+        (, PositionInfo oldPositionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Calculate new tick range based on current tick
         int24 baseTick = _getTickLower(_getCurrentTick(poolId), poolKey.tickSpacing);
@@ -151,8 +152,29 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             owner
         );
 
+        if (newTokenId == 0) {
+            // If remint fails, restore liquidity on the original position and keep its configuration.
+            (amount0, amount1) = _calculateAndSwap(
+                tokenId,
+                poolKey,
+                oldPositionInfo.tickLower(),
+                oldPositionInfo.tickUpper(),
+                amount0,
+                amount1
+            );
+            _approveToken(currency0, amount0);
+            _approveToken(currency1, amount1);
+            _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
+            _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
+            _addPositionTriggers(tokenId, poolKey);
+
+            emit AutoRange(tokenId, tokenId, currency0, currency1, amount0, amount1);
+            return;
+        }
+
         // Send leftover tokens and copy config to new position
         _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
+        generalConfigs[newTokenId] = generalConfigs[tokenId];
         _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
         _disablePosition(tokenId);
 

@@ -223,6 +223,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     function _setPositionConfig(uint256 tokenId, PositionConfig memory config, bool checkImmediateExecution) internal {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         _validateTickAlignedConfig(config, poolKey.tickSpacing);
+        _validateRangeConfig(config.modeFlags, config);
 
         // Validate mode flag combinations
         _validateModeFlags(config.modeFlags, tokenId, poolKey);
@@ -248,6 +249,16 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 || !_isValidTickConfig(config.autoLendToleranceTick, tickSpacing, 0)
                 || config.autoLeverageTargetBps >= 10000
         ) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _validateRangeConfig(uint8 modeFlags, PositionConfig memory config) internal pure {
+        if (!PositionModeFlags.hasAutoRange(modeFlags)) {
+            return;
+        }
+
+        if (config.autoRangeLowerDelta >= config.autoRangeUpperDelta) {
             revert InvalidConfig();
         }
     }

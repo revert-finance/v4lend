@@ -590,6 +590,756 @@ contract V4VaultHookTest is V4ForkTestBase {
         });
     }
 
+    // ==================== Mode Combination Coverage ====================
+
+    function testModeMatrixSetup_AllValidVaultCombinations() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(vault), hookedTokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.create(hookedTokenId, WHALE_ACCOUNT);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(hookedTokenId, address(revertHook), true);
+
+        uint8 validCount;
+        for (uint8 mode = 1; mode < 32; mode++) {
+            // Vault positions cannot use AUTO_LEND.
+            if ((mode & PositionModeFlags.MODE_AUTO_LEND) != 0) {
+                continue;
+            }
+
+            vm.prank(WHALE_ACCOUNT);
+            revertHook.setPositionConfig(
+                hookedTokenId,
+                _buildVaultModeConfig(mode, hookedPoolKey.tickSpacing, false, false, type(int24).min, type(int24).max)
+            );
+
+            (
+                uint8 storedMode,
+                RevertHookState.AutoCompoundMode storedAutoCompoundMode,
+                ,
+                ,
+                ,
+                ,
+                ,
+                ,
+                ,
+                ,
+                uint16 storedLeverageTargetBps
+            ) = revertHook.positionConfigs(hookedTokenId);
+
+            assertEq(storedMode, mode, "Stored mode flags mismatch");
+            if ((mode & PositionModeFlags.MODE_AUTO_COMPOUND) != 0) {
+                assertEq(
+                    uint8(storedAutoCompoundMode),
+                    uint8(RevertHookState.AutoCompoundMode.AUTO_COMPOUND),
+                    "AUTO_COMPOUND mode should be enabled"
+                );
+            } else {
+                assertEq(
+                    uint8(storedAutoCompoundMode),
+                    uint8(RevertHookState.AutoCompoundMode.NONE),
+                    "Auto compound mode should be NONE"
+                );
+            }
+
+            if ((mode & PositionModeFlags.MODE_AUTO_LEVERAGE) != 0) {
+                assertEq(storedLeverageTargetBps, 5000, "AUTO_LEVERAGE target should be set");
+            } else {
+                assertEq(storedLeverageTargetBps, 0, "AUTO_LEVERAGE target should be zero");
+            }
+
+            unchecked {
+                ++validCount;
+            }
+        }
+
+        assertEq(validCount, 15, "Expected 15 valid vault mode combinations");
+    }
+
+    function testModeMatrixSetup_InvalidVaultCombinationsRevert() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(vault), hookedTokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.create(hookedTokenId, WHALE_ACCOUNT);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(hookedTokenId, address(revertHook), true);
+
+        uint8 invalidCount;
+        for (uint8 mode = 1; mode < 32; mode++) {
+            // Vault positions cannot use AUTO_LEND in any combination.
+            if ((mode & PositionModeFlags.MODE_AUTO_LEND) == 0) {
+                continue;
+            }
+
+            vm.expectRevert(Constants.InvalidConfig.selector);
+            vm.prank(WHALE_ACCOUNT);
+            revertHook.setPositionConfig(
+                hookedTokenId,
+                _buildVaultModeConfig(mode, hookedPoolKey.tickSpacing, false, false, type(int24).min, type(int24).max)
+            );
+
+            unchecked {
+                ++invalidCount;
+            }
+        }
+
+        assertEq(invalidCount, 16, "Expected 16 invalid vault mode combinations");
+    }
+
+    function testOracleClamp_DoesNotDropDeferredTriggers() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth
+        uint256 nearTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        uint256 farTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 baseTick = _getTickLower(currentTick, spacing);
+        int24 nearExitTick = baseTick - spacing;
+        int24 farExitTick = baseTick - 12 * spacing;
+
+        vm.startPrank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(revertHook), true);
+        revertHook.setPositionConfig(
+            nearTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: nearExitTick,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        revertHook.setPositionConfig(
+            farTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: farExitTick,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        vm.stopPrank();
+
+        // Clamp execution close to oracle so only the near trigger is reachable.
+        revertHook.setMaxTicksFromOracle(2 * spacing);
+
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        _moveTickDownUntil(hookedPoolKey, farExitTick - spacing, 25e6, 80);
+
+        assertEq(positionManager.getPositionLiquidity(nearTokenId), 0, "Near trigger should execute under clamp");
+        assertGt(positionManager.getPositionLiquidity(farTokenId), 0, "Far trigger should remain pending under clamp");
+        (uint8 farModeBefore,,,,,,,,,,) = revertHook.positionConfigs(farTokenId);
+        assertEq(farModeBefore, PositionModeFlags.MODE_AUTO_EXIT, "Deferred trigger config should remain active");
+
+        // Remove clamp and continue down: deferred trigger must still execute.
+        revertHook.setMaxTicksFromOracle(10000);
+        _moveTickDownUntil(hookedPoolKey, farExitTick - 2 * spacing, 20e6, 20);
+
+        assertEq(positionManager.getPositionLiquidity(farTokenId), 0, "Deferred trigger should execute once clamp is relaxed");
+        (uint8 farModeAfter,,,,,,,,,,) = revertHook.positionConfigs(farTokenId);
+        assertEq(farModeAfter, PositionModeFlags.MODE_NONE, "Config should clear after deferred trigger execution");
+    }
+
+    function testModeRV_TieBreakerPrefersRangeWhenLowerTriggersEqual() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth
+
+        uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 baseTick = _getTickLower(currentTick, spacing);
+        int24 leverageLower = baseTick - 10 * spacing;
+        int24 autoRangeLowerLimit = posInfo.tickLower() - leverageLower;
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEVERAGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: autoRangeLowerLimit,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 5000
+            })
+        );
+
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+        _moveTickDownUntil(hookedPoolKey, leverageLower, 40e6, 50);
+
+        uint256 remintedTokenId = nextTokenIdBefore;
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Range should win tie-break and remint");
+        assertGt(positionManager.getPositionLiquidity(remintedTokenId), 0, "Tie-break should produce reminted range position");
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(remintedTokenId);
+        assertEq(debtAfter, debtBefore, "Range path should preserve debt");
+        (uint256 oldDebt,,,,) = vault.loanInfo(tokenId);
+        assertEq(oldDebt, 0, "Old token debt should be cleared after remint");
+    }
+
+    function testModeCREV_FullAutomationCoverage() public {
+        // Keep legacy test name as an alias to the deterministic multi-mode coverage test.
+        testModeCREV_AllAutomationsActive_MultiModeTickHandling();
+    }
+
+    function testModeCREV_AllAutomationsActive_MultiModeTickHandling() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth for deterministic trigger crossings
+
+        uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+        _generateFees(hookedPoolKey);
+
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
+            | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT
+            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        (, PositionInfo initialPosInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 baseTick = _getTickLower(currentTick, spacing);
+
+        // Phase 1: leverage should fire first on downward tick movement.
+        int24 leverageLowerPhase1 = baseTick - 10 * spacing;
+        int24 rangeLowerPhase1 = initialPosInfo.tickLower() - 20 * spacing;
+        int24 exitLowerPhase1 = baseTick - 30 * spacing;
+        assertGt(leverageLowerPhase1, rangeLowerPhase1, "Expected leverage trigger to be above range trigger (phase 1)");
+        assertGt(rangeLowerPhase1, exitLowerPhase1, "Expected range trigger to be above exit trigger (phase 1)");
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: modeCREV,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerPhase1,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: 20 * spacing,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 5000
+            })
+        );
+
+        // C: auto-compound executes while trigger modes are active.
+        uint128 liquidityBeforeCompound = positionManager.getPositionLiquidity(tokenId);
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = tokenId;
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.autoCompound(tokenIds);
+        uint128 liquidityAfterCompound = positionManager.getPositionLiquidity(tokenId);
+        assertGt(liquidityAfterCompound, liquidityBeforeCompound, "AUTO_COMPOUND should increase liquidity");
+
+        // Move down only to leverage trigger band.
+        uint256 nextTokenIdBeforeLeverage = positionManager.nextTokenId();
+        (uint256 debtBeforeLeverage,,,,) = vault.loanInfo(tokenId);
+        (,,,,,,, int24 storedBaseTickBeforeLeverage) = revertHook.positionStates(tokenId);
+        int24 tickAfterLeverage = _moveTickDownUntil(hookedPoolKey, leverageLowerPhase1, 50e6, 40);
+        assertGt(tickAfterLeverage, rangeLowerPhase1, "Range trigger should not be crossed in leverage phase");
+
+        // V: leverage adjusts debt and updates base tick without reminting.
+        (uint256 debtAfterLeverage,,,,) = vault.loanInfo(tokenId);
+        (,,,,,,, int24 storedBaseTickAfterLeverage) = revertHook.positionStates(tokenId);
+        assertGt(debtAfterLeverage, debtBeforeLeverage, "AUTO_LEVERAGE should increase debt toward target");
+        assertTrue(
+            storedBaseTickAfterLeverage != storedBaseTickBeforeLeverage,
+            "AUTO_LEVERAGE should reset base tick after execution"
+        );
+        assertEq(positionManager.nextTokenId(), nextTokenIdBeforeLeverage, "Leverage should not remint position");
+        assertGt(positionManager.getPositionLiquidity(tokenId), 0, "Position should remain active after leverage");
+
+        // Phase 2: reconfigure with all flags still active, but make range fire before leverage.
+        (, PositionInfo posAfterLeverage) = positionManager.getPoolAndPositionInfo(tokenId);
+        (, currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        baseTick = _getTickLower(currentTick, spacing);
+
+        int24 rangeLowerPhase2 = posAfterLeverage.tickLower() - 15 * spacing;
+        int24 leverageLowerPhase2 = baseTick - 10 * spacing;
+        int24 exitLowerPhase2 = baseTick - 40 * spacing;
+        assertGt(rangeLowerPhase2, leverageLowerPhase2, "Expected range trigger to be above leverage trigger (phase 2)");
+        assertGt(leverageLowerPhase2, exitLowerPhase2, "Expected leverage trigger to be above exit trigger (phase 2)");
+
+        RevertHookState.PositionConfig memory phase2Config = RevertHookState.PositionConfig({
+            modeFlags: modeCREV,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: exitLowerPhase2,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 15 * spacing,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 5000
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(tokenId, phase2Config);
+
+        uint256 nextTokenIdBeforeRange = positionManager.nextTokenId();
+        (uint256 debtBeforeRange,,,,) = vault.loanInfo(tokenId);
+        _moveTickDownUntil(hookedPoolKey, rangeLowerPhase2, 50e6, 40);
+
+        // R: range remints position, preserves debt, keeps multi-mode config.
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "AUTO_RANGE should remove liquidity from old token");
+        uint256 rangedTokenId = nextTokenIdBeforeRange;
+        assertGt(positionManager.getPositionLiquidity(rangedTokenId), 0, "AUTO_RANGE should mint replacement token");
+
+        _assertVaultHookPositionConfigEq(rangedTokenId, phase2Config);
+        (,, uint32 rangedLastActivated,,,,,) = revertHook.positionStates(rangedTokenId);
+        assertGt(rangedLastActivated, 0, "Reminted position should stay activated");
+
+        (uint256 debtAfterRange,,,,) = vault.loanInfo(rangedTokenId);
+        assertEq(debtAfterRange, debtBeforeRange, "AUTO_RANGE should preserve debt");
+
+        (, int24 tickAfterRange,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        (, PositionInfo rangedPosInfo) = positionManager.getPoolAndPositionInfo(rangedTokenId);
+        assertTrue(
+            tickAfterRange >= rangedPosInfo.tickLower() && tickAfterRange <= rangedPosInfo.tickUpper(),
+            "Current tick should be within reminted range"
+        );
+
+        // Base tick must be re-initialized for leverage-capable reminted positions.
+        int24 expectedBaseTickAfterRange = _getTickLower(tickAfterRange, spacing);
+        (,,,,,,, int24 baseTickAfterRange) = revertHook.positionStates(rangedTokenId);
+        assertEq(baseTickAfterRange, expectedBaseTickAfterRange, "Reminted C|R|E|V position should reset leverage base tick");
+
+        // Phase 3: keep all flags active and make exit fire before range/leverage.
+        int24 exitLowerPhase3 = expectedBaseTickAfterRange - spacing;
+        int24 rangeLowerPhase3 = rangedPosInfo.tickLower() - 20 * spacing;
+        int24 leverageLowerPhase3 = expectedBaseTickAfterRange - 10 * spacing;
+        assertGt(exitLowerPhase3, leverageLowerPhase3, "Expected exit trigger to be above leverage trigger (phase 3)");
+        assertGt(leverageLowerPhase3, rangeLowerPhase3, "Expected leverage trigger to be above range trigger (phase 3)");
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(
+            rangedTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: modeCREV,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerPhase3,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: 20 * spacing,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 5000
+            })
+        );
+
+        _moveTickDownUntil(hookedPoolKey, exitLowerPhase3, 25e6, 40);
+
+        // E: exit should fully unwind the active token.
+        assertEq(positionManager.getPositionLiquidity(rangedTokenId), 0, "AUTO_EXIT should remove all liquidity");
+        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(rangedTokenId);
+        assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Position config should be disabled after AUTO_EXIT");
+    }
+
+    function testModeCREV_ImmediateExecutionWhenOutOfBounds() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth for deterministic tick movement
+
+        uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+        _generateFees(hookedPoolKey);
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        (, PositionInfo posInfoBeforeConfig) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Pre-move price out of bounds before configuration to force immediate execution on setPositionConfig.
+        int24 rangeLowerTrigger = posInfoBeforeConfig.tickLower() - 2 * spacing;
+        _moveTickDownUntil(hookedPoolKey, rangeLowerTrigger - spacing, 20e6, 40);
+
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 baseTick = _getTickLower(currentTick, spacing);
+        int24 leverageLowerTrigger = baseTick - 10 * spacing;
+        int24 exitLowerTrigger = leverageLowerTrigger - 20 * spacing;
+        int24 autoRangeLowerLimit = posInfoBeforeConfig.tickLower() - rangeLowerTrigger;
+
+        assertGt(rangeLowerTrigger, leverageLowerTrigger, "Range trigger should fire before leverage trigger");
+        assertGt(leverageLowerTrigger, exitLowerTrigger, "Leverage trigger should fire before exit trigger");
+
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
+            | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT
+            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+
+        RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
+            modeFlags: modeCREV,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: exitLowerTrigger,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: autoRangeLowerLimit,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 5000
+        });
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(tokenId, config);
+
+        // Immediate dispatch should remint via AUTO_RANGE (not leverage/exit) because range lower trigger is first.
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Immediate C|R|E|V config should remint old token");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate range should mint exactly one new token");
+
+        uint256 remintedTokenId = nextTokenIdBefore;
+        assertGt(positionManager.getPositionLiquidity(remintedTokenId), 0, "Reminted token should hold liquidity");
+        _assertVaultHookPositionConfigEq(remintedTokenId, config);
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(remintedTokenId);
+        assertEq(debtAfter, debtBefore, "Immediate remint should preserve debt");
+        _assertOldPositionFullyCleaned(tokenId);
+        _assertHookHasNoTokenDust();
+    }
+
+    function testModeCREV_StressRepeatedTransitions() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+        revertHook.setMinPositionValueNative(0);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth
+
+        uint256 activeTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(activeTokenId, hookedPoolKey);
+        _generateFees(hookedPoolKey);
+
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
+            | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT
+            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+        int24 spacing = hookedPoolKey.tickSpacing;
+
+        // Ensure C is exercised while all trigger flags are present.
+        RevertHookState.PositionConfig memory warmupConfig = RevertHookState.PositionConfig({
+            modeFlags: modeCREV,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 20 * spacing,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 6500
+        });
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(activeTokenId, warmupConfig);
+
+        uint128 liquidityBeforeCompound = positionManager.getPositionLiquidity(activeTokenId);
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = activeTokenId;
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.autoCompound(tokenIds);
+        uint128 liquidityAfterCompound = positionManager.getPositionLiquidity(activeTokenId);
+        assertGt(liquidityAfterCompound, liquidityBeforeCompound, "AUTO_COMPOUND should increase liquidity");
+        _assertHookHasNoTokenDust();
+
+        // Run repeated transitions to catch state drift bugs.
+        for (uint256 cycle; cycle < 2; cycle++) {
+            // -------- Range-first phase (R should execute before V/E) --------
+            (, PositionInfo posInfoRange) = positionManager.getPoolAndPositionInfo(activeTokenId);
+            (, int24 currentTickRange,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+            int24 baseTickRange = _getTickLower(currentTickRange, spacing);
+            int24 leverageLower = baseTickRange - 10 * spacing;
+            int24 rangeLower = leverageLower + 4 * spacing;
+            int24 exitLowerFar = leverageLower - 20 * spacing;
+            int24 autoRangeLowerLimitRangeFirst = posInfoRange.tickLower() - rangeLower;
+            assertGt(rangeLower, leverageLower, "Range should trigger before leverage in range-first phase");
+            assertGt(leverageLower, exitLowerFar, "Leverage should trigger before exit in range-first phase");
+
+            uint256 oldTokenId = activeTokenId;
+            uint256 nextTokenIdBeforeRange = positionManager.nextTokenId();
+            (uint256 debtBeforeRange,,,,) = vault.loanInfo(oldTokenId);
+            (,,,,,,, int24 baseTickBeforeRange) = revertHook.positionStates(oldTokenId);
+
+            RevertHookState.PositionConfig memory rangeFirstConfig = RevertHookState.PositionConfig({
+                modeFlags: modeCREV,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerFar,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: autoRangeLowerLimitRangeFirst,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 6500
+            });
+            vm.prank(WHALE_ACCOUNT);
+            revertHook.setPositionConfig(activeTokenId, rangeFirstConfig);
+
+            _moveTickDownUntil(hookedPoolKey, rangeLower, 40e6, 40);
+
+            bool reminted = positionManager.nextTokenId() > nextTokenIdBeforeRange;
+            if (reminted) {
+                activeTokenId = nextTokenIdBeforeRange;
+                assertEq(positionManager.getPositionLiquidity(oldTokenId), 0, "Old token should be fully exited after range");
+                assertGt(positionManager.getPositionLiquidity(activeTokenId), 0, "Range should mint replacement token");
+                _assertVaultHookPositionConfigEq(activeTokenId, rangeFirstConfig);
+                _assertOldPositionFullyCleaned(oldTokenId);
+
+                (uint256 debtAfterRange,,,,) = vault.loanInfo(activeTokenId);
+                assertEq(debtAfterRange, debtBeforeRange, "Debt should transfer exactly through range remint");
+                assertEq(IERC721(address(positionManager)).ownerOf(activeTokenId), address(vault), "Vault ownership must persist");
+
+                (, int24 tickAfterRange,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+                (,,,,,,, int24 baseTickAfterRange) = revertHook.positionStates(activeTokenId);
+                assertEq(baseTickAfterRange, _getTickLower(tickAfterRange, spacing), "Base tick must reset on reminted token");
+            } else {
+                activeTokenId = oldTokenId;
+                assertGt(positionManager.getPositionLiquidity(activeTokenId), 0, "Fallback should restore liquidity");
+                _assertVaultHookPositionConfigEq(activeTokenId, rangeFirstConfig);
+
+                (uint256 debtAfterFallback,,,,) = vault.loanInfo(activeTokenId);
+                assertEq(debtAfterFallback, debtBeforeRange, "Fallback should preserve debt");
+                assertEq(IERC721(address(positionManager)).ownerOf(activeTokenId), address(vault), "Vault ownership must persist");
+
+                (,,,,,,, int24 baseTickAfterFallback) = revertHook.positionStates(activeTokenId);
+                assertEq(baseTickAfterFallback, baseTickBeforeRange, "Fallback should preserve base tick");
+            }
+            _assertHookHasNoTokenDust();
+
+            // -------- Leverage-first phase (V should execute before R/E) --------
+            (, PositionInfo posInfoLev) = positionManager.getPoolAndPositionInfo(activeTokenId);
+            (, int24 currentTickLev,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+            int24 baseTickLev = _getTickLower(currentTickLev, spacing);
+            int24 leverageLowerFirst = baseTickLev - 10 * spacing;
+            int24 rangeLowerFar = leverageLowerFirst - 8 * spacing;
+            int24 exitLowerVeryFar = rangeLowerFar - 20 * spacing;
+            int24 autoRangeLowerLimitLeverageFirst = posInfoLev.tickLower() - rangeLowerFar;
+            assertGt(leverageLowerFirst, rangeLowerFar, "Leverage should trigger before range in leverage-first phase");
+            assertGt(rangeLowerFar, exitLowerVeryFar, "Range should trigger before exit in leverage-first phase");
+
+            uint256 nextTokenIdBeforeLeverage = positionManager.nextTokenId();
+            (uint256 debtBeforeLeverage,, uint256 collateralBeforeLeverage,,) = vault.loanInfo(activeTokenId);
+            (,,,,,,, int24 baseTickBeforeLeverage) = revertHook.positionStates(activeTokenId);
+            uint256 currentRatioBps = collateralBeforeLeverage > 0 ? debtBeforeLeverage * 10000 / collateralBeforeLeverage : 0;
+            uint16 leverageTargetBps = currentRatioBps > 6000 ? 3000 : 8000;
+
+            RevertHookState.PositionConfig memory leverageFirstConfig = RevertHookState.PositionConfig({
+                modeFlags: modeCREV,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerVeryFar,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: autoRangeLowerLimitLeverageFirst,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: leverageTargetBps
+            });
+            vm.prank(WHALE_ACCOUNT);
+            revertHook.setPositionConfig(activeTokenId, leverageFirstConfig);
+
+            _moveTickDownUntil(hookedPoolKey, leverageLowerFirst, 40e6, 40);
+
+            assertEq(positionManager.nextTokenId(), nextTokenIdBeforeLeverage, "Leverage should not mint a new token");
+            assertGt(positionManager.getPositionLiquidity(activeTokenId), 0, "Leverage phase should keep position active");
+            (uint256 debtAfterLeverage,, uint256 collateralAfterLeverage,,) = vault.loanInfo(activeTokenId);
+            assertTrue(debtAfterLeverage != debtBeforeLeverage, "Leverage should adjust debt");
+            assertTrue(collateralAfterLeverage > debtAfterLeverage, "Position should remain healthy after leverage");
+            (,,,,,,, int24 baseTickAfterLeverage) = revertHook.positionStates(activeTokenId);
+            assertTrue(baseTickAfterLeverage != baseTickBeforeLeverage, "Leverage should reset base tick");
+            _assertHookHasNoTokenDust();
+        }
+
+        // -------- Exit-first phase (E should execute before V/R) --------
+        (, PositionInfo posInfoExit) = positionManager.getPoolAndPositionInfo(activeTokenId);
+        (, int24 currentTickExit,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 baseTickExit = _getTickLower(currentTickExit, spacing);
+        int24 exitLowerFirst = baseTickExit - 3 * spacing;
+        int24 leverageLowerExitPhase = baseTickExit - 10 * spacing;
+        int24 rangeLowerExitPhase = leverageLowerExitPhase - 8 * spacing;
+        int24 autoRangeLowerLimitExitFirst = posInfoExit.tickLower() - rangeLowerExitPhase;
+        assertGt(exitLowerFirst, leverageLowerExitPhase, "Exit should trigger before leverage in exit-first phase");
+        assertGt(leverageLowerExitPhase, rangeLowerExitPhase, "Leverage should trigger before range in exit-first phase");
+
+        RevertHookState.PositionConfig memory exitFirstConfig = RevertHookState.PositionConfig({
+            modeFlags: modeCREV,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: exitLowerFirst,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: autoRangeLowerLimitExitFirst,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 6500
+        });
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(activeTokenId, exitFirstConfig);
+
+        _moveTickDownUntil(hookedPoolKey, exitLowerFirst, 20e6, 40);
+
+        assertEq(positionManager.getPositionLiquidity(activeTokenId), 0, "Exit should fully remove position liquidity");
+        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(activeTokenId);
+        assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Exit should disable position config");
+        _assertOldPositionFullyCleaned(activeTokenId);
+        _assertHookHasNoTokenDust();
+    }
+
+    function _buildVaultModeConfig(
+        uint8 modeFlags,
+        int24 tickSpacing,
+        bool enableRange,
+        bool enableExit,
+        int24 exitTickLower,
+        int24 exitTickUpper
+    ) internal pure returns (RevertHookState.PositionConfig memory config) {
+        bool hasRangeMode = PositionModeFlags.hasAutoRange(modeFlags);
+        bool hasRangeTriggers = hasRangeMode && enableRange;
+
+        config = RevertHookState.PositionConfig({
+            modeFlags: modeFlags,
+            autoCompoundMode: PositionModeFlags.hasAutoCompound(modeFlags)
+                ? RevertHookState.AutoCompoundMode.AUTO_COMPOUND
+                : RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: enableExit ? exitTickLower : type(int24).min,
+            autoExitTickUpper: enableExit ? exitTickUpper : type(int24).max,
+            autoRangeLowerLimit: hasRangeTriggers ? int24(0) : type(int24).min,
+            autoRangeUpperLimit: hasRangeTriggers ? int24(0) : type(int24).max,
+            autoRangeLowerDelta: hasRangeMode ? -tickSpacing : int24(0),
+            autoRangeUpperDelta: hasRangeMode ? tickSpacing : int24(0),
+            autoLendToleranceTick: int24(0),
+            autoLeverageTargetBps: PositionModeFlags.hasAutoLeverage(modeFlags) ? 5000 : 0
+        });
+    }
+
+    function _moveTickDownUntil(
+        PoolKey memory hookedPoolKey,
+        int24 targetTick,
+        uint128 amountInPerSwap,
+        uint256 maxSteps
+    ) internal returns (int24 currentTick) {
+        (, currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+
+        uint256 steps;
+        while (currentTick > targetTick && steps < maxSteps) {
+            _swapExactInputSingle(hookedPoolKey, true, amountInPerSwap, 0);
+            (, currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+            unchecked {
+                ++steps;
+            }
+        }
+
+        assertLe(currentTick, targetTick, "Target tick was not reached");
+    }
+
+    function _assertVaultHookPositionConfigEq(
+        uint256 tokenId,
+        RevertHookState.PositionConfig memory expected
+    ) internal view {
+        (
+            uint8 modeFlags,
+            RevertHookState.AutoCompoundMode autoCompoundMode,
+            bool autoExitIsRelative,
+            int24 autoExitTickLower,
+            int24 autoExitTickUpper,
+            int24 autoRangeLowerLimit,
+            int24 autoRangeUpperLimit,
+            int24 autoRangeLowerDelta,
+            int24 autoRangeUpperDelta,
+            int24 autoLendToleranceTick,
+            uint16 autoLeverageTargetBps
+        ) = revertHook.positionConfigs(tokenId);
+
+        assertEq(modeFlags, expected.modeFlags, "modeFlags mismatch");
+        assertEq(uint8(autoCompoundMode), uint8(expected.autoCompoundMode), "autoCompoundMode mismatch");
+        assertEq(autoExitIsRelative, expected.autoExitIsRelative, "autoExitIsRelative mismatch");
+        assertEq(autoExitTickLower, expected.autoExitTickLower, "autoExitTickLower mismatch");
+        assertEq(autoExitTickUpper, expected.autoExitTickUpper, "autoExitTickUpper mismatch");
+        assertEq(autoRangeLowerLimit, expected.autoRangeLowerLimit, "autoRangeLowerLimit mismatch");
+        assertEq(autoRangeUpperLimit, expected.autoRangeUpperLimit, "autoRangeUpperLimit mismatch");
+        assertEq(autoRangeLowerDelta, expected.autoRangeLowerDelta, "autoRangeLowerDelta mismatch");
+        assertEq(autoRangeUpperDelta, expected.autoRangeUpperDelta, "autoRangeUpperDelta mismatch");
+        assertEq(autoLendToleranceTick, expected.autoLendToleranceTick, "autoLendToleranceTick mismatch");
+        assertEq(autoLeverageTargetBps, expected.autoLeverageTargetBps, "autoLeverageTargetBps mismatch");
+    }
+
+    function _assertOldPositionFullyCleaned(uint256 tokenId) internal view {
+        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        assertEq(debt, 0, "Old token debt should be cleared");
+        assertEq(fullValue, 0, "Old token full value should be cleared");
+        assertEq(collateralValue, 0, "Old token collateral should be cleared");
+    }
+
+    function _assertHookHasNoTokenDust() internal view {
+        assertEq(usdc.balanceOf(address(revertHook)), 0, "Hook should not retain USDC");
+        assertEq(weth.balanceOf(address(revertHook)), 0, "Hook should not retain WETH");
+    }
+
+    function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
+        int24 compressed = tick / tickSpacing;
+        if (tick < 0 && tick % tickSpacing != 0) compressed--;
+        return compressed * tickSpacing;
+    }
+
     function test_CollateralizedPositionWithAutoLeverage() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
 
@@ -1150,4 +1900,3 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(debtAfter, debtBefore, "Debt should not change when mode is disabled");
     }
 }
-

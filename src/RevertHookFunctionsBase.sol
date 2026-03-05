@@ -23,6 +23,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 
 /// @title RevertHookFunctionsBase
@@ -107,6 +108,10 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
             positionStates[newTokenId].lastActivated = uint32(block.timestamp);
         }
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        if (PositionModeFlags.hasAutoLeverage(oldConfig.modeFlags)) {
+            int24 currentTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
+            positionStates[newTokenId].autoLeverageBaseTick = currentTick;
+        }
         _addPositionTriggers(newTokenId, poolKey);
         emit SetPositionConfig(newTokenId, positionConfigs[newTokenId]);
     }
@@ -273,6 +278,9 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
             amount0Max,
             amount1Max
         );
+        if (liquidity == 0) {
+            return (0, 0, 0);
+        }
 
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
         bytes[] memory params = new bytes[](2);
@@ -282,11 +290,16 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         try positionManager.modifyLiquiditiesWithoutUnlock(actions, params) {
             amount0Used -= poolKey.currency0.balanceOfSelf();
             amount1Used -= poolKey.currency1.balanceOfSelf();
-            if (vaults[recipient]) {
+            if (positionManager.nextTokenId() == newTokenId) {
+                newTokenId = 0;
+                amount0Used = 0;
+                amount1Used = 0;
+            } else if (vaults[recipient]) {
                 IVault(recipient).notifyERC721Received(newTokenId, recipient);
             }
         } catch (bytes memory reason) {
             emit HookModifyLiquiditiesFailed(actions, params, reason);
+            newTokenId = 0;
             amount0Used = 0;
             amount1Used = 0;
         }
