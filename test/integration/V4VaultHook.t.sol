@@ -1053,6 +1053,101 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
     }
 
+    function testModeCREV_ImmediateExecutionExitWinsWhenOutOfBounds() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey);
+
+        uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+        _generateFees(hookedPoolKey);
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        (, PositionInfo posInfoBeforeConfig) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        int24 rangeLowerTrigger = posInfoBeforeConfig.tickLower() - 4 * spacing;
+        _moveTickDownUntil(hookedPoolKey, rangeLowerTrigger - spacing, 20e6, 40);
+
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 baseTick = _getTickLower(currentTick, spacing);
+        int24 exitLowerTrigger = posInfoBeforeConfig.tickLower() - spacing;
+        int24 leverageLowerTrigger = baseTick - 10 * spacing;
+        int24 autoRangeLowerLimit = posInfoBeforeConfig.tickLower() - rangeLowerTrigger;
+
+        assertGt(exitLowerTrigger, rangeLowerTrigger, "Exit trigger should fire before range trigger");
+        assertGt(rangeLowerTrigger, leverageLowerTrigger, "Range trigger should fire before leverage trigger");
+
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
+            | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT
+            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
+            modeFlags: modeCREV,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoExitIsRelative: false,
+            autoExitTickLower: exitLowerTrigger,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: autoRangeLowerLimit,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 5000
+        }));
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Immediate exit should not remint a replacement token");
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Immediate exit should fully unwind liquidity");
+        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
+        assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Immediate exit should disable the position");
+        _assertOldPositionFullyCleaned(tokenId);
+        _assertHookHasNoTokenDust();
+    }
+
+    function testAutoLeverageReconfiguration_ReplacesOldTriggerNodes() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey);
+
+        uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+        _generateFees(hookedPoolKey);
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        RevertHookState.PositionConfig memory initialConfig =
+            _buildVaultModeConfig(PositionModeFlags.MODE_AUTO_LEVERAGE, spacing, false, false, type(int24).min, type(int24).max);
+
+        (uint32 lowerBaseline, uint32 upperBaseline) = _getTriggerListSizes(hookedPoolKey);
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(tokenId, initialConfig);
+
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerConfigured, lowerBaseline + 1, "Initial leverage setup should add one lower trigger");
+        assertEq(upperConfigured, upperBaseline + 1, "Initial leverage setup should add one upper trigger");
+
+        (,,,,,,, int24 initialBaseTick) = revertHook.positionStates(tokenId);
+        _moveTickDownUntil(hookedPoolKey, initialBaseTick - 2 * spacing, 5e6, 40);
+
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 newBaseTick = _getTickLower(currentTick, spacing);
+        assertLt(newBaseTick, initialBaseTick, "Price move should change the leverage base tick before reconfiguration");
+
+        RevertHookState.PositionConfig memory updatedConfig = initialConfig;
+        updatedConfig.autoLeverageTargetBps = 6500;
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(tokenId, updatedConfig);
+
+        (uint32 lowerAfterReconfig, uint32 upperAfterReconfig) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfterReconfig, lowerConfigured, "Reconfiguration must replace, not leak, lower trigger nodes");
+        assertEq(upperAfterReconfig, upperConfigured, "Reconfiguration must replace, not leak, upper trigger nodes");
+        (,,,,,,, int24 storedBaseTick) = revertHook.positionStates(tokenId);
+        assertEq(storedBaseTick, newBaseTick, "Reconfiguration should update the stored leverage base tick");
+    }
+
     function testModeCREV_StressRepeatedTransitions() public {
         v4Oracle.setMaxPoolPriceDifference(10000);
         revertHook.setMaxTicksFromOracle(10000);
@@ -1289,6 +1384,11 @@ contract V4VaultHookTest is V4ForkTestBase {
         }
 
         assertLe(currentTick, targetTick, "Target tick was not reached");
+    }
+
+    function _getTriggerListSizes(PoolKey memory hookedPoolKey) internal view returns (uint32 lowerSize, uint32 upperSize) {
+        (, lowerSize,) = revertHook.lowerTriggerAfterSwap(PoolIdLibrary.toId(hookedPoolKey));
+        (, upperSize,) = revertHook.upperTriggerAfterSwap(PoolIdLibrary.toId(hookedPoolKey));
     }
 
     function _assertVaultHookPositionConfigEq(

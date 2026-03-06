@@ -17,6 +17,14 @@ import {Transformer} from "./transformers/Transformer.sol";
 abstract contract RevertHookState is Transformer {
     // ==================== Enums ====================
 
+    enum Mode {
+        AUTO_COMPOUND,
+        AUTO_RANGE,
+        AUTO_EXIT,
+        AUTO_LEND,
+        AUTO_LEVERAGE
+    }
+
     enum AutoCompoundMode {
         NONE,
         AUTO_COMPOUND,
@@ -124,6 +132,7 @@ abstract contract RevertHookState is Transformer {
     );
 
     // Special events for swap failures / modifyLiquidities failures
+    event HookActionFailed(uint256 indexed tokenId, Mode mode);
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
     event HookSwapPartial(uint256 indexed tokenId, bool zeroForOne, uint256 requested, uint256 swapped);
     event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);

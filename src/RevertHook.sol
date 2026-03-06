@@ -104,6 +104,9 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @param token The token address (typically stablecoin) that the vault accepts
     /// @param vault The ERC4626 vault contract to deposit into
     function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
+        if (address(vault) != address(0) && vault.asset() != token) {
+            revert InvalidConfig();
+        }
         autoLendVaults[token] = vault;
         emit SetAutoLendVault(token, vault);
     }
@@ -187,6 +190,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @dev Configures the automated behavior mode and parameters for a position.
     ///      Only callable by position owner. Position must meet minimum value requirement.
     ///      Because value checks and trigger bounds use V4Oracle, position tokens must have oracle support.
+    ///      AUTO_LEND additionally requires configured ERC4626 vaults for both pool tokens.
     /// @param tokenId The position token ID to configure
     /// @param positionConfig Configuration struct containing mode and parameters for automation
     /// @custom:security Validates position meets minPositionValueNative to prevent dust position attacks
@@ -224,14 +228,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         _validateTickAlignedConfig(config, poolKey.tickSpacing);
         _validateRangeConfig(config.modeFlags, config);
-
-        // Validate mode flag combinations
         _validateModeFlags(config.modeFlags, tokenId, poolKey);
+        PositionConfig memory oldConfig = positionConfigs[tokenId];
+        _removePositionTriggersWithConfig(tokenId, poolKey, oldConfig);
 
-        _prepareModeState(tokenId, poolKey, config.modeFlags);
-
-        _updatePositionTriggers(tokenId, poolKey, config);
+        positionStates[tokenId].autoLeverageBaseTick = PositionModeFlags.hasAutoLeverage(config.modeFlags)
+            ? _getCurrentBaseTick(poolKey)
+            : int24(0);
         positionConfigs[tokenId] = config;
+        _addPositionTriggers(tokenId, poolKey);
 
         _syncActivation(tokenId, poolKey, config, checkImmediateExecution);
 
@@ -260,14 +265,6 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         if (config.autoRangeLowerDelta >= config.autoRangeUpperDelta) {
             revert InvalidConfig();
-        }
-    }
-
-    function _prepareModeState(uint256 tokenId, PoolKey memory poolKey, uint8 modeFlags) internal {
-        // AUTO_LEVERAGE requires setting base tick
-        if (PositionModeFlags.hasAutoLeverage(modeFlags)) {
-            int24 currentTick = _getCurrentBaseTick(poolKey);
-            positionStates[tokenId].autoLeverageBaseTick = (currentTick / poolKey.tickSpacing) * poolKey.tickSpacing;
         }
     }
 
@@ -309,6 +306,12 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         if (PositionModeFlags.hasAutoLend(modeFlags)) {
             address owner = _getOwner(tokenId, false);
             if (vaults[owner]) {
+                revert InvalidConfig();
+            }
+            if (
+                address(autoLendVaults[Currency.unwrap(poolKey.currency0)]) == address(0)
+                    || address(autoLendVaults[Currency.unwrap(poolKey.currency1)]) == address(0)
+            ) {
                 revert InvalidConfig();
             }
         }
@@ -427,6 +430,10 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             }
 
             uint256[] memory tokenIdsAtTick = list.tokenIds[tick];
+            int24 nextTick;
+            (exists, nextTick) = list.getNext(tick);
+            list.clearTick(tick);
+
             uint256 length = tokenIdsAtTick.length;
             for (uint256 i; i < length;) {
                 uint256 tokenId = tokenIdsAtTick[i];
@@ -452,9 +459,6 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd)
                 : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
 
-            int24 nextTick;
-            (exists, nextTick) = list.getNext(tick);
-            list.clearTick(tick);
             tick = nextTick;
         }
 
@@ -547,21 +551,26 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _handleAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
+        _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
         if (vaults[owner]) {
-            IVault(owner).transform(
+            try IVault(owner).transform(
                 tokenId,
                 address(this),
                 abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
-            );
+            ) {} catch {
+                emit HookActionFailed(tokenId, Mode.AUTO_EXIT);
+            }
         } else {
-            _delegatecallPositionActions(
-                abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
-            );
+            if (
+                !_tryDelegatecallPositionActions(
+                    abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
+                )
+            ) {
+                emit HookActionFailed(tokenId, Mode.AUTO_EXIT);
+            }
         }
-
-        _removePositionTriggers(tokenId, poolKey);
     }
 
     function _handleAutoLend(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
@@ -572,25 +581,41 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         uint256 shares = positionStates[tokenId].autoLendShares;
         if (shares > 0) {
-            _delegatecallLendingActions(
-                abi.encodeCall(hookFunctionsLendingActions.autoLendWithdraw, (poolKey, tokenId, shares))
-            );
+            if (
+                !_tryDelegatecallLendingActions(
+                    abi.encodeCall(hookFunctionsLendingActions.autoLendWithdraw, (poolKey, tokenId, shares))
+                )
+            ) {
+                emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+            }
         } else {
-            _delegatecallLendingActions(
-                abi.encodeCall(hookFunctionsLendingActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger))
-            );
+            if (
+                !_tryDelegatecallLendingActions(
+                    abi.encodeCall(hookFunctionsLendingActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger))
+                )
+            ) {
+                emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+            }
         }
     }
 
     function _handleAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
+        _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
         if (vaults[owner]) {
-            IVault(owner).transform(tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId)));
+            try IVault(owner).transform(tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId)))
+            {} catch {
+                emit HookActionFailed(tokenId, Mode.AUTO_RANGE);
+            }
         } else {
-            _delegatecallPositionActions(
-                abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId))
-            );
+            if (
+                !_tryDelegatecallPositionActions(
+                    abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId))
+                )
+            ) {
+                emit HookActionFailed(tokenId, Mode.AUTO_RANGE);
+            }
         }
     }
 
@@ -600,11 +625,13 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             return;
         }
 
-        IVault(owner).transform(
+        try IVault(owner).transform(
             tokenId,
             address(this),
             abi.encodeCall(this.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
-        );
+        ) {} catch {
+            emit HookActionFailed(tokenId, Mode.AUTO_LEVERAGE);
+        }
     }
 
     /// @notice Handles case when both AUTO_RANGE and AUTO_LEVERAGE are enabled
@@ -788,21 +815,55 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         int24 currentTickLower = _getTickLower(_getTick(poolId), poolKey.tickSpacing);
 
         int24[4] memory triggerTicks = _computeTriggerTicksMemory(tokenId, poolKey, config, posTickLower, posTickUpper);
+        int24 lowerTrigger = _getNearestSatisfiedLowerTrigger(currentTickLower, triggerTicks[0], triggerTicks[1]);
+        int24 upperTrigger = _getNearestSatisfiedUpperTrigger(currentTickLower, triggerTicks[2], triggerTicks[3]);
 
-        if (triggerTicks[0] != type(int24).min && currentTickLower < triggerTicks[0]) {
-            return (true, false, triggerTicks[0]);
+        bool lowerSatisfied = lowerTrigger != type(int24).min;
+        bool upperSatisfied = upperTrigger != type(int24).max;
+
+        if (lowerSatisfied && upperSatisfied) {
+            uint256 lowerDistance = uint256(int256(lowerTrigger) - int256(currentTickLower));
+            uint256 upperDistance = uint256(int256(currentTickLower) - int256(upperTrigger));
+            return lowerDistance <= upperDistance ? (true, false, lowerTrigger) : (true, true, upperTrigger);
         }
-        if (triggerTicks[1] != type(int24).min && currentTickLower < triggerTicks[1]) {
-            return (true, false, triggerTicks[1]);
+        if (lowerSatisfied) {
+            return (true, false, lowerTrigger);
         }
-        if (triggerTicks[2] != type(int24).max && currentTickLower >= triggerTicks[2]) {
-            return (true, true, triggerTicks[2]);
-        }
-        if (triggerTicks[3] != type(int24).max && currentTickLower >= triggerTicks[3]) {
-            return (true, true, triggerTicks[3]);
+        if (upperSatisfied) {
+            return (true, true, upperTrigger);
         }
 
         return (false, false, 0);
+    }
+
+    function _getNearestSatisfiedLowerTrigger(int24 currentTickLower, int24 first, int24 second)
+        internal
+        pure
+        returns (int24 lowerTrigger)
+    {
+        lowerTrigger = type(int24).min;
+
+        if (first != type(int24).min && currentTickLower <= first) {
+            lowerTrigger = first;
+        }
+        if (second != type(int24).min && currentTickLower <= second && second > lowerTrigger) {
+            lowerTrigger = second;
+        }
+    }
+
+    function _getNearestSatisfiedUpperTrigger(int24 currentTickLower, int24 first, int24 second)
+        internal
+        pure
+        returns (int24 upperTrigger)
+    {
+        upperTrigger = type(int24).max;
+
+        if (first != type(int24).max && currentTickLower >= first) {
+            upperTrigger = first;
+        }
+        if (second != type(int24).max && currentTickLower >= second && second < upperTrigger) {
+            upperTrigger = second;
+        }
     }
 
     function _executeImmediateAction(
@@ -940,6 +1001,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     function _executeImmediateActionUnlocked(ImmediateActionData memory actionData) internal {
         PoolId poolId = actionData.poolKey.toId();
+        _consumeImmediateTrigger(actionData.tokenId, poolId, actionData.isUpperTrigger, actionData.tick);
         _dispatchAutomationAction(
             actionData.poolKey,
             poolId,
@@ -953,8 +1015,19 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         );
     }
 
+    function _consumeImmediateTrigger(uint256 tokenId, PoolId poolId, bool isUpperTrigger, int24 tick) internal {
+        TickLinkedList.List storage list = isUpperTrigger ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+        list.remove(tick, tokenId);
+    }
+
     function _executeAutoCompound(uint256 tokenId, address caller) internal {
-        _delegatecallPositionActions(abi.encodeCall(hookFunctionsPositionActions.executeAutoCompound, (tokenId, caller)));
+        if (
+            !_tryDelegatecallPositionActions(
+                abi.encodeCall(hookFunctionsPositionActions.executeAutoCompound, (tokenId, caller))
+            )
+        ) {
+            emit HookActionFailed(tokenId, Mode.AUTO_COMPOUND);
+        }
     }
 
     function _getOracleMaxEndTick(PoolKey memory poolKey, bool up) internal view returns (int24 maxEndTick) {
@@ -978,11 +1051,23 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
     }
 
+    function _tryDelegatecall(address target, bytes memory data) internal returns (bool success) {
+        (success,) = target.delegatecall(data);
+    }
+
     function _delegatecallPositionActions(bytes memory data) internal {
         _delegatecall(address(hookFunctionsPositionActions), data);
     }
 
     function _delegatecallLendingActions(bytes memory data) internal {
         _delegatecall(address(hookFunctionsLendingActions), data);
+    }
+
+    function _tryDelegatecallPositionActions(bytes memory data) internal returns (bool success) {
+        return _tryDelegatecall(address(hookFunctionsPositionActions), data);
+    }
+
+    function _tryDelegatecallLendingActions(bytes memory data) internal returns (bool success) {
+        return _tryDelegatecall(address(hookFunctionsLendingActions), data);
     }
 }

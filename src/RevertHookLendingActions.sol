@@ -14,12 +14,14 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
+import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
 /// @title RevertHookLendingActions
 /// @notice Contains auto-leverage and auto-lend functions for RevertHook (called via delegatecall)
 contract RevertHookLendingActions is RevertHookFunctionsBase {
     using PoolIdLibrary for PoolKey;
+    using TickLinkedList for TickLinkedList.List;
 
     constructor(
         IPermit2 _permit2,
@@ -173,19 +175,23 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
     /// @param isUpperTrigger True if triggered by upper tick
     function autoLendDeposit(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
         address owner = _getOwner(tokenId, false);
-
-        _removePositionTriggers(tokenId, poolKey);
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        Currency lendCurrency = isUpperTrigger ? poolKey.currency1 : poolKey.currency0;
+        address tokenAddress = Currency.unwrap(lendCurrency);
+        IERC4626 lendVault = autoLendVaults[tokenAddress];
+        if (address(lendVault) == address(0)) {
+            emit HookAutoLendFailed(address(0), lendCurrency, abi.encodeWithSignature("InvalidConfig()"));
+            emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+            return;
+        }
 
         // Remove all liquidity
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
-
-        // Determine which token to lend based on trigger direction
-        Currency lendCurrency = isUpperTrigger ? currency1 : currency0;
-        address tokenAddress = Currency.unwrap(lendCurrency);
         uint256 lendAmount = isUpperTrigger ? amount1 : amount0;
-
-        IERC4626 lendVault = autoLendVaults[tokenAddress];
-        if (address(lendVault) == address(0)) return;
+        if (amount0 == 0 && amount1 == 0) {
+            emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+            return;
+        }
 
         // Deposit into lending vault
         SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), lendAmount);
@@ -198,11 +204,18 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
             state.autoLendVault = address(lendVault);
 
             _sendLeftoverTokens(tokenId, currency0, currency1, owner);
+            _removeOppositeAutoLendDepositTrigger(tokenId, poolKey, positionInfo, isUpperTrigger);
             _addPositionTriggers(tokenId, poolKey);
 
             emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
         } catch (bytes memory reason) {
+            SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), 0);
+            _restoreAutoLendPosition(
+                tokenId, poolKey, positionInfo, currency0, currency1, amount0, amount1, owner, isUpperTrigger
+            );
             emit HookAutoLendFailed(address(lendVault), lendCurrency, reason);
+            emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+            return;
         }
         SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), 0);
     }
@@ -218,6 +231,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
             _processLendWithdraw(poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount);
         } catch (bytes memory reason) {
             emit HookAutoLendFailed(state.autoLendVault, Currency.wrap(state.autoLendToken), reason);
+            emit HookActionFailed(tokenId, Mode.AUTO_LEND);
         }
     }
 
@@ -231,6 +245,7 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
     ) internal {
         address owner = _getOwner(tokenId, false);
         address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
+        uint256 shares = positionStates[tokenId].autoLendShares;
 
         _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
 
@@ -272,13 +287,14 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, realOwner);
 
         if (newTokenId > 0) {
+            generalConfigs[newTokenId] = generalConfigs[tokenId];
             _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
             _disablePosition(tokenId);
         } else {
             _addPositionTriggers(tokenId, poolKey);
         }
 
-        emit AutoLendWithdraw(tokenId, Currency.wrap(tokenAddress), redeemedAmount, positionStates[tokenId].autoLendShares);
+        emit AutoLendWithdraw(tokenId, Currency.wrap(tokenAddress), redeemedAmount, shares);
     }
 
     // ==================== Internal Helpers ====================
@@ -314,5 +330,60 @@ contract RevertHookLendingActions is RevertHookFunctionsBase {
         state.autoLendToken = address(0);
         state.autoLendAmount = 0;
         state.autoLendVault = address(0);
+    }
+
+    function _restoreAutoLendPosition(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionInfo positionInfo,
+        Currency currency0,
+        Currency currency1,
+        uint256 amount0,
+        uint256 amount1,
+        address owner,
+        bool isUpperTrigger
+    ) internal {
+        _approveToken(currency0, amount0);
+        _approveToken(currency1, amount1);
+        _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        _sendLeftoverTokens(tokenId, currency0, currency1, owner);
+
+        if (positionManager.getPositionLiquidity(tokenId) == 0) {
+            _disablePosition(tokenId);
+        } else {
+            _removeTriggeredAutoLendDepositTrigger(tokenId, poolKey, positionInfo, isUpperTrigger);
+        }
+    }
+
+    function _removeOppositeAutoLendDepositTrigger(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionInfo positionInfo,
+        bool isUpperTrigger
+    ) internal {
+        int24 tolerance = positionConfigs[tokenId].autoLendToleranceTick;
+        if (isUpperTrigger) {
+            lowerTriggerAfterSwap[poolKey.toId()].remove(
+                positionInfo.tickLower() - tolerance * 2 - poolKey.tickSpacing, tokenId
+            );
+        } else {
+            upperTriggerAfterSwap[poolKey.toId()].remove(positionInfo.tickUpper() + tolerance * 2, tokenId);
+        }
+    }
+
+    function _removeTriggeredAutoLendDepositTrigger(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionInfo positionInfo,
+        bool isUpperTrigger
+    ) internal {
+        int24 tolerance = positionConfigs[tokenId].autoLendToleranceTick;
+        if (isUpperTrigger) {
+            upperTriggerAfterSwap[poolKey.toId()].remove(positionInfo.tickUpper() + tolerance * 2, tokenId);
+        } else {
+            lowerTriggerAfterSwap[poolKey.toId()].remove(
+                positionInfo.tickLower() - tolerance * 2 - poolKey.tickSpacing, tokenId
+            );
+        }
     }
 }

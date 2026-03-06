@@ -455,6 +455,7 @@ contract RevertHookTest is BaseTest {
         hook.setMaxTicksFromOracle(1000);
         // Configure a non-existent swap pool so swap-to-ratio fails and remint has no usable token1.
         hook.setGeneralConfig(token3Id, 500, 60, IHooks(address(0)), 0, 0);
+        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
 
         hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
             modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
@@ -470,12 +471,14 @@ contract RevertHookTest is BaseTest {
             autoLeverageTargetBps: 0
         }));
         IERC721(address(positionManager)).approve(address(hook), token3Id);
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes();
+        assertEq(lowerConfigured, lowerInitial + 1, "AUTO_RANGE config should add the lower trigger");
+        assertEq(upperConfigured, upperInitial, "Upper trigger should remain disabled in failure setup");
 
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
         uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
         assertGt(liquidityBefore, 0, "Position should start with liquidity");
 
-        bytes32 autoRangeTopic = keccak256("AutoRange(uint256,uint256,address,address,uint256,uint256)");
         vm.recordLogs();
         swapRouter.swapExactTokensForTokens({
             amountIn: 7e17,
@@ -488,22 +491,18 @@ contract RevertHookTest is BaseTest {
         });
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bool sawFallbackEvent;
-        for (uint256 i; i < logs.length; ++i) {
-            if (logs[i].topics.length < 2 || logs[i].topics[0] != autoRangeTopic) continue;
-            if (uint256(logs[i].topics[1]) != token3Id) continue;
-            (uint256 newTokenId,,,,) = abi.decode(logs[i].data, (uint256, address, address, uint256, uint256));
-            if (newTokenId == token3Id) {
-                sawFallbackEvent = true;
-            }
-        }
-
-        assertTrue(sawFallbackEvent, "Fallback AUTO_RANGE should emit with unchanged tokenId");
+        assertTrue(
+            _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_RANGE),
+            "Failed AUTO_RANGE should emit HookActionFailed"
+        );
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Remint failure should not create a new token");
         assertGt(positionManager.getPositionLiquidity(token3Id), 0, "Original position should be restored");
 
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "Position config should remain active after fallback");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerInitial, "Failed AUTO_RANGE should consume the fired lower trigger");
+        assertEq(upperAfter, upperInitial, "Failed AUTO_RANGE should not leave stale trigger nodes");
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should not retain currency0 after fallback");
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should not retain currency1 after fallback");
     }
@@ -1396,6 +1395,100 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
     }
 
+    function testAutoLendWithdrawRemintCopiesGeneralConfig() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        int24 testTickLower = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
+        int24 testTickUpper = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
+        uint128 liquidityAmount = 50e18;
+        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
+            Constants.SQRT_PRICE_1_1,
+            TickMath.getSqrtPriceAtTick(testTickLower),
+            TickMath.getSqrtPriceAtTick(testTickUpper),
+            liquidityAmount
+        );
+
+        (uint256 autolendTokenId,) = positionManager.mint(
+            poolKey,
+            testTickLower,
+            testTickUpper,
+            liquidityAmount,
+            amount0Expected + 1,
+            amount1Expected + 1,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        hook.setPositionConfig(autolendTokenId, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 60,
+            autoLeverageTargetBps: 0
+        }));
+        hook.setGeneralConfig(autolendTokenId, 3000, 60, IHooks(hook), 123, 456);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        (
+            uint24 feeBefore,
+            int24 tickSpacingBefore,
+            IHooks hooksBefore,
+            uint128 multiplier0Before,
+            uint128 multiplier1Before
+        ) = hook.generalConfigs(autolendTokenId);
+
+        uint256 swapAmount = 20e17;
+        swapRouter.swapExactTokensForTokens({
+            amountIn: swapAmount,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        assertEq(positionManager.getPositionLiquidity(autolendTokenId), 0, "Deposit should remove the original liquidity");
+        assertGt(autoLendShares, 0, "Deposit should create lend shares");
+        assertEq(autoLendToken, Currency.unwrap(currency0), "Deposit should lend token0 on the lower side");
+
+        uint256 nextTokenIdBeforeWithdraw = positionManager.nextTokenId();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: swapAmount,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBeforeWithdraw + 1, "Withdraw should remint exactly one token");
+        uint256 newTokenId = nextTokenIdBeforeWithdraw;
+
+        (
+            uint24 feeAfter,
+            int24 tickSpacingAfter,
+            IHooks hooksAfter,
+            uint128 multiplier0After,
+            uint128 multiplier1After
+        ) = hook.generalConfigs(newTokenId);
+
+        assertEq(feeAfter, feeBefore, "swapPoolFee should copy on auto-lend remint");
+        assertEq(tickSpacingAfter, tickSpacingBefore, "swapPoolTickSpacing should copy on auto-lend remint");
+        assertEq(address(hooksAfter), address(hooksBefore), "swapPoolHooks should copy on auto-lend remint");
+        assertEq(multiplier0After, multiplier0Before, "sqrtPriceMultiplier0 should copy on auto-lend remint");
+        assertEq(multiplier1After, multiplier1Before, "sqrtPriceMultiplier1 should copy on auto-lend remint");
+    }
+
     // ==================== Mode Combination Coverage ====================
 
     function testModeMatrixSetup_AllValidNonVaultCombinations() public {
@@ -1482,6 +1575,21 @@ contract RevertHookTest is BaseTest {
 
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "Valid AUTO_RANGE config should be accepted");
+    }
+
+    function testSetAutoLendVault_RejectsMismatchedVaultAsset() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setAutoLendVault(Currency.unwrap(currency0), vault1);
+    }
+
+    function testSetPositionConfig_AutoLendRequiresVaultsForBothPoolTokens() public {
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(0)));
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
     }
 
     function testModeCRL_FullAutomationCoverage() public {
@@ -2435,6 +2543,491 @@ contract RevertHookTest is BaseTest {
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "Position should still be configured for auto-exit");
     }
 
+    function testImmediateExecution_AutoExitWinsOverAutoRange_Lower() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        int24 spacing = poolKey.tickSpacing;
+        int24 rangeLower = tickLower3 - 3 * spacing;
+        int24 exitLower = tickLower3 - spacing;
+        _moveTickDownUntil(rangeLower - spacing, 2e16, 160);
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: exitLower,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: tickLower3 - rangeLower,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Immediate lower-side setup should exit old token");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Exit should win over range and avoid remint");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Exit should disable the position");
+        _verifyNoLeftoverBalances("immediate lower E|R priority");
+    }
+
+    function testImmediateExecution_AutoExitWinsOverAutoRange_Upper() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        int24 spacing = poolKey.tickSpacing;
+        int24 rangeUpper = tickUpper3 + 3 * spacing;
+        int24 exitUpper = tickUpper3 + spacing;
+        _moveTickUpUntil(rangeUpper + spacing, 2e16, 160);
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: exitUpper,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: rangeUpper - tickUpper3,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Immediate upper-side setup should exit old token");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Exit should win over range and avoid remint");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Exit should disable the position");
+        _verifyNoLeftoverBalances("immediate upper E|R priority");
+    }
+
+    function testImmediateExecution_AutoExitTriggersAtExactLowerTick() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        _moveTickDownUntil(tickLower2 - poolKey.tickSpacing, 2e16, 160);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLower = _getTickLower(currentTick, poolKey.tickSpacing);
+        assertLt(currentTickLower, tickLower2, "Position must be below range before exact-boundary check");
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: currentTickLower,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "Exact lower-tick AUTO_EXIT should execute immediately");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after exact-boundary exit");
+    }
+
+    function testImmediateExecution_AutoRangeTriggersAtExactLowerTick() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLower = _getTickLower(currentTick, poolKey.tickSpacing);
+        assertLt(currentTickLower, tickLower3, "Position must be below range before exact-boundary check");
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: tickLower3 - currentTickLower,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -poolKey.tickSpacing,
+            autoRangeUpperDelta: poolKey.tickSpacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Exact lower-tick AUTO_RANGE should remint immediately");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate exact-boundary range should mint one token");
+    }
+
+    function testImmediateExecution_AutoLendTriggersAtExactLowerTick() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        int24 currentTickLower = _moveTickDownUntilAutoLendEqualityTick(tickLower3, 5e15, 240);
+        int24 tolerance = (tickLower3 - poolKey.tickSpacing - currentTickLower) / 2;
+
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: tolerance,
+            autoLeverageTargetBps: 0
+        }));
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(liquidityAfter, 0, "Exact lower-tick AUTO_LEND should remove liquidity immediately");
+        assertGt(autoLendShares, 0, "Exact lower-tick AUTO_LEND should mint lending shares");
+        assertEq(autoLendToken, Currency.unwrap(currency0), "Lower exact-boundary lend should use token0");
+    }
+
+    function testImmediateExecution_AutoExitTriggersAtExactUpperTick() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        _moveTickUpUntil(tickUpper2 + poolKey.tickSpacing, 2e16, 160);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLower = _getTickLower(currentTick, poolKey.tickSpacing);
+        assertGe(currentTickLower, tickUpper2, "Position must be at or above range before exact upper-bound check");
+
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: currentTickLower,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "Exact upper-tick AUTO_EXIT should execute immediately");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after exact upper-bound exit");
+    }
+
+    function testImmediateExecution_AutoRangeTriggersAtExactUpperTick() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        _moveTickUpUntil(tickUpper3 + poolKey.tickSpacing, 2e16, 160);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLower = _getTickLower(currentTick, poolKey.tickSpacing);
+        assertGe(currentTickLower, tickUpper3, "Position must be at or above range before exact upper-bound check");
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: currentTickLower - tickUpper3,
+            autoRangeLowerDelta: -poolKey.tickSpacing,
+            autoRangeUpperDelta: poolKey.tickSpacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Exact upper-tick AUTO_RANGE should remint immediately");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate exact upper-bound range should mint one token");
+    }
+
+    function testImmediateExecution_AutoLendTriggersAtExactUpperTick() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        int24 currentTickLower = _moveTickUpUntilAutoLendEqualityTick(tickUpper3, 5e15, 240);
+        int24 tolerance = (currentTickLower - tickUpper3) / 2;
+
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: tolerance,
+            autoLeverageTargetBps: 0
+        }));
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(liquidityAfter, 0, "Exact upper-tick AUTO_LEND should remove liquidity immediately");
+        assertGt(autoLendShares, 0, "Exact upper-tick AUTO_LEND should mint lending shares");
+        assertEq(autoLendToken, Currency.unwrap(currency1), "Upper exact-boundary lend should use token1");
+        _verifyNoLeftoverBalances("exact upper auto-lend");
+    }
+
+    function testAutoLendMissingVaultAtRuntime_ConsumesTriggeredTickAndEmitsActionFailure() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(0)));
+
+        vm.recordLogs();
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        assertEq(positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Missing vault must not strip LP liquidity");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Missing vault must not disable config");
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendShares, 0, "Missing vault must not mint shares");
+        assertEq(autoLendToken, address(0), "Missing vault must not set lend token");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore - 1, "Missing vault must consume the fired lower trigger");
+        assertEq(upperAfter, upperBefore, "Missing vault must keep the unfired upper trigger");
+        _verifyNoLeftoverBalances("missing auto-lend vault");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(_sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Missing vault path should emit HookAutoLendFailed");
+        assertTrue(
+            _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Missing vault path should emit HookActionFailed"
+        );
+    }
+
+    function testAutoLendDepositFailure_RestoresLiquidityAndConsumesTriggeredTick() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        RevertingERC4626Vault failingVault =
+            new RevertingERC4626Vault(IERC20(Currency.unwrap(currency0)), "Failing Vault", "FAIL");
+        hook.setAutoLendVault(Currency.unwrap(currency0), failingVault);
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+        uint256 failingVaultAssetsBefore = failingVault.totalAssets();
+
+        vm.recordLogs();
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        assertGe(positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Failed deposit must restore liquidity");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Failed deposit must keep config active");
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendShares, 0, "Failed deposit must not leave lending shares");
+        assertEq(autoLendToken, address(0), "Failed deposit must not keep lend token state");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore - 1, "Failed deposit must consume the fired lower trigger");
+        assertEq(upperAfter, upperBefore, "Failed deposit must keep the unfired upper trigger");
+        assertEq(failingVault.totalAssets(), failingVaultAssetsBefore, "Failed vault must not keep deposited assets");
+        _verifyNoLeftoverBalances("failed auto-lend deposit");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(_sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Deposit failure should emit HookAutoLendFailed");
+        assertTrue(
+            _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Deposit failure should emit HookActionFailed"
+        );
+    }
+
+    function testImmediateExecution_AutoLendFailureConsumesImmediateTrigger() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        RevertingERC4626Vault failingVault =
+            new RevertingERC4626Vault(IERC20(Currency.unwrap(currency0)), "Failing Vault", "FAIL");
+        hook.setAutoLendVault(Currency.unwrap(currency0), failingVault);
+
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+
+        vm.recordLogs();
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        assertGe(
+            positionManager.getPositionLiquidity(token3Id),
+            liquidityBefore,
+            "Immediate failure must leave LP liquidity in place"
+        );
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Immediate failure must keep config active");
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendShares, 0, "Immediate failure must not mint shares");
+        assertEq(autoLendToken, address(0), "Immediate failure must not set lend state");
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore, "Immediate failure must consume the lower trigger immediately");
+        assertEq(upperAfter, upperBefore + 1, "Immediate failure must leave the unfired upper trigger active");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(_sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Immediate failure should emit HookAutoLendFailed");
+        assertTrue(
+            _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Immediate failure should emit HookActionFailed"
+        );
+    }
+
+    function testAutoLendWithdrawFailure_ConsumesTriggeredTickAndDoesNotRetry() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        ConfigurableERC4626Vault configurableVault =
+            new ConfigurableERC4626Vault(IERC20(Currency.unwrap(currency0)), "Configurable Vault", "CFG");
+        hook.setAutoLendVault(Currency.unwrap(currency0), configurableVault);
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        (,,, address autoLendTokenBefore, uint256 sharesBefore,,,) = hook.positionStates(token3Id);
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Successful deposit should remove LP liquidity");
+        assertEq(autoLendTokenBefore, Currency.unwrap(currency0), "Lower-side lend should hold token0 in the vault");
+        assertGt(sharesBefore, 0, "Successful deposit should mint lending shares");
+
+        (uint32 lowerBeforeFailure, uint32 upperBeforeFailure) = _getTriggerListSizes();
+        configurableVault.setFailRedeem(true);
+
+        vm.recordLogs();
+        _moveTickUpUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        (,,, address autoLendTokenAfter, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Failed withdraw must not restore liquidity");
+        assertEq(autoLendTokenAfter, autoLendTokenBefore, "Failed withdraw must keep lent token state");
+        assertEq(sharesAfter, sharesBefore, "Failed withdraw must keep lending shares");
+        (uint32 lowerAfterFailure, uint32 upperAfterFailure) = _getTriggerListSizes();
+        assertEq(lowerAfterFailure, lowerBeforeFailure, "Failed withdraw must not add unrelated lower triggers");
+        assertEq(upperAfterFailure, upperBeforeFailure - 1, "Failed withdraw must consume the fired re-entry trigger");
+
+        Vm.Log[] memory failureLogs = vm.getRecordedLogs();
+        assertTrue(_sawEventTopic(failureLogs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Failed withdraw should emit HookAutoLendFailed");
+        assertTrue(
+            _sawHookActionFailed(failureLogs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Failed withdraw should emit HookActionFailed"
+        );
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1e16,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory retryLogs = vm.getRecordedLogs();
+        assertFalse(
+            _sawHookActionFailed(retryLogs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Consumed withdraw trigger must not retry on subsequent swaps"
+        );
+        assertFalse(
+            _sawEventTopic(retryLogs, keccak256("HookAutoLendFailed(address,address,bytes)")),
+            "Consumed withdraw trigger must not emit duplicate failures"
+        );
+        (,,, address autoLendTokenFinal, uint256 sharesFinal,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendTokenFinal, autoLendTokenBefore, "No retry should keep the original lend token state");
+        assertEq(sharesFinal, sharesBefore, "No retry should leave vault shares unchanged");
+    }
+
+    function testAutoExitExecution_RemovesOppositeTriggerNode() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        RevertHookState.PositionConfig memory exitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: tickUpper2 + poolKey.tickSpacing,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
+        hook.setPositionConfig(token2Id, exitConfig);
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes();
+        assertEq(lowerConfigured, lowerInitial + 1, "Exit config should add one lower trigger");
+        assertEq(upperConfigured, upperInitial + 1, "Exit config should add one upper trigger");
+
+        _moveTickDownUntil(exitConfig.autoExitTickLower, 2e16, 160);
+
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "AUTO_EXIT should remove liquidity after trigger");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerInitial, "Triggered lower exit should not leave stale lower nodes");
+        assertEq(upperAfter, upperInitial, "Triggered lower exit should remove stale upper node");
+    }
+
+    function testAutoRangeRemint_SameTickTriggerSurvivesProcessedTickClear() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        int24 spacing = poolKey.tickSpacing;
+        RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 2 * spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
+        hook.setPositionConfig(token3Id, config);
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes();
+        assertEq(lowerConfigured, lowerInitial + 1, "AUTO_RANGE should register one lower trigger");
+        assertEq(upperConfigured, upperInitial, "Upper trigger should stay disabled in same-tick test");
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        _moveTickDownUntil(tickLower3, 1e16, 160);
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "AUTO_RANGE should remint one replacement token");
+        uint256 remintedTokenId = nextTokenIdBefore;
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Original token should be emptied after remint");
+        assertGt(positionManager.getPositionLiquidity(remintedTokenId), 0, "Replacement token should hold liquidity");
+        _assertPositionConfigEq(remintedTokenId, config);
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerInitial + 1, "Same-tick remint must preserve the new lower trigger node");
+        assertEq(upperAfter, upperInitial, "Same-tick remint should not add unrelated upper nodes");
+    }
+
     function testAutoExitRelative_RecomputedAfterAutoRangeRemint() public {
         hook.setMaxTicksFromOracle(1000);
         int24 spacing = poolKey.tickSpacing;
@@ -2587,6 +3180,131 @@ contract RevertHookTest is BaseTest {
         assertEq(upperFinal, upperInitial, "Final disable should leave upper trigger list in baseline state");
     }
 
+    function testDisableWhileOutOfRange_RemovesPendingOldTrigger() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        int24 staleExitTick = tickLower3 - 5 * poolKey.tickSpacing;
+        RevertHookState.PositionConfig memory exitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: staleExitTick,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
+        hook.setPositionConfig(token3Id, exitConfig);
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_NONE, false, false, type(int24).min, type(int24).max)
+        );
+        (uint32 lowerAfterDisable, uint32 upperAfterDisable) = _getTriggerListSizes();
+        assertEq(lowerAfterDisable, lowerInitial, "Disable should remove the pending lower trigger");
+        assertEq(upperAfterDisable, upperInitial, "Disable should leave upper trigger list at baseline");
+
+        vm.recordLogs();
+        _moveTickDownUntil(staleExitTick - poolKey.tickSpacing, 2e16, 160);
+
+        assertGt(positionManager.getPositionLiquidity(token3Id), 0, "Disabled out-of-range position must not execute stale AUTO_EXIT");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertFalse(
+            _sawIndexedTokenEvent(logs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), token3Id),
+            "Disabled position must not emit AutoExit at the old trigger"
+        );
+    }
+
+    function testSameTickMixedSuccessAndFailure_ConsumeTriggerOnceEach() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        RevertHookState.PositionConfig memory exitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+        RevertHookState.PositionConfig memory failingLendConfig =
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max);
+
+        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
+        hook.setPositionConfig(token2Id, exitConfig);
+        hook.setPositionConfig(token3Id, failingLendConfig);
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes();
+        assertEq(lowerConfigured, lowerInitial + 1, "Same-tick configs should share one lower trigger node");
+        assertEq(upperConfigured, upperInitial + 1, "AUTO_LEND should keep its unfired upper trigger active");
+
+        uint128 token3LiquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(0)));
+
+        vm.recordLogs();
+        _moveTickDownUntil(tickLower2 - poolKey.tickSpacing, 2e16, 160);
+
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "AUTO_EXIT should still succeed on the shared tick");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id),
+            token3LiquidityBefore,
+            "Failed AUTO_LEND should leave the original position untouched"
+        );
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendShares, 0, "Failed AUTO_LEND should not leave lending shares");
+        assertEq(autoLendToken, address(0), "Failed AUTO_LEND should not set lend token state");
+
+        Vm.Log[] memory firstLogs = vm.getRecordedLogs();
+        assertTrue(
+            _sawIndexedTokenEvent(firstLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), token2Id),
+            "Shared tick should execute AUTO_EXIT for token2"
+        );
+        assertTrue(
+            _sawHookActionFailed(firstLogs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Shared tick should emit HookActionFailed for the failed AUTO_LEND"
+        );
+        assertTrue(
+            _sawEventTopic(firstLogs, keccak256("HookAutoLendFailed(address,address,bytes)")),
+            "Shared tick should emit HookAutoLendFailed for the failed AUTO_LEND"
+        );
+
+        (uint32 lowerAfterFirst, uint32 upperAfterFirst) = _getTriggerListSizes();
+        assertEq(lowerAfterFirst, lowerInitial, "Processed shared tick must not leave stale lower triggers");
+        assertEq(upperAfterFirst, upperInitial + 1, "Failed lower AUTO_LEND should keep only the unfired upper trigger");
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1e16,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory secondLogs = vm.getRecordedLogs();
+        assertFalse(
+            _sawIndexedTokenEvent(secondLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), token2Id),
+            "Consumed AUTO_EXIT must not fire twice on later swaps"
+        );
+        assertFalse(
+            _sawHookActionFailed(secondLogs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Consumed failed AUTO_LEND trigger must not retry on later swaps"
+        );
+    }
+
     function testAutoExitFailureIsolation_OnePositionCanFailWithoutBlockingOthers() public {
         uint128 extraLiquidity = 10e18;
         (uint256 token4Id,) = positionManager.mint(
@@ -2728,6 +3446,61 @@ contract RevertHookTest is BaseTest {
         (, upperSize,) = hook.upperTriggerAfterSwap(poolId);
     }
 
+    function _sawEventTopic(Vm.Log[] memory logs, bytes32 topic) internal view returns (bool) {
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter == address(hook) && logs[i].topics.length > 0 && logs[i].topics[0] == topic) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function _sawHookActionFailed(Vm.Log[] memory logs, uint256 expectedTokenId, RevertHookState.Mode expectedMode)
+        internal
+        view
+        returns (bool)
+    {
+        bytes32 eventTopic = keccak256("HookActionFailed(uint256,uint8)");
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter != address(hook)) {
+                continue;
+            }
+            if (logs[i].topics.length < 2 || logs[i].topics[0] != eventTopic) {
+                continue;
+            }
+            if (uint256(logs[i].topics[1]) != expectedTokenId) {
+                continue;
+            }
+            uint8 actualMode = abi.decode(logs[i].data, (uint8));
+            if (actualMode == uint8(expectedMode)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function _sawIndexedTokenEvent(Vm.Log[] memory logs, bytes32 topic, uint256 expectedTokenId)
+        internal
+        view
+        returns (bool)
+    {
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter != address(hook)) {
+                continue;
+            }
+            if (logs[i].topics.length < 2 || logs[i].topics[0] != topic) {
+                continue;
+            }
+            if (uint256(logs[i].topics[1]) == expectedTokenId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function _moveTickDownUntil(
         int24 targetTick,
         uint256 amountInPerSwap,
@@ -2753,5 +3526,151 @@ contract RevertHookTest is BaseTest {
         }
 
         assertLe(currentTick, targetTick, "Target tick was not reached");
+    }
+
+    function _moveTickUpUntil(
+        int24 targetTick,
+        uint256 amountInPerSwap,
+        uint256 maxSteps
+    ) internal returns (int24 currentTick) {
+        (, currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+
+        uint256 steps;
+        while (currentTick < targetTick && steps < maxSteps) {
+            swapRouter.swapExactTokensForTokens({
+                amountIn: amountInPerSwap,
+                amountOutMin: 0,
+                zeroForOne: false,
+                poolKey: poolKey,
+                hookData: Constants.ZERO_BYTES,
+                receiver: address(this),
+                deadline: block.timestamp
+            });
+            (, currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+            unchecked {
+                ++steps;
+            }
+        }
+
+        assertGe(currentTick, targetTick, "Target tick was not reached");
+    }
+
+    function _moveTickDownUntilAutoLendEqualityTick(
+        int24 positionTickLower,
+        uint256 amountInPerSwap,
+        uint256 maxSteps
+    ) internal returns (int24 currentTickLower) {
+        int24 spacing = poolKey.tickSpacing;
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        currentTickLower = _getTickLower(currentTick, spacing);
+
+        uint256 steps;
+        while (
+            (
+                currentTickLower > positionTickLower - spacing
+                    || (positionTickLower - spacing - currentTickLower) % (2 * spacing) != 0
+            ) && steps < maxSteps
+        ) {
+            swapRouter.swapExactTokensForTokens({
+                amountIn: amountInPerSwap,
+                amountOutMin: 0,
+                zeroForOne: true,
+                poolKey: poolKey,
+                hookData: Constants.ZERO_BYTES,
+                receiver: address(this),
+                deadline: block.timestamp
+            });
+            (, currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+            currentTickLower = _getTickLower(currentTick, spacing);
+            unchecked {
+                ++steps;
+            }
+        }
+
+        assertLe(currentTickLower, positionTickLower - spacing, "Auto-lend equality tick was not reached");
+        assertEq(
+            (positionTickLower - spacing - currentTickLower) % (2 * spacing),
+            0,
+            "Auto-lend equality tick must allow an aligned tolerance"
+        );
+    }
+
+    function _moveTickUpUntilAutoLendEqualityTick(
+        int24 positionTickUpper,
+        uint256 amountInPerSwap,
+        uint256 maxSteps
+    ) internal returns (int24 currentTickLower) {
+        int24 spacing = poolKey.tickSpacing;
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        currentTickLower = _getTickLower(currentTick, spacing);
+
+        uint256 steps;
+        while (
+            (currentTickLower < positionTickUpper || (currentTickLower - positionTickUpper) % (2 * spacing) != 0)
+                && steps < maxSteps
+        ) {
+            swapRouter.swapExactTokensForTokens({
+                amountIn: amountInPerSwap,
+                amountOutMin: 0,
+                zeroForOne: false,
+                poolKey: poolKey,
+                hookData: Constants.ZERO_BYTES,
+                receiver: address(this),
+                deadline: block.timestamp
+            });
+            (, currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+            currentTickLower = _getTickLower(currentTick, spacing);
+            unchecked {
+                ++steps;
+            }
+        }
+
+        assertGe(currentTickLower, positionTickUpper, "Auto-lend equality tick was not reached");
+        assertEq(
+            (currentTickLower - positionTickUpper) % (2 * spacing),
+            0,
+            "Auto-lend upper equality tick must allow an aligned tolerance"
+        );
+    }
+}
+
+contract RevertingERC4626Vault is MockERC4626Vault {
+    constructor(IERC20 asset_, string memory name_, string memory symbol_)
+        MockERC4626Vault(asset_, name_, symbol_)
+    {}
+
+    function deposit(uint256, address) public pure override returns (uint256) {
+        revert("deposit failed");
+    }
+}
+
+contract ConfigurableERC4626Vault is MockERC4626Vault {
+    bool public failDeposit;
+    bool public failRedeem;
+
+    constructor(IERC20 asset_, string memory name_, string memory symbol_)
+        MockERC4626Vault(asset_, name_, symbol_)
+    {}
+
+    function setFailDeposit(bool value) external {
+        failDeposit = value;
+    }
+
+    function setFailRedeem(bool value) external {
+        failRedeem = value;
+    }
+
+    function deposit(uint256 assets, address receiver) public override returns (uint256 shares) {
+        if (failDeposit) {
+            revert("deposit failed");
+        }
+        return super.deposit(assets, receiver);
+    }
+
+    function redeem(uint256 shares, address receiver, address owner) public override returns (uint256 assets) {
+        if (failRedeem) {
+            revert("redeem failed");
+        }
+        return super.redeem(shares, receiver, owner);
     }
 }

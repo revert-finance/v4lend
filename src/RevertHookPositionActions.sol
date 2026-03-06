@@ -41,6 +41,10 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
 
         // Remove all liquidity and collect fees
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+        if (amount0 == 0 && amount1 == 0) {
+            emit HookActionFailed(tokenId, Mode.AUTO_EXIT);
+            return;
+        }
 
         address owner = _getOwner(tokenId, false);
         address realOwner = owner;
@@ -133,6 +137,10 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
 
         // Remove all liquidity from current position
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+        if (amount0 == 0 && amount1 == 0) {
+            emit HookActionFailed(tokenId, Mode.AUTO_RANGE);
+            return;
+        }
 
         // Swap to optimal ratio for new range
         (amount0, amount1) = _calculateAndSwap(tokenId, poolKey, newTickLower, newTickUpper, amount0, amount1);
@@ -153,7 +161,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         );
 
         if (newTokenId == 0) {
-            // If remint fails, restore liquidity on the original position and keep its configuration.
+            // If remint fails, restore liquidity on the original position without re-arming the consumed trigger.
             (amount0, amount1) = _calculateAndSwap(
                 tokenId,
                 poolKey,
@@ -166,9 +174,13 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             _approveToken(currency1, amount1);
             _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
             _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
-            _addPositionTriggers(tokenId, poolKey);
-
-            emit AutoRange(tokenId, tokenId, currency0, currency1, amount0, amount1);
+            if (positionManager.getPositionLiquidity(tokenId) > 0) {
+                _removePositionTriggers(tokenId, poolKey);
+                _deactivatePosition(tokenId);
+            } else {
+                _disablePosition(tokenId);
+            }
+            emit HookActionFailed(tokenId, Mode.AUTO_RANGE);
             return;
         }
 

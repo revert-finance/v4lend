@@ -157,8 +157,14 @@ abstract contract RevertHookTriggers is RevertHookState {
 
     /// @notice Removes position triggers based on the current position configuration
     function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PositionConfig storage config = positionConfigs[tokenId];
+        _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
+    }
 
+    /// @notice Removes position triggers using an explicit config snapshot
+    /// @dev Used when a caller must remove old trigger nodes before mutating config/base-tick state.
+    function _removePositionTriggersWithConfig(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config)
+        internal
+    {
         if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
             return;
         }
@@ -169,7 +175,7 @@ abstract contract RevertHookTriggers is RevertHookState {
         TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
         TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
 
-        int24[4] memory ticks = _computeTriggerTicks(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
+        int24[4] memory ticks = _computeTriggerTicksMemory(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
 
         if (ticks[0] != type(int24).min) lowerList.remove(ticks[0], tokenId);
         if (ticks[1] != type(int24).min) lowerList.remove(ticks[1], tokenId);
