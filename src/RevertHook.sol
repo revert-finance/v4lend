@@ -30,7 +30,8 @@ import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";
-import {RevertHookLendingActions} from "./RevertHookLendingActions.sol";
+import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
+import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
 
 /// @title RevertHook
 /// @notice Uniswap V4 hook enabling automated LP position management features
@@ -46,7 +47,7 @@ import {RevertHookLendingActions} from "./RevertHookLendingActions.sol";
 ///   - maxTicksFromOracle limits how far from oracle price actions can execute
 ///   - Prevents manipulation attacks by constraining execution to valid price ranges
 /// @custom:security Delegatecall Pattern:
-///   - Uses hookFunctionsPositionActions and hookFunctionsLendingActions via delegatecall to avoid contract size limits
+///   - Uses action contracts via delegatecall to avoid contract size limits
 ///   - All state is maintained in this contract
 contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
@@ -62,8 +63,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice The RevertHookPositionActions contract for delegatecall (auto-exit, auto-range, auto-compound)
     RevertHookPositionActions public immutable hookFunctionsPositionActions;
 
-    /// @notice The RevertHookLendingActions contract for delegatecall (auto-leverage, auto-lend)
-    RevertHookLendingActions public immutable hookFunctionsLendingActions;
+    /// @notice The RevertHookAutoLeverageActions contract for delegatecall (auto-leverage)
+    RevertHookAutoLeverageActions public immutable hookFunctionsAutoLeverageActions;
+
+    /// @notice The RevertHookAutoLendActions contract for delegatecall (auto-lend)
+    RevertHookAutoLendActions public immutable hookFunctionsAutoLendActions;
 
     struct ImmediateActionData {
         uint256 tokenId;
@@ -83,7 +87,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
         RevertHookPositionActions _hookFunctionsPositionActions,
-        RevertHookLendingActions _hookFunctionsLendingActions
+        RevertHookAutoLeverageActions _hookFunctionsAutoLeverageActions,
+        RevertHookAutoLendActions _hookFunctionsAutoLendActions
     ) BaseHook(_v4Oracle.poolManager()) Ownable(owner_) {
         positionManager = _v4Oracle.positionManager();
         protocolFeeRecipient = protocolFeeRecipient_;
@@ -93,7 +98,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         // Use pre-deployed function contracts
         hookFunctionsPositionActions = _hookFunctionsPositionActions;
-        hookFunctionsLendingActions = _hookFunctionsLendingActions;
+        hookFunctionsAutoLeverageActions = _hookFunctionsAutoLeverageActions;
+        hookFunctionsAutoLendActions = _hookFunctionsAutoLendActions;
     }
 
     // ==================== Configuration Setters ====================
@@ -582,16 +588,18 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         uint256 shares = positionStates[tokenId].autoLendShares;
         if (shares > 0) {
             if (
-                !_tryDelegatecallLendingActions(
-                    abi.encodeCall(hookFunctionsLendingActions.autoLendWithdraw, (poolKey, tokenId, shares))
+                !_tryDelegatecall(
+                    address(hookFunctionsAutoLendActions),
+                    abi.encodeCall(hookFunctionsAutoLendActions.autoLendWithdraw, (poolKey, tokenId, shares))
                 )
             ) {
                 emit HookActionFailed(tokenId, Mode.AUTO_LEND);
             }
         } else {
             if (
-                !_tryDelegatecallLendingActions(
-                    abi.encodeCall(hookFunctionsLendingActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger))
+                !_tryDelegatecall(
+                    address(hookFunctionsAutoLendActions),
+                    abi.encodeCall(hookFunctionsAutoLendActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger))
                 )
             ) {
                 emit HookActionFailed(tokenId, Mode.AUTO_LEND);
@@ -941,7 +949,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Executes auto-leverage adjustment for a vault-owned position
     /// @dev Adjusts leverage based on price movement. Only works for vault-owned positions.
-    ///      Delegatecalls to hookFunctionsLendingActions contract.
+    ///      Delegatecalls to hookFunctionsAutoLeverageActions contract.
     /// @param poolKey The pool key for the position's pool
     /// @param poolId The pool ID
     /// @param tokenId The position token ID to adjust leverage
@@ -953,7 +961,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         bool isUpperTrigger
     ) external {
         _delegatecallLendingActions(
-            abi.encodeCall(hookFunctionsLendingActions.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
+            abi.encodeCall(hookFunctionsAutoLeverageActions.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
         );
     }
 
@@ -961,7 +969,10 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @dev Can be called to manually exit auto-lend before trigger conditions
     /// @param tokenId The position token ID to force exit
     function autoLendForceExit(uint256 tokenId) external {
-        _delegatecallLendingActions(abi.encodeCall(hookFunctionsLendingActions.autoLendForceExit, (tokenId)));
+        _delegatecall(
+            address(hookFunctionsAutoLendActions),
+            abi.encodeCall(hookFunctionsAutoLendActions.autoLendForceExit, (tokenId))
+        );
     }
 
     /// @notice Manually triggers auto-compound for multiple positions
@@ -1060,14 +1071,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _delegatecallLendingActions(bytes memory data) internal {
-        _delegatecall(address(hookFunctionsLendingActions), data);
+        _delegatecall(address(hookFunctionsAutoLeverageActions), data);
     }
 
     function _tryDelegatecallPositionActions(bytes memory data) internal returns (bool success) {
         return _tryDelegatecall(address(hookFunctionsPositionActions), data);
     }
 
-    function _tryDelegatecallLendingActions(bytes memory data) internal returns (bool success) {
-        return _tryDelegatecall(address(hookFunctionsLendingActions), data);
-    }
 }

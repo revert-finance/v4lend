@@ -12,7 +12,8 @@ import {V4Oracle, AggregatorV3Interface} from "../src/V4Oracle.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
 import {RevertHook} from "../src/RevertHook.sol";
 import {RevertHookPositionActions} from "../src/RevertHookPositionActions.sol";
-import {RevertHookLendingActions} from "../src/RevertHookLendingActions.sol";
+import {RevertHookAutoLeverageActions} from "../src/RevertHookAutoLeverageActions.sol";
+import {RevertHookAutoLendActions} from "../src/RevertHookAutoLendActions.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -223,18 +224,25 @@ contract DeployUnichain is Script {
         );
         console.log("RevertHookPositionActions deployed at:", address(hookFunctionsPositionActions));
 
-        // Deploy RevertHookLendingActions separately to avoid initcode size limit
-        RevertHookLendingActions hookFunctionsLendingActions = new RevertHookLendingActions(
+        // Deploy RevertHookAutoLeverageActions separately to avoid initcode size limit
+        RevertHookAutoLeverageActions hookFunctionsAutoLeverageActions = new RevertHookAutoLeverageActions(
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator)
         );
-        console.log("RevertHookLendingActions deployed at:", address(hookFunctionsLendingActions));
+        console.log("RevertHookAutoLeverageActions deployed at:", address(hookFunctionsAutoLeverageActions));
+
+        RevertHookAutoLendActions hookFunctionsAutoLendActions = new RevertHookAutoLendActions(
+            IPermit2(PERMIT2),
+            oracle,
+            ILiquidityCalculator(liquidityCalculator)
+        );
+        console.log("RevertHookAutoLendActions deployed at:", address(hookFunctionsAutoLendActions));
 
         // ==================== Step 4: Deploy RevertHook with CREATE2 ====================
 
         // Prepare constructor arguments for RevertHook
-        // Constructor: (owner_, protocolFeeRecipient_, permit2, v4Oracle, liquidityCalculator, hookFunctionsPositionActions, hookFunctionsLendingActions)
+        // Constructor: (owner_, protocolFeeRecipient_, permit2, v4Oracle, liquidityCalculator, hookFunctionsPositionActions, hookFunctionsAutoLeverageActions, hookFunctionsAutoLendActions)
         bytes memory constructorArgs = abi.encode(
             deployer,
             deployer,
@@ -242,7 +250,8 @@ contract DeployUnichain is Script {
             oracle,
             ILiquidityCalculator(liquidityCalculator),
             hookFunctionsPositionActions,
-            hookFunctionsLendingActions
+            hookFunctionsAutoLeverageActions,
+            hookFunctionsAutoLendActions
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
 
@@ -261,7 +270,8 @@ contract DeployUnichain is Script {
             oracle,
             ILiquidityCalculator(liquidityCalculator),
             hookFunctionsPositionActions,
-            hookFunctionsLendingActions
+            hookFunctionsAutoLeverageActions,
+            hookFunctionsAutoLendActions
         );
         require(address(revertHook) == expectedHookAddress, "Hook address mismatch");
         console.log("RevertHook deployed at:", address(revertHook));
@@ -371,7 +381,8 @@ contract DeployUnichain is Script {
         console.log("LiquidityCalculator:", address(liquidityCalculator));
         console.log("V4Oracle:", address(oracle));
         console.log("RevertHookPositionActions:", address(hookFunctionsPositionActions));
-        console.log("RevertHookLendingActions:", address(hookFunctionsLendingActions));
+        console.log("RevertHookAutoLeverageActions:", address(hookFunctionsAutoLeverageActions));
+        console.log("RevertHookAutoLendActions:", address(hookFunctionsAutoLendActions));
         console.log("RevertHook:", address(revertHook));
         console.log("=========================================\n");
     }

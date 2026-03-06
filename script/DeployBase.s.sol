@@ -12,7 +12,8 @@ import {LeverageTransformer} from "../src/transformers/LeverageTransformer.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
 import {RevertHook} from "../src/RevertHook.sol";
 import {RevertHookPositionActions} from "../src/RevertHookPositionActions.sol";
-import {RevertHookLendingActions} from "../src/RevertHookLendingActions.sol";
+import {RevertHookAutoLeverageActions} from "../src/RevertHookAutoLeverageActions.sol";
+import {RevertHookAutoLendActions} from "../src/RevertHookAutoLendActions.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -192,10 +193,14 @@ contract DeployBase is Script {
             new RevertHookPositionActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator));
         console.log("  RevertHookPositionActions deployed at:", address(hookFunctionsPositionActions));
 
-        // Deploy RevertHookLendingActions (delegatecall target 2)
-        RevertHookLendingActions hookFunctionsLendingActions =
-            new RevertHookLendingActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator));
-        console.log("  RevertHookLendingActions deployed at:", address(hookFunctionsLendingActions));
+        // Deploy RevertHookAutoLeverageActions (delegatecall target 2)
+        RevertHookAutoLeverageActions hookFunctionsAutoLeverageActions =
+            new RevertHookAutoLeverageActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator));
+        console.log("  RevertHookAutoLeverageActions deployed at:", address(hookFunctionsAutoLeverageActions));
+
+        RevertHookAutoLendActions hookFunctionsAutoLendActions =
+            new RevertHookAutoLendActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator));
+        console.log("  RevertHookAutoLendActions deployed at:", address(hookFunctionsAutoLendActions));
 
         // ==================== Step 4: Deploy RevertHook with CREATE2 ====================
 
@@ -209,7 +214,8 @@ contract DeployBase is Script {
             oracle,
             ILiquidityCalculator(liquidityCalculator),
             hookFunctionsPositionActions,
-            hookFunctionsLendingActions
+            hookFunctionsAutoLeverageActions,
+            hookFunctionsAutoLendActions
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
 
@@ -227,7 +233,8 @@ contract DeployBase is Script {
             oracle,
             ILiquidityCalculator(liquidityCalculator),
             hookFunctionsPositionActions,
-            hookFunctionsLendingActions
+            hookFunctionsAutoLeverageActions,
+            hookFunctionsAutoLendActions
         );
         require(address(revertHook) == expectedHookAddress, "Hook address mismatch");
         console.log("  RevertHook deployed at:", address(revertHook));
@@ -321,7 +328,8 @@ contract DeployBase is Script {
         console.log("-------------------------------------------");
         console.log("Hook Contracts:");
         console.log("  RevertHookPositionActions:", address(hookFunctionsPositionActions));
-        console.log("  RevertHookLendingActions: ", address(hookFunctionsLendingActions));
+        console.log("  RevertHookAutoLeverageActions: ", address(hookFunctionsAutoLeverageActions));
+        console.log("  RevertHookAutoLendActions:", address(hookFunctionsAutoLendActions));
         console.log("  RevertHook:            ", address(revertHook));
         console.log("-------------------------------------------");
         console.log("Vault & Transformers:");

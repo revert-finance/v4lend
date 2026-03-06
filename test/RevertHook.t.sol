@@ -26,7 +26,8 @@ import {RevertHook} from "../src/RevertHook.sol";
 import {RevertHookState} from "../src/RevertHookState.sol";
 import {PositionModeFlags} from "../src/lib/PositionModeFlags.sol";
 import {RevertHookPositionActions} from "../src/RevertHookPositionActions.sol";
-import {RevertHookLendingActions} from "../src/RevertHookLendingActions.sol";
+import {RevertHookAutoLeverageActions} from "../src/RevertHookAutoLeverageActions.sol";
+import {RevertHookAutoLendActions} from "../src/RevertHookAutoLendActions.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
 import {IV4Oracle} from "../src/interfaces/IV4Oracle.sol";
 import {MockV4Oracle} from "./utils/MockV4Oracle.sol";
@@ -97,11 +98,22 @@ contract RevertHookTest is BaseTest {
         // Deploy LiquidityCalculator
         liquidityCalculator = new LiquidityCalculator();
 
-        // Deploy RevertHookPositionActions and RevertHookLendingActions
+        // Deploy RevertHook action targets
         RevertHookPositionActions hookFunctionsPositionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookLendingActions hookFunctionsLendingActions = new RevertHookLendingActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLeverageActions hookFunctionsAutoLeverageActions = new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLendActions hookFunctionsAutoLendActions =
+            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
 
-        bytes memory constructorArgs = abi.encode(address(this), protocolFeeRecipient, permit2, v4Oracle, liquidityCalculator, hookFunctionsPositionActions, hookFunctionsLendingActions);
+        bytes memory constructorArgs = abi.encode(
+            address(this),
+            protocolFeeRecipient,
+            permit2,
+            v4Oracle,
+            liquidityCalculator,
+            hookFunctionsPositionActions,
+            hookFunctionsAutoLeverageActions,
+            hookFunctionsAutoLendActions
+        );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);
 
