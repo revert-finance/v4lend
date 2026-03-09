@@ -17,6 +17,8 @@ import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
     using PoolIdLibrary for PoolKey;
 
+    error RestoreFailed();
+
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
@@ -37,12 +39,18 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
 
         uint16 targetRatioBps = positionConfigs[tokenId].autoLeverageTargetBps;
         uint256 currentRatio = collateralValue > 0 ? currentDebt * 10000 / collateralValue : 0;
+        bool success = true;
 
         // Adjust leverage based on current vs target ratio
         if (currentRatio < targetRatioBps) {
-            _increaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
+            success = _increaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
         } else if (currentRatio > targetRatioBps) {
-            _decreaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
+            success = _decreaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
+        }
+
+        if (!success) {
+            emit HookActionFailed(tokenId, Mode.AUTO_LEVERAGE);
+            return;
         }
 
         // Update triggers for new base tick
@@ -63,18 +71,19 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         uint256 currentDebt,
         uint256 collateralValue,
         uint16 targetRatioBps
-    ) internal {
-        if (currentDebt * 10000 >= collateralValue * targetRatioBps) return;
+    ) internal returns (bool) {
+        if (currentDebt * 10000 >= collateralValue * targetRatioBps) return true;
 
         uint256 denominator = 10000 - uint256(targetRatioBps);
-        if (denominator == 0) return;
+        if (denominator == 0) return true;
 
         // Calculate amount to borrow to reach target ratio
         uint256 borrowAmount = (uint256(targetRatioBps) * collateralValue - currentDebt * 10000) / denominator;
-        if (borrowAmount == 0) return;
+        if (borrowAmount == 0) return true;
 
         // Borrow from vault
         Currency lendToken = Currency.wrap(vault.asset());
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
         vault.borrow(tokenId, borrowAmount);
 
         // Swap to optimal ratio and add liquidity
@@ -91,7 +100,17 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         _approveToken(poolKey.currency0, amount0);
         _approveToken(poolKey.currency1, amount1);
         _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        if (positionManager.getPositionLiquidity(tokenId) > liquidityBefore) {
+            _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, vault.ownerOf(tokenId));
+            return true;
+        }
+
+        if (_rollbackFailedIncrease(tokenId, poolKey, vault, lendToken) > currentDebt) {
+            revert RestoreFailed();
+        }
+
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, vault.ownerOf(tokenId));
+        return false;
     }
 
     /// @notice Decreases leverage by removing liquidity and repaying debt
@@ -102,11 +121,11 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         uint256 currentDebt,
         uint256 collateralValue,
         uint16 targetRatioBps
-    ) internal {
-        if (currentDebt * 10000 <= collateralValue * targetRatioBps) return;
+    ) internal returns (bool) {
+        if (currentDebt * 10000 <= collateralValue * targetRatioBps) return true;
 
         uint256 denominator = 10000 - uint256(targetRatioBps);
-        if (denominator == 0) return;
+        if (denominator == 0) return true;
 
         // Calculate amount to repay to reach target ratio
         uint256 repayAmount = (currentDebt * 10000 - uint256(targetRatioBps) * collateralValue) / denominator;
@@ -114,23 +133,63 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         Currency lendToken = Currency.wrap(vault.asset());
         uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
         (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, vault.asset());
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
-        if (positionValue == 0 || currentLiquidity == 0) return;
+        if (positionValue == 0 || currentLiquidity == 0) return true;
 
         // Calculate liquidity to remove based on value ratio
         uint128 liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / positionValue);
         if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
-        if (liquidityToRemove == 0) return;
+        if (liquidityToRemove == 0) return true;
 
         // Remove partial liquidity and swap to lend token
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
             _decreaseLiquidityPartial(tokenId, liquidityToRemove);
+        if (amount0 == 0 && amount1 == 0) {
+            return false;
+        }
 
         uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
 
         // Repay debt
         _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);
+        (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
+        if (newDebt < currentDebt) {
+            _sendLeftoverTokens(tokenId, currency0, currency1, vault.ownerOf(tokenId));
+            return true;
+        }
+
+        _approveToken(currency0, currency0.balanceOfSelf());
+        _approveToken(currency1, currency1.balanceOfSelf());
+        _increaseLiquidity(
+            tokenId,
+            poolKey,
+            positionInfo,
+            uint128(currency0.balanceOfSelf()),
+            uint128(currency1.balanceOfSelf())
+        );
+        if (positionManager.getPositionLiquidity(tokenId) < currentLiquidity) {
+            revert RestoreFailed();
+        }
 
         _sendLeftoverTokens(tokenId, currency0, currency1, vault.ownerOf(tokenId));
+        return false;
+    }
+
+    function _rollbackFailedIncrease(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        IVault vault,
+        Currency lendToken
+    ) internal returns (uint256 debtAfterRollback) {
+        Currency currency0 = poolKey.currency0;
+        Currency currency1 = poolKey.currency1;
+
+        uint256 lendAmount =
+            _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, currency0.balanceOfSelf(), currency1.balanceOfSelf());
+
+        (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
+        _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);
+        (debtAfterRollback,,,,) = vault.loanInfo(tokenId);
     }
 }

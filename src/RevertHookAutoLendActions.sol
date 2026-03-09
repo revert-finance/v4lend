@@ -128,6 +128,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         address owner = _getOwner(tokenId, false);
         address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
         uint256 shares = positionStates[tokenId].autoLendShares;
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
 
         _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
 
@@ -167,8 +168,11 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
             generalConfigs[newTokenId] = generalConfigs[tokenId];
             _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
             _disablePosition(tokenId);
-        } else {
+        } else if (positionManager.getPositionLiquidity(tokenId) > liquidityBefore) {
             _addPositionTriggers(tokenId, poolKey);
+        } else {
+            _disablePosition(tokenId);
+            emit HookActionFailed(tokenId, Mode.AUTO_LEND);
         }
 
         emit AutoLendWithdraw(tokenId, Currency.wrap(tokenAddress), redeemedAmount, shares);

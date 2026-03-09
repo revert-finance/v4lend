@@ -1594,6 +1594,11 @@ contract RevertHookTest is BaseTest {
         hook.setAutoLendVault(Currency.unwrap(currency0), vault1);
     }
 
+    function testSetAutoLendVault_RejectsNativeTokenConfig() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setAutoLendVault(address(0), vault0);
+    }
+
     function testSetPositionConfig_AutoLendRequiresVaultsForBothPoolTokens() public {
         hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(0)));
 
@@ -2966,6 +2971,51 @@ contract RevertHookTest is BaseTest {
         (,,, address autoLendTokenFinal, uint256 sharesFinal,,,) = hook.positionStates(token3Id);
         assertEq(autoLendTokenFinal, autoLendTokenBefore, "No retry should keep the original lend token state");
         assertEq(sharesFinal, sharesBefore, "No retry should leave vault shares unchanged");
+    }
+
+    function testAutoLendWithdrawReentryFailure_DisablesZeroLiquidityPosition() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        (,,, address autoLendTokenBefore, uint256 sharesBefore,,,) = hook.positionStates(token3Id);
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Successful deposit should remove LP liquidity");
+        assertEq(autoLendTokenBefore, Currency.unwrap(currency0), "Lower-side lend should hold token0 in the vault");
+        assertGt(sharesBefore, 0, "Successful deposit should mint lending shares");
+
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), false);
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        (uint32 lowerBeforeFailure, uint32 upperBeforeFailure) = _getTriggerListSizes();
+
+        vm.recordLogs();
+        _moveTickUpUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Failed re-entry should not mint a replacement token");
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Failed re-entry must leave the old token empty");
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Empty position must be disabled after failed re-entry");
+        (,,, address autoLendTokenAfter, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
+        assertEq(sharesAfter, 0, "Failed re-entry must clear lending shares");
+        assertEq(autoLendTokenAfter, address(0), "Failed re-entry must clear lent token state");
+
+        (uint32 lowerAfterFailure, uint32 upperAfterFailure) = _getTriggerListSizes();
+        assertEq(lowerAfterFailure, lowerBeforeFailure, "Failed re-entry must not add new lower triggers");
+        assertEq(upperAfterFailure, upperBeforeFailure - 1, "Failed re-entry must consume the fired withdraw trigger");
+        _verifyNoLeftoverBalances("failed auto-lend withdraw re-entry");
+
+        Vm.Log[] memory failureLogs = vm.getRecordedLogs();
+        assertTrue(
+            _sawEventTopic(failureLogs, keccak256("HookModifyLiquiditiesFailed(bytes,bytes[],bytes)")),
+            "Failed re-entry should emit HookModifyLiquiditiesFailed"
+        );
+        assertTrue(
+            _sawHookActionFailed(failureLogs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Failed re-entry should emit HookActionFailed"
+        );
     }
 
     function testAutoExitExecution_RemovesOppositeTriggerNode() public {

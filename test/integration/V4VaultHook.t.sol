@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -1446,6 +1447,61 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(weth.balanceOf(address(revertHook)), 0, "Hook should not retain WETH");
     }
 
+    function _sawHookEventTopic(Vm.Log[] memory logs, bytes32 topic) internal view returns (bool) {
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter == address(revertHook) && logs[i].topics.length > 0 && logs[i].topics[0] == topic) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function _sawHookActionFailed(Vm.Log[] memory logs, uint256 expectedTokenId, RevertHookState.Mode expectedMode)
+        internal
+        view
+        returns (bool)
+    {
+        bytes32 eventTopic = keccak256("HookActionFailed(uint256,uint8)");
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter != address(revertHook)) {
+                continue;
+            }
+            if (logs[i].topics.length < 2 || logs[i].topics[0] != eventTopic) {
+                continue;
+            }
+            if (uint256(logs[i].topics[1]) != expectedTokenId) {
+                continue;
+            }
+            uint8 actualMode = abi.decode(logs[i].data, (uint8));
+            if (actualMode == uint8(expectedMode)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function _sawIndexedHookEvent(Vm.Log[] memory logs, bytes32 topic, uint256 expectedTokenId)
+        internal
+        view
+        returns (bool)
+    {
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter != address(revertHook)) {
+                continue;
+            }
+            if (logs[i].topics.length < 2 || logs[i].topics[0] != topic) {
+                continue;
+            }
+            if (uint256(logs[i].topics[1]) == expectedTokenId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
         int24 compressed = tick / tickSpacing;
         if (tick < 0 && tick % tickSpacing != 0) compressed--;
@@ -1906,6 +1962,50 @@ contract V4VaultHookTest is V4ForkTestBase {
         int24 expectedUpperTrigger = baseTickAfterSecond + 10 * tickSpacing;
         console.log("Expected new lower trigger:", expectedLowerTrigger);
         console.log("Expected new upper trigger:", expectedUpperTrigger);
+    }
+
+    function test_AutoLeverageSwapFailure_RestoresDebtAndLiquidity() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        (uint256 initialDebt,) = _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(hookedTokenId);
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setGeneralConfig(hookedTokenId, 123, hookedPoolKey.tickSpacing, IHooks(address(0)), 0, 0);
+
+        _configurePositionForAutoLeverage(hookedTokenId, 5000);
+        (,,,,,,, int24 baseTickBefore) = revertHook.positionStates(hookedTokenId);
+
+        vm.recordLogs();
+        _movePriceUp(hookedPoolKey);
+
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(hookedTokenId);
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(hookedTokenId);
+        (,,,,,,, int24 baseTickAfter) = revertHook.positionStates(hookedTokenId);
+
+        assertLe(debtAfter, initialDebt, "Failed leverage-up must not increase debt");
+        assertEq(liquidityAfter, liquidityBefore, "Failed leverage-up must restore original liquidity");
+        assertGt(collateralAfter, debtAfter, "Restored position should remain healthy");
+        assertEq(baseTickAfter, baseTickBefore, "Failed leverage-up must keep the previous base tick");
+        assertEq(IERC721(address(positionManager)).ownerOf(hookedTokenId), address(vault), "Position should remain in the vault");
+        _assertHookHasNoTokenDust();
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(
+            _sawHookEventTopic(logs, keccak256("HookSwapFailed((address,address,uint24,int24,address),(bool,int256,uint160),bytes)")),
+            "Failed leverage-up should emit HookSwapFailed"
+        );
+        assertTrue(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "Failed leverage-up should emit HookActionFailed"
+        );
+        assertFalse(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "Failed leverage-up must not emit AutoLeverage"
+        );
     }
 
     /// @notice Test AUTO_LEVERAGE with zero initial debt (should leverage up from 0)
