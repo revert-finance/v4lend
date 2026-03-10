@@ -1122,6 +1122,101 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
     }
 
+    function testAfterSwap_CanSwitchDirectionAndExecuteOppositeSideTrigger() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        (, int24 initialTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 stagedBaseTick = _getTickLower(initialTick, spacing) - 10 * spacing;
+        _moveTickDownUntil(hookedPoolKey, stagedBaseTick, 25e6, 80);
+
+        uint256 leverageTokenId = _createPositionInHookedPool(hookedPoolKey);
+        (uint256 debtBefore,) = _setupCollateralizedPositionForAutoLeverage(leverageTokenId);
+        _configurePositionForAutoLeverage(leverageTokenId, 1500);
+
+        (,,,,,,, int24 leverageBaseTick) = revertHook.positionStates(leverageTokenId);
+
+        uint256 exitTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        int24 exitUpperTrigger = leverageBaseTick + spacing;
+
+        vm.startPrank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(revertHook), true);
+        revertHook.setPositionConfig(
+            exitTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: exitUpperTrigger,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        vm.stopPrank();
+
+        vm.recordLogs();
+        _swapExactInputSingle(hookedPoolKey, true, 700e6, 0);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (, int24 tickAfterAction,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        bytes32 autoLeverageTopic = keccak256("AutoLeverage(uint256,bool,uint256,uint256)");
+        bytes32 autoExitTopic = keccak256("AutoExit(uint256,address,address,uint256,uint256)");
+        bytes32[2] memory expectedTopics = [autoLeverageTopic, autoExitTopic];
+        uint256[2] memory expectedTokenIds = [leverageTokenId, exitTokenId];
+        uint256 matchedEvents;
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter != address(revertHook) || logs[i].topics.length < 2) {
+                continue;
+            }
+            bytes32 topic0 = logs[i].topics[0];
+            if (topic0 != autoLeverageTopic && topic0 != autoExitTopic) {
+                continue;
+            }
+
+            assertLt(matchedEvents, 2, "Only the expected bidirectional actions should fire");
+            assertEq(topic0, expectedTopics[matchedEvents], "Bidirectional actions should execute in order");
+            assertEq(uint256(logs[i].topics[1]), expectedTokenIds[matchedEvents], "Unexpected token executed");
+            unchecked {
+                ++matchedEvents;
+            }
+        }
+
+        assertEq(matchedEvents, 2, "Expected leverage action followed by opposite-side exit");
+        assertFalse(
+            _sawHookActionFailed(logs, leverageTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "Leverage path should complete without HookActionFailed"
+        );
+        assertFalse(
+            _sawHookActionFailed(logs, exitTokenId, RevertHookState.Mode.AUTO_EXIT),
+            "Opposite-side AUTO_EXIT should complete without HookActionFailed"
+        );
+
+        assertEq(positionManager.getPositionLiquidity(exitTokenId), 0, "Opposite-side AUTO_EXIT should remove liquidity");
+        (uint8 exitModeFlags,,,,,,,,,,) = revertHook.positionConfigs(exitTokenId);
+        assertEq(exitModeFlags, PositionModeFlags.MODE_NONE, "Opposite-side AUTO_EXIT token should be disabled");
+
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(leverageTokenId);
+        assertLt(debtAfter, debtBefore, "Triggered lower AUTO_LEVERAGE should reduce debt");
+        assertTrue(collateralAfter > debtAfter, "Leverage position should remain healthy");
+        assertGe(tickAfterAction, exitUpperTrigger, "Internal leverage swap should reverse price across the upper exit trigger");
+        _assertHookHasNoTokenDust();
+    }
+
     function testAutoLeverageReconfiguration_ReplacesOldTriggerNodes() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         _createPositionInHookedPool(hookedPoolKey);

@@ -530,6 +530,183 @@ contract RevertHookTest is BaseTest {
         );
     }
 
+    function testAfterSwap_MaxTriggerBatchCapDefersRemainingTriggers() public {
+        hook.setMaxTicksFromOracle(5000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        uint256 batchCap = hook.MAX_TRIGGER_BATCHES_PER_SWAP();
+        uint256 totalPositions = batchCap + 2;
+        uint256[] memory tokenIds = new uint256[](totalPositions);
+        int24[] memory triggerTicks = new int24[](totalPositions);
+        int24 spacing = poolKey.tickSpacing;
+        int24 nextUpperTrigger = _getTickLower(tickStart, spacing) + spacing;
+        uint128 exitLiquidity = 1e18;
+
+        for (uint256 i; i < totalPositions; ++i) {
+            (uint256 stagedTokenId,) = positionManager.mint(
+                poolKey,
+                tickLower2,
+                tickUpper2,
+                exitLiquidity,
+                type(uint256).max,
+                type(uint256).max,
+                address(this),
+                block.timestamp,
+                Constants.ZERO_BYTES
+            );
+            tokenIds[i] = stagedTokenId;
+            triggerTicks[i] = nextUpperTrigger;
+
+            hook.setPositionConfig(stagedTokenId, RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: nextUpperTrigger,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            }));
+
+            nextUpperTrigger += spacing;
+        }
+
+        (, uint32 upperConfigured,) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperConfigured, totalPositions, "Distinct AUTO_EXIT upper ticks should register one batch each");
+
+        bytes32 autoExitTopic = keccak256("AutoExit(uint256,address,address,uint256,uint256)");
+        bytes32 hookActionFailedTopic = keccak256("HookActionFailed(uint256,uint8)");
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 15e18,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory firstLogs = vm.getRecordedLogs();
+        bool[] memory executedFirst = new bool[](totalPositions);
+        uint256 firstExecutionCount;
+        uint256 firstFailureCount;
+        uint256 firstLogLength = firstLogs.length;
+        for (uint256 i; i < firstLogLength; ++i) {
+            if (firstLogs[i].emitter != address(hook) || firstLogs[i].topics.length == 0) {
+                continue;
+            }
+            if (firstLogs[i].topics[0] == hookActionFailedTopic) {
+                ++firstFailureCount;
+                continue;
+            }
+            if (firstLogs[i].topics[0] != autoExitTopic || firstLogs[i].topics.length < 2) {
+                continue;
+            }
+
+            uint256 exitedTokenId = uint256(firstLogs[i].topics[1]);
+            for (uint256 j; j < totalPositions; ++j) {
+                if (tokenIds[j] != exitedTokenId || executedFirst[j]) {
+                    continue;
+                }
+                executedFirst[j] = true;
+                ++firstExecutionCount;
+                break;
+            }
+        }
+
+        assertEq(firstExecutionCount, batchCap, "First swap should stop at the configured batch cap");
+        assertEq(firstFailureCount, 0, "Capped processing should not emit HookActionFailed");
+        assertEq(hook.tickLowerLasts(poolId), triggerTicks[batchCap - 1], "Cursor should stop at the last processed trigger");
+
+        (, int24 currentTickAfterFirst,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLowerAfterFirst = _getTickLower(currentTickAfterFirst, spacing);
+        assertGe(
+            currentTickLowerAfterFirst,
+            triggerTicks[totalPositions - 1],
+            "First swap must cross even the deferred triggers so deferral comes from the cap"
+        );
+
+        for (uint256 i; i < totalPositions; ++i) {
+            if (i < batchCap) {
+                assertTrue(executedFirst[i], "Processed batch should emit one AUTO_EXIT");
+                assertEq(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Processed token should be fully exited");
+                (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+                assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Processed token should be disabled");
+            } else {
+                assertFalse(executedFirst[i], "Deferred batch must not execute before the next swap");
+                assertGt(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Deferred token should keep liquidity");
+                (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+                assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "Deferred token should remain armed");
+            }
+        }
+
+        (, uint32 upperAfterFirst, int24 upperHeadAfterFirst) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperAfterFirst, totalPositions - batchCap, "Deferred upper triggers should stay registered");
+        assertEq(upperHeadAfterFirst, triggerTicks[batchCap], "Head should advance to the first deferred trigger");
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1e16,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory secondLogs = vm.getRecordedLogs();
+        bool[] memory executedSecond = new bool[](totalPositions);
+        uint256 secondExecutionCount;
+        uint256 secondFailureCount;
+        uint256 secondLogLength = secondLogs.length;
+        for (uint256 i; i < secondLogLength; ++i) {
+            if (secondLogs[i].emitter != address(hook) || secondLogs[i].topics.length == 0) {
+                continue;
+            }
+            if (secondLogs[i].topics[0] == hookActionFailedTopic) {
+                ++secondFailureCount;
+                continue;
+            }
+            if (secondLogs[i].topics[0] != autoExitTopic || secondLogs[i].topics.length < 2) {
+                continue;
+            }
+
+            uint256 exitedTokenId = uint256(secondLogs[i].topics[1]);
+            for (uint256 j; j < totalPositions; ++j) {
+                if (tokenIds[j] != exitedTokenId || executedSecond[j]) {
+                    continue;
+                }
+                executedSecond[j] = true;
+                ++secondExecutionCount;
+                break;
+            }
+        }
+
+        assertEq(secondExecutionCount, totalPositions - batchCap, "Next swap should resume and drain deferred triggers");
+        assertEq(secondFailureCount, 0, "Deferred processing should complete without HookActionFailed");
+        for (uint256 i; i < totalPositions; ++i) {
+            if (i < batchCap) {
+                assertFalse(executedSecond[i], "Already processed tokens must not execute again");
+            } else {
+                assertTrue(executedSecond[i], "Deferred token should execute on the later swap");
+            }
+            assertEq(positionManager.getPositionLiquidity(tokenIds[i]), 0, "All staged tokens should be fully exited");
+            (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+            assertEq(modeFlags, PositionModeFlags.MODE_NONE, "All staged tokens should be disabled after drain");
+        }
+
+        (, uint32 upperAfterSecond, int24 upperHeadAfterSecond) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperAfterSecond, 0, "Later swap should drain the deferred upper triggers");
+        assertEq(upperHeadAfterSecond, 0, "Drained upper trigger list should return to empty head");
+        _verifyNoLeftoverBalances("batch-cap deferred trigger processing");
+    }
+
     function testAutoExit_MultiplePositionsOnSameTriggerExecuteOnceEach() public {
         uint128 extraLiquidity = 10e18;
         (uint256 token4Id,) = positionManager.mint(

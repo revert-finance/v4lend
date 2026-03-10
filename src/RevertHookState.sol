@@ -160,6 +160,9 @@ abstract contract RevertHookState is Transformer {
 
     // oracle price validation
     int24 public maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
+    // Bound trigger processing for one external swap. If the cap is hit, remaining trigger batches stay registered
+    // and can be picked up by a later external swap; they are not guaranteed to run on the immediately following swap.
+    uint256 public constant MAX_TRIGGER_BATCHES_PER_SWAP = 32;
 
     // minimum position value in native token (address(0)) to be configurable
     uint256 public minPositionValueNative = 0.01 ether;

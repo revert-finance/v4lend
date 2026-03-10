@@ -404,40 +404,59 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
 
         PoolId poolId = key.toId();
-        int24 tick = tickLowerLasts[poolId];
-        int24 tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
+        int24 cursor = tickLowerLasts[poolId];
+        int24 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
 
-        if (tick == tickEnd) {
+        if (cursor == liveTick) {
             return (this.afterSwap.selector, 0);
         }
 
-        TickLinkedList.List storage list =
-            tick < tickEnd ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
-        bool increasing = list.increasing;
-
-        int24 oracleMaxEndTick = type(int24).min;
-
-        bool exists;
-        (exists, tick) = list.searchFirstAfter(tick);
-
-        while (true) {
-            if (!exists || (increasing ? tick > tickEnd : tick < tickEnd)) {
+        bool hasCachedUpperOracleMaxEndTick;
+        bool hasCachedLowerOracleMaxEndTick;
+        int24 upperOracleMaxEndTick;
+        int24 lowerOracleMaxEndTick;
+        uint256 processedTickBatches;
+        while (processedTickBatches < MAX_TRIGGER_BATCHES_PER_SWAP) {
+            liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
+            if (cursor == liveTick) {
                 break;
             }
 
-            if (oracleMaxEndTick == type(int24).min) {
-                oracleMaxEndTick = _getOracleMaxEndTick(key, increasing);
-                tickEnd = increasing
-                    ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd)
-                    : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
-                if (increasing ? tick > tickEnd : tick < tickEnd) {
-                    break;
+            bool increasing = cursor < liveTick;
+            int24 tickEnd = liveTick;
+            if (increasing) {
+                if (!hasCachedUpperOracleMaxEndTick) {
+                    upperOracleMaxEndTick = _getOracleMaxEndTick(key, true);
+                    hasCachedUpperOracleMaxEndTick = true;
                 }
+                if (upperOracleMaxEndTick < tickEnd) {
+                    tickEnd = upperOracleMaxEndTick;
+                }
+            } else {
+                if (!hasCachedLowerOracleMaxEndTick) {
+                    lowerOracleMaxEndTick = _getOracleMaxEndTick(key, false);
+                    hasCachedLowerOracleMaxEndTick = true;
+                }
+                if (lowerOracleMaxEndTick > tickEnd) {
+                    tickEnd = lowerOracleMaxEndTick;
+                }
+            }
+            if (tickEnd == cursor) {
+                break;
+            }
+
+            TickLinkedList.List storage list =
+                increasing ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+
+            bool exists;
+            int24 tick;
+            (exists, tick) = list.searchFirstAfter(cursor);
+            if (!exists || (increasing ? tick > tickEnd : tick < tickEnd)) {
+                cursor = tickEnd;
+                continue;
             }
 
             uint256[] memory tokenIdsAtTick = list.tokenIds[tick];
-            int24 nextTick;
-            (exists, nextTick) = list.getNext(tick);
             list.clearTick(tick);
 
             uint256 length = tokenIdsAtTick.length;
@@ -460,15 +479,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 }
             }
 
-            tickEnd = _getTickLower(_getTick(poolId), key.tickSpacing);
-            tickEnd = increasing
-                ? (oracleMaxEndTick < tickEnd ? oracleMaxEndTick : tickEnd)
-                : (oracleMaxEndTick > tickEnd ? oracleMaxEndTick : tickEnd);
-
-            tick = nextTick;
+            cursor = tick;
+            unchecked {
+                ++processedTickBatches;
+            }
         }
 
-        tickLowerLasts[poolId] = tickEnd;
+        // Persist the last processed cursor even when the batch cap is hit. Unprocessed trigger ticks remain in the
+        // linked lists and may be consumed by a later external swap if the subsequent price path makes them eligible.
+        tickLowerLasts[poolId] = cursor;
         return (this.afterSwap.selector, 0);
     }
 
