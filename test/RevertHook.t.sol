@@ -368,6 +368,168 @@ contract RevertHookTest is BaseTest {
         assertEq(multiplier1After, multiplier1Before, "sqrtPriceMultiplier1 should copy on remint");
     }
 
+    function testSingleSwap_CascadesAcrossMultipleTriggerTicks() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        uint128 extraLiquidity = 8e18;
+        (uint256 token4Id,) = positionManager.mint(
+            poolKey,
+            tickLower2,
+            tickUpper2,
+            extraLiquidity,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        int24 spacing = poolKey.tickSpacing;
+        RevertHookState.PositionConfig memory rangeConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+        RevertHookState.PositionConfig memory lendConfig =
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max);
+        RevertHookState.PositionConfig memory exitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - 2 * spacing,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        hook.setPositionConfig(token2Id, rangeConfig);
+        hook.setPositionConfig(token3Id, lendConfig);
+        hook.setPositionConfig(token4Id, exitConfig);
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        bytes32 autoRangeTopic = keccak256("AutoRange(uint256,uint256,address,address,uint256,uint256)");
+        bytes32 autoLendDepositTopic = keccak256("AutoLendDeposit(uint256,address,uint256,uint256)");
+        bytes32 autoExitTopic = keccak256("AutoExit(uint256,address,address,uint256,uint256)");
+        bytes32 hookActionFailedTopic = keccak256("HookActionFailed(uint256,uint8)");
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 35e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        assertLe(currentTick, exitConfig.autoExitTickLower, "Single swap should cross all configured lower triggers");
+
+        uint256 remintedTokenId = nextTokenIdBefore;
+        uint256 remintedTokenId2 = nextTokenIdBefore + 1;
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 2, "Single swap should chain into a second auto-range remint");
+
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "Original AUTO_RANGE token should be emptied");
+        assertEq(positionManager.getPositionLiquidity(remintedTokenId), 0, "First AUTO_RANGE remint should be consumed again in the same swap");
+        assertGt(positionManager.getPositionLiquidity(remintedTokenId2), 0, "Final AUTO_RANGE remint should hold the active liquidity");
+        _assertPositionConfigEq(remintedTokenId2, rangeConfig);
+        (uint8 intermediateRangeModeFlags,,,,,,,,,,) = hook.positionConfigs(remintedTokenId);
+        assertEq(intermediateRangeModeFlags, PositionModeFlags.MODE_NONE, "Intermediate remint should be disabled after chaining");
+
+        (, PositionInfo finalRangePosInfo) = positionManager.getPoolAndPositionInfo(remintedTokenId2);
+        assertTrue(
+            currentTick >= finalRangePosInfo.tickLower() && currentTick <= finalRangePosInfo.tickUpper(),
+            "Current tick should end inside the final reminted range"
+        );
+
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "AUTO_LEND should remove LP liquidity");
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendToken, Currency.unwrap(currency0), "Lower-side AUTO_LEND should park token0");
+        assertGt(autoLendShares, 0, "AUTO_LEND should mint lending shares");
+
+        assertEq(positionManager.getPositionLiquidity(token4Id), 0, "AUTO_EXIT should remove all liquidity");
+        (uint8 exitedModeFlags,,,,,,,,,,) = hook.positionConfigs(token4Id);
+        assertEq(exitedModeFlags, PositionModeFlags.MODE_NONE, "AUTO_EXIT token should be disabled");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32[4] memory expectedTopics = [autoRangeTopic, autoLendDepositTopic, autoExitTopic, autoRangeTopic];
+        uint256[4] memory expectedTokenIds = [token2Id, token3Id, token4Id, remintedTokenId];
+        uint256 matchedEvents;
+        uint256 hookActionFailedCount;
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter != address(hook) || logs[i].topics.length == 0) {
+                continue;
+            }
+            bytes32 topic0 = logs[i].topics[0];
+            if (topic0 == hookActionFailedTopic) {
+                ++hookActionFailedCount;
+                continue;
+            }
+            if (
+                topic0 != autoRangeTopic
+                    && topic0 != autoLendDepositTopic
+                    && topic0 != autoExitTopic
+            ) {
+                continue;
+            }
+
+            assertLt(matchedEvents, 4, "Only the expected chained actions should fire during the swap");
+            assertEq(topic0, expectedTopics[matchedEvents], "Actions should execute in crossed-tick order");
+            assertEq(uint256(logs[i].topics[1]), expectedTokenIds[matchedEvents], "Unexpected token executed for action");
+            unchecked {
+                ++matchedEvents;
+            }
+        }
+
+        assertEq(matchedEvents, 4, "Single swap should execute the full chained action sequence");
+        assertEq(hookActionFailedCount, 0, "Chained action execution should not emit HookActionFailed");
+        _verifyNoLeftoverBalances("single-swap action cascade");
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1e16,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory followupLogs = vm.getRecordedLogs();
+        assertFalse(
+            _sawIndexedTokenEvent(followupLogs, autoRangeTopic, token2Id),
+            "Consumed AUTO_RANGE trigger must not fire twice for the original token"
+        );
+        assertFalse(
+            _sawIndexedTokenEvent(followupLogs, autoLendDepositTopic, token3Id),
+            "Consumed AUTO_LEND deposit trigger must not fire twice"
+        );
+        assertFalse(
+            _sawIndexedTokenEvent(followupLogs, autoExitTopic, token4Id),
+            "Consumed AUTO_EXIT trigger must not fire twice"
+        );
+        assertFalse(
+            _sawIndexedTokenEvent(followupLogs, autoRangeTopic, remintedTokenId),
+            "Consumed intermediate AUTO_RANGE remint must not fire twice"
+        );
+    }
+
     function testAutoExit_MultiplePositionsOnSameTriggerExecuteOnceEach() public {
         uint128 extraLiquidity = 10e18;
         (uint256 token4Id,) = positionManager.mint(
