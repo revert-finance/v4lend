@@ -186,9 +186,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
 
         // Send leftover tokens and copy config to new position
         _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
-        generalConfigs[newTokenId] = generalConfigs[tokenId];
-        _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
-        _disablePosition(tokenId);
+        _migrateRemintedPosition(tokenId, newTokenId);
 
         emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
     }

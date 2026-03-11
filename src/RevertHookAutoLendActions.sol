@@ -14,6 +14,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
+import {AutoLendReentry} from "./lib/AutoLendReentry.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
@@ -86,7 +87,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
             state.autoLendVault = address(lendVault);
 
             _sendLeftoverTokens(tokenId, currency0, currency1, owner);
-            _removeOppositeAutoLendDepositTrigger(tokenId, poolKey, positionInfo, isUpperTrigger);
+            _removeAutoLendDepositTrigger(tokenId, poolKey, positionInfo, !isUpperTrigger);
             _addPositionTriggers(tokenId, poolKey);
 
             emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
@@ -135,39 +136,40 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _approveToken(Currency.wrap(tokenAddress), redeemedAmount);
 
+        bool isToken0Lent = tokenAddress == Currency.unwrap(poolKey.currency0);
         uint256 newTokenId;
-        int24 baseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
+        (bool addToExisting, int24 newTickLower, int24 newTickUpper) = AutoLendReentry.planOneSidedReentry(
+            _getCurrentTick(poolKey.toId()),
+            poolKey.tickSpacing,
+            positionInfo.tickLower(),
+            positionInfo.tickUpper(),
+            isToken0Lent
+        );
 
-        if (tokenAddress == Currency.unwrap(poolKey.currency0)) {
-            if (baseTick < positionInfo.tickLower()) {
-                _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(redeemedAmount), 0);
-            } else {
-                int24 tickWidth = positionInfo.tickUpper() - positionInfo.tickLower();
-                (newTokenId,,) = _mintPosition(
-                    poolKey,
-                    baseTick + poolKey.tickSpacing,
-                    baseTick + poolKey.tickSpacing + tickWidth,
-                    uint128(redeemedAmount),
-                    0,
-                    owner
-                );
-            }
+        if (addToExisting) {
+            _increaseLiquidity(
+                tokenId,
+                poolKey,
+                positionInfo,
+                isToken0Lent ? uint128(redeemedAmount) : 0,
+                isToken0Lent ? 0 : uint128(redeemedAmount)
+            );
         } else {
-            if (baseTick >= positionInfo.tickUpper()) {
-                _increaseLiquidity(tokenId, poolKey, positionInfo, 0, uint128(redeemedAmount));
-            } else {
-                int24 tickWidth = positionInfo.tickUpper() - positionInfo.tickLower();
-                (newTokenId,,) = _mintPosition(poolKey, baseTick - tickWidth, baseTick, 0, uint128(redeemedAmount), owner);
-            }
+            (newTokenId,,) = _mintPosition(
+                poolKey,
+                newTickLower,
+                newTickUpper,
+                isToken0Lent ? uint128(redeemedAmount) : 0,
+                isToken0Lent ? 0 : uint128(redeemedAmount),
+                owner
+            );
         }
 
         _resetAutoLendState(tokenId);
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, realOwner);
 
         if (newTokenId > 0) {
-            generalConfigs[newTokenId] = generalConfigs[tokenId];
-            _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
-            _disablePosition(tokenId);
+            _migrateRemintedPosition(tokenId, newTokenId);
         } else if (positionManager.getPositionLiquidity(tokenId) > liquidityBefore) {
             _addPositionTriggers(tokenId, poolKey);
         } else {
@@ -230,34 +232,18 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         if (positionManager.getPositionLiquidity(tokenId) == 0) {
             _disablePosition(tokenId);
         } else {
-            _removeTriggeredAutoLendDepositTrigger(tokenId, poolKey, positionInfo, isUpperTrigger);
+            _removeAutoLendDepositTrigger(tokenId, poolKey, positionInfo, isUpperTrigger);
         }
     }
 
-    function _removeOppositeAutoLendDepositTrigger(
+    function _removeAutoLendDepositTrigger(
         uint256 tokenId,
         PoolKey memory poolKey,
         PositionInfo positionInfo,
-        bool isUpperTrigger
+        bool removeUpperTrigger
     ) internal {
         int24 tolerance = positionConfigs[tokenId].autoLendToleranceTick;
-        if (isUpperTrigger) {
-            lowerTriggerAfterSwap[poolKey.toId()].remove(
-                positionInfo.tickLower() - tolerance * 2 - poolKey.tickSpacing, tokenId
-            );
-        } else {
-            upperTriggerAfterSwap[poolKey.toId()].remove(positionInfo.tickUpper() + tolerance * 2, tokenId);
-        }
-    }
-
-    function _removeTriggeredAutoLendDepositTrigger(
-        uint256 tokenId,
-        PoolKey memory poolKey,
-        PositionInfo positionInfo,
-        bool isUpperTrigger
-    ) internal {
-        int24 tolerance = positionConfigs[tokenId].autoLendToleranceTick;
-        if (isUpperTrigger) {
+        if (removeUpperTrigger) {
             upperTriggerAfterSwap[poolKey.toId()].remove(positionInfo.tickUpper() + tolerance * 2, tokenId);
         } else {
             lowerTriggerAfterSwap[poolKey.toId()].remove(

@@ -16,6 +16,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {AutoLendReentry} from "../lib/AutoLendReentry.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoLend
@@ -255,14 +256,9 @@ contract AutoLend is Automator {
 
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
-        int24 tickWidth = tickUpper - tickLower;
         int24 tickSpacing = poolKey.tickSpacing;
 
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
-        int24 baseTick = (currentTick / tickSpacing) * tickSpacing;
-        if (currentTick < 0 && currentTick % tickSpacing != 0) {
-            baseTick -= tickSpacing;
-        }
 
         // Check withdrawal trigger zones
         bool isToken0Lent = state.lentToken == Currency.unwrap(poolKey.currency0);
@@ -306,71 +302,45 @@ contract AutoLend is Automator {
         }
 
         uint256 newTokenId;
+        (bool addToExisting, int24 newLower, int24 newUpper) = AutoLendReentry.planOneSidedReentry(
+            currentTick,
+            tickSpacing,
+            tickLower,
+            tickUpper,
+            isToken0Lent
+        );
 
-        if (isToken0Lent) {
-            if (baseTick < tickLower) {
-                _handleApproval(permit2, poolKey.currency0, redeemedAmount);
-                _increaseLiquidityOnExisting(
-                    params.tokenId,
-                    poolKey,
-                    positionInfo,
-                    redeemedAmount,
-                    0,
-                    params.deadline,
-                    params.hookData
-                );
-            } else {
-                int24 newLower = baseTick + tickSpacing;
-                int24 newUpper = baseTick + tickSpacing + tickWidth;
-                if (newUpper > TickMath.MAX_TICK) {
-                    newUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
-                }
-                if (newLower >= newUpper) {
-                    revert InvalidConfig();
-                }
-                _handleApproval(permit2, poolKey.currency0, redeemedAmount);
-                newTokenId = _mintOneSidedPosition(
-                    poolKey,
-                    newLower,
-                    newUpper,
-                    redeemedAmount,
-                    0,
-                    params.deadline,
-                    params.hookData
-                );
-            }
+        if (addToExisting) {
+            _handleApproval(permit2, isToken0Lent ? poolKey.currency0 : poolKey.currency1, redeemedAmount);
+            _increaseLiquidityOnExisting(
+                params.tokenId,
+                poolKey,
+                positionInfo,
+                isToken0Lent ? redeemedAmount : 0,
+                isToken0Lent ? 0 : redeemedAmount,
+                params.deadline,
+                params.hookData
+            );
         } else {
-            if (baseTick >= tickUpper) {
-                _handleApproval(permit2, poolKey.currency1, redeemedAmount);
-                _increaseLiquidityOnExisting(
-                    params.tokenId,
-                    poolKey,
-                    positionInfo,
-                    0,
-                    redeemedAmount,
-                    params.deadline,
-                    params.hookData
-                );
-            } else {
-                int24 newLower = baseTick - tickWidth;
-                int24 newUpper = baseTick;
-                if (newLower < TickMath.MIN_TICK) {
-                    newLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
-                }
-                if (newLower >= newUpper) {
-                    revert InvalidConfig();
-                }
-                _handleApproval(permit2, poolKey.currency1, redeemedAmount);
-                newTokenId = _mintOneSidedPosition(
-                    poolKey,
-                    newLower,
-                    newUpper,
-                    0,
-                    redeemedAmount,
-                    params.deadline,
-                    params.hookData
-                );
+            if (newUpper > TickMath.MAX_TICK) {
+                newUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
             }
+            if (newLower < TickMath.MIN_TICK) {
+                newLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
+            }
+            if (newLower >= newUpper) {
+                revert InvalidConfig();
+            }
+            _handleApproval(permit2, isToken0Lent ? poolKey.currency0 : poolKey.currency1, redeemedAmount);
+            newTokenId = _mintOneSidedPosition(
+                poolKey,
+                newLower,
+                newUpper,
+                isToken0Lent ? redeemedAmount : 0,
+                isToken0Lent ? 0 : redeemedAmount,
+                params.deadline,
+                params.hookData
+            );
         }
 
         // Clear lend state and release vault reference

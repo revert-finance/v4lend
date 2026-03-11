@@ -153,6 +153,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Sets the general swap configuration for a position
     /// @dev Configures which pool to use for rebalancing swaps and max price impact limits.
+    ///      Hook-initiated swaps may use the same hooked pool or a pool that does not use this hook.
+    ///      Another pool using this same hook is rejected to keep afterSwap tick caching scoped to one hooked pool.
     ///      Only callable by position owner (real owner if position is in vault).
     /// @param tokenId The position token ID to configure
     /// @param swapPoolFee Fee tier of the pool to use for swaps
@@ -174,6 +176,12 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         if (swapPoolTickSpacing % poolKey.tickSpacing != 0) {
+            revert InvalidConfig();
+        }
+        if (
+            address(swapPoolHooks) == address(this)
+                && (swapPoolFee != poolKey.fee || swapPoolTickSpacing != poolKey.tickSpacing)
+        ) {
             revert InvalidConfig();
         }
         if (maxPriceImpactBps0 > 10000 || maxPriceImpactBps1 > 10000) {
@@ -399,17 +407,13 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         override
         returns (bytes4, int128)
     {
+        PoolId poolId = key.toId();
         if (caller == address(this)) {
             return (this.afterSwap.selector, 0);
         }
 
-        PoolId poolId = key.toId();
         int24 cursor = tickLowerLasts[poolId];
-        int24 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
-
-        if (cursor == liveTick) {
-            return (this.afterSwap.selector, 0);
-        }
+        int24 liveTick;
 
         bool hasCachedUpperOracleMaxEndTick;
         bool hasCachedLowerOracleMaxEndTick;
@@ -460,13 +464,13 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             list.clearTick(tick);
 
             uint256 length = tokenIdsAtTick.length;
+            int24 previousLiveTick = liveTick;
             for (uint256 i; i < length;) {
-                uint256 tokenId = tokenIdsAtTick[i];
-                PositionConfig storage config = positionConfigs[tokenId];
+                PositionConfig storage config = positionConfigs[tokenIdsAtTick[i]];
                 _dispatchAutomationAction(
                     key,
                     poolId,
-                    tokenId,
+                    tokenIdsAtTick[i],
                     config.modeFlags,
                     increasing,
                     tick,
@@ -474,6 +478,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                     config.autoExitTickLower,
                     config.autoExitTickUpper
                 );
+
+                liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
+                if (_hasDirectionReversed(previousLiveTick, liveTick, increasing)) {
+                    if (i + 1 < length) {
+                        _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i + 1);
+                    }
+                    break;
+                }
+                previousLiveTick = liveTick;
                 unchecked {
                     ++i;
                 }
@@ -579,50 +592,29 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
-        if (vaults[owner]) {
-            try IVault(owner).transform(
+        if (
+            !_executePositionAction(
+                owner,
                 tokenId,
-                address(this),
-                abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
-            ) {} catch {
-                emit HookActionFailed(tokenId, Mode.AUTO_EXIT);
-            }
-        } else {
-            if (
-                !_tryDelegatecallPositionActions(
-                    abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
-                )
-            ) {
-                emit HookActionFailed(tokenId, Mode.AUTO_EXIT);
-            }
+                abi.encodeCall(this.autoExit, (poolKey, poolId, tokenId, isUpperTrigger)),
+                abi.encodeCall(hookFunctionsPositionActions.autoExit, (poolKey, poolId, tokenId, isUpperTrigger))
+            )
+        ) {
+            _emitActionFailed(tokenId, Mode.AUTO_EXIT);
         }
     }
 
     function _handleAutoLend(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
-        bool ownedByVault = vaults[_getOwner(tokenId, false)];
-        if (ownedByVault) {
+        if (vaults[_getOwner(tokenId, false)]) {
             return;
         }
 
         uint256 shares = positionStates[tokenId].autoLendShares;
-        if (shares > 0) {
-            if (
-                !_tryDelegatecall(
-                    address(hookFunctionsAutoLendActions),
-                    abi.encodeCall(hookFunctionsAutoLendActions.autoLendWithdraw, (poolKey, tokenId, shares))
-                )
-            ) {
-                emit HookActionFailed(tokenId, Mode.AUTO_LEND);
-            }
-        } else {
-            if (
-                !_tryDelegatecall(
-                    address(hookFunctionsAutoLendActions),
-                    abi.encodeCall(hookFunctionsAutoLendActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger))
-                )
-            ) {
-                emit HookActionFailed(tokenId, Mode.AUTO_LEND);
-            }
+        bytes memory data = shares > 0
+            ? abi.encodeCall(hookFunctionsAutoLendActions.autoLendWithdraw, (poolKey, tokenId, shares))
+            : abi.encodeCall(hookFunctionsAutoLendActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger));
+        if (!_tryDelegatecall(address(hookFunctionsAutoLendActions), data)) {
+            _emitActionFailed(tokenId, Mode.AUTO_LEND);
         }
     }
 
@@ -630,19 +622,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
-        if (vaults[owner]) {
-            try IVault(owner).transform(tokenId, address(this), abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId)))
-            {} catch {
-                emit HookActionFailed(tokenId, Mode.AUTO_RANGE);
-            }
-        } else {
-            if (
-                !_tryDelegatecallPositionActions(
-                    abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId))
-                )
-            ) {
-                emit HookActionFailed(tokenId, Mode.AUTO_RANGE);
-            }
+        if (
+            !_executePositionAction(
+                owner,
+                tokenId,
+                abi.encodeCall(this.autoRange, (poolKey, poolId, tokenId)),
+                abi.encodeCall(hookFunctionsPositionActions.autoRange, (poolKey, poolId, tokenId))
+            )
+        ) {
+            _emitActionFailed(tokenId, Mode.AUTO_RANGE);
         }
     }
 
@@ -657,7 +645,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             address(this),
             abi.encodeCall(this.autoLeverage, (poolKey, poolId, tokenId, isUpperTrigger))
         ) {} catch {
-            emit HookActionFailed(tokenId, Mode.AUTO_LEVERAGE);
+            _emitActionFailed(tokenId, Mode.AUTO_LEVERAGE);
         }
     }
 
@@ -1056,8 +1044,26 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 abi.encodeCall(hookFunctionsPositionActions.executeAutoCompound, (tokenId, caller))
             )
         ) {
-            emit HookActionFailed(tokenId, Mode.AUTO_COMPOUND);
+            _emitActionFailed(tokenId, Mode.AUTO_COMPOUND);
         }
+    }
+
+    function _emitActionFailed(uint256 tokenId, Mode mode) internal {
+        emit HookActionFailed(tokenId, mode);
+    }
+
+    function _executePositionAction(address owner, uint256 tokenId, bytes memory transformData, bytes memory delegateData)
+        internal
+        returns (bool)
+    {
+        if (vaults[owner]) {
+            try IVault(owner).transform(tokenId, address(this), transformData) {
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        return _tryDelegatecallPositionActions(delegateData);
     }
 
     function _getOracleMaxEndTick(PoolKey memory poolKey, bool up) internal view returns (int24 maxEndTick) {
@@ -1069,6 +1075,29 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             maxEndTick = _getTickLower(oracleTick + maxTicksFromOracle, poolKey.tickSpacing);
         } else {
             maxEndTick = _getTickLower(oracleTick - maxTicksFromOracle, poolKey.tickSpacing);
+        }
+    }
+
+    function _hasDirectionReversed(int24 previousLiveTick, int24 currentLiveTick, bool increasing)
+        internal
+        pure
+        returns (bool)
+    {
+        return increasing ? currentLiveTick < previousLiveTick : currentLiveTick > previousLiveTick;
+    }
+
+    function _requeueTokenIdsAtTick(
+        TickLinkedList.List storage list,
+        int24 tick,
+        uint256[] memory tokenIds,
+        uint256 startIndex
+    ) internal {
+        uint256 length = tokenIds.length;
+        for (uint256 i = startIndex; i < length;) {
+            list.insert(tick, tokenIds[i]);
+            unchecked {
+                ++i;
+            }
         }
     }
 

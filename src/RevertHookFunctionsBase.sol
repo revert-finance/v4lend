@@ -90,6 +90,12 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         if (config.swapPoolFee == 0 || config.swapPoolTickSpacing == 0) {
             return poolKey;
         }
+        if (
+            address(config.swapPoolHooks) == address(this)
+                && (config.swapPoolFee != poolKey.fee || config.swapPoolTickSpacing != poolKey.tickSpacing)
+        ) {
+            revert InvalidConfig();
+        }
         return PoolKey({
             currency0: poolKey.currency0,
             currency1: poolKey.currency1,
@@ -114,6 +120,13 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         }
         _addPositionTriggers(newTokenId, poolKey);
         emit SetPositionConfig(newTokenId, positionConfigs[newTokenId]);
+    }
+
+    /// @notice Migrates configuration from an old position to its reminted replacement
+    function _migrateRemintedPosition(uint256 tokenId, uint256 newTokenId) internal {
+        generalConfigs[newTokenId] = generalConfigs[tokenId];
+        _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
+        _disablePosition(tokenId);
     }
 
     // ==================== Swap Helpers ====================
