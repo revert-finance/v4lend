@@ -1217,6 +1217,108 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
     }
 
+    function testAfterSwap_ReversedSharedTickDefersRemainingPositions() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth
+
+        int24 spacing = hookedPoolKey.tickSpacing;
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        (, int24 initialTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 stagedBaseTick = _getTickLower(initialTick, spacing) - 10 * spacing;
+        _moveTickDownUntil(hookedPoolKey, stagedBaseTick, 25e6, 80);
+
+        uint256 leverageTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(leverageTokenId);
+        _configurePositionForAutoLeverage(leverageTokenId, 1500);
+
+        (,,,,,,, int24 leverageBaseTick) = revertHook.positionStates(leverageTokenId);
+        int24 sharedLowerTrigger =
+            leverageBaseTick - int24(revertHook.LEVERAGE_TICK_OFFSET_MULTIPLIER()) * spacing;
+
+        uint256 lowerExitTokenId1 = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        uint256 lowerExitTokenId2 = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+
+        vm.startPrank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(revertHook), true);
+        RevertHookState.PositionConfig memory sharedLowerExitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: sharedLowerTrigger,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+        revertHook.setPositionConfig(lowerExitTokenId1, sharedLowerExitConfig);
+        revertHook.setPositionConfig(lowerExitTokenId2, sharedLowerExitConfig);
+        vm.stopPrank();
+
+        uint128 lowerExitLiquidity1Before = positionManager.getPositionLiquidity(lowerExitTokenId1);
+        uint128 lowerExitLiquidity2Before = positionManager.getPositionLiquidity(lowerExitTokenId2);
+
+        vm.recordLogs();
+        _swapExactInputSingle(hookedPoolKey, true, 700e6, 0);
+
+        Vm.Log[] memory firstLogs = vm.getRecordedLogs();
+        (, int24 tickAfterFirstSwap,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+
+        assertTrue(
+            _sawIndexedHookEvent(firstLogs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), leverageTokenId),
+            "Shared lower tick should execute AUTO_LEVERAGE first"
+        );
+        assertFalse(
+            _sawIndexedHookEvent(firstLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId1),
+            "First remaining shared-tick AUTO_EXIT should be deferred after reversal"
+        );
+        assertFalse(
+            _sawIndexedHookEvent(firstLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId2),
+            "Second remaining shared-tick AUTO_EXIT should be deferred after reversal"
+        );
+
+        assertEq(
+            positionManager.getPositionLiquidity(lowerExitTokenId1),
+            lowerExitLiquidity1Before,
+            "Deferred shared-tick exit should keep its liquidity"
+        );
+        assertEq(
+            positionManager.getPositionLiquidity(lowerExitTokenId2),
+            lowerExitLiquidity2Before,
+            "Deferred shared-tick exit should keep its liquidity"
+        );
+        (uint8 lowerModeFlags1,,,,,,,,,,) = revertHook.positionConfigs(lowerExitTokenId1);
+        (uint8 lowerModeFlags2,,,,,,,,,,) = revertHook.positionConfigs(lowerExitTokenId2);
+        assertEq(lowerModeFlags1, PositionModeFlags.MODE_AUTO_EXIT, "Deferred shared-tick exit should remain armed");
+        assertEq(lowerModeFlags2, PositionModeFlags.MODE_AUTO_EXIT, "Deferred shared-tick exit should remain armed");
+        assertGt(tickAfterFirstSwap, sharedLowerTrigger, "First action should move price back above the shared trigger tick");
+
+        vm.recordLogs();
+        _moveTickDownUntil(hookedPoolKey, sharedLowerTrigger - spacing, 25e6, 80);
+
+        Vm.Log[] memory secondLogs = vm.getRecordedLogs();
+        assertTrue(
+            _sawIndexedHookEvent(secondLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId1),
+            "Deferred shared-tick exit should execute after a later downward recross"
+        );
+        assertTrue(
+            _sawIndexedHookEvent(secondLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId2),
+            "Both deferred shared-tick exits should execute on the later recross"
+        );
+        assertEq(positionManager.getPositionLiquidity(lowerExitTokenId1), 0, "First deferred shared-tick exit should drain");
+        assertEq(positionManager.getPositionLiquidity(lowerExitTokenId2), 0, "Second deferred shared-tick exit should drain");
+        _assertHookHasNoTokenDust();
+    }
+
     function testAutoLeverageReconfiguration_ReplacesOldTriggerNodes() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         _createPositionInHookedPool(hookedPoolKey);

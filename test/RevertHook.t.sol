@@ -1938,6 +1938,14 @@ contract RevertHookTest is BaseTest {
         hook.setAutoLendVault(address(0), vault0);
     }
 
+    function testSetGeneralConfig_RejectsAnotherPoolUsingSameHook() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setGeneralConfig(token3Id, 500, 60, IHooks(hook), 0, 0);
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setGeneralConfig(token3Id, 3000, 120, IHooks(hook), 0, 0);
+    }
+
     function testSetPositionConfig_AutoLendRequiresVaultsForBothPoolTokens() public {
         hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(0)));
 

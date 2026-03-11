@@ -472,6 +472,118 @@ contract AutoLeverageTest is AutomatorTestBase {
         autoLeverage.execute(params);
     }
 
+    function test_ExecuteAtExactLowerThresholdBoundary() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, collateralValue * 40 / 100);
+
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 5000,
+            rebalanceThresholdBps: 1000,
+            maxSwapSlippageBps: 10000,
+            maxRewardX64: 0
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: true,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertGt(debtAfter, debtBefore, "exact lower threshold boundary should still rebalance up");
+    }
+
+    function test_ExecuteAtExactUpperThresholdBoundary() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, collateralValue * 70 / 100);
+
+        (uint256 currentDebt,, uint256 currentCollateralValue,,) = vault.loanInfo(tokenId);
+        uint16 thresholdBps = uint16(currentDebt * 10_000 / currentCollateralValue / 2);
+        uint16 targetBps = uint16(currentDebt * 10_000 / currentCollateralValue) - thresholdBps;
+
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: targetBps,
+            rebalanceThresholdBps: thresholdBps,
+            maxSwapSlippageBps: 10000,
+            maxRewardX64: 0
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: false,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertLt(debtAfter, debtBefore, "exact upper threshold boundary should still rebalance down");
+    }
+
     // --- Reward Retention Test ---
 
     function test_RewardStaysInContract() public {

@@ -46,6 +46,21 @@ contract AutoLendTest is AutomatorTestBase {
         });
     }
 
+    function _configWithWithdrawZones(int24 lowerTickZoneWithdraw, int24 upperTickZoneWithdraw)
+        internal
+        pure
+        returns (AutoLend.PositionConfig memory)
+    {
+        return AutoLend.PositionConfig({
+            isActive: true,
+            lowerTickZone: 0,
+            upperTickZone: 0,
+            lowerTickZoneWithdraw: lowerTickZoneWithdraw,
+            upperTickZoneWithdraw: upperTickZoneWithdraw,
+            maxRewardX64: 0
+        });
+    }
+
     function _configureAndApprove(uint256 tokenId, AutoLend.PositionConfig memory config) internal {
         vm.prank(WHALE_ACCOUNT);
         autoLend.configToken(tokenId, config);
@@ -70,6 +85,52 @@ contract AutoLendTest is AutomatorTestBase {
             }
             _swapExactInputSingleETH(poolKey, false, 500e6, 0);
         }
+    }
+
+    function _pushTickBelow(PoolKey memory poolKey, int24 targetTick) internal {
+        for (uint256 i; i < 10; ++i) {
+            if (_getCurrentTick(poolKey) < targetTick) {
+                return;
+            }
+            _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        }
+    }
+
+    function _pushTickIntoUpperWithdrawWindow(PoolKey memory poolKey, int24 tickUpper) internal {
+        int24 currentTick = _getCurrentTick(poolKey);
+        for (uint256 i; i < 20 && currentTick >= tickUpper + 5 * poolKey.tickSpacing; ++i) {
+            _swapExactInputSingle(poolKey, true, 500e6, 0);
+            currentTick = _getCurrentTick(poolKey);
+        }
+
+        for (uint256 i; i < 120 && (currentTick < tickUpper || currentTick >= tickUpper + poolKey.tickSpacing); ++i) {
+            if (currentTick >= tickUpper + poolKey.tickSpacing) {
+                _swapExactInputSingle(poolKey, true, 10e6, 0);
+            } else {
+                _swapExactInputSingle(poolKey, false, 1e15, 0);
+            }
+            currentTick = _getCurrentTick(poolKey);
+        }
+    }
+
+    function _depositParams(uint256 tokenId) internal view returns (AutoLend.DepositParams memory) {
+        return AutoLend.DepositParams({
+            tokenId: tokenId,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+    }
+
+    function _withdrawParams(uint256 tokenId) internal view returns (AutoLend.WithdrawParams memory) {
+        return AutoLend.WithdrawParams({
+            tokenId: tokenId,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
     }
 
     function test_RevertWhenNonOperatorCallsDeposit() public {
@@ -221,6 +282,129 @@ contract AutoLendTest is AutomatorTestBase {
         (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
         assertEq(sharesAfter, 0, "shares should be cleared");
         assertEq(address(autoLend).balance, 0, "no native ETH should remain in contract");
+    }
+
+    function test_WithdrawToken0LentAddsLiquidityBackToExistingPosition() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _configWithWithdrawZones(10000, 10000));
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _pushTickBelow(poolKey, posInfo.tickLower());
+
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+
+        (, uint256 shares,,) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "deposit should create vault shares");
+
+        uint256 nextTokenBefore = positionManager.nextTokenId();
+
+        vm.prank(operator);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        assertEq(positionManager.nextTokenId(), nextTokenBefore, "withdraw should reuse the existing position");
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "shares should be cleared");
+        assertGt(positionManager.getPositionLiquidity(tokenId), 0, "existing position should regain liquidity");
+    }
+
+    function test_WithdrawToken0LentMintsShiftedPositionWhenPriceRecovers() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _configWithWithdrawZones(0, 10000));
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _pushTickBelow(poolKey, posInfo.tickLower());
+
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+
+        _pushTickToOrAbove(poolKey, posInfo.tickLower());
+
+        uint256 nextTokenBefore = positionManager.nextTokenId();
+
+        vm.prank(operator);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        uint256 nextTokenAfter = positionManager.nextTokenId();
+        assertGt(nextTokenAfter, nextTokenBefore, "withdraw should mint a shifted replacement");
+
+        uint256 newTokenId = nextTokenAfter - 1;
+        assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "replacement position should have liquidity");
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT, "owner should receive the replacement");
+        (bool isActiveOld,,,,,) = autoLend.positionConfigs(tokenId);
+        assertFalse(isActiveOld, "old config should be cleared after remint");
+    }
+
+    function test_WithdrawToken1LentAddsLiquidityBackToExistingPosition() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _configWithWithdrawZones(10000, 10000));
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _pushTickToOrAbove(poolKey, posInfo.tickUpper());
+
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+
+        (, uint256 shares,,) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "deposit should create vault shares");
+
+        _pushTickIntoUpperWithdrawWindow(poolKey, posInfo.tickUpper());
+        int24 currentTick = _getCurrentTick(poolKey);
+        assertGe(currentTick, posInfo.tickUpper(), "price should stay above the original range for add-to-existing");
+        assertLt(
+            currentTick,
+            posInfo.tickUpper() + poolKey.tickSpacing,
+            "price should return close enough for token1 reentry on the existing range"
+        );
+
+        uint256 nextTokenBefore = positionManager.nextTokenId();
+
+        vm.prank(operator);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        assertEq(positionManager.nextTokenId(), nextTokenBefore, "withdraw should reuse the existing position");
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "shares should be cleared");
+        assertGt(positionManager.getPositionLiquidity(tokenId), 0, "existing position should regain liquidity");
+    }
+
+    function test_WithdrawToken1LentMintsShiftedPositionWhenPriceReturnsBelowUpper() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _configWithWithdrawZones(10000, 0));
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _pushTickToOrAbove(poolKey, posInfo.tickUpper());
+
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+
+        _pushTickBelow(poolKey, posInfo.tickUpper());
+
+        uint256 nextTokenBefore = positionManager.nextTokenId();
+
+        vm.prank(operator);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        uint256 nextTokenAfter = positionManager.nextTokenId();
+        assertGt(nextTokenAfter, nextTokenBefore, "withdraw should mint a shifted replacement");
+
+        uint256 newTokenId = nextTokenAfter - 1;
+        assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "replacement position should have liquidity");
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT, "owner should receive the replacement");
+        (bool isActiveOld,,,,,) = autoLend.positionConfigs(tokenId);
+        assertFalse(isActiveOld, "old config should be cleared after remint");
     }
 
     function test_DepositDoesNotChargePrincipalWhenNoLPFees() public {
