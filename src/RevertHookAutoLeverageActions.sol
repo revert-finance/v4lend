@@ -10,6 +10,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
+import {AutoLeverageLib} from "./lib/AutoLeverageLib.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
 /// @title RevertHookAutoLeverageActions
@@ -38,7 +39,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
 
         uint16 targetRatioBps = positionConfigs[tokenId].autoLeverageTargetBps;
-        uint256 currentRatio = collateralValue > 0 ? currentDebt * 10000 / collateralValue : 0;
+        uint256 currentRatio = AutoLeverageLib.currentRatio(currentDebt, collateralValue);
         bool success = true;
 
         // Adjust leverage based on current vs target ratio
@@ -72,13 +73,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         uint256 collateralValue,
         uint16 targetRatioBps
     ) internal returns (bool) {
-        if (currentDebt * 10000 >= collateralValue * targetRatioBps) return true;
-
-        uint256 denominator = 10000 - uint256(targetRatioBps);
-        if (denominator == 0) return true;
-
-        // Calculate amount to borrow to reach target ratio
-        uint256 borrowAmount = (uint256(targetRatioBps) * collateralValue - currentDebt * 10000) / denominator;
+        uint256 borrowAmount = AutoLeverageLib.borrowAmountToTarget(currentDebt, collateralValue, targetRatioBps);
         if (borrowAmount == 0) return true;
 
         // Borrow from vault
@@ -122,13 +117,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         uint256 collateralValue,
         uint16 targetRatioBps
     ) internal returns (bool) {
-        if (currentDebt * 10000 <= collateralValue * targetRatioBps) return true;
-
-        uint256 denominator = 10000 - uint256(targetRatioBps);
-        if (denominator == 0) return true;
-
-        // Calculate amount to repay to reach target ratio
-        uint256 repayAmount = (currentDebt * 10000 - uint256(targetRatioBps) * collateralValue) / denominator;
+        uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(currentDebt, collateralValue, targetRatioBps);
 
         Currency lendToken = Currency.wrap(vault.asset());
         uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
@@ -138,8 +127,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         if (positionValue == 0 || currentLiquidity == 0) return true;
 
         // Calculate liquidity to remove based on value ratio
-        uint128 liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / positionValue);
-        if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
+        uint128 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
         if (liquidityToRemove == 0) return true;
 
         // Remove partial liquidity and swap to lend token

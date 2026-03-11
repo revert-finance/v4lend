@@ -16,7 +16,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
-import {AutoLendReentry} from "../lib/AutoLendReentry.sol";
+import {AutoLendLib} from "../lib/AutoLendLib.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoLend
@@ -302,7 +302,7 @@ contract AutoLend is Automator {
         }
 
         uint256 newTokenId;
-        (bool addToExisting, int24 newLower, int24 newUpper) = AutoLendReentry.planOneSidedReentry(
+        (bool addToExisting, int24 newLower, int24 newUpper) = AutoLendLib.planOneSidedReentry(
             currentTick,
             tickSpacing,
             tickLower,

@@ -14,6 +14,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
+import {AutoRangeLib} from "./lib/AutoRangeLib.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
@@ -131,9 +132,12 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         (, PositionInfo oldPositionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Calculate new tick range based on current tick
-        int24 baseTick = _getTickLower(_getCurrentTick(poolId), poolKey.tickSpacing);
-        int24 newTickLower = baseTick + positionConfigs[tokenId].autoRangeLowerDelta;
-        int24 newTickUpper = baseTick + positionConfigs[tokenId].autoRangeUpperDelta;
+        (int24 newTickLower, int24 newTickUpper) = AutoRangeLib.plan(
+            _getCurrentTick(poolId),
+            poolKey.tickSpacing,
+            positionConfigs[tokenId].autoRangeLowerDelta,
+            positionConfigs[tokenId].autoRangeUpperDelta
+        );
 
         // Remove all liquidity from current position
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);

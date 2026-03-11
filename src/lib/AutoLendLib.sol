@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
 
-library AutoLendReentry {
+library AutoLendLib {
     function floorToSpacing(int24 tick, int24 tickSpacing) internal pure returns (int24 baseTick) {
         baseTick = (tick / tickSpacing) * tickSpacing;
         if (tick < 0 && tick % tickSpacing != 0) {

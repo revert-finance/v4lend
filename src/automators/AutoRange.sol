@@ -17,6 +17,7 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {IVault} from "../interfaces/IVault.sol";
 import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {AutoRangeLib} from "../lib/AutoRangeLib.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoRange
@@ -131,39 +132,29 @@ contract AutoRange is Automator {
 
         // Check if position is out of range enough
         if (
-            (config.lowerTickLimit == 0 || currentTick >= tickLower - int24(config.lowerTickLimit))
-                && (config.upperTickLimit == 0 || currentTick <= tickUpper + int24(config.upperTickLimit))
+            !AutoRangeLib.isReady(
+                currentTick,
+                tickLower,
+                tickUpper,
+                int24(config.lowerTickLimit),
+                int24(config.upperTickLimit)
+            )
         ) {
-            // Check if within negative limits (allows in-range adjustment)
-            if (config.lowerTickLimit >= 0 && config.upperTickLimit >= 0) {
-                revert NotReady();
-            }
-            // Negative limits allow in-range re-ranging - check those conditions
-            if (
-                config.lowerTickLimit < 0 && currentTick < tickLower - int24(config.lowerTickLimit)
-            ) {
-                // ok - below lower limit
-            } else if (
-                config.upperTickLimit < 0 && currentTick > tickUpper + int24(config.upperTickLimit)
-            ) {
-                // ok - above upper limit
-            } else {
-                revert NotReady();
-            }
+            revert NotReady();
         }
 
         // Calculate new range
-        int24 baseTick = (currentTick / tickSpacing) * tickSpacing;
-        if (currentTick < 0 && currentTick % tickSpacing != 0) {
-            baseTick -= tickSpacing;
-        }
-        int24 newTickLower = baseTick + int24(config.lowerTickDelta);
-        int24 newTickUpper = baseTick + int24(config.upperTickDelta);
+        (int24 newTickLower, int24 newTickUpper) = AutoRangeLib.plan(
+            currentTick,
+            tickSpacing,
+            int24(config.lowerTickDelta),
+            int24(config.upperTickDelta)
+        );
 
-        if (newTickLower >= newTickUpper) {
+        if (!AutoRangeLib.isValidRange(newTickLower, newTickUpper)) {
             revert InvalidConfig();
         }
-        if (newTickLower == tickLower && newTickUpper == tickUpper) {
+        if (AutoRangeLib.isSameRange(tickLower, tickUpper, newTickLower, newTickUpper)) {
             revert SameRange();
         }
 

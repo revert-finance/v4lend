@@ -15,6 +15,7 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {IVault} from "../interfaces/IVault.sol";
 import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {AutoLeverageLib} from "../lib/AutoLeverageLib.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoLeverage
@@ -109,11 +110,11 @@ contract AutoLeverage is Automator {
         (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(params.tokenId);
 
         // Check if rebalancing is needed
-        uint256 currentRatio = collateralValue > 0 ? currentDebt * 10000 / collateralValue : 0;
+        uint256 currentRatio = AutoLeverageLib.currentRatio(currentDebt, collateralValue);
         uint256 targetRatio = uint256(config.targetLeverageBps);
         uint256 threshold = uint256(config.rebalanceThresholdBps);
 
-        if (currentRatio > targetRatio - threshold && currentRatio < targetRatio + threshold) {
+        if (AutoLeverageLib.isWithinThreshold(currentRatio, targetRatio, threshold)) {
             revert NotReady();
         }
 
@@ -194,13 +195,8 @@ contract AutoLeverage is Automator {
         uint256 amount1;
 
         {
-            uint16 targetBps = config.targetLeverageBps;
-            if (currentDebt * 10000 >= collateralValue * targetBps) revert NotReady();
-
-            uint256 denominator = 10000 - uint256(targetBps);
-            if (denominator == 0) revert NotReady();
-
-            uint256 borrowAmount = (uint256(targetBps) * collateralValue - currentDebt * 10000) / denominator;
+            uint256 borrowAmount =
+                AutoLeverageLib.borrowAmountToTarget(currentDebt, collateralValue, config.targetLeverageBps);
             if (borrowAmount == 0) revert NotReady();
 
             // Snapshot balances before borrow to calculate received amounts
@@ -289,13 +285,8 @@ contract AutoLeverage is Automator {
         uint128 liquidityToRemove;
         uint256 netFeeLendValue;
         {
-            uint16 targetBps = config.targetLeverageBps;
-            if (currentDebt * 10000 <= collateralValue * targetBps) revert NotReady();
-
-            uint256 denominator = 10000 - uint256(targetBps);
-            if (denominator == 0) revert NotReady();
-
-            uint256 repayAmount = (currentDebt * 10000 - uint256(targetBps) * collateralValue) / denominator;
+            uint256 repayAmount =
+                AutoLeverageLib.repayAmountToTarget(currentDebt, collateralValue, config.targetLeverageBps);
 
             // Net fees in lend token reduce how much liquidity must be removed
             netFeeLendValue = (lendToken == token0) ? state.netFee0 : ((lendToken == token1) ? state.netFee1 : 0);
@@ -307,10 +298,7 @@ contract AutoLeverage is Automator {
 
                 // Calculate proportional liquidity to remove
                 // Use collateralValue as proxy for total position value
-                if (collateralValue > 0) {
-                    liquidityToRemove = uint128(uint256(currentLiquidity) * repayAmount / collateralValue);
-                }
-                if (liquidityToRemove > currentLiquidity) liquidityToRemove = currentLiquidity;
+                liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, collateralValue);
             }
             if (liquidityToRemove == 0 && netFeeLendValue == 0) revert NotReady();
         }

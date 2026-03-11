@@ -14,7 +14,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
-import {AutoLendReentry} from "./lib/AutoLendReentry.sol";
+import {AutoLendLib} from "./lib/AutoLendLib.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
@@ -138,7 +138,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
 
         bool isToken0Lent = tokenAddress == Currency.unwrap(poolKey.currency0);
         uint256 newTokenId;
-        (bool addToExisting, int24 newTickLower, int24 newTickUpper) = AutoLendReentry.planOneSidedReentry(
+        (bool addToExisting, int24 newTickLower, int24 newTickUpper) = AutoLendLib.planOneSidedReentry(
             _getCurrentTick(poolKey.toId()),
             poolKey.tickSpacing,
             positionInfo.tickLower(),
