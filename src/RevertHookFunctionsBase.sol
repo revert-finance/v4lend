@@ -243,9 +243,6 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         uint128 amount0Max,
         uint128 amount1Max
     ) internal returns (uint256, uint256) {
-        uint256 balance0Before = poolKey.currency0.balanceOfSelf();
-        uint256 balance1Before = poolKey.currency1.balanceOfSelf();
-
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
             sqrtPriceX96,
@@ -256,6 +253,9 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         );
 
         if (liquidity == 0) return (0, 0);
+
+        uint256 balance0Before = poolKey.currency0.balanceOfSelf();
+        uint256 balance1Before = poolKey.currency1.balanceOfSelf();
 
         bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
         bytes[] memory params = new bytes[](2);
@@ -320,10 +320,10 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
 
     /// @notice Decreases liquidity from a position (optionally only fees)
     function _decreaseLiquidity(
+        PoolKey memory poolKey,
         uint256 tokenId,
         bool feesOnly
     ) internal returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) {
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         uint128 liquidity = feesOnly ? 0 : positionManager.getPositionLiquidity(tokenId);
         currency0 = poolKey.currency0;
         currency1 = poolKey.currency1;
@@ -352,10 +352,10 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
 
     /// @notice Decreases a partial amount of liquidity from a position
     function _decreaseLiquidityPartial(
+        PoolKey memory poolKey,
         uint256 tokenId,
         uint128 liquidityToRemove
     ) internal returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) {
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         currency0 = poolKey.currency0;
         currency1 = poolKey.currency1;
 

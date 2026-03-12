@@ -86,7 +86,8 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         _requireAuthorization(tokenId);
 
         // Remove all liquidity and collect fees
-        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
+            _decreaseLiquidity(poolKey, tokenId, false);
         if (amount0 == 0 && amount1 == 0) {
             emit HookActionFailed(tokenId, Mode.AUTO_EXIT);
             return;
@@ -190,7 +191,8 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         }
 
         // Remove all liquidity from current position
-        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
+            _decreaseLiquidity(poolKey, tokenId, false);
         if (amount0 == 0 && amount1 == 0) {
             emit HookActionFailed(tokenId, Mode.AUTO_RANGE);
             return;
@@ -226,9 +228,10 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             );
             _approveToken(currency0, amount0);
             _approveToken(currency1, amount1);
-            _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
+            (uint256 restored0, uint256 restored1) =
+                _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
             _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
-            if (positionManager.getPositionLiquidity(tokenId) > 0) {
+            if (restored0 != 0 || restored1 != 0) {
                 _removePositionTriggers(tokenId, poolKey);
                 _deactivatePosition(tokenId);
             } else {
@@ -294,7 +297,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Collect fees only (no liquidity removal)
-        (,, uint256 fees0, uint256 fees1) = _decreaseLiquidity(tokenId, true);
+        (,, uint256 fees0, uint256 fees1) = _decreaseLiquidity(poolKey, tokenId, true);
         if (fees0 == 0 && fees1 == 0) return;
 
         // Process based on compound mode

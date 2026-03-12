@@ -106,7 +106,6 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
 
         // Borrow from vault
         Currency lendToken = Currency.wrap(vault.asset());
-        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
         vault.borrow(tokenId, borrowAmount);
 
         // Swap to optimal ratio and add liquidity
@@ -122,8 +121,9 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
 
         _approveToken(poolKey.currency0, amount0);
         _approveToken(poolKey.currency1, amount1);
-        _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
-        if (positionManager.getPositionLiquidity(tokenId) > liquidityBefore) {
+        (uint256 used0, uint256 used1) =
+            _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        if (used0 != 0 || used1 != 0) {
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, vault.ownerOf(tokenId));
             return true;
         }
@@ -160,7 +160,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
 
         // Remove partial liquidity and swap to lend token
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
-            _decreaseLiquidityPartial(tokenId, liquidityToRemove);
+            _decreaseLiquidityPartial(poolKey, tokenId, liquidityToRemove);
         if (amount0 == 0 && amount1 == 0) {
             return false;
         }

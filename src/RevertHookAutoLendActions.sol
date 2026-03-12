@@ -97,7 +97,8 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
             return;
         }
 
-        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
+            _decreaseLiquidity(poolKey, tokenId, false);
         uint256 lendAmount = isUpperTrigger ? amount1 : amount0;
         if (amount0 == 0 && amount1 == 0) {
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
