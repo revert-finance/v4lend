@@ -94,7 +94,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         address realOwner = owner;
 
         // Check if this is a vault position with debt
-        if (vaults[owner]) {
+        if (_vaults[owner]) {
             realOwner = IVault(owner).ownerOf(tokenId);
             uint256 debtShares = IVault(owner).loans(tokenId);
 
@@ -198,7 +198,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         (amount0, amount1) = _calculateAndSwap(tokenId, poolKey, newTickLower, newTickUpper, amount0, amount1);
 
         address owner = _getOwner(tokenId, false);
-        address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
+        address realOwner = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
 
         // Approve tokens and mint new position
         _approveToken(currency0, amount0);
@@ -254,7 +254,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         for (uint256 i; i < length;) {
             uint256 tokenId = tokenIds[i];
             address owner = _getOwner(tokenId, false);
-            if (vaults[owner]) {
+            if (_vaults[owner]) {
                 IVault(owner).transform(
                     tokenId,
                     address(this),
@@ -273,7 +273,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     /// @param tokenId The token ID to compound
     /// @param caller The original caller (for rewards)
     function autoCompoundForVault(uint256 tokenId, address caller) external {
-        if (!vaults[msg.sender]) revert Unauthorized();
+        if (!_vaults[msg.sender]) revert Unauthorized();
         _validateCaller(positionManager, tokenId);
         poolManager.unlock(abi.encode(tokenId, caller));
     }

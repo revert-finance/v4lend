@@ -33,7 +33,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         bool hasAutoExit = PositionModeFlags.hasAutoExit(modeFlags);
 
         if (hasAutoLeverage || hasAutoExit) {
-            bool isVault = vaults[owner];
+            bool isVault = _vaults[owner];
 
             if (hasAutoLeverage && !isVault) {
                 revert InvalidConfig();

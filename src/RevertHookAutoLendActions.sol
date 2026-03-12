@@ -45,7 +45,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         }
 
         address owner = _getOwner(tokenId, false);
-        if (vaults[owner]) {
+        if (_vaults[owner]) {
             revert InvalidConfig();
         }
         if (
@@ -154,7 +154,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         uint256 originalLendAmount
     ) internal {
         address owner = _getOwner(tokenId, false);
-        address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
+        address realOwner = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
         uint256 shares = _positionStates[tokenId].autoLendShares;
 
         _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);

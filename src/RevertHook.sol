@@ -3,7 +3,6 @@ pragma solidity ^0.8.30;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -78,7 +77,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         RevertHookPositionActions _hookFunctionsPositionActions,
         RevertHookAutoLeverageActions _hookFunctionsAutoLeverageActions,
         RevertHookAutoLendActions _hookFunctionsAutoLendActions
-    ) BaseHook(_v4Oracle.poolManager()) Ownable(owner_) {
+    ) BaseHook(_v4Oracle.poolManager()) {
+        if (owner_ == address(0)) {
+            revert OwnableInvalidOwner(address(0));
+        }
+        _transferOwnership(owner_);
         positionManager = _v4Oracle.positionManager();
         _protocolFeeRecipient = protocolFeeRecipient_;
         permit2 = _permit2;
@@ -101,6 +104,29 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     function MAX_TRIGGER_BATCHES_PER_SWAP() external pure returns (uint256) {
         return _MAX_TRIGGER_BATCHES_PER_SWAP;
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) {
+            revert OwnableInvalidOwner(address(0));
+        }
+        _transferOwnership(newOwner);
+    }
+
+    function renounceOwnership() external onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    function setVault(address vault) external onlyOwner {
+        _setVault(vault);
+    }
+
+    function vaults(address vault) external view returns (bool) {
+        return _vaults[vault];
     }
 
     function positionConfigs(uint256 tokenId)
@@ -445,7 +471,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice Returns the owner of the position
     function _getOwner(uint256 tokenId, bool isRealOwner) internal view override returns (address) {
         address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-        return (isRealOwner && vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
+        return (isRealOwner && _vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
     }
 
     /// @notice Gets the position value in native token
@@ -683,7 +709,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _handleAutoLend(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
-        if (vaults[_getOwner(tokenId, false)]) {
+        if (_vaults[_getOwner(tokenId, false)]) {
             return;
         }
 
@@ -714,7 +740,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     function _handleAutoLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
         address owner = _getOwner(tokenId, false);
-        if (!vaults[owner]) {
+        if (!_vaults[owner]) {
             return;
         }
 
@@ -1105,7 +1131,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         internal
         returns (bool)
     {
-        if (vaults[owner]) {
+        if (_vaults[owner]) {
             try IVault(owner).transform(tokenId, address(this), transformData) {
                 return true;
             } catch {

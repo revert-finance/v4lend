@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
-
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -39,7 +37,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     ILiquidityCalculator internal immutable liquidityCalculator;
     IPoolManager internal immutable poolManager;
 
-    constructor(IPermit2 _permit2, IV4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) Ownable(address(1)) {
+    constructor(IPermit2 _permit2, IV4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) {
         positionManager = _v4Oracle.positionManager();
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
@@ -59,7 +57,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     /// @notice Returns the owner of the position
     function _getOwner(uint256 tokenId, bool isRealOwner) internal view override returns (address) {
         address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-        return (isRealOwner && vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
+        return (isRealOwner && _vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
     }
 
     // ==================== Auth Helpers ====================
@@ -67,7 +65,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     /// @notice Validates that the caller is authorized to interact with the position
     function _requireAuthorization(uint256 tokenId) internal view {
         if (msg.sender != address(poolManager)) {
-            if (vaults[msg.sender]) {
+            if (_vaults[msg.sender]) {
                 _validateCaller(positionManager, tokenId);
             } else {
                 revert Unauthorized();
@@ -338,7 +336,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
                 newTokenId = 0;
                 amount0Used = 0;
                 amount1Used = 0;
-            } else if (vaults[recipient]) {
+            } else if (_vaults[recipient]) {
                 IVault(recipient).notifyERC721Received(newTokenId, recipient);
             }
         } else {

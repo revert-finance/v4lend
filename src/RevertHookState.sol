@@ -9,12 +9,12 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
-import {Transformer} from "./transformers/Transformer.sol";
+import {RevertHookAccess} from "./RevertHookAccess.sol";
 
 /// @title RevertHookState
 /// @notice Abstract contract containing all state variables, enums, structs, and events for RevertHook
 /// @dev This contract separates state from logic to improve code organization
-abstract contract RevertHookState is Transformer {
+abstract contract RevertHookState is RevertHookAccess {
     // ==================== Enums ====================
 
     enum Mode {
