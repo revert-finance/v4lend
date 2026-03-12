@@ -220,6 +220,56 @@ contract AutoRangeTest is AutomatorTestBase {
         autoRange.execute(params);
     }
 
+    function test_RevertWhenRewardConsumesAllRangeLiquidity() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+
+        _approveWhaleTokens();
+        int24 currentTick = _getCurrentTick(poolKey);
+        int24 tickSpacing = poolKey.tickSpacing;
+        int24 tickLower = (currentTick / tickSpacing - 2) * tickSpacing;
+        int24 tickUpper = (currentTick / tickSpacing + 2) * tickSpacing;
+        uint256 tokenId = _mintPosition(poolKey, tickLower, tickUpper, 1);
+
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: type(uint64).max,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoRange), tokenId);
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes(""),
+            rewardX64: type(uint64).max
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.NoLiquidity.selector);
+        autoRange.execute(params);
+    }
+
     function test_RevertWhenNotReady() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);

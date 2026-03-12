@@ -258,10 +258,13 @@ contract AutoRange is Automator {
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256 newTokenId) {
+        uint128 liquidity = _calculateLiquidity(tickLower, tickUpper, poolKey, amount0, amount1);
+        if (liquidity == 0) {
+            revert NoLiquidity();
+        }
+
         _handleApproval(permit2, token0, amount0);
         _handleApproval(permit2, token1, amount1);
-
-        uint128 liquidity = _calculateLiquidity(tickLower, tickUpper, poolKey, amount0, amount1);
 
         // Track balances before mint to calculate actual amounts added
         uint256 balance0Before = token0.balanceOfSelf();

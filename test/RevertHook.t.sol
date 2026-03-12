@@ -3111,6 +3111,112 @@ contract RevertHookTest is BaseTest {
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate exact upper-bound range should mint one token");
     }
 
+    function testSetPositionConfig_AutoRangeUpperTriggerSameRangeReverts() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        _moveTickUpUntil(tickUpper3 + poolKey.tickSpacing, 2e16, 160);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLower = _getTickLower(currentTick, poolKey.tickSpacing);
+        assertGe(currentTickLower, tickUpper3, "Position must be at or above range before same-range check");
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+        RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: currentTickLower - tickUpper3,
+            autoRangeLowerDelta: tickLower3 - currentTickLower,
+            autoRangeUpperDelta: tickUpper3 - currentTickLower,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, config);
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Rejected config should not mint a replacement");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id),
+            liquidityBefore,
+            "Rejected config should leave the original position untouched"
+        );
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore, "Rejected config should not change lower triggers");
+        assertEq(upperAfter, upperBefore, "Rejected config should not change upper triggers");
+    }
+
+    function testSetPositionConfig_AutoRangeLowerSideFutureSameRangeReverts() public {
+        int24 spacing = poolKey.tickSpacing;
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: -spacing,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 2 * spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Rejected config should not mint a replacement");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id),
+            liquidityBefore,
+            "Rejected config should leave the original position untouched"
+        );
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore, "Rejected config should not change lower triggers");
+        assertEq(upperAfter, upperBefore, "Rejected config should not change upper triggers");
+    }
+
+    function testSetPositionConfig_AutoRangeUpperSideFutureSameRangeReverts() public {
+        int24 spacing = poolKey.tickSpacing;
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: -spacing,
+            autoRangeLowerDelta: -2 * spacing,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        }));
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Rejected config should not mint a replacement");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id),
+            liquidityBefore,
+            "Rejected config should leave the original position untouched"
+        );
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore, "Rejected config should not change lower triggers");
+        assertEq(upperAfter, upperBefore, "Rejected config should not change upper triggers");
+    }
+
     function testImmediateExecution_AutoLendTriggersAtExactUpperTick() public {
         hook.setMaxTicksFromOracle(1000);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
@@ -3398,9 +3504,8 @@ contract RevertHookTest is BaseTest {
         assertEq(upperAfter, upperInitial, "Triggered lower exit should remove stale upper node");
     }
 
-    function testAutoRangeRemint_SameTickTriggerSurvivesProcessedTickClear() public {
+    function testSetPositionConfig_AutoRangeLowerTriggerSameRangeReverts() public {
         hook.setMaxTicksFromOracle(1000);
-        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
 
         int24 spacing = poolKey.tickSpacing;
         RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
@@ -3417,24 +3522,23 @@ contract RevertHookTest is BaseTest {
             autoLeverageTargetBps: 0
         });
 
-        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
-        hook.setPositionConfig(token3Id, config);
-        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes();
-        assertEq(lowerConfigured, lowerInitial + 1, "AUTO_RANGE should register one lower trigger");
-        assertEq(upperConfigured, upperInitial, "Upper trigger should stay disabled in same-tick test");
-
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
-        _moveTickDownUntil(tickLower3, 1e16, 160);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
 
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "AUTO_RANGE should remint one replacement token");
-        uint256 remintedTokenId = nextTokenIdBefore;
-        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Original token should be emptied after remint");
-        assertGt(positionManager.getPositionLiquidity(remintedTokenId), 0, "Replacement token should hold liquidity");
-        _assertPositionConfigEq(remintedTokenId, config);
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, config);
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Rejected config should not mint a replacement");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id),
+            liquidityBefore,
+            "Rejected config should keep the original position"
+        );
 
         (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
-        assertEq(lowerAfter, lowerInitial + 1, "Same-tick remint must preserve the new lower trigger node");
-        assertEq(upperAfter, upperInitial, "Same-tick remint should not add unrelated upper nodes");
+        assertEq(lowerAfter, lowerBefore, "Rejected config should not change lower triggers");
+        assertEq(upperAfter, upperBefore, "Rejected config should not change upper triggers");
     }
 
     function testAutoExitRelative_RecomputedAfterAutoRangeRemint() public {

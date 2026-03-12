@@ -139,15 +139,18 @@ abstract contract RevertHookTriggers is RevertHookState {
 
         PoolId poolId = poolKey.toId();
         (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
+        int24[4] memory ticks = _computeTriggerTicks(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
+        _insertTriggerTicks(poolId, tokenId, ticks);
+    }
 
+    /// @notice Inserts precomputed trigger ticks into the linked lists
+    function _insertTriggerTicks(PoolId poolId, uint256 tokenId, int24[4] memory ticks) internal {
         TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
         TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
 
         if (!upperList.increasing) {
             upperList.increasing = true;
         }
-
-        int24[4] memory ticks = _computeTriggerTicks(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
 
         if (ticks[0] != type(int24).min) lowerList.insert(ticks[0], tokenId);
         if (ticks[1] != type(int24).min) lowerList.insert(ticks[1], tokenId);
