@@ -2,7 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -60,7 +60,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick
-    function autoLeverage(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
+    function autoLeverage(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
         _requireAuthorization(tokenId);
 
         IVault vault = IVault(msg.sender);

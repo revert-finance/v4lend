@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
 
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -82,7 +79,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick, false if lower tick
-    function autoExit(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
+    function autoExit(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
         _requireAuthorization(tokenId);
 
         // Remove all liquidity and collect fees
@@ -171,15 +168,14 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
 
     /// @notice Executes auto-range for a position when trigger conditions are met
     /// @param poolKey The pool key for the position
-    /// @param poolId The pool ID
     /// @param tokenId The token ID of the position
-    function autoRange(PoolKey calldata poolKey, PoolId poolId, uint256 tokenId) external {
+    function autoRange(PoolKey calldata poolKey, uint256 tokenId) external {
         _requireAuthorization(tokenId);
         (, PositionInfo oldPositionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Calculate new tick range based on current tick
         (int24 newTickLower, int24 newTickUpper) = AutoRangeLib.plan(
-            _getCurrentTick(poolId),
+            _getCurrentTick(poolKey.toId()),
             poolKey.tickSpacing,
             _positionConfigs[tokenId].autoRangeLowerDelta,
             _positionConfigs[tokenId].autoRangeUpperDelta

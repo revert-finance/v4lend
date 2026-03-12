@@ -235,6 +235,41 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
 
     // ==================== Liquidity Helpers ====================
 
+    function _calculateLiquidityForRange(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 amount0Max,
+        uint128 amount1Max
+    ) internal view returns (uint128) {
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
+        return LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96,
+            TickMath.getSqrtPriceAtTick(tickLower),
+            TickMath.getSqrtPriceAtTick(tickUpper),
+            amount0Max,
+            amount1Max
+        );
+    }
+
+    function _modifyLiquiditiesWithPair(
+        bytes memory actions,
+        bytes memory primaryParams,
+        Currency currency0,
+        Currency currency1
+    ) internal returns (bool success) {
+        bytes[] memory params = new bytes[](2);
+        params[0] = primaryParams;
+        params[1] = abi.encode(currency0, currency1, address(this));
+
+        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params) {
+            return true;
+        } catch (bytes memory reason) {
+            emit HookModifyLiquiditiesFailed(actions, params, reason);
+            return false;
+        }
+    }
+
     /// @notice Increases liquidity for a position
     function _increaseLiquidity(
         uint256 tokenId,
@@ -243,11 +278,10 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         uint128 amount0Max,
         uint128 amount1Max
     ) internal returns (uint256, uint256) {
-        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(positionInfo.tickLower()),
-            TickMath.getSqrtPriceAtTick(positionInfo.tickUpper()),
+        uint128 liquidity = _calculateLiquidityForRange(
+            poolKey,
+            positionInfo.tickLower(),
+            positionInfo.tickUpper(),
             amount0Max,
             amount1Max
         );
@@ -258,16 +292,17 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         uint256 balance1Before = poolKey.currency1.balanceOfSelf();
 
         bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, bytes(""));
-        params[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-
-        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params) {
+        if (
+            _modifyLiquiditiesWithPair(
+                actions,
+                abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, bytes("")),
+                poolKey.currency0,
+                poolKey.currency1
+            )
+        ) {
             return (balance0Before - poolKey.currency0.balanceOfSelf(), balance1Before - poolKey.currency1.balanceOfSelf());
-        } catch (bytes memory reason) {
-            emit HookModifyLiquiditiesFailed(actions, params, reason);
-            return (0, 0);
         }
+        return (0, 0);
     }
 
     /// @notice Mints a new position
@@ -283,24 +318,20 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         amount0Used = poolKey.currency0.balanceOfSelf();
         amount1Used = poolKey.currency1.balanceOfSelf();
 
-        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(tickLower),
-            TickMath.getSqrtPriceAtTick(tickUpper),
-            amount0Max,
-            amount1Max
-        );
+        uint128 liquidity = _calculateLiquidityForRange(poolKey, tickLower, tickUpper, amount0Max, amount1Max);
         if (liquidity == 0) {
             return (0, 0, 0);
         }
 
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, recipient, bytes(""));
-        params[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-
-        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params) {
+        if (
+            _modifyLiquiditiesWithPair(
+                actions,
+                abi.encode(poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, recipient, bytes("")),
+                poolKey.currency0,
+                poolKey.currency1
+            )
+        ) {
             amount0Used -= poolKey.currency0.balanceOfSelf();
             amount1Used -= poolKey.currency1.balanceOfSelf();
             if (positionManager.nextTokenId() == newTokenId) {
@@ -310,8 +341,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
             } else if (vaults[recipient]) {
                 IVault(recipient).notifyERC721Received(newTokenId, recipient);
             }
-        } catch (bytes memory reason) {
-            emit HookModifyLiquiditiesFailed(actions, params, reason);
+        } else {
             newTokenId = 0;
             amount0Used = 0;
             amount1Used = 0;
@@ -332,21 +362,22 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
             feesOnly ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY),
             uint8(Actions.TAKE_PAIR)
         );
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(
-            tokenId,
-            liquidity,
-            feesOnly ? type(uint128).max : 0,
-            feesOnly ? type(uint128).max : 0,
-            bytes("")
-        );
-        params[1] = abi.encode(currency0, currency1, address(this));
-
-        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params) {
+        if (
+            _modifyLiquiditiesWithPair(
+                actions,
+                abi.encode(
+                    tokenId,
+                    liquidity,
+                    feesOnly ? type(uint128).max : 0,
+                    feesOnly ? type(uint128).max : 0,
+                    bytes("")
+                ),
+                currency0,
+                currency1
+            )
+        ) {
             amount0 = currency0.balanceOfSelf();
             amount1 = currency1.balanceOfSelf();
-        } catch (bytes memory reason) {
-            emit HookModifyLiquiditiesFailed(actions, params, reason);
         }
     }
 
@@ -360,15 +391,16 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         currency1 = poolKey.currency1;
 
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(tokenId, liquidityToRemove, 0, 0, bytes(""));
-        params[1] = abi.encode(currency0, currency1, address(this));
-
-        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params) {
+        if (
+            _modifyLiquiditiesWithPair(
+                actions,
+                abi.encode(tokenId, liquidityToRemove, 0, 0, bytes("")),
+                currency0,
+                currency1
+            )
+        ) {
             amount0 = currency0.balanceOfSelf();
             amount1 = currency1.balanceOfSelf();
-        } catch (bytes memory reason) {
-            emit HookModifyLiquiditiesFailed(actions, params, reason);
         }
     }
 

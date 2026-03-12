@@ -6,7 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -85,7 +85,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick
-    function autoLendDeposit(PoolKey calldata poolKey, PoolId, uint256 tokenId, bool isUpperTrigger) external {
+    function autoLendDeposit(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
         address owner = _getOwner(tokenId, false);
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         Currency lendCurrency = isUpperTrigger ? poolKey.currency1 : poolKey.currency0;
