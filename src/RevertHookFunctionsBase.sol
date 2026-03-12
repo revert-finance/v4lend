@@ -389,9 +389,9 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
             address tokenAddress = Currency.unwrap(currency);
             if (!permit2Approved[tokenAddress]) {
                 SafeERC20.forceApprove(IERC20(tokenAddress), address(permit2), type(uint256).max);
+                permit2.approve(tokenAddress, address(positionManager), type(uint160).max, type(uint48).max);
                 permit2Approved[tokenAddress] = true;
             }
-            permit2.approve(tokenAddress, address(positionManager), uint160(amount), uint48(block.timestamp));
         }
     }
 

@@ -315,10 +315,9 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         // Pay rewards to caller
         (fees0, fees1) = _payCompoundRewards(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, caller);
 
-        // Approve and add liquidity for AUTO_COMPOUND mode
-        _approveToken(poolKey.currency0, fees0);
-        _approveToken(poolKey.currency1, fees1);
         if (compoundMode == AutoCompoundMode.AUTO_COMPOUND) {
+            _approveToken(poolKey.currency0, fees0);
+            _approveToken(poolKey.currency1, fees1);
             _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(fees0), uint128(fees1));
         }
 

@@ -85,7 +85,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         // Update triggers for new base tick
         _removePositionTriggers(tokenId, poolKey);
         int24 newBaseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
-        positionStates[tokenId].autoLeverageBaseTick = (newBaseTick / poolKey.tickSpacing) * poolKey.tickSpacing;
+        positionStates[tokenId].autoLeverageBaseTick = newBaseTick;
         _addPositionTriggers(tokenId, poolKey);
 
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
@@ -175,14 +175,16 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
             return true;
         }
 
-        _approveToken(currency0, currency0.balanceOfSelf());
-        _approveToken(currency1, currency1.balanceOfSelf());
+        uint256 balance0 = currency0.balanceOfSelf();
+        uint256 balance1 = currency1.balanceOfSelf();
+        _approveToken(currency0, balance0);
+        _approveToken(currency1, balance1);
         _increaseLiquidity(
             tokenId,
             poolKey,
             positionInfo,
-            uint128(currency0.balanceOfSelf()),
-            uint128(currency1.balanceOfSelf())
+            uint128(balance0),
+            uint128(balance1)
         );
         if (positionManager.getPositionLiquidity(tokenId) < currentLiquidity) {
             revert RestoreFailed();

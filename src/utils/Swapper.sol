@@ -174,9 +174,9 @@ abstract contract Swapper is Constants {
             address tokenAddr = Currency.unwrap(token);
             if (!permit2Approved[tokenAddr]) {
                 SafeERC20.forceApprove(IERC20(tokenAddr), address(permit2), type(uint256).max);
+                permit2.approve(tokenAddr, address(positionManager), type(uint160).max, type(uint48).max);
                 permit2Approved[tokenAddr] = true;
             }
-            permit2.approve(tokenAddr, address(positionManager), uint160(amount), uint48(block.timestamp));
         }
     }
 
