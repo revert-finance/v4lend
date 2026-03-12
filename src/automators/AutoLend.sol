@@ -256,9 +256,7 @@ contract AutoLend is Automator {
 
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
-        int24 tickSpacing = poolKey.tickSpacing;
-
-        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+        (uint160 sqrtPriceX96, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
 
         // Check withdrawal trigger zones
         bool isToken0Lent = state.lentToken == Currency.unwrap(poolKey.currency0);
@@ -304,7 +302,7 @@ contract AutoLend is Automator {
         uint256 newTokenId;
         (bool addToExisting, int24 newLower, int24 newUpper) = AutoLendLib.planOneSidedReentry(
             currentTick,
-            tickSpacing,
+            poolKey.tickSpacing,
             tickLower,
             tickUpper,
             isToken0Lent
@@ -318,15 +316,16 @@ contract AutoLend is Automator {
                 positionInfo,
                 isToken0Lent ? redeemedAmount : 0,
                 isToken0Lent ? 0 : redeemedAmount,
+                sqrtPriceX96,
                 params.deadline,
                 params.hookData
             );
         } else {
             if (newUpper > TickMath.MAX_TICK) {
-                newUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
+                newUpper = (TickMath.MAX_TICK / poolKey.tickSpacing) * poolKey.tickSpacing;
             }
             if (newLower < TickMath.MIN_TICK) {
-                newLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
+                newLower = (TickMath.MIN_TICK / poolKey.tickSpacing) * poolKey.tickSpacing;
             }
             if (newLower >= newUpper) {
                 revert InvalidConfig();
@@ -338,6 +337,7 @@ contract AutoLend is Automator {
                 newUpper,
                 isToken0Lent ? redeemedAmount : 0,
                 isToken0Lent ? 0 : redeemedAmount,
+                sqrtPriceX96,
                 params.deadline,
                 params.hookData
             );
@@ -378,11 +378,12 @@ contract AutoLend is Automator {
         PositionInfo positionInfo,
         uint256 amount0,
         uint256 amount1,
+        uint160 sqrtPriceX96,
         uint256 deadline,
         bytes calldata hookData
     ) internal {
         uint128 liquidity =
-            _calculateLiquidity(positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1);
+            _calculateLiquidity(sqrtPriceX96, positionInfo.tickLower(), positionInfo.tickUpper(), amount0, amount1);
 
         (bytes memory actions, bytes[] memory params_array) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), poolKey.currency0, poolKey.currency1);
@@ -399,10 +400,11 @@ contract AutoLend is Automator {
         int24 tickUpper,
         uint256 amount0,
         uint256 amount1,
+        uint160 sqrtPriceX96,
         uint256 deadline,
         bytes calldata hookData
     ) internal returns (uint256 newTokenId) {
-        uint128 liquidity = _calculateLiquidity(tickLower, tickUpper, poolKey, amount0, amount1);
+        uint128 liquidity = _calculateLiquidity(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
 
         (bytes memory actions, bytes[] memory params_array) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), poolKey.currency0, poolKey.currency1);

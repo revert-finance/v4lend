@@ -209,6 +209,22 @@ abstract contract Swapper is Constants {
     }
 
     function _calculateLiquidity(
+        uint160 sqrtPriceX96,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0,
+        uint256 amount1
+    ) internal pure returns (uint128 maxLiquidity) {
+        // Calculate sqrt prices for tick range
+        uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
+
+        // Calculate max liquidity
+        maxLiquidity =
+            LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, amount0, amount1);
+    }
+
+    function _calculateLiquidity(
         int24 tickLower,
         int24 tickUpper,
         PoolKey memory poolKey,
@@ -217,14 +233,7 @@ abstract contract Swapper is Constants {
     ) internal view returns (uint128 maxLiquidity) {
         // Get current price from pool
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
-
-        // Calculate sqrt prices for tick range
-        uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
-
-        // Calculate max liquidity
-        maxLiquidity =
-            LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, amount0, amount1);
+        return _calculateLiquidity(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
     }
 
     // decreases liquidity from uniswap v4 position

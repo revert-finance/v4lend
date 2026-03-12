@@ -415,8 +415,11 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             hooks: IHooks(params.hook)
         });
 
+        (uint160 sqrtPriceX96, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+
         // Get dummy tick range based on which token is the other token
-        (int24 dummyTickLower, int24 dummyTickUpper) = _getDummyTickRange(poolKey, otherToken, params.tickSpacing);
+        (int24 dummyTickLower, int24 dummyTickUpper) =
+            _getDummyTickRange(poolKey, otherToken, params.tickSpacing, currentTick);
 
         // Handle approval for the initial token
         _handleApproval(permit2, otherToken, params.initialAmount);
@@ -425,7 +428,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint256 amount0 = otherToken == params.token0 ? params.initialAmount : 0;
         uint256 amount1 = otherToken == params.token1 ? params.initialAmount : 0;
 
-        uint128 liquidity = _calculateLiquidity(dummyTickLower, dummyTickUpper, poolKey, amount0, amount1);
+        uint128 liquidity = _calculateLiquidity(sqrtPriceX96, dummyTickLower, dummyTickUpper, amount0, amount1);
 
         // Mint the dummy position
         _mintDummyPosition(poolKey, dummyTickLower, dummyTickUpper, liquidity, params);
@@ -445,11 +448,9 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     function _getDummyTickRange(
         PoolKey memory poolKey,
         Currency otherToken,
-        int24 tickSpacing
-    ) internal view returns (int24 dummyTickLower, int24 dummyTickUpper) {
-        // Get current tick to create a one-sided position
-        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
-
+        int24 tickSpacing,
+        int24 currentTick
+    ) internal pure returns (int24 dummyTickLower, int24 dummyTickUpper) {
         // Round current tick to tick spacing
         int24 roundedTick = (currentTick / tickSpacing) * tickSpacing;
 

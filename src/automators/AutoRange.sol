@@ -119,14 +119,13 @@ contract AutoRange is Automator {
     ) internal {
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
-        int24 tickSpacing = poolKey.tickSpacing;
 
         // Snapshot balances before any operation to isolate this execution's tokens
         uint256 balance0Before = token0.balanceOfSelf();
         uint256 balance1Before = token1.balanceOfSelf();
 
-        // Get current tick
-        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+        // Reuse the current slot0 for both planning and liquidity math.
+        (uint160 sqrtPriceX96, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
 
@@ -146,7 +145,7 @@ contract AutoRange is Automator {
         // Calculate new range
         (int24 newTickLower, int24 newTickUpper) = AutoRangeLib.plan(
             currentTick,
-            tickSpacing,
+            poolKey.tickSpacing,
             int24(config.lowerTickDelta),
             int24(config.upperTickDelta)
         );
@@ -185,13 +184,9 @@ contract AutoRange is Automator {
         }
         // Track rewards by updating balance snapshots — adding reward to "before" baseline
         // so the delta (balanceOfSelf - balance0Before) excludes reward
-        {
-            uint256 amount0Pre = amount0;
-            uint256 amount1Pre = amount1;
-            (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
-            balance0Before += (amount0Pre - amount0);
-            balance1Before += (amount1Pre - amount1);
-        }
+        (amount0, amount1, balance0Before, balance1Before) = _deductRewardAndUpdateBaselines(
+            config, params.rewardX64, feeAmount0, feeAmount1, amount0, amount1, balance0Before, balance1Before
+        );
 
         // Swap to rebalance for new range
         if (params.amountIn != 0) {
@@ -216,7 +211,7 @@ contract AutoRange is Automator {
 
         // Mint new position
         uint256 newTokenId = _mintNewPosition(
-            params, poolKey, token0, token1, newTickLower, newTickUpper, amount0, amount1
+            params, poolKey, token0, token1, newTickLower, newTickUpper, amount0, amount1, sqrtPriceX96
         );
 
         // Get owner for sending leftover tokens
@@ -256,9 +251,10 @@ contract AutoRange is Automator {
         int24 tickLower,
         int24 tickUpper,
         uint256 amount0,
-        uint256 amount1
+        uint256 amount1,
+        uint160 sqrtPriceX96
     ) internal returns (uint256 newTokenId) {
-        uint128 liquidity = _calculateLiquidity(tickLower, tickUpper, poolKey, amount0, amount1);
+        uint128 liquidity = _calculateLiquidity(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
         if (liquidity == 0) {
             revert NoLiquidity();
         }
@@ -288,6 +284,27 @@ contract AutoRange is Automator {
         if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
             revert InsufficientAmountAdded();
         }
+    }
+
+    function _deductRewardAndUpdateBaselines(
+        PositionConfig memory config,
+        uint64 rewardX64,
+        uint256 feeAmount0,
+        uint256 feeAmount1,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 balance0Before,
+        uint256 balance1Before
+    ) internal pure returns (uint256, uint256, uint256, uint256) {
+        uint256 amount0Pre = amount0;
+        uint256 amount1Pre = amount1;
+        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, rewardX64);
+        return (
+            amount0,
+            amount1,
+            balance0Before + (amount0Pre - amount0),
+            balance1Before + (amount1Pre - amount1)
+        );
     }
 
     /// @notice Configure a token for auto-range
