@@ -15,6 +15,7 @@ import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {AutoLendLib} from "./lib/AutoLendLib.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
@@ -29,6 +30,31 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator
     ) RevertHookFunctionsBase(_permit2, _v4Oracle, _liquidityCalculator) {}
+
+    function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
+        if (address(vault) != address(0) && vault.asset() != token) {
+            revert InvalidConfig();
+        }
+        autoLendVaults[token] = vault;
+        emit SetAutoLendVault(token, vault);
+    }
+
+    function validateAutoLendMode(uint256 tokenId, PoolKey calldata poolKey, uint8 modeFlags) external view {
+        if (!PositionModeFlags.hasAutoLend(modeFlags)) {
+            return;
+        }
+
+        address owner = _getOwner(tokenId, false);
+        if (vaults[owner]) {
+            revert InvalidConfig();
+        }
+        if (
+            address(autoLendVaults[Currency.unwrap(poolKey.currency0)]) == address(0)
+                || address(autoLendVaults[Currency.unwrap(poolKey.currency1)]) == address(0)
+        ) {
+            revert InvalidConfig();
+        }
+    }
 
     /// @notice Forces exit from auto-lend position (called by position owner)
     /// @param tokenId The token ID of the position

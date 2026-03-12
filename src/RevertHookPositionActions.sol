@@ -30,6 +30,51 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         ILiquidityCalculator _liquidityCalculator
     ) RevertHookFunctionsBase(_permit2, _v4Oracle, _liquidityCalculator) {}
 
+    function validateRangeConfig(
+        int24 tickSpacing,
+        int24 positionTickLower,
+        int24 positionTickUpper,
+        PositionConfig calldata config
+    ) external pure {
+        if (!PositionModeFlags.hasAutoRange(config.modeFlags)) {
+            return;
+        }
+
+        if (config.autoRangeLowerDelta >= config.autoRangeUpperDelta) {
+            revert InvalidConfig();
+        }
+
+        (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
+            positionTickLower,
+            positionTickUpper,
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit
+        );
+
+        if (
+            _rangeTriggerCanResolveToSamePosition(
+                positionTickLower,
+                positionTickUpper,
+                rangeLower,
+                config.autoRangeLowerDelta,
+                config.autoRangeUpperDelta,
+                tickSpacing,
+                false
+            )
+                || _rangeTriggerCanResolveToSamePosition(
+                    positionTickLower,
+                    positionTickUpper,
+                    rangeUpper,
+                    config.autoRangeLowerDelta,
+                    config.autoRangeUpperDelta,
+                    tickSpacing,
+                    true
+                )
+        ) {
+            revert InvalidConfig();
+        }
+    }
+
     // ==================== Auto Exit ====================
 
     /// @notice Executes auto-exit for a position when trigger conditions are met
@@ -138,6 +183,11 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             positionConfigs[tokenId].autoRangeLowerDelta,
             positionConfigs[tokenId].autoRangeUpperDelta
         );
+
+        // This should already be rejected at configuration time.
+        if (AutoRangeLib.isSameRange(oldPositionInfo.tickLower(), oldPositionInfo.tickUpper(), newTickLower, newTickUpper)) {
+            revert InvalidConfig();
+        }
 
         // Remove all liquidity from current position
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = _decreaseLiquidity(tokenId, false);
@@ -295,5 +345,33 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
 
         emit SendRewards(tokenId, currency0, currency1, reward0, reward1, recipient);
         return (amount0 - reward0, amount1 - reward1);
+    }
+
+    function _rangeTriggerCanResolveToSamePosition(
+        int24 currentTickLower,
+        int24 currentTickUpper,
+        int24 triggerTick,
+        int24 lowerDelta,
+        int24 upperDelta,
+        int24 tickSpacing,
+        bool isUpperTrigger
+    ) internal pure returns (bool) {
+        if (triggerTick == type(int24).min || triggerTick == type(int24).max) {
+            return false;
+        }
+
+        int256 sameRangeBaseTickLower = int256(currentTickLower) - int256(lowerDelta);
+        int256 sameRangeBaseTickUpper = int256(currentTickUpper) - int256(upperDelta);
+        if (sameRangeBaseTickLower != sameRangeBaseTickUpper) {
+            return false;
+        }
+
+        int256 sameRangeBaseTick = sameRangeBaseTickLower;
+        if (sameRangeBaseTick % int256(tickSpacing) != 0) {
+            return false;
+        }
+
+        int256 triggerTickInt = int256(triggerTick);
+        return isUpperTrigger ? sameRangeBaseTick >= triggerTickInt : sameRangeBaseTick <= triggerTickInt;
     }
 }

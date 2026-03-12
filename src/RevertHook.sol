@@ -109,12 +109,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     ///      This is effectively a token-level allowlist for AUTO_LEND target vaults.
     /// @param token The token address (typically stablecoin) that the vault accepts
     /// @param vault The ERC4626 vault contract to deposit into
-    function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
-        if (address(vault) != address(0) && vault.asset() != token) {
-            revert InvalidConfig();
-        }
-        autoLendVaults[token] = vault;
-        emit SetAutoLendVault(token, vault);
+    function setAutoLendVault(address token, IERC4626 vault) external {
+        _delegatecallPassthrough(
+            address(hookFunctionsAutoLendActions),
+            abi.encodeCall(hookFunctionsAutoLendActions.setAutoLendVault, (token, vault))
+        );
     }
 
     /// @notice Sets the maximum tick deviation allowed from oracle price for automated actions (onlyOwner)
@@ -226,7 +225,11 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     // ==================== Internal Configuration Helpers ====================
 
     /// @notice Calculates the sqrt price multiplier from basis points
-    function _calculateSqrtPriceMultiplier(uint32 maxPriceImpactBps, bool zeroForOne) internal pure returns (uint128 multiplier) {
+    function _calculateSqrtPriceMultiplier(uint32 maxPriceImpactBps, bool zeroForOne)
+        internal
+        pure
+        returns (uint128 multiplier)
+    {
         if (maxPriceImpactBps == 0) {
             return 0;
         }
@@ -239,17 +242,22 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Internal function to set position configuration
     function _setPositionConfig(uint256 tokenId, PositionConfig memory config, bool checkImmediateExecution) internal {
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _validateTickAlignedConfig(config, poolKey.tickSpacing);
-        _validateRangeConfig(config.modeFlags, config);
         _validateModeFlags(config.modeFlags, tokenId, poolKey);
+        hookFunctionsPositionActions.validateRangeConfig(
+            poolKey.tickSpacing,
+            positionInfo.tickLower(),
+            positionInfo.tickUpper(),
+            config
+        );
         PositionConfig memory oldConfig = positionConfigs[tokenId];
         _removePositionTriggersWithConfig(tokenId, poolKey, oldConfig);
 
-        positionStates[tokenId].autoLeverageBaseTick = PositionModeFlags.hasAutoLeverage(config.modeFlags)
-            ? _getCurrentBaseTick(poolKey)
-            : int24(0);
         positionConfigs[tokenId] = config;
+        _delegatecallLendingActions(
+            abi.encodeCall(hookFunctionsAutoLeverageActions.syncAutoLeverageBaseTick, (tokenId, poolKey, config.modeFlags))
+        );
         _addPositionTriggers(tokenId, poolKey);
 
         _syncActivation(tokenId, poolKey, config, checkImmediateExecution);
@@ -268,16 +276,6 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
                 || !_isValidTickConfig(config.autoLendToleranceTick, tickSpacing, 0)
                 || config.autoLeverageTargetBps >= 10000
         ) {
-            revert InvalidConfig();
-        }
-    }
-
-    function _validateRangeConfig(uint8 modeFlags, PositionConfig memory config) internal pure {
-        if (!PositionModeFlags.hasAutoRange(modeFlags)) {
-            return;
-        }
-
-        if (config.autoRangeLowerDelta >= config.autoRangeUpperDelta) {
             revert InvalidConfig();
         }
     }
@@ -303,33 +301,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Validates mode flag combinations
     /// @dev Reverts if invalid combinations are detected
-    function _validateModeFlags(uint8 modeFlags, uint256 tokenId, PoolKey memory poolKey) internal view {
-        // AUTO_LEVERAGE only for vault-owned positions with lend asset
-        if (PositionModeFlags.hasAutoLeverage(modeFlags)) {
-            address owner = _getOwner(tokenId, false);
-            if (!vaults[owner]) {
-                revert InvalidConfig();
-            }
-            address lendAsset = IVault(owner).asset();
-            if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
-                revert InvalidConfig();
-            }
-        }
-
-        // AUTO_LEND only for non-vault positions
-        if (PositionModeFlags.hasAutoLend(modeFlags)) {
-            address owner = _getOwner(tokenId, false);
-            if (vaults[owner]) {
-                revert InvalidConfig();
-            }
-            if (
-                address(autoLendVaults[Currency.unwrap(poolKey.currency0)]) == address(0)
-                    || address(autoLendVaults[Currency.unwrap(poolKey.currency1)]) == address(0)
-            ) {
-                revert InvalidConfig();
-            }
-        }
-
+    function _validateModeFlags(uint8 modeFlags, uint256 tokenId, PoolKey memory poolKey) internal {
         // Invalid combinations
         if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoLeverage(modeFlags)) {
             revert InvalidConfig();
@@ -337,18 +309,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoExit(modeFlags)) {
             revert InvalidConfig();
         }
-        // NOTE: AUTO_LEVERAGE + AUTO_EXIT (+ AUTO_RANGE) is valid for vault positions
 
-        // AUTO_EXIT for vault positions requires lend asset in pool (for debt repayment)
-        if (PositionModeFlags.hasAutoExit(modeFlags)) {
-            address owner = _getOwner(tokenId, false);
-            if (vaults[owner]) {
-                address lendAsset = IVault(owner).asset();
-                if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
-                    revert InvalidConfig();
-                }
-            }
-        }
+        _delegatecallPassthrough(
+            address(hookFunctionsAutoLendActions),
+            abi.encodeCall(hookFunctionsAutoLendActions.validateAutoLendMode, (tokenId, poolKey, modeFlags))
+        );
+        _delegatecallPassthrough(
+            address(hookFunctionsAutoLeverageActions),
+            abi.encodeCall(hookFunctionsAutoLeverageActions.validateAutoLeverageMode, (tokenId, poolKey, modeFlags))
+        );
     }
 
     // ==================== Abstract Function Implementations ====================
@@ -366,11 +335,6 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     /// @notice Gets the position value in native token
     function _getPositionValueNative(uint256 tokenId) internal view returns (uint256 value) {
         (value,,,) = v4Oracle.getValue(tokenId, address(0));
-    }
-
-    /// @notice Gets the current base tick for a pool
-    function _getCurrentBaseTick(PoolKey memory poolKey) internal view returns (int24 tick) {
-        return _getTickLower(_getTick(poolKey.toId()), poolKey.tickSpacing);
     }
 
     // ==================== Hook Permissions ====================
@@ -1107,6 +1071,15 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         (bool success,) = target.delegatecall(data);
         if (!success) {
             revert TransformFailed();
+        }
+    }
+
+    function _delegatecallPassthrough(address target, bytes memory data) internal {
+        (bool success, bytes memory returndata) = target.delegatecall(data);
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returndata, 0x20), mload(returndata))
+            }
         }
     }
 

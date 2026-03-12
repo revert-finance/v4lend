@@ -11,6 +11,7 @@ import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {AutoLeverageLib} from "./lib/AutoLeverageLib.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
 
 /// @title RevertHookAutoLeverageActions
@@ -25,6 +26,33 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator
     ) RevertHookFunctionsBase(_permit2, _v4Oracle, _liquidityCalculator) {}
+
+    function validateAutoLeverageMode(uint256 tokenId, PoolKey calldata poolKey, uint8 modeFlags) external view {
+        address owner = _getOwner(tokenId, false);
+        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
+        bool hasAutoExit = PositionModeFlags.hasAutoExit(modeFlags);
+
+        if (hasAutoLeverage || hasAutoExit) {
+            bool isVault = vaults[owner];
+
+            if (hasAutoLeverage && !isVault) {
+                revert InvalidConfig();
+            }
+
+            if (isVault) {
+                address lendAsset = IVault(owner).asset();
+                if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
+                    revert InvalidConfig();
+                }
+            }
+        }
+    }
+
+    function syncAutoLeverageBaseTick(uint256 tokenId, PoolKey calldata poolKey, uint8 modeFlags) external {
+        positionStates[tokenId].autoLeverageBaseTick = PositionModeFlags.hasAutoLeverage(modeFlags)
+            ? _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing)
+            : int24(0);
+    }
 
     // ==================== Auto Leverage ====================
 
