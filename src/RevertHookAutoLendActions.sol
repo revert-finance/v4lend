@@ -156,7 +156,6 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         address owner = _getOwner(tokenId, false);
         address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
         uint256 shares = positionStates[tokenId].autoLendShares;
-        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
 
         _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
 
@@ -165,6 +164,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
 
         bool isToken0Lent = tokenAddress == Currency.unwrap(poolKey.currency0);
         uint256 newTokenId;
+        bool restoredExistingPosition;
         (bool addToExisting, int24 newTickLower, int24 newTickUpper) = AutoLendLib.planOneSidedReentry(
             _getCurrentTick(poolKey.toId()),
             poolKey.tickSpacing,
@@ -174,13 +174,14 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         );
 
         if (addToExisting) {
-            _increaseLiquidity(
+            (uint256 restored0, uint256 restored1) = _increaseLiquidity(
                 tokenId,
                 poolKey,
                 positionInfo,
                 isToken0Lent ? uint128(redeemedAmount) : 0,
                 isToken0Lent ? 0 : uint128(redeemedAmount)
             );
+            restoredExistingPosition = restored0 != 0 || restored1 != 0;
         } else {
             (newTokenId,,) = _mintPosition(
                 poolKey,
@@ -197,7 +198,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
 
         if (newTokenId > 0) {
             _migrateRemintedPosition(tokenId, newTokenId);
-        } else if (positionManager.getPositionLiquidity(tokenId) > liquidityBefore) {
+        } else if (restoredExistingPosition) {
             _addPositionTriggers(tokenId, poolKey);
         } else {
             _disablePosition(tokenId);
@@ -253,10 +254,11 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
     ) internal {
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
-        _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        (uint256 restored0, uint256 restored1) =
+            _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
         _sendLeftoverTokens(tokenId, currency0, currency1, owner);
 
-        if (positionManager.getPositionLiquidity(tokenId) == 0) {
+        if (restored0 == 0 && restored1 == 0) {
             _disablePosition(tokenId);
         } else {
             _removeAutoLendDepositTrigger(tokenId, poolKey, positionInfo, isUpperTrigger);

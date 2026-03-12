@@ -147,9 +147,10 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
     ) internal returns (bool) {
         uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(currentDebt, collateralValue, targetRatioBps);
 
-        Currency lendToken = Currency.wrap(vault.asset());
+        address lendAsset = vault.asset();
+        Currency lendToken = Currency.wrap(lendAsset);
         uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
-        (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, vault.asset());
+        (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, lendAsset);
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         if (positionValue == 0 || currentLiquidity == 0) return true;
@@ -168,7 +169,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
 
         // Repay debt
-        _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);
+        _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
         if (newDebt < currentDebt) {
             _sendLeftoverTokens(tokenId, currency0, currency1, vault.ownerOf(tokenId));
