@@ -89,6 +89,8 @@ contract AutoExit is Automator {
     /// @notice Handle token exit (must be in correct state)
     function execute(ExecuteParams calldata params) external nonReentrant {
         bool isVaultCall = vaults[msg.sender];
+        IVault vault;
+        Currency lendToken;
         if (!operators[msg.sender] && !isVaultCall) {
             revert Unauthorized();
         }
@@ -146,9 +148,9 @@ contract AutoExit is Automator {
         // Resolve owner; for vault positions, repay debt before swap
         address owner;
         if (isVaultCall) {
-            IVault vault = IVault(msg.sender);
+            vault = IVault(msg.sender);
             owner = vault.ownerOf(params.tokenId);
-            Currency lendToken = Currency.wrap(vault.asset());
+            lendToken = Currency.wrap(vault.asset());
 
             // Vault asset must be one of the pool tokens for debt repayment to work
             if (!(lendToken == token0) && !(lendToken == token1)) {
@@ -191,8 +193,6 @@ contract AutoExit is Automator {
 
         // Post-swap repayment: when swap produced the lend token, repay remaining debt
         if (isVaultCall) {
-            IVault vault = IVault(msg.sender);
-            Currency lendToken = Currency.wrap(vault.asset());
             bool repayAfterSwap = isSwap && (isAbove ? (lendToken == token0) : (lendToken == token1));
             if (repayAfterSwap) {
                 (amount0, amount1) =
