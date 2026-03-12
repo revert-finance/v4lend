@@ -35,7 +35,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         if (address(vault) != address(0) && vault.asset() != token) {
             revert InvalidConfig();
         }
-        autoLendVaults[token] = vault;
+        _autoLendVaults[token] = vault;
         emit SetAutoLendVault(token, vault);
     }
 
@@ -49,8 +49,8 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
             revert InvalidConfig();
         }
         if (
-            address(autoLendVaults[Currency.unwrap(poolKey.currency0)]) == address(0)
-                || address(autoLendVaults[Currency.unwrap(poolKey.currency1)]) == address(0)
+            address(_autoLendVaults[Currency.unwrap(poolKey.currency0)]) == address(0)
+                || address(_autoLendVaults[Currency.unwrap(poolKey.currency1)]) == address(0)
         ) {
             revert InvalidConfig();
         }
@@ -65,7 +65,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         _removePositionTriggers(tokenId, poolKey);
 
-        PositionState storage state = positionStates[tokenId];
+        PositionState storage state = _positionStates[tokenId];
         if (state.autoLendShares > 0) {
             uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(
                 state.autoLendShares, address(this), address(this)
@@ -90,7 +90,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         Currency lendCurrency = isUpperTrigger ? poolKey.currency1 : poolKey.currency0;
         address tokenAddress = Currency.unwrap(lendCurrency);
-        IERC4626 lendVault = autoLendVaults[tokenAddress];
+        IERC4626 lendVault = _autoLendVaults[tokenAddress];
         if (address(lendVault) == address(0)) {
             emit HookAutoLendFailed(address(0), lendCurrency, abi.encodeWithSignature("InvalidConfig()"));
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
@@ -107,7 +107,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
 
         SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), lendAmount);
         try lendVault.deposit(lendAmount, address(this)) returns (uint256 shares) {
-            PositionState storage state = positionStates[tokenId];
+            PositionState storage state = _positionStates[tokenId];
             state.autoLendShares = shares;
             state.autoLendToken = tokenAddress;
             state.autoLendAmount = lendAmount;
@@ -135,7 +135,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
     /// @param tokenId The token ID of the position
     /// @param shares The number of shares to redeem
     function autoLendWithdraw(PoolKey calldata poolKey, uint256 tokenId, uint256 shares) external {
-        PositionState storage state = positionStates[tokenId];
+        PositionState storage state = _positionStates[tokenId];
 
         try IERC4626(state.autoLendVault).redeem(shares, address(this), address(this)) returns (uint256 amount) {
             _processLendWithdraw(poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount);
@@ -155,7 +155,7 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
     ) internal {
         address owner = _getOwner(tokenId, false);
         address realOwner = vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
-        uint256 shares = positionStates[tokenId].autoLendShares;
+        uint256 shares = _positionStates[tokenId].autoLendShares;
 
         _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
 
@@ -219,22 +219,22 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         uint256 gain = redeemedAmount > originalAmount ? redeemedAmount - originalAmount : 0;
         if (gain > 0) {
             bool isToken0 = poolKey.currency0 == lendCurrency;
-            uint256 protocolFee = gain * protocolFeeBps / 10000;
-            lendCurrency.transfer(protocolFeeRecipient, protocolFee);
+            uint256 protocolFee = gain * _protocolFeeBps / 10000;
+            lendCurrency.transfer(_protocolFeeRecipient, protocolFee);
             emit SendProtocolFee(
                 tokenId,
                 poolKey.currency0,
                 poolKey.currency1,
                 isToken0 ? protocolFee : 0,
                 isToken0 ? 0 : protocolFee,
-                protocolFeeRecipient
+                _protocolFeeRecipient
             );
         }
     }
 
     /// @notice Resets the auto-lend state for a position
     function _resetAutoLendState(uint256 tokenId) internal {
-        PositionState storage state = positionStates[tokenId];
+        PositionState storage state = _positionStates[tokenId];
         state.autoLendShares = 0;
         state.autoLendToken = address(0);
         state.autoLendAmount = 0;
@@ -271,11 +271,11 @@ contract RevertHookAutoLendActions is RevertHookFunctionsBase {
         PositionInfo positionInfo,
         bool removeUpperTrigger
     ) internal {
-        int24 tolerance = positionConfigs[tokenId].autoLendToleranceTick;
+        int24 tolerance = _positionConfigs[tokenId].autoLendToleranceTick;
         if (removeUpperTrigger) {
-            upperTriggerAfterSwap[poolKey.toId()].remove(positionInfo.tickUpper() + tolerance * 2, tokenId);
+            _upperTriggerAfterSwap[poolKey.toId()].remove(positionInfo.tickUpper() + tolerance * 2, tokenId);
         } else {
-            lowerTriggerAfterSwap[poolKey.toId()].remove(
+            _lowerTriggerAfterSwap[poolKey.toId()].remove(
                 positionInfo.tickLower() - tolerance * 2 - poolKey.tickSpacing, tokenId
             );
         }

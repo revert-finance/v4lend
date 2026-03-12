@@ -181,8 +181,8 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         (int24 newTickLower, int24 newTickUpper) = AutoRangeLib.plan(
             _getCurrentTick(poolId),
             poolKey.tickSpacing,
-            positionConfigs[tokenId].autoRangeLowerDelta,
-            positionConfigs[tokenId].autoRangeUpperDelta
+            _positionConfigs[tokenId].autoRangeLowerDelta,
+            _positionConfigs[tokenId].autoRangeUpperDelta
         );
 
         // This should already be rejected at configuration time.
@@ -286,7 +286,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
     /// @param tokenId The token ID to compound
     /// @param caller The original caller (for rewards)
     function executeAutoCompound(uint256 tokenId, address caller) external {
-        PositionConfig storage config = positionConfigs[tokenId];
+        PositionConfig storage config = _positionConfigs[tokenId];
         AutoCompoundMode compoundMode = config.autoCompoundMode;
 
         // Skip if compound is disabled or position is not active
@@ -339,8 +339,8 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         uint256 amount1,
         address recipient
     ) internal returns (uint256, uint256) {
-        uint256 reward0 = amount0 * autoCompoundRewardBps / 10000;
-        uint256 reward1 = amount1 * autoCompoundRewardBps / 10000;
+        uint256 reward0 = amount0 * _AUTO_COMPOUND_REWARD_BPS / 10000;
+        uint256 reward1 = amount1 * _AUTO_COMPOUND_REWARD_BPS / 10000;
 
         if (reward0 != 0) currency0.transfer(recipient, reward0);
         if (reward1 != 0) currency1.transfer(recipient, reward1);

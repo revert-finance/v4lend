@@ -73,8 +73,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 baseTick,
         int24 tickSpacing
     ) internal pure returns (int24 leverageLower, int24 leverageUpper) {
-        leverageLower = baseTick - LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
-        leverageUpper = baseTick + LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
+        leverageLower = baseTick - _LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
+        leverageUpper = baseTick + _LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
     }
 
     // ==================== Position Config Helpers ====================
@@ -82,7 +82,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     /// @notice Disables a position by setting its config to NONE
     function _disablePosition(uint256 tokenId) internal {
         PositionConfig memory emptyConfig = _getEmptyPositionConfig();
-        positionConfigs[tokenId] = emptyConfig;
+        _positionConfigs[tokenId] = emptyConfig;
         _deactivatePosition(tokenId);
         emit SetPositionConfig(tokenId, emptyConfig);
     }
@@ -108,30 +108,30 @@ abstract contract RevertHookTriggers is RevertHookState {
 
     /// @notice Marks position as activated (triggers are now active)
     function _activatePosition(uint256 tokenId) internal {
-        if (positionStates[tokenId].lastActivated == 0) {
-            positionStates[tokenId].lastActivated = uint32(block.timestamp);
+        if (_positionStates[tokenId].lastActivated == 0) {
+            _positionStates[tokenId].lastActivated = uint32(block.timestamp);
         }
     }
 
     /// @notice Marks position as deactivated
     function _deactivatePosition(uint256 tokenId) internal {
-        uint32 lastActivated = positionStates[tokenId].lastActivated;
+        uint32 lastActivated = _positionStates[tokenId].lastActivated;
         if (lastActivated > 0) {
-            positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - lastActivated;
-            positionStates[tokenId].lastActivated = 0;
+            _positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - lastActivated;
+            _positionStates[tokenId].lastActivated = 0;
         }
     }
 
     /// @notice Checks if position is currently activated
     function _isActivated(uint256 tokenId) internal view returns (bool) {
-        return positionStates[tokenId].lastActivated > 0;
+        return _positionStates[tokenId].lastActivated > 0;
     }
 
     // ==================== Trigger Management ====================
 
     /// @notice Adds position triggers based on the current position configuration
     function _addPositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        PositionConfig storage config = positionConfigs[tokenId];
+        PositionConfig storage config = _positionConfigs[tokenId];
 
         if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
             return;
@@ -145,8 +145,8 @@ abstract contract RevertHookTriggers is RevertHookState {
 
     /// @notice Inserts precomputed trigger ticks into the linked lists
     function _insertTriggerTicks(PoolId poolId, uint256 tokenId, int24[4] memory ticks) internal {
-        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
-        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
+        TickLinkedList.List storage lowerList = _lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage upperList = _upperTriggerAfterSwap[poolId];
 
         if (!upperList.increasing) {
             upperList.increasing = true;
@@ -160,7 +160,7 @@ abstract contract RevertHookTriggers is RevertHookState {
 
     /// @notice Removes position triggers based on the current position configuration
     function _removePositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
-        _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
+        _removePositionTriggersWithConfig(tokenId, poolKey, _positionConfigs[tokenId]);
     }
 
     /// @notice Removes position triggers using an explicit config snapshot
@@ -175,8 +175,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         PoolId poolId = poolKey.toId();
         (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
 
-        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
-        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
+        TickLinkedList.List storage lowerList = _lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage upperList = _upperTriggerAfterSwap[poolId];
 
         int24[4] memory ticks = _computeTriggerTicksMemory(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
 
@@ -193,7 +193,7 @@ abstract contract RevertHookTriggers is RevertHookState {
 
     /// @notice Updates position triggers with optional force flag
     function _updatePositionTriggersInternal(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig, bool force) internal {
-        PositionConfig storage oldConfig = positionConfigs[tokenId];
+        PositionConfig storage oldConfig = _positionConfigs[tokenId];
 
         bool oldHasTriggers = !force && PositionModeFlags.hasTriggers(oldConfig.modeFlags);
         bool newHasTriggers = PositionModeFlags.hasTriggers(newConfig.modeFlags);
@@ -205,8 +205,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         PoolId poolId = poolKey.toId();
         (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
 
-        TickLinkedList.List storage lowerList = lowerTriggerAfterSwap[poolId];
-        TickLinkedList.List storage upperList = upperTriggerAfterSwap[poolId];
+        TickLinkedList.List storage lowerList = _lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage upperList = _upperTriggerAfterSwap[poolId];
 
         if (!upperList.increasing) {
             upperList.increasing = true;
@@ -319,7 +319,7 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 leverageLower = type(int24).min;
         int24 leverageUpper = type(int24).max;
         if (hasAutoLeverage) {
-            int24 baseTick = positionStates[tokenId].autoLeverageBaseTick;
+            int24 baseTick = _positionStates[tokenId].autoLeverageBaseTick;
             (leverageLower, leverageUpper) = _calculateLeverageTriggerTicks(baseTick, poolKey.tickSpacing);
         }
 
@@ -365,7 +365,7 @@ abstract contract RevertHookTriggers is RevertHookState {
 
         // AUTO_LEND triggers (mutually exclusive with AUTO_EXIT and AUTO_LEVERAGE per validation)
         if (PositionModeFlags.hasAutoLend(modeFlags)) {
-            PositionState storage state = positionStates[tokenId];
+            PositionState storage state = _positionStates[tokenId];
             if (state.autoLendShares > 0) {
                 if (Currency.unwrap(poolKey.currency0) == state.autoLendToken) {
                     ticks[2] = tickLower - autoLendToleranceTick - poolKey.tickSpacing;

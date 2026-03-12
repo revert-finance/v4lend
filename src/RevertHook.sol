@@ -54,31 +54,20 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     using TickLinkedList for TickLinkedList.List;
     using CurrencyLibrary for Currency;
 
-    IPermit2 public immutable permit2;
+    IPermit2 internal immutable permit2;
 
-    IPositionManager public immutable positionManager;
-    IV4Oracle public immutable v4Oracle;
-    ILiquidityCalculator public immutable liquidityCalculator;
+    IPositionManager internal immutable positionManager;
+    IV4Oracle internal immutable v4Oracle;
+    ILiquidityCalculator internal immutable liquidityCalculator;
 
     /// @notice The RevertHookPositionActions contract for delegatecall (auto-exit, auto-range, auto-compound)
-    RevertHookPositionActions public immutable hookFunctionsPositionActions;
+    RevertHookPositionActions internal immutable hookFunctionsPositionActions;
 
     /// @notice The RevertHookAutoLeverageActions contract for delegatecall (auto-leverage)
-    RevertHookAutoLeverageActions public immutable hookFunctionsAutoLeverageActions;
+    RevertHookAutoLeverageActions internal immutable hookFunctionsAutoLeverageActions;
 
     /// @notice The RevertHookAutoLendActions contract for delegatecall (auto-lend)
-    RevertHookAutoLendActions public immutable hookFunctionsAutoLendActions;
-
-    struct ImmediateActionData {
-        uint256 tokenId;
-        PoolKey poolKey;
-        uint8 modeFlags;
-        bool isUpperTrigger;
-        int24 tick;
-        bool autoExitIsRelative;
-        int24 autoExitTickLower;
-        int24 autoExitTickUpper;
-    }
+    RevertHookAutoLendActions internal immutable hookFunctionsAutoLendActions;
 
     constructor(
         address owner_,
@@ -91,7 +80,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         RevertHookAutoLendActions _hookFunctionsAutoLendActions
     ) BaseHook(_v4Oracle.poolManager()) Ownable(owner_) {
         positionManager = _v4Oracle.positionManager();
-        protocolFeeRecipient = protocolFeeRecipient_;
+        _protocolFeeRecipient = protocolFeeRecipient_;
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
@@ -100,6 +89,133 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         hookFunctionsPositionActions = _hookFunctionsPositionActions;
         hookFunctionsAutoLeverageActions = _hookFunctionsAutoLeverageActions;
         hookFunctionsAutoLendActions = _hookFunctionsAutoLendActions;
+    }
+
+    function autoCompoundRewardBps() external pure returns (uint16) {
+        return _AUTO_COMPOUND_REWARD_BPS;
+    }
+
+    function LEVERAGE_TICK_OFFSET_MULTIPLIER() external pure returns (int24) {
+        return _LEVERAGE_TICK_OFFSET_MULTIPLIER;
+    }
+
+    function MAX_TRIGGER_BATCHES_PER_SWAP() external pure returns (uint256) {
+        return _MAX_TRIGGER_BATCHES_PER_SWAP;
+    }
+
+    function positionConfigs(uint256 tokenId)
+        external
+        view
+        returns (
+            uint8 modeFlags,
+            AutoCompoundMode autoCompoundMode,
+            bool autoExitIsRelative,
+            int24 autoExitTickLower,
+            int24 autoExitTickUpper,
+            int24 autoRangeLowerLimit,
+            int24 autoRangeUpperLimit,
+            int24 autoRangeLowerDelta,
+            int24 autoRangeUpperDelta,
+            int24 autoLendToleranceTick,
+            uint16 autoLeverageTargetBps
+        )
+    {
+        PositionConfig storage config = _positionConfigs[tokenId];
+        return (
+            config.modeFlags,
+            config.autoCompoundMode,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper,
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit,
+            config.autoRangeLowerDelta,
+            config.autoRangeUpperDelta,
+            config.autoLendToleranceTick,
+            config.autoLeverageTargetBps
+        );
+    }
+
+    function generalConfigs(uint256 tokenId)
+        external
+        view
+        returns (
+            uint24 swapPoolFee,
+            int24 swapPoolTickSpacing,
+            IHooks swapPoolHooks,
+            uint128 sqrtPriceMultiplier0,
+            uint128 sqrtPriceMultiplier1
+        )
+    {
+        GeneralConfig storage config = _generalConfigs[tokenId];
+        return (
+            config.swapPoolFee,
+            config.swapPoolTickSpacing,
+            config.swapPoolHooks,
+            config.sqrtPriceMultiplier0,
+            config.sqrtPriceMultiplier1
+        );
+    }
+
+    function positionStates(uint256 tokenId)
+        external
+        view
+        returns (
+            uint32 lastCollect,
+            uint32 acumulatedActiveTime,
+            uint32 lastActivated,
+            address autoLendToken,
+            uint256 autoLendShares,
+            uint256 autoLendAmount,
+            address autoLendVault,
+            int24 autoLeverageBaseTick
+        )
+    {
+        PositionState storage state = _positionStates[tokenId];
+        return (
+            state.lastCollect,
+            state.acumulatedActiveTime,
+            state.lastActivated,
+            state.autoLendToken,
+            state.autoLendShares,
+            state.autoLendAmount,
+            state.autoLendVault,
+            state.autoLeverageBaseTick
+        );
+    }
+
+    function autoLendVaults(address token) external view returns (IERC4626 vault) {
+        return _autoLendVaults[token];
+    }
+
+    function protocolFeeBps() external view returns (uint16) {
+        return _protocolFeeBps;
+    }
+
+    function protocolFeeRecipient() external view returns (address) {
+        return _protocolFeeRecipient;
+    }
+
+    function maxTicksFromOracle() external view returns (int24) {
+        return _maxTicksFromOracle;
+    }
+
+    function minPositionValueNative() external view returns (uint256) {
+        return _minPositionValueNative;
+    }
+
+    function tickLowerLasts(PoolId poolId) external view returns (int24) {
+        return _tickLowerLasts[poolId];
+    }
+
+    function lowerTriggerAfterSwap(PoolId poolId) external view returns (bool increasing, uint32 size, int24 head) {
+        TickLinkedList.List storage list = _lowerTriggerAfterSwap[poolId];
+        return (list.increasing, list.size, list.head);
+    }
+
+    function upperTriggerAfterSwap(PoolId poolId) external view returns (bool increasing, uint32 size, int24 head) {
+        TickLinkedList.List storage list = _upperTriggerAfterSwap[poolId];
+        return (list.increasing, list.size, list.head);
     }
 
     // ==================== Configuration Setters ====================
@@ -118,36 +234,36 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     /// @notice Sets the maximum tick deviation allowed from oracle price for automated actions (onlyOwner)
     /// @dev Protects against price manipulation by limiting execution to prices within range of oracle
-    /// @param _maxTicksFromOracle Maximum tick difference from oracle-derived tick (e.g., 100 = ~1% price deviation)
+    /// @param newMaxTicksFromOracle Maximum tick difference from oracle-derived tick (e.g., 100 = ~1% price deviation)
     /// @custom:security Lower values provide stronger manipulation protection but may prevent legitimate executions
-    function setMaxTicksFromOracle(int24 _maxTicksFromOracle) external onlyOwner {
-        maxTicksFromOracle = _maxTicksFromOracle;
-        emit SetMaxTicksFromOracle(_maxTicksFromOracle);
+    function setMaxTicksFromOracle(int24 newMaxTicksFromOracle) external onlyOwner {
+        _maxTicksFromOracle = newMaxTicksFromOracle;
+        emit SetMaxTicksFromOracle(newMaxTicksFromOracle);
     }
 
     /// @notice Sets the minimum position value (in native token) required to enable automated features (onlyOwner)
     /// @dev Prevents dust positions from triggering gas-expensive automated actions
-    /// @param _minPositionValueNative Minimum position value in native token (e.g., 0.01 ether)
-    function setMinPositionValueNative(uint256 _minPositionValueNative) external onlyOwner {
-        minPositionValueNative = _minPositionValueNative;
-        emit SetMinPositionValueNative(_minPositionValueNative);
+    /// @param newMinPositionValueNative Minimum position value in native token (e.g., 0.01 ether)
+    function setMinPositionValueNative(uint256 newMinPositionValueNative) external onlyOwner {
+        _minPositionValueNative = newMinPositionValueNative;
+        emit SetMinPositionValueNative(newMinPositionValueNative);
     }
 
     /// @notice Sets the protocol fee percentage charged on position fees while active (onlyOwner)
     /// @dev Fee is calculated proportionally based on time position was active vs total time since last collect
-    /// @param _protocolFeeBps Protocol fee in basis points (e.g., 100 = 1%, max 10000 = 100%)
-    function setProtocolFeeBps(uint16 _protocolFeeBps) external onlyOwner {
-        if (_protocolFeeBps > 10000) {
+    /// @param newProtocolFeeBps Protocol fee in basis points (e.g., 100 = 1%, max 10000 = 100%)
+    function setProtocolFeeBps(uint16 newProtocolFeeBps) external onlyOwner {
+        if (newProtocolFeeBps > 10000) {
             revert InvalidConfig();
         }
-        protocolFeeBps = _protocolFeeBps;
-        emit SetProtocolFeeBps(_protocolFeeBps);
+        _protocolFeeBps = newProtocolFeeBps;
+        emit SetProtocolFeeBps(newProtocolFeeBps);
     }
 
     /// @notice Sets the protocol fee recipient
-    function setProtocolFeeRecipient(address _protocolFeeRecipient) external onlyOwner {
-        protocolFeeRecipient = _protocolFeeRecipient;
-        emit SetProtocolFeeRecipient(_protocolFeeRecipient);
+    function setProtocolFeeRecipient(address newProtocolFeeRecipient) external onlyOwner {
+        _protocolFeeRecipient = newProtocolFeeRecipient;
+        emit SetProtocolFeeRecipient(newProtocolFeeRecipient);
     }
 
     /// @notice Sets the general swap configuration for a position
@@ -195,7 +311,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             sqrtPriceMultiplier1: _calculateSqrtPriceMultiplier(maxPriceImpactBps1, false)
         });
 
-        generalConfigs[tokenId] = generalConfig;
+        _generalConfigs[tokenId] = generalConfig;
         emit SetGeneralConfig(tokenId, generalConfig);
     }
 
@@ -214,7 +330,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         if (!PositionModeFlags.isNone(positionConfig.modeFlags)) {
             uint256 value = _getPositionValueNative(tokenId);
-            if (value < minPositionValueNative) {
+            if (value < _minPositionValueNative) {
                 revert PositionValueTooLow();
             }
         }
@@ -251,10 +367,10 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             positionInfo.tickUpper(),
             config
         );
-        PositionConfig memory oldConfig = positionConfigs[tokenId];
+        PositionConfig memory oldConfig = _positionConfigs[tokenId];
         _removePositionTriggersWithConfig(tokenId, poolKey, oldConfig);
 
-        positionConfigs[tokenId] = config;
+        _positionConfigs[tokenId] = config;
         _delegatecallLendingActions(
             abi.encodeCall(hookFunctionsAutoLeverageActions.syncAutoLeverageBaseTick, (tokenId, poolKey, config.modeFlags))
         );
@@ -362,7 +478,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
         int24 tickLower = _getTickLower(tick, key.tickSpacing);
-        tickLowerLasts[key.toId()] = tickLower;
+        _tickLowerLasts[key.toId()] = tickLower;
         return BaseHook.afterInitialize.selector;
     }
 
@@ -376,7 +492,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             return (this.afterSwap.selector, 0);
         }
 
-        int24 cursor = tickLowerLasts[poolId];
+        int24 cursor = _tickLowerLasts[poolId];
         int24 liveTick;
 
         bool hasCachedUpperOracleMaxEndTick;
@@ -384,7 +500,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         int24 upperOracleMaxEndTick;
         int24 lowerOracleMaxEndTick;
         uint256 processedTickBatches;
-        while (processedTickBatches < MAX_TRIGGER_BATCHES_PER_SWAP) {
+        while (processedTickBatches < _MAX_TRIGGER_BATCHES_PER_SWAP) {
             liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
             if (cursor == liveTick) {
                 break;
@@ -414,7 +530,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             }
 
             TickLinkedList.List storage list =
-                increasing ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+                increasing ? _upperTriggerAfterSwap[poolId] : _lowerTriggerAfterSwap[poolId];
 
             bool exists;
             int24 tick;
@@ -430,7 +546,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             uint256 length = tokenIdsAtTick.length;
             int24 previousLiveTick = liveTick;
             for (uint256 i; i < length;) {
-                PositionConfig storage config = positionConfigs[tokenIdsAtTick[i]];
+                PositionConfig storage config = _positionConfigs[tokenIdsAtTick[i]];
                 _dispatchAutomationAction(
                     key,
                     poolId,
@@ -464,7 +580,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         // Persist the last processed cursor even when the batch cap is hit. Unprocessed trigger ticks remain in the
         // linked lists and may be consumed by a later external swap if the subsequent price path makes them eligible.
-        tickLowerLasts[poolId] = cursor;
+        _tickLowerLasts[poolId] = cursor;
         return (this.afterSwap.selector, 0);
     }
 
@@ -553,7 +669,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _handleAutoExit(PoolKey memory poolKey, PoolId poolId, uint256 tokenId, bool isUpperTrigger) internal {
-        _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
+        _removePositionTriggersWithConfig(tokenId, poolKey, _positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
         if (
@@ -573,7 +689,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             return;
         }
 
-        uint256 shares = positionStates[tokenId].autoLendShares;
+        uint256 shares = _positionStates[tokenId].autoLendShares;
         bytes memory data = shares > 0
             ? abi.encodeCall(hookFunctionsAutoLendActions.autoLendWithdraw, (poolKey, tokenId, shares))
             : abi.encodeCall(hookFunctionsAutoLendActions.autoLendDeposit, (poolKey, poolId, tokenId, isUpperTrigger));
@@ -583,7 +699,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
     }
 
     function _handleAutoRange(PoolKey memory poolKey, PoolId poolId, uint256 tokenId) internal {
-        _removePositionTriggersWithConfig(tokenId, poolKey, positionConfigs[tokenId]);
+        _removePositionTriggersWithConfig(tokenId, poolKey, _positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
         if (
@@ -621,7 +737,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         uint256 tokenId,
         bool isUpperTrigger
     ) internal {
-        PositionConfig storage config = positionConfigs[tokenId];
+        PositionConfig storage config = _positionConfigs[tokenId];
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Compute AUTO_RANGE trigger ticks
@@ -634,7 +750,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         // Compute AUTO_LEVERAGE trigger ticks
         (int24 leverageLower, int24 leverageUpper) = _calculateLeverageTriggerTicks(
-            positionStates[tokenId].autoLeverageBaseTick,
+            _positionStates[tokenId].autoLeverageBaseTick,
             poolKey.tickSpacing
         );
 
@@ -684,8 +800,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
 
-        if (!PositionModeFlags.isNone(positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
-            if (_getPositionValueNative(tokenId) >= minPositionValueNative) {
+        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
+            if (_getPositionValueNative(tokenId) >= _minPositionValueNative) {
                 _addPositionTriggers(tokenId, key);
                 _activatePosition(tokenId);
             }
@@ -711,7 +827,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
 
         if (_isActivated(tokenId)) {
             uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
-            if (liquidity == 0 || _getPositionValueNative(tokenId) < minPositionValueNative) {
+            if (liquidity == 0 || _getPositionValueNative(tokenId) < _minPositionValueNative) {
                 _removePositionTriggers(tokenId, key);
                 _deactivatePosition(tokenId);
             }
@@ -724,8 +840,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         internal
         returns (BalanceDelta newFeeDelta)
     {
-        address feeRecipient = protocolFeeRecipient;
-        PositionState storage state = positionStates[tokenId];
+        address feeRecipient = _protocolFeeRecipient;
+        PositionState storage state = _positionStates[tokenId];
         uint32 accumulatedActiveTime = state.acumulatedActiveTime;
         uint32 lastActivated = state.lastActivated;
         uint32 currentTime = uint32(block.timestamp);
@@ -743,9 +859,9 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
 
         int128 protocolFee0 =
-            int32(accumulatedActiveTime) * feeDelta.amount0() * int16(protocolFeeBps) / (10000 * int32(feeTime));
+            int32(accumulatedActiveTime) * feeDelta.amount0() * int16(_protocolFeeBps) / (10000 * int32(feeTime));
         int128 protocolFee1 =
-            int32(accumulatedActiveTime) * feeDelta.amount1() * int16(protocolFeeBps) / (10000 * int32(feeTime));
+            int32(accumulatedActiveTime) * feeDelta.amount1() * int16(_protocolFeeBps) / (10000 * int32(feeTime));
 
         if (protocolFee0 > 0) {
             poolManager.take(key.currency0, feeRecipient, uint256(int256(protocolFee0)));
@@ -779,7 +895,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         );
 
         if (shouldExecute) {
-            _executeImmediateAction(tokenId, poolKey, config, isUpperTrigger, triggeredTick);
+            _executeImmediateAction(tokenId, isUpperTrigger, triggeredTick);
         }
     }
 
@@ -845,24 +961,8 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         }
     }
 
-    function _executeImmediateAction(
-        uint256 tokenId,
-        PoolKey memory poolKey,
-        PositionConfig memory config,
-        bool isUpperTrigger,
-        int24 tick
-    ) internal {
-        ImmediateActionData memory actionData = ImmediateActionData({
-            tokenId: tokenId,
-            poolKey: poolKey,
-            modeFlags: config.modeFlags,
-            isUpperTrigger: isUpperTrigger,
-            tick: tick,
-            autoExitIsRelative: config.autoExitIsRelative,
-            autoExitTickLower: config.autoExitTickLower,
-            autoExitTickUpper: config.autoExitTickUpper
-        });
-        poolManager.unlock(abi.encode(actionData));
+    function _executeImmediateAction(uint256 tokenId, bool isUpperTrigger, int24 tick) internal {
+        poolManager.unlock(abi.encode(tokenId, isUpperTrigger, tick));
     }
 
     function _getCrossedTicks(PoolId poolId, int24 tickSpacing)
@@ -871,7 +971,7 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         returns (int24 tickLower, int24 lower, int24 upper)
     {
         tickLower = _getTickLower(_getTick(poolId), tickSpacing);
-        int24 tickLowerLast = tickLowerLasts[poolId];
+        int24 tickLowerLast = _tickLowerLasts[poolId];
 
         if (tickLower < tickLowerLast) {
             lower = tickLower + tickSpacing;
@@ -971,34 +1071,36 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
             revert Unauthorized();
         }
 
-        if (data.length > 64) {
-            ImmediateActionData memory actionData = abi.decode(data, (ImmediateActionData));
-            _executeImmediateActionUnlocked(actionData);
-        } else {
+        if (data.length == 64) {
             (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
             _executeAutoCompound(tokenId, caller);
+        } else {
+            (uint256 tokenId, bool isUpperTrigger, int24 tick) = abi.decode(data, (uint256, bool, int24));
+            _executeImmediateActionUnlocked(tokenId, isUpperTrigger, tick);
         }
         return bytes("");
     }
 
-    function _executeImmediateActionUnlocked(ImmediateActionData memory actionData) internal {
-        PoolId poolId = actionData.poolKey.toId();
-        _consumeImmediateTrigger(actionData.tokenId, poolId, actionData.isUpperTrigger, actionData.tick);
+    function _executeImmediateActionUnlocked(uint256 tokenId, bool isUpperTrigger, int24 tick) internal {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        PositionConfig storage config = _positionConfigs[tokenId];
+        PoolId poolId = poolKey.toId();
+        _consumeImmediateTrigger(tokenId, poolId, isUpperTrigger, tick);
         _dispatchAutomationAction(
-            actionData.poolKey,
+            poolKey,
             poolId,
-            actionData.tokenId,
-            actionData.modeFlags,
-            actionData.isUpperTrigger,
-            actionData.tick,
-            actionData.autoExitIsRelative,
-            actionData.autoExitTickLower,
-            actionData.autoExitTickUpper
+            tokenId,
+            config.modeFlags,
+            isUpperTrigger,
+            tick,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper
         );
     }
 
     function _consumeImmediateTrigger(uint256 tokenId, PoolId poolId, bool isUpperTrigger, int24 tick) internal {
-        TickLinkedList.List storage list = isUpperTrigger ? upperTriggerAfterSwap[poolId] : lowerTriggerAfterSwap[poolId];
+        TickLinkedList.List storage list = isUpperTrigger ? _upperTriggerAfterSwap[poolId] : _lowerTriggerAfterSwap[poolId];
         list.remove(tick, tokenId);
     }
 
@@ -1036,9 +1138,9 @@ contract RevertHook is RevertHookTriggers, BaseHook, IUnlockCallback {
         int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), poolKey.tickSpacing);
 
         if (up) {
-            maxEndTick = _getTickLower(oracleTick + maxTicksFromOracle, poolKey.tickSpacing);
+            maxEndTick = _getTickLower(oracleTick + _maxTicksFromOracle, poolKey.tickSpacing);
         } else {
-            maxEndTick = _getTickLower(oracleTick - maxTicksFromOracle, poolKey.tickSpacing);
+            maxEndTick = _getTickLower(oracleTick - _maxTicksFromOracle, poolKey.tickSpacing);
         }
     }
 

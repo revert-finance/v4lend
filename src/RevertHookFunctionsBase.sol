@@ -33,11 +33,11 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
-    IPermit2 public immutable permit2;
-    IPositionManager public immutable positionManager;
-    IV4Oracle public immutable v4Oracle;
-    ILiquidityCalculator public immutable liquidityCalculator;
-    IPoolManager public immutable poolManager;
+    IPermit2 internal immutable permit2;
+    IPositionManager internal immutable positionManager;
+    IV4Oracle internal immutable v4Oracle;
+    ILiquidityCalculator internal immutable liquidityCalculator;
+    IPoolManager internal immutable poolManager;
 
     constructor(IPermit2 _permit2, IV4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) Ownable(address(1)) {
         positionManager = _v4Oracle.positionManager();
@@ -86,7 +86,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
 
     /// @notice Gets the swap pool key for a position (may differ from position pool)
     function _getSwapPoolKey(uint256 tokenId, PoolKey memory poolKey) internal view returns (PoolKey memory) {
-        GeneralConfig storage config = generalConfigs[tokenId];
+        GeneralConfig storage config = _generalConfigs[tokenId];
         if (config.swapPoolFee == 0 || config.swapPoolTickSpacing == 0) {
             return poolKey;
         }
@@ -109,23 +109,23 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
 
     /// @notice Copies configuration from one position to a new position
     function _copyPositionConfig(uint256 newTokenId, PositionConfig storage oldConfig) internal {
-        positionConfigs[newTokenId] = oldConfig;
-        if (positionStates[newTokenId].lastActivated == 0) {
-            positionStates[newTokenId].lastActivated = uint32(block.timestamp);
+        _positionConfigs[newTokenId] = oldConfig;
+        if (_positionStates[newTokenId].lastActivated == 0) {
+            _positionStates[newTokenId].lastActivated = uint32(block.timestamp);
         }
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
         if (PositionModeFlags.hasAutoLeverage(oldConfig.modeFlags)) {
             int24 currentTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
-            positionStates[newTokenId].autoLeverageBaseTick = currentTick;
+            _positionStates[newTokenId].autoLeverageBaseTick = currentTick;
         }
         _addPositionTriggers(newTokenId, poolKey);
-        emit SetPositionConfig(newTokenId, positionConfigs[newTokenId]);
+        emit SetPositionConfig(newTokenId, _positionConfigs[newTokenId]);
     }
 
     /// @notice Migrates configuration from an old position to its reminted replacement
     function _migrateRemintedPosition(uint256 tokenId, uint256 newTokenId) internal {
-        generalConfigs[newTokenId] = generalConfigs[tokenId];
-        _copyPositionConfig(newTokenId, positionConfigs[tokenId]);
+        _generalConfigs[newTokenId] = _generalConfigs[tokenId];
+        _copyPositionConfig(newTokenId, _positionConfigs[tokenId]);
         _disablePosition(tokenId);
     }
 
@@ -176,7 +176,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         uint256 amountIn,
         uint256 tokenId
     ) internal returns (BalanceDelta delta) {
-        GeneralConfig storage config = generalConfigs[tokenId];
+        GeneralConfig storage config = _generalConfigs[tokenId];
         uint128 priceMultiplier = zeroForOne ? config.sqrtPriceMultiplier0 : config.sqrtPriceMultiplier1;
 
         uint160 sqrtPriceLimitX96;
@@ -387,10 +387,10 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     function _approveToken(Currency currency, uint256 amount) internal {
         if (amount != 0 && !currency.isAddressZero()) {
             address tokenAddress = Currency.unwrap(currency);
-            if (!permit2Approved[tokenAddress]) {
+            if (!_permit2Approved[tokenAddress]) {
                 SafeERC20.forceApprove(IERC20(tokenAddress), address(permit2), type(uint256).max);
                 permit2.approve(tokenAddress, address(positionManager), type(uint160).max, type(uint48).max);
-                permit2Approved[tokenAddress] = true;
+                _permit2Approved[tokenAddress] = true;
             }
         }
     }

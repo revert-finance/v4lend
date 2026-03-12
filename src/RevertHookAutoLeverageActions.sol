@@ -49,7 +49,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
     }
 
     function syncAutoLeverageBaseTick(uint256 tokenId, PoolKey calldata poolKey, uint8 modeFlags) external {
-        positionStates[tokenId].autoLeverageBaseTick = PositionModeFlags.hasAutoLeverage(modeFlags)
+        _positionStates[tokenId].autoLeverageBaseTick = PositionModeFlags.hasAutoLeverage(modeFlags)
             ? _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing)
             : int24(0);
     }
@@ -66,7 +66,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         IVault vault = IVault(msg.sender);
         (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
 
-        uint16 targetRatioBps = positionConfigs[tokenId].autoLeverageTargetBps;
+        uint16 targetRatioBps = _positionConfigs[tokenId].autoLeverageTargetBps;
         uint256 currentRatio = AutoLeverageLib.currentRatio(currentDebt, collateralValue);
         bool success = true;
 
@@ -85,7 +85,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         // Update triggers for new base tick
         _removePositionTriggers(tokenId, poolKey);
         int24 newBaseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
-        positionStates[tokenId].autoLeverageBaseTick = newBaseTick;
+        _positionStates[tokenId].autoLeverageBaseTick = newBaseTick;
         _addPositionTriggers(tokenId, poolKey);
 
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);

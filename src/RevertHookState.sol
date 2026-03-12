@@ -141,37 +141,37 @@ abstract contract RevertHookState is Transformer {
     // ==================== State Variables ====================
 
     // Configuration storage
-    mapping(uint256 tokenId => PositionConfig positionConfig) public positionConfigs;
-    mapping(uint256 tokenId => GeneralConfig generalConfig) public generalConfigs;
-    mapping(uint256 tokenId => PositionState positionState) public positionStates;
+    mapping(uint256 tokenId => PositionConfig positionConfig) internal _positionConfigs;
+    mapping(uint256 tokenId => GeneralConfig generalConfig) internal _generalConfigs;
+    mapping(uint256 tokenId => PositionState positionState) internal _positionStates;
 
     // configured vaults for auto lend
-    mapping(address token => IERC4626 vault) public autoLendVaults;
+    mapping(address token => IERC4626 vault) internal _autoLendVaults;
 
     // fees for auto compound execution 1% reward - of fees autocompounded / harvested
-    uint16 public constant autoCompoundRewardBps = 100;
+    uint16 internal constant _AUTO_COMPOUND_REWARD_BPS = 100;
 
     // auto-leverage triggers at baseTick ± (LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing)
-    int24 public constant LEVERAGE_TICK_OFFSET_MULTIPLIER = 10;
+    int24 internal constant _LEVERAGE_TICK_OFFSET_MULTIPLIER = 10;
 
     // protocol fees (taken from the fees collected while position is active)
-    uint16 public protocolFeeBps = 200;
-    address public protocolFeeRecipient;
+    uint16 internal _protocolFeeBps = 200;
+    address internal _protocolFeeRecipient;
 
     // oracle price validation
-    int24 public maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
+    int24 internal _maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
     // Bound trigger processing for one external swap. If the cap is hit, remaining trigger batches stay registered
     // and can be picked up by a later external swap; they are not guaranteed to run on the immediately following swap.
-    uint256 public constant MAX_TRIGGER_BATCHES_PER_SWAP = 32;
+    uint256 internal constant _MAX_TRIGGER_BATCHES_PER_SWAP = 32;
 
     // minimum position value in native token (address(0)) to be configurable
-    uint256 public minPositionValueNative = 0.01 ether;
+    uint256 internal _minPositionValueNative = 0.01 ether;
 
     // Position trigger mappings
-    mapping(PoolId => int24) public tickLowerLasts;
-    mapping(PoolId poolId => TickLinkedList.List) public lowerTriggerAfterSwap;
-    mapping(PoolId poolId => TickLinkedList.List) public upperTriggerAfterSwap;
+    mapping(PoolId => int24) internal _tickLowerLasts;
+    mapping(PoolId poolId => TickLinkedList.List) internal _lowerTriggerAfterSwap;
+    mapping(PoolId poolId => TickLinkedList.List) internal _upperTriggerAfterSwap;
 
     // Permit2 approval tracking
-    mapping(address => bool) internal permit2Approved;
+    mapping(address => bool) internal _permit2Approved;
 }
