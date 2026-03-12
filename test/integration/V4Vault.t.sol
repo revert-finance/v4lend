@@ -95,9 +95,8 @@ contract V4VaultTest is V4ForkTestBase {
 
         if (borrowMax) {
             // borrow max
-            uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
             vm.prank(nft1Owner);
-            vault.borrow(nft1TokenId, collateralValue * buffer / Q32);
+            vault.borrow(nft1TokenId, collateralValue);
         }
     }
 
@@ -117,9 +116,8 @@ contract V4VaultTest is V4ForkTestBase {
 
         if (borrowMax) {
             // borrow max
-            uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
             vm.prank(nft2Owner);
-            vault.borrow(nft2TokenId, collateralValue * buffer / Q32);
+            vault.borrow(nft2TokenId, collateralValue);
         }
     }
 
@@ -279,13 +277,11 @@ contract V4VaultTest is V4ForkTestBase {
         uint256 debtLimit = vault.globalDebtLimit();
         uint256 increaseLimit = vault.dailyDebtIncreaseLimitMin();
 
-        uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
-
         if (amount > debtLimit) {
             vm.expectRevert(Constants.GlobalDebtLimit.selector);
         } else if (amount > increaseLimit) {
             vm.expectRevert(Constants.DailyDebtIncreaseLimit.selector);
-        } else if (amount > collateralValue * buffer / Q32) {
+        } else if (amount > collateralValue) {
             vm.expectRevert(Constants.CollateralFail.selector);
         }
 
@@ -306,13 +302,11 @@ contract V4VaultTest is V4ForkTestBase {
         uint256 debtLimit = vault.globalDebtLimit();
         uint256 increaseLimit = vault.dailyDebtIncreaseLimitMin();
 
-        uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
-
         if (amount > debtLimit) {
             vm.expectRevert(Constants.GlobalDebtLimit.selector);
         } else if (amount > increaseLimit) {
             vm.expectRevert(Constants.DailyDebtIncreaseLimit.selector);
-        } else if (amount > collateralValue * buffer / Q32) {
+        } else if (amount > collateralValue) {
             vm.expectRevert(Constants.CollateralFail.selector);
         }
 
@@ -990,9 +984,9 @@ contract V4VaultTest is V4ForkTestBase {
         // debt is greater than collateral value
         (uint256 debt,,, uint256 liquidationCost, uint256 liquidationValue) = vault.loanInfo(nft1TokenId);
 
-        assertEq(debt, 126434088);
-        assertEq(liquidationCost, 126434088);
-        assertEq(liquidationValue, 129699012);
+        assertEq(debt, 133416282);
+        assertEq(liquidationCost, 127038436);
+        assertEq(liquidationValue, 140380064);
 
         (Currency token0, Currency token1,,,,,,) = v4Oracle.getPositionBreakdown(nft1TokenId);
 
@@ -1037,10 +1031,10 @@ contract V4VaultTest is V4ForkTestBase {
             )
         );
 
-        assertEq(liquidationValue - liquidationCost, 3264924); // promised liquidation premium
+        assertEq(liquidationValue - liquidationCost, 13341628); // promised liquidation premium
 
-        assertEq(token0.balanceOf(address(this)) - token0Before, 3160994);
-        assertEq(token1.balanceOf(address(this)) - token1Before, 0); // actual liquidation premium (less because of swap)
+        assertEq(token0.balanceOf(address(this)) - token0Before, 7901404);
+        assertEq(token1.balanceOf(address(this)) - token1Before, 1235549817247049); // leftover WETH not consumed by the swap
 
         (debt,,,,) = vault.loanInfo(nft1TokenId);
         assertEq(debt, 0);
@@ -1245,15 +1239,13 @@ contract V4VaultTest is V4ForkTestBase {
         vault.create(nft1TokenId, nft1Owner);
 
         (,, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
-        uint256 buffer = vault.BORROW_SAFETY_BUFFER_X32();
-
         uint256 vaultBalance = usdc.balanceOf(address(vault));
 
         if (debt > globalDebtLimit) {
             vm.expectRevert(Constants.GlobalDebtLimit.selector);
         } else if (debt > dailyDebtIncreaseLimitMin) {
             vm.expectRevert(Constants.DailyDebtIncreaseLimit.selector);
-        } else if (collateralValue * buffer / Q32 < debt) {
+        } else if (collateralValue < debt) {
             vm.expectRevert(Constants.CollateralFail.selector);
         } else if (vaultBalance < debt) {
             vm.expectRevert("ERC20: transfer amount exceeds balance");

@@ -332,11 +332,7 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
         ) {
             amount0Used -= poolKey.currency0.balanceOfSelf();
             amount1Used -= poolKey.currency1.balanceOfSelf();
-            if (positionManager.nextTokenId() == newTokenId) {
-                newTokenId = 0;
-                amount0Used = 0;
-                amount1Used = 0;
-            } else if (_vaults[recipient]) {
+            if (_vaults[recipient]) {
                 IVault(recipient).notifyERC721Received(newTokenId, recipient);
             }
         } else {

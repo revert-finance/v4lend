@@ -55,8 +55,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     uint32 public constant MAX_DAILY_LEND_INCREASE_X32 = uint32(Q32 / 10); //10%
     uint32 public constant MAX_DAILY_DEBT_INCREASE_X32 = uint32(Q32 / 10); //10%
 
-    uint256 public constant BORROW_SAFETY_BUFFER_X32 = uint32(Q32 * 95 / 100); //95% of collateral value
-
     /// @notice Uniswap v4 position manager
     IPositionManager public immutable positionManager;
 
@@ -268,7 +266,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         debt = _convertToAssets(loans[tokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
 
         bool isHealthy;
-        (isHealthy, fullValue, collateralValue,) = _checkLoanIsHealthy(tokenId, debt, false);
+        (isHealthy, fullValue, collateralValue,) = _checkLoanIsHealthy(tokenId, debt);
 
         if (!isHealthy) {
             (liquidationValue, liquidationCost,) = _calculateLiquidation(debt, fullValue, collateralValue);
@@ -620,7 +618,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         IERC721(address(positionManager)).approve(address(0), newTokenId);
 
         uint256 debt = _convertToAssets(loans[newTokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
-        _requireLoanIsHealthy(newTokenId, debt, false);
+        _requireLoanIsHealthy(newTokenId, debt);
 
         transformedTokenId = 0;
     }
@@ -632,7 +630,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     ///      and oracle feeds must exist for both position tokens plus the vault asset.
     /// @param tokenId The token ID of the position to use as collateral
     /// @param assets Amount of assets to borrow (in asset token decimals)
-    /// @custom:security Validates sufficient collateralization after borrow (with 5% safety buffer when not in transform)
+    /// @custom:security Validates sufficient collateralization after borrow
     /// @custom:security In transform mode, health check is deferred to end of transform()
     function borrow(uint256 tokenId, uint256 assets) external override {
 
@@ -678,7 +676,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         // only does check health here if not in transform mode
         if (!isTransformMode) {
-            _requireLoanIsHealthy(tokenId, debt, true);
+            _requireLoanIsHealthy(tokenId, debt);
         }
 
         // fails if not enough asset available
@@ -723,7 +721,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         );
 
         uint256 debt = _convertToAssets(loans[params.tokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
-        _requireLoanIsHealthy(params.tokenId, debt, true);
+        _requireLoanIsHealthy(params.tokenId, debt);
 
         emit WithdrawCollateral(params.tokenId, owner, params.recipient, params.liquidity, amount0, amount1);
     }
@@ -783,7 +781,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         state.debt = _convertToAssets(debtShares, state.newDebtExchangeRateX96, Math.Rounding.Ceil);
 
         (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue) =
-            _checkLoanIsHealthy(params.tokenId, state.debt, false);
+            _checkLoanIsHealthy(params.tokenId, state.debt);
         if (state.isHealthy) {
             revert NotLiquidatable();
         }
@@ -1378,8 +1376,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         }
     }
 
-    function _requireLoanIsHealthy(uint256 tokenId, uint256 debt, bool withBuffer) internal view {
-        (bool isHealthy,,,) = _checkLoanIsHealthy(tokenId, debt, withBuffer);
+    function _requireLoanIsHealthy(uint256 tokenId, uint256 debt) internal view {
+        (bool isHealthy,,,) = _checkLoanIsHealthy(tokenId, debt);
         if (!isHealthy) {
             revert CollateralFail();
         }
@@ -1456,7 +1454,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         return limitMin > increaseLimit ? limitMin : increaseLimit;
     }
 
-    function _checkLoanIsHealthy(uint256 tokenId, uint256 debt, bool withBuffer)
+    function _checkLoanIsHealthy(uint256 tokenId, uint256 debt)
         internal
         view
         returns (bool isHealthy, uint256 fullValue, uint256 collateralValue, uint256 feeValue)
@@ -1464,7 +1462,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         (fullValue, feeValue,,) = oracle.getValue(tokenId, address(asset));
         uint256 collateralFactorX32 = _calculateTokenCollateralFactorX32(tokenId);
         collateralValue = fullValue.mulDiv(collateralFactorX32, Q32);
-        isHealthy = (withBuffer ? collateralValue * BORROW_SAFETY_BUFFER_X32 / Q32 : collateralValue) >= debt;
+        isHealthy = collateralValue >= debt;
     }
 
     function _convertToShares(uint256 amount, uint256 exchangeRateX96, Math.Rounding rounding)
