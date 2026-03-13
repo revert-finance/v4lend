@@ -305,10 +305,32 @@ contract V4VaultTest is V4ForkTestBase {
 
         if (amount > 100000000) {
             vm.expectRevert(Constants.InsufficientLiquidity.selector);
+        } else if (amount > lent) {
+            vm.expectRevert();
         }
 
         vm.prank(WHALE_ACCOUNT);
         vault.withdraw(amount, WHALE_ACCOUNT, WHALE_ACCOUNT);
+    }
+
+    function testWithdrawRevertsWhenAssetsExceedOwnerBalance() external {
+        _deposit(20000000, WHALE_ACCOUNT);
+        _deposit(20000000, nft2Owner);
+
+        vm.expectRevert();
+        vm.prank(WHALE_ACCOUNT);
+        vault.withdraw(30000000, WHALE_ACCOUNT, WHALE_ACCOUNT);
+    }
+
+    function testRedeemRevertsWhenSharesExceedOwnerBalance() external {
+        _deposit(20000000, WHALE_ACCOUNT);
+        _deposit(20000000, nft2Owner);
+
+        uint256 ownerShares = vault.balanceOf(WHALE_ACCOUNT);
+
+        vm.expectRevert();
+        vm.prank(WHALE_ACCOUNT);
+        vault.redeem(ownerShares + 1, WHALE_ACCOUNT, WHALE_ACCOUNT);
     }
 
 
@@ -1321,9 +1343,11 @@ contract V4VaultTest is V4ForkTestBase {
 
         vaultBalance = usdc.balanceOf(address(vault));
         lent = vault.lendInfo(WHALE_ACCOUNT);
-        
-        if (lent > vaultBalance && withdraw > vaultBalance && lent > 0) {
+
+        if (withdraw > vaultBalance) {
             vm.expectRevert(Constants.InsufficientLiquidity.selector);
+        } else if (withdraw > lent) {
+            vm.expectRevert();
         }
         vm.prank(WHALE_ACCOUNT);
         vault.withdraw(withdraw, WHALE_ACCOUNT, WHALE_ACCOUNT);

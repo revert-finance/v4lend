@@ -1035,12 +1035,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             shares = _convertToShares(amount, newLendExchangeRateX96, Math.Rounding.Ceil);
         }
 
-        uint256 ownerBalance = balanceOf(owner);
-        if (shares > ownerBalance) {
-            shares = ownerBalance;
-            assets = _convertToAssets(shares, newLendExchangeRateX96, Math.Rounding.Floor);
-        }
-
         // if caller has allowance for owners shares - may call withdraw
         if (msg.sender != owner) {
             _spendAllowance(owner, msg.sender, shares);

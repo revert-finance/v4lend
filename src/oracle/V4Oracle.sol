@@ -106,7 +106,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
         (uint256 price0X96, uint256 chainlinkReferencePriceX96) = _getReferenceTokenPriceX96(token0, 0);
         (uint256 price1X96,) = _getReferenceTokenPriceX96(token1, chainlinkReferencePriceX96);
-        return SafeCast.toUint160(Math.sqrt(price0X96 * Q96 / price1X96) * (2 ** 48));
+        return SafeCast.toUint160(Math.sqrt(FullMath.mulDiv(price0X96, Q96, price1X96)) * (2 ** 48));
     }
 
     /// @notice Gets value of a V4 position in a specific token
@@ -140,8 +140,8 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         // Calculate outputs
         value = (state.price0X96 * (amount0 + fees0) + state.price1X96 * (amount1 + fees1)) / priceTokenX96;
         feeValue = (state.price0X96 * fees0 + state.price1X96 * fees1) / priceTokenX96;
-        price0X96 = state.price0X96 * Q96 / priceTokenX96;
-        price1X96 = state.price1X96 * Q96 / priceTokenX96;
+        price0X96 = FullMath.mulDiv(state.price0X96, Q96, priceTokenX96);
+        price1X96 = FullMath.mulDiv(state.price1X96, Q96, priceTokenX96);
     }
 
     /// @notice Gets liquidity and uncollected fees for a V4 position by tokenId
@@ -263,8 +263,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         TokenConfig memory feedConfig = feedConfigs[token];
 
         if (referenceTokenDecimals > feedConfig.tokenDecimals) {
-            priceX96 = (10 ** (referenceTokenDecimals - feedConfig.tokenDecimals)) * chainlinkPriceX96
-                * Q96 / chainlinkReferencePriceX96;
+            priceX96 = FullMath.mulDiv(
+                (10 ** (referenceTokenDecimals - feedConfig.tokenDecimals)) * chainlinkPriceX96,
+                Q96,
+                chainlinkReferencePriceX96
+            );
         } else if (referenceTokenDecimals < feedConfig.tokenDecimals) {
             priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96
                 / (10 ** (feedConfig.tokenDecimals - referenceTokenDecimals));
@@ -395,7 +398,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         (state.price1X96, ) = _getReferenceTokenPriceX96(Currency.unwrap(state.currency1), state.cachedChainlinkReferencePriceX96);
 
         // Check derived pool price for manipulation attacks
-        uint256 derivedPoolPriceX96 = state.price0X96 * Q96 / state.price1X96;
+        uint256 derivedPoolPriceX96 = FullMath.mulDiv(state.price0X96, Q96, state.price1X96);
         
         // Current pool price
         uint256 priceX96 = (uint256(state.sqrtPriceX96) * uint256(state.sqrtPriceX96)) / Q96;
