@@ -63,12 +63,6 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         if (swapPoolTickSpacing % poolKey.tickSpacing != 0) {
             revert InvalidConfig();
         }
-        if (
-            address(swapPoolHooks) == address(this)
-                && (swapPoolFee != poolKey.fee || swapPoolTickSpacing != poolKey.tickSpacing)
-        ) {
-            revert InvalidConfig();
-        }
         if (maxPriceImpactBps0 > 10000 || maxPriceImpactBps1 > 10000) {
             revert InvalidConfig();
         }

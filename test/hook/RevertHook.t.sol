@@ -1939,12 +1939,18 @@ contract RevertHookTest is BaseTest {
         hook.setAutoLendVault(address(0), vault0);
     }
 
-    function testSetGeneralConfig_RejectsAnotherPoolUsingSameHook() public {
-        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+    function testSetGeneralConfig_AllowsAnotherPoolUsingSameHook() public {
         hook.setGeneralConfig(token3Id, 500, 60, IHooks(hook), 0, 0);
+        (uint24 fee, int24 tickSpacing, IHooks hooksAfter,,) = hook.generalConfigs(token3Id);
+        assertEq(fee, 500, "swapPoolFee should update");
+        assertEq(tickSpacing, 60, "swapPoolTickSpacing should update");
+        assertEq(address(hooksAfter), address(hook), "swapPoolHooks should update");
 
-        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
         hook.setGeneralConfig(token3Id, 3000, 120, IHooks(hook), 0, 0);
+        (fee, tickSpacing, hooksAfter,,) = hook.generalConfigs(token3Id);
+        assertEq(fee, 3000, "swapPoolFee should support same-hook alternate pools");
+        assertEq(tickSpacing, 120, "swapPoolTickSpacing should support same-hook alternate pools");
+        assertEq(address(hooksAfter), address(hook), "swapPoolHooks should remain the hook address");
     }
 
     function testSetPositionConfig_AutoLendRequiresVaultsForBothPoolTokens() public {

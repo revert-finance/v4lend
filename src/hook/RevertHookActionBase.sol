@@ -73,12 +73,6 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         if (config.swapPoolFee == 0 || config.swapPoolTickSpacing == 0) {
             return poolKey;
         }
-        if (
-            address(config.swapPoolHooks) == address(this)
-                && (config.swapPoolFee != poolKey.fee || config.swapPoolTickSpacing != poolKey.tickSpacing)
-        ) {
-            revert InvalidConfig();
-        }
         return PoolKey({
             currency0: poolKey.currency0,
             currency1: poolKey.currency1,
