@@ -2,7 +2,7 @@
 
 `v4lend` is a Uniswap v4-native lending and automation codebase.
 
-The repository now contains much more than the original `V4Utils` transformer. It includes:
+It includes:
 - a lending vault that accepts Uniswap v4 LP NFTs as collateral,
 - an oracle for valuing LP positions with Chainlink-backed price checks,
 - a Uniswap v4 hook for on-swap automation,
