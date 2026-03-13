@@ -11,12 +11,11 @@ import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {AutoLeverageLib} from "./lib/AutoLeverageLib.sol";
-import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
-import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
+import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 
 /// @title RevertHookAutoLeverageActions
 /// @notice Contains auto-leverage functions for RevertHook (called via delegatecall)
-contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
+contract RevertHookAutoLeverageActions is RevertHookActionBase {
     using PoolIdLibrary for PoolKey;
 
     error RestoreFailed();
@@ -25,34 +24,7 @@ contract RevertHookAutoLeverageActions is RevertHookFunctionsBase {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator
-    ) RevertHookFunctionsBase(_permit2, _v4Oracle, _liquidityCalculator) {}
-
-    function validateAutoLeverageMode(uint256 tokenId, PoolKey calldata poolKey, uint8 modeFlags) external view {
-        address owner = _getOwner(tokenId, false);
-        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
-        bool hasAutoExit = PositionModeFlags.hasAutoExit(modeFlags);
-
-        if (hasAutoLeverage || hasAutoExit) {
-            bool isVault = _vaults[owner];
-
-            if (hasAutoLeverage && !isVault) {
-                revert InvalidConfig();
-            }
-
-            if (isVault) {
-                address lendAsset = IVault(owner).asset();
-                if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset) {
-                    revert InvalidConfig();
-                }
-            }
-        }
-    }
-
-    function syncAutoLeverageBaseTick(uint256 tokenId, PoolKey calldata poolKey, uint8 modeFlags) external {
-        _positionStates[tokenId].autoLeverageBaseTick = PositionModeFlags.hasAutoLeverage(modeFlags)
-            ? _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing)
-            : int24(0);
-    }
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator) {}
 
     // ==================== Auto Leverage ====================
 

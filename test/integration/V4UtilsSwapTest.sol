@@ -120,7 +120,7 @@ contract V4UtilsSwapTest is V4ForkTestBase {
             amountIn: 873073,
             minAmountOut: 188428045653858,
             recipient: nft1Owner,
-            swapData: _getUSDCtoWETHSwapData(),
+            swapData: _getUsdcToWethSwapData(),
             testName: "USDC to WETH"
         });
         
@@ -134,7 +134,7 @@ contract V4UtilsSwapTest is V4ForkTestBase {
             amountIn: 1000000000000000,
             minAmountOut: 4128717,
             recipient: nft1Owner,
-            swapData: _getETHToUSDCSwapData(),
+            swapData: _getEthToUsdcSwapData(),
             testName: "ETH to USDC"
         });
         
@@ -148,7 +148,7 @@ contract V4UtilsSwapTest is V4ForkTestBase {
             amountIn: 6274987, 
             minAmountOut: 756050291375000,
             recipient: nft1Owner,
-            swapData: _getUSDCtoETHSwapData(),
+            swapData: _getUsdcToEthSwapData(),
             testName: "USDC to ETH"
         });
         

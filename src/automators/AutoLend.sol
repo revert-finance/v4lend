@@ -385,12 +385,12 @@ contract AutoLend is Automator {
         uint128 liquidity =
             _calculateLiquidity(sqrtPriceX96, positionInfo.tickLower(), positionInfo.tickUpper(), amount0, amount1);
 
-        (bytes memory actions, bytes[] memory params_array) =
+        (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), poolKey.currency0, poolKey.currency1);
-        params_array[0] = abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, hookData);
+        paramsArray[0] = abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, hookData);
 
         positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)}(
-            abi.encode(actions, params_array), deadline
+            abi.encode(actions, paramsArray), deadline
         );
     }
 
@@ -406,9 +406,9 @@ contract AutoLend is Automator {
     ) internal returns (uint256 newTokenId) {
         uint128 liquidity = _calculateLiquidity(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
 
-        (bytes memory actions, bytes[] memory params_array) =
+        (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), poolKey.currency0, poolKey.currency1);
-        params_array[0] = abi.encode(
+        paramsArray[0] = abi.encode(
             poolKey,
             tickLower,
             tickUpper,
@@ -420,7 +420,7 @@ contract AutoLend is Automator {
         );
 
         positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)}(
-            abi.encode(actions, params_array), deadline
+            abi.encode(actions, paramsArray), deadline
         );
 
         newTokenId = positionManager.nextTokenId() - 1;

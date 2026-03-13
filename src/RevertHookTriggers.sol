@@ -23,7 +23,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _getPoolAndPositionInfo(uint256 tokenId) internal view virtual returns (PoolKey memory, PositionInfo);
 
     /// @notice Returns the owner of the position - must be implemented by child
-    function _getOwner(uint256 tokenId, bool isRealOwner) internal view virtual returns (address);
+    function _getOwner(uint256 tokenId, bool resolveVaultOwner) internal view virtual returns (address);
 
     // ==================== Tick Helpers ====================
 
@@ -117,7 +117,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _deactivatePosition(uint256 tokenId) internal {
         uint32 lastActivated = _positionStates[tokenId].lastActivated;
         if (lastActivated > 0) {
-            _positionStates[tokenId].acumulatedActiveTime += uint32(block.timestamp) - lastActivated;
+            _positionStates[tokenId].accumulatedActiveTime += uint32(block.timestamp) - lastActivated;
             _positionStates[tokenId].lastActivated = 0;
         }
     }

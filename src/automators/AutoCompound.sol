@@ -168,9 +168,9 @@ contract AutoCompound is Automator {
                 positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1
             );
 
-            (bytes memory actions, bytes[] memory params_array) =
+            (bytes memory actions, bytes[] memory paramsArray) =
                 _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
-            params_array[0] = abi.encode(
+            paramsArray[0] = abi.encode(
                 params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.hookData
             );
 
@@ -178,7 +178,7 @@ contract AutoCompound is Automator {
             uint256 balance1Before = token1.balanceOfSelf();
 
             positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
-                abi.encode(actions, params_array), params.deadline
+                abi.encode(actions, paramsArray), params.deadline
             );
 
             compounded0 = balance0Before - token0.balanceOfSelf();

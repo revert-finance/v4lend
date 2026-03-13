@@ -266,14 +266,14 @@ contract AutoRange is Automator {
         uint256 balance0Before = token0.balanceOfSelf();
         uint256 balance1Before = token1.balanceOfSelf();
 
-        (bytes memory actions, bytes[] memory params_array) =
+        (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), token0, token1);
-        params_array[0] = abi.encode(
+        paramsArray[0] = abi.encode(
             poolKey, tickLower, tickUpper, liquidity, type(uint128).max, type(uint128).max, address(this), params.mintHookData
         );
 
         positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
-            abi.encode(actions, params_array), params.deadline
+            abi.encode(actions, paramsArray), params.deadline
         );
 
         newTokenId = positionManager.nextTokenId() - 1;

@@ -184,18 +184,18 @@ abstract contract Swapper is Constants {
         uint8 baseAction,
         Currency token0, 
         Currency token1
-    ) internal view returns (bytes memory actions, bytes[] memory params_array) {
+    ) internal view returns (bytes memory actions, bytes[] memory paramsArray) {
         if (token0.isAddressZero() || token1.isAddressZero()) {
             // Include SWEEP action for native ETH
             actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
-            params_array = new bytes[](3);
-            params_array[2] = abi.encode(address(0), address(this));
+            paramsArray = new bytes[](3);
+            paramsArray[2] = abi.encode(address(0), address(this));
         } else {
             // Standard actions for ERC20 tokens only
             actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR));
-            params_array = new bytes[](2);
+            paramsArray = new bytes[](2);
         }
-        params_array[1] = abi.encode(token0, token1);
+        paramsArray[1] = abi.encode(token0, token1);
     }
 
 
@@ -259,17 +259,17 @@ abstract contract Swapper is Constants {
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory params_array = new bytes[](2);
-        params_array[0] = abi.encode(
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] = abi.encode(
             tokenId,
             uint256(liquidityRemove),
             uint128(amount0Min),
             uint128(amount1Min),
             decreaseLiquidityHookData
         );
-        params_array[1] = abi.encode(currency0, currency1, address(this));
+        paramsArray[1] = abi.encode(currency0, currency1, address(this));
 
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
         
         // calculate delta
         amount0 = currency0.balanceOfSelf() - amount0;

@@ -299,9 +299,9 @@ contract AutoLeverageTest is AutomatorTestBase {
     // --- Native ETH Position Tests ---
 
     function test_LeverageUpETH() public {
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
 
         // Setup vault position
         _depositToVault(50000000000, WHALE_ACCOUNT); // 50k USDC
@@ -358,9 +358,9 @@ contract AutoLeverageTest is AutomatorTestBase {
     }
 
     function test_LeverageDownETH() public {
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
 
         // Setup vault position with high leverage
         _depositToVault(50000000000, WHALE_ACCOUNT);

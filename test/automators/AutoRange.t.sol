@@ -373,9 +373,9 @@ contract AutoRangeTest is AutomatorTestBase {
     // --- Native ETH Position Tests ---
 
     function test_ExecuteRangeChangeETH() public {
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createNarrowPositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
 
         // Configure auto-range: trigger when 1 tick out of range
         // New range above current tick (one-sided, no swap needed)
@@ -396,7 +396,7 @@ contract AutoRangeTest is AutomatorTestBase {
         IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
 
         // Move price out of range (large ETH sell)
-        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
 
         AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
             tokenId: tokenId,
@@ -434,9 +434,9 @@ contract AutoRangeTest is AutomatorTestBase {
     function test_ExecuteWithVaultETH() public {
         v4Oracle.setMaxPoolPriceDifference(10000);
 
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createNarrowPositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
 
         // Add to vault
         _depositToVault(200000000, WHALE_ACCOUNT);
@@ -460,7 +460,7 @@ contract AutoRangeTest is AutomatorTestBase {
         autoRange.configToken(tokenId, address(vault), config);
 
         // Move price out of range
-        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
 
         AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
             tokenId: tokenId,

@@ -317,9 +317,9 @@ contract AutoExitTest is AutomatorTestBase {
     // --- Native ETH Position Tests ---
 
     function test_ExecuteLimitOrderETH() public {
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createNarrowPositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
 
         int24 tick = _getCurrentTick(poolKey);
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -344,7 +344,7 @@ contract AutoExitTest is AutomatorTestBase {
         IERC721(address(positionManager)).approve(address(autoExit), tokenId);
 
         // Move price below range (large ETH sell)
-        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
 
         // Execute exit
         AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
@@ -377,9 +377,9 @@ contract AutoExitTest is AutomatorTestBase {
     function test_ExecuteWithVaultETH() public {
         v4Oracle.setMaxPoolPriceDifference(10000);
 
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createNarrowPositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
 
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
@@ -405,7 +405,7 @@ contract AutoExitTest is AutomatorTestBase {
         vault.approveTransform(tokenId, address(autoExit), true);
 
         // Move price out of range
-        _swapExactInputSingleETH(poolKey, true, 10e18, 0);
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
 
         AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
             tokenId: tokenId,

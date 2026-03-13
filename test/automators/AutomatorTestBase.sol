@@ -164,14 +164,14 @@ contract AutomatorTestBase is Test {
         returns (uint256 tokenId)
     {
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory params_array = new bytes[](2);
-        params_array[0] = abi.encode(
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] = abi.encode(
             poolKey, tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max, WHALE_ACCOUNT, bytes("")
         );
-        params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, WHALE_ACCOUNT);
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, WHALE_ACCOUNT);
 
         vm.prank(WHALE_ACCOUNT);
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), block.timestamp);
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
         tokenId = positionManager.nextTokenId() - 1;
     }
 
@@ -274,7 +274,7 @@ contract AutomatorTestBase is Test {
 
     /// @notice Create an ETH/USDC pool (native ETH as currency0, USDC as currency1)
     /// Uses fee=7777, tickSpacing=60 to avoid conflict with existing mainnet V4 pools
-    function _createETHPool() internal returns (PoolKey memory poolKey) {
+    function _createEthPool() internal returns (PoolKey memory poolKey) {
         // address(0) < USDC_ADDRESS, so ETH is always currency0
         poolKey = PoolKey({
             currency0: CurrencyLibrary.ADDRESS_ZERO, // Native ETH
@@ -291,7 +291,7 @@ contract AutomatorTestBase is Test {
         poolManager.initialize(poolKey, 5206259495888489151463424);
     }
 
-    function _approveWhaleTokensETH() internal {
+    function _approveWhaleTokensEth() internal {
         vm.prank(WHALE_ACCOUNT);
         usdc.approve(address(permit2), type(uint256).max);
         vm.prank(WHALE_ACCOUNT);
@@ -299,41 +299,41 @@ contract AutomatorTestBase is Test {
         // No approval needed for native ETH
     }
 
-    function _createFullRangePositionETH(PoolKey memory poolKey) internal returns (uint256 tokenId) {
-        _approveWhaleTokensETH();
-        tokenId = _mintPositionETH(poolKey, -887220, 887220, 1e14);
+    function _createFullRangePositionEth(PoolKey memory poolKey) internal returns (uint256 tokenId) {
+        _approveWhaleTokensEth();
+        tokenId = _mintPositionEth(poolKey, -887220, 887220, 1e14);
     }
 
-    function _createNarrowPositionETH(PoolKey memory poolKey) internal returns (uint256 tokenId) {
-        _approveWhaleTokensETH();
+    function _createNarrowPositionEth(PoolKey memory poolKey) internal returns (uint256 tokenId) {
+        _approveWhaleTokensEth();
         int24 currentTick = _getCurrentTick(poolKey);
         int24 tickSpacing = poolKey.tickSpacing;
         int24 tickLower = (currentTick / tickSpacing - 2) * tickSpacing;
         int24 tickUpper = (currentTick / tickSpacing + 2) * tickSpacing;
-        tokenId = _mintPositionETH(poolKey, tickLower, tickUpper, 1e13);
+        tokenId = _mintPositionEth(poolKey, tickLower, tickUpper, 1e13);
     }
 
-    function _mintPositionETH(PoolKey memory poolKey, int24 tickLower, int24 tickUpper, uint128 liquidity)
+    function _mintPositionEth(PoolKey memory poolKey, int24 tickLower, int24 tickUpper, uint128 liquidity)
         internal
         returns (uint256 tokenId)
     {
         // For native ETH, need SETTLE_PAIR + SWEEP to handle excess ETH
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
-        bytes[] memory params_array = new bytes[](3);
-        params_array[0] = abi.encode(
+        bytes[] memory paramsArray = new bytes[](3);
+        paramsArray[0] = abi.encode(
             poolKey, tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max, WHALE_ACCOUNT, bytes("")
         );
-        params_array[1] = abi.encode(poolKey.currency0, poolKey.currency1, WHALE_ACCOUNT);
-        params_array[2] = abi.encode(address(0), WHALE_ACCOUNT); // Sweep leftover ETH back to whale
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, WHALE_ACCOUNT);
+        paramsArray[2] = abi.encode(address(0), WHALE_ACCOUNT); // Sweep leftover ETH back to whale
 
         // Fund whale with ETH and send value
         vm.deal(WHALE_ACCOUNT, 1000 ether);
         vm.prank(WHALE_ACCOUNT);
-        positionManager.modifyLiquidities{value: 100 ether}(abi.encode(actions, params_array), block.timestamp);
+        positionManager.modifyLiquidities{value: 100 ether}(abi.encode(actions, paramsArray), block.timestamp);
         tokenId = positionManager.nextTokenId() - 1;
     }
 
-    function _swapExactInputSingleETH(PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 minAmountOut)
+    function _swapExactInputSingleEth(PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 minAmountOut)
         internal
     {
         vm.prank(WHALE_ACCOUNT);
@@ -396,9 +396,9 @@ contract AutomatorTestBase is Test {
         }
     }
 
-    function _generateFeesETH(PoolKey memory poolKey) internal {
+    function _generateFeesEth(PoolKey memory poolKey) internal {
         // Swap ETH → USDC then USDC → ETH to generate fees
-        _swapExactInputSingleETH(poolKey, true, 1e16, 0); // 0.01 ETH → USDC
-        _swapExactInputSingleETH(poolKey, false, 10e6, 0); // 10 USDC → ETH
+        _swapExactInputSingleEth(poolKey, true, 1e16, 0); // 0.01 ETH → USDC
+        _swapExactInputSingleEth(poolKey, false, 10e6, 0); // 10 USDC → ETH
     }
 }

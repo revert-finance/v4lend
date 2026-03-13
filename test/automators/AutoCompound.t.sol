@@ -275,11 +275,11 @@ contract AutoCompoundTest is AutomatorTestBase {
     // --- Native ETH Position Tests ---
 
     function test_AutoCompoundETH() public {
-        PoolKey memory poolKey = _createETHPool();
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
 
         // Generate fees with native ETH swaps
-        _generateFeesETH(poolKey);
+        _generateFeesEth(poolKey);
 
         uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
 
@@ -311,11 +311,11 @@ contract AutoCompoundTest is AutomatorTestBase {
         // Increase oracle tolerance for custom pool price
         v4Oracle.setMaxPoolPriceDifference(10000);
 
-        PoolKey memory poolKey = _createETHPool();
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
 
         // Generate fees
-        _generateFeesETH(poolKey);
+        _generateFeesEth(poolKey);
 
         // Add position to vault
         _depositToVault(200000000, WHALE_ACCOUNT);
@@ -351,10 +351,10 @@ contract AutoCompoundTest is AutomatorTestBase {
     }
 
     function test_AutoCompoundDoesNotRetainPositionBalancesETH() public {
-        PoolKey memory poolKey = _createETHPool();
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
 
-        _generateFeesETH(poolKey);
+        _generateFeesEth(poolKey);
 
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
@@ -385,11 +385,11 @@ contract AutoCompoundTest is AutomatorTestBase {
     // --- Withdraw protocol fees ---
 
     function test_WithdrawETHCollectsProtocolFees() public {
-        PoolKey memory poolKey = _createETHPool();
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
 
         // Generate fees
-        _generateFeesETH(poolKey);
+        _generateFeesEth(poolKey);
 
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCompound), tokenId);
@@ -474,10 +474,10 @@ contract AutoCompoundTest is AutomatorTestBase {
     }
 
     function test_HarvestTokensETH() public {
-        PoolKey memory poolKey = _createETHPool();
-        uint256 tokenId = _createFullRangePositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
 
-        _generateFeesETH(poolKey);
+        _generateFeesEth(poolKey);
 
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCompound), tokenId);

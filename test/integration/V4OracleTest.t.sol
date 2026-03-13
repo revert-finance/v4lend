@@ -197,17 +197,17 @@ contract V4OracleTest is V4ForkTestBase {
             uint balance1 = currency1.balanceOfSelf();
 
             bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-            bytes[] memory params_array = new bytes[](2);
-            params_array[0] = abi.encode(
+            bytes[] memory paramsArray = new bytes[](2);
+            paramsArray[0] = abi.encode(
                 tokenId,
                 uint256(0),
                 uint128(0), // amount0Min
                 uint128(0),
                 ""
             );
-            params_array[1] = abi.encode(currency0, currency1, address(this));
+            paramsArray[1] = abi.encode(currency0, currency1, address(this));
             vm.prank(owner);
-            positionManager.modifyLiquidities(abi.encode(actions, params_array), block.timestamp);
+            positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
 
             balance0 = currency0.balanceOfSelf() - balance0;
             balance1 = currency1.balanceOfSelf() - balance1;

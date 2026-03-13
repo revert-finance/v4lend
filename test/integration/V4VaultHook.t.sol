@@ -82,9 +82,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Deploy RevertHook action targets
-        RevertHookPositionActions hookFunctionsPositionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookAutoLeverageActions hookFunctionsAutoLeverageActions = new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookAutoLendActions hookFunctionsAutoLendActions =
+        RevertHookPositionActions positionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLeverageActions autoLeverageActions = new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
 
         bytes memory constructorArgs = abi.encode(
@@ -93,9 +93,9 @@ contract V4VaultHookTest is V4ForkTestBase {
             permit2,
             v4Oracle,
             liquidityCalculator,
-            hookFunctionsPositionActions,
-            hookFunctionsAutoLeverageActions,
-            hookFunctionsAutoLendActions
+            positionActions,
+            autoLeverageActions,
+            autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
         revertHook = RevertHook(hookFlags);
@@ -176,12 +176,12 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         // Use MINT_POSITION and SETTLE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory params_array = new bytes[](2);
+        bytes[] memory paramsArray = new bytes[](2);
 
         uint128 liquidity = 1e14;
 
         // MINT_POSITION params: (poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, owner, hookData)
-        params_array[0] = abi.encode(
+        paramsArray[0] = abi.encode(
             hookedPoolKey,
             tickLower,
             tickUpper,
@@ -191,10 +191,10 @@ contract V4VaultHookTest is V4ForkTestBase {
             WHALE_ACCOUNT,
             bytes("") // hookData
         );
-        params_array[1] = abi.encode(hookedPoolKey.currency0, hookedPoolKey.currency1, WHALE_ACCOUNT);
+        paramsArray[1] = abi.encode(hookedPoolKey.currency0, hookedPoolKey.currency1, WHALE_ACCOUNT);
 
         vm.prank(WHALE_ACCOUNT);
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), block.timestamp);
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
 
         hookedTokenId = positionManager.nextTokenId() - 1;
 
@@ -365,12 +365,12 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         // Use MINT_POSITION and SETTLE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        bytes[] memory params_array = new bytes[](2);
+        bytes[] memory paramsArray = new bytes[](2);
 
         uint128 liquidity = 1e14;
 
         // MINT_POSITION params: (poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, owner, hookData)
-        params_array[0] = abi.encode(
+        paramsArray[0] = abi.encode(
             hookedPoolKey,
             tickLower,
             tickUpper,
@@ -380,10 +380,10 @@ contract V4VaultHookTest is V4ForkTestBase {
             WHALE_ACCOUNT,
             bytes("") // hookData
         );
-        params_array[1] = abi.encode(hookedPoolKey.currency0, hookedPoolKey.currency1, WHALE_ACCOUNT);
+        paramsArray[1] = abi.encode(hookedPoolKey.currency0, hookedPoolKey.currency1, WHALE_ACCOUNT);
 
         vm.prank(WHALE_ACCOUNT);
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), block.timestamp);
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
 
         hookedTokenId = positionManager.nextTokenId() - 1;
 

@@ -37,7 +37,7 @@ abstract contract RevertHookState is RevertHookAccess {
 
     struct PositionState {
         uint32 lastCollect;
-        uint32 acumulatedActiveTime;
+        uint32 accumulatedActiveTime;
         uint32 lastActivated;
         address autoLendToken;
         uint256 autoLendShares;

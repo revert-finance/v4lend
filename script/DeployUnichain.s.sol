@@ -217,41 +217,41 @@ contract DeployUnichain is Script {
         // ==================== Step 3: Deploy RevertHook action contracts ====================
 
         // Deploy RevertHookPositionActions separately to avoid initcode size limit
-        RevertHookPositionActions hookFunctionsPositionActions = new RevertHookPositionActions(
+        RevertHookPositionActions positionActions = new RevertHookPositionActions(
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator)
         );
-        console.log("RevertHookPositionActions deployed at:", address(hookFunctionsPositionActions));
+        console.log("RevertHookPositionActions deployed at:", address(positionActions));
 
         // Deploy RevertHookAutoLeverageActions separately to avoid initcode size limit
-        RevertHookAutoLeverageActions hookFunctionsAutoLeverageActions = new RevertHookAutoLeverageActions(
+        RevertHookAutoLeverageActions autoLeverageActions = new RevertHookAutoLeverageActions(
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator)
         );
-        console.log("RevertHookAutoLeverageActions deployed at:", address(hookFunctionsAutoLeverageActions));
+        console.log("RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
 
-        RevertHookAutoLendActions hookFunctionsAutoLendActions = new RevertHookAutoLendActions(
+        RevertHookAutoLendActions autoLendActions = new RevertHookAutoLendActions(
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator)
         );
-        console.log("RevertHookAutoLendActions deployed at:", address(hookFunctionsAutoLendActions));
+        console.log("RevertHookAutoLendActions deployed at:", address(autoLendActions));
 
         // ==================== Step 4: Deploy RevertHook with CREATE2 ====================
 
         // Prepare constructor arguments for RevertHook
-        // Constructor: (owner_, protocolFeeRecipient_, permit2, v4Oracle, liquidityCalculator, hookFunctionsPositionActions, hookFunctionsAutoLeverageActions, hookFunctionsAutoLendActions)
+        // Constructor: (owner_, protocolFeeRecipient_, permit2, v4Oracle, liquidityCalculator, positionActions, autoLeverageActions, autoLendActions)
         bytes memory constructorArgs = abi.encode(
             deployer,
             deployer,
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
-            hookFunctionsPositionActions,
-            hookFunctionsAutoLeverageActions,
-            hookFunctionsAutoLendActions
+            positionActions,
+            autoLeverageActions,
+            autoLendActions
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
 
@@ -269,9 +269,9 @@ contract DeployUnichain is Script {
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
-            hookFunctionsPositionActions,
-            hookFunctionsAutoLeverageActions,
-            hookFunctionsAutoLendActions
+            positionActions,
+            autoLeverageActions,
+            autoLendActions
         );
         require(address(revertHook) == expectedHookAddress, "Hook address mismatch");
         console.log("RevertHook deployed at:", address(revertHook));
@@ -380,9 +380,9 @@ contract DeployUnichain is Script {
         console.log("Chain: Unichain (130)");
         console.log("LiquidityCalculator:", address(liquidityCalculator));
         console.log("V4Oracle:", address(oracle));
-        console.log("RevertHookPositionActions:", address(hookFunctionsPositionActions));
-        console.log("RevertHookAutoLeverageActions:", address(hookFunctionsAutoLeverageActions));
-        console.log("RevertHookAutoLendActions:", address(hookFunctionsAutoLendActions));
+        console.log("RevertHookPositionActions:", address(positionActions));
+        console.log("RevertHookAutoLeverageActions:", address(autoLeverageActions));
+        console.log("RevertHookAutoLendActions:", address(autoLendActions));
         console.log("RevertHook:", address(revertHook));
         console.log("=========================================\n");
     }

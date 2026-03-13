@@ -83,7 +83,7 @@ contract AutoLendTest is AutomatorTestBase {
             if (_getCurrentTick(poolKey) >= targetTick) {
                 return;
             }
-            _swapExactInputSingleETH(poolKey, false, 500e6, 0);
+            _swapExactInputSingleEth(poolKey, false, 500e6, 0);
         }
     }
 
@@ -241,16 +241,16 @@ contract AutoLendTest is AutomatorTestBase {
     }
 
     function test_DepositAndWithdrawETHNativePosition() public {
-        PoolKey memory poolKey = _createETHPool();
-        _createFullRangePositionETH(poolKey);
-        uint256 tokenId = _createNarrowPositionETH(poolKey);
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
 
         // Native ETH positions lend through WETH vault.
         autoLend.setAutoLendVault(address(0), IERC4626(address(wethLendVault)));
         _configureAndApprove(tokenId, _defaultConfig(0));
 
         // Move below range and deposit (token0/native ETH should be lent via WETH vault).
-        _swapExactInputSingleETH(poolKey, true, 1e16, 0);
+        _swapExactInputSingleEth(poolKey, true, 1e16, 0);
 
         AutoLend.DepositParams memory depositParams = AutoLend.DepositParams({
             tokenId: tokenId,

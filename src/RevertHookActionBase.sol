@@ -24,10 +24,10 @@ import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 
-/// @title RevertHookFunctionsBase
+/// @title RevertHookActionBase
 /// @notice Base contract with shared helper functions for RevertHook action targets
 /// @dev Inherits from RevertHookTriggers for state access and trigger management
-abstract contract RevertHookFunctionsBase is RevertHookTriggers {
+abstract contract RevertHookActionBase is RevertHookTriggers {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -55,9 +55,9 @@ abstract contract RevertHookFunctionsBase is RevertHookTriggers {
     // ==================== Owner Helper ====================
 
     /// @notice Returns the owner of the position
-    function _getOwner(uint256 tokenId, bool isRealOwner) internal view override returns (address) {
+    function _getOwner(uint256 tokenId, bool resolveVaultOwner) internal view override returns (address) {
         address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-        return (isRealOwner && _vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
+        return (resolveVaultOwner && _vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
     }
 
     // ==================== Auth Helpers ====================

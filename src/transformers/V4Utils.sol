@@ -716,13 +716,13 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         uint256 total0,
         uint256 total1
     ) internal returns (uint256 tokenId, uint128 liquidity) {
-        (bytes memory actions, bytes[] memory params_array) =
+        (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), params.token0, params.token1);
 
         // Calculate liquidity from amounts
         liquidity = _calculateLiquidity(params.tickLower, params.tickUpper, poolKey, total0, total1);
 
-        params_array[0] = abi.encode(
+        paramsArray[0] = abi.encode(
             poolKey,
             params.tickLower,
             params.tickUpper,
@@ -734,7 +734,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         );
 
         positionManager.modifyLiquidities{value: address(this).balance}(
-            abi.encode(actions, params_array), params.deadline
+            abi.encode(actions, paramsArray), params.deadline
         );
 
         // Get the newly minted token ID
@@ -754,16 +754,16 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         (PoolKey memory poolKey, PositionInfo info) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
         // Build actions for native ETH if needed
-        (bytes memory actions, bytes[] memory params_array) =
+        (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), poolKey.currency0, poolKey.currency1);
 
         // Calculate liquidity from amounts
         liquidity = _calculateLiquidity(info.tickLower(), info.tickUpper(), poolKey, total0, total1);
 
-        params_array[0] = abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
+        paramsArray[0] = abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
 
         positionManager.modifyLiquidities{value: address(this).balance}(
-            abi.encode(actions, params_array), params.deadline
+            abi.encode(actions, paramsArray), params.deadline
         );
 
         // Calculate consumption and return leftovers

@@ -243,7 +243,7 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4ForkTestBase {
             swapData0: hex"",
             amountIn1: 873073,
             amountOut1Min: 188428045653858,
-            swapData1: _getUSDCtoWETHSwapData(),
+            swapData1: _getUsdcToWethSwapData(),
             amountAddMin0: 0,
             amountAddMin1: 0,
             testName: "NFT1 - WETH to USDC Swap"
@@ -262,7 +262,7 @@ contract V4UtilsSwapAndIncreaseLiquidityTest is V4ForkTestBase {
             swapSourceToken: Currency.wrap(address(usdc)), // Swap USDC to ETH
             amountIn0: 6274987,
             amountOut0Min: 756050291375000,
-            swapData0: _getUSDCtoETHSwapData(),
+            swapData0: _getUsdcToEthSwapData(),
             amountIn1: 0,
             amountOut1Min: 0,
             swapData1: hex"",

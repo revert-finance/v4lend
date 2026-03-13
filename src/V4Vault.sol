@@ -455,7 +455,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Unauthorized();
         }
 
-        _handleERC721Received(tokenId, recipient);
+        _handleErc721Received(tokenId, recipient);
     }
 
     /// @notice Whenever a token is recieved it either creates a new loan, or modifies an existing one when in transform mode.
@@ -475,7 +475,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             owner = abi.decode(data, (address));
         }
 
-        _handleERC721Received(tokenId, owner);
+        _handleErc721Received(tokenId, owner);
 
         return IERC721Receiver.onERC721Received.selector;
     }
@@ -483,7 +483,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @notice Internal function to handle ERC721 token receipt logic
     /// @param tokenId The token ID received
     /// @param owner The owner address for the new loan
-    function _handleERC721Received(uint256 tokenId, address owner) internal {
+    function _handleErc721Received(uint256 tokenId, address owner) internal {
         (uint256 debtExchangeRateX96, uint256 lendExchangeRateX96) = _updateGlobalInterest();
 
         uint256 oldTokenId = transformedTokenId;
@@ -1193,12 +1193,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         address owner = tokenOwner[tokenId];
 
         // wrap native ETH to WETH to prevent revert attacks from owner
-        _transferTokenOrWETH(currency0, amount0 - fees0, owner);
-        _transferTokenOrWETH(currency1, amount1 - fees1, owner);
+        _transferTokenOrWeth(currency0, amount0 - fees0, owner);
+        _transferTokenOrWeth(currency1, amount1 - fees1, owner);
     }
 
     // transfers token to recipient, wrapping native ETH to WETH to prevent revert attacks
-    function _transferTokenOrWETH(Currency currency, uint256 amount, address recipient) internal {
+    function _transferTokenOrWeth(Currency currency, uint256 amount, address recipient) internal {
         if (amount > 0) {
             if (currency.isAddressZero()) {
                 weth.deposit{value: amount}();
@@ -1233,17 +1233,17 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory params_array = new bytes[](2);
-        params_array[0] = abi.encode(
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] = abi.encode(
             tokenId,
             liquidityRemove,
             amount0Min,
             amount1Min,
             decreaseLiquidityHookData
         );
-        params_array[1] = abi.encode(currency0, currency1, recipient);
+        paramsArray[1] = abi.encode(currency0, currency1, recipient);
 
-        positionManager.modifyLiquidities(abi.encode(actions, params_array), deadline);
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
 
         // calculate delta
         amount0 = currency0.balanceOf(recipient) - amount0;

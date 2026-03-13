@@ -13,11 +13,11 @@ import {IVault} from "./interfaces/IVault.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 import {AutoRangeLib} from "./lib/AutoRangeLib.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
-import {RevertHookFunctionsBase} from "./RevertHookFunctionsBase.sol";
+import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 
 /// @title RevertHookPositionActions
 /// @notice Contains auto-exit, auto-range, and auto-compound functions for RevertHook (called via delegatecall)
-contract RevertHookPositionActions is RevertHookFunctionsBase {
+contract RevertHookPositionActions is RevertHookActionBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -25,52 +25,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator
-    ) RevertHookFunctionsBase(_permit2, _v4Oracle, _liquidityCalculator) {}
-
-    function validateRangeConfig(
-        int24 tickSpacing,
-        int24 positionTickLower,
-        int24 positionTickUpper,
-        PositionConfig calldata config
-    ) external pure {
-        if (!PositionModeFlags.hasAutoRange(config.modeFlags)) {
-            return;
-        }
-
-        if (config.autoRangeLowerDelta >= config.autoRangeUpperDelta) {
-            revert InvalidConfig();
-        }
-
-        (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
-            positionTickLower,
-            positionTickUpper,
-            config.autoRangeLowerLimit,
-            config.autoRangeUpperLimit
-        );
-
-        if (
-            _rangeTriggerCanResolveToSamePosition(
-                positionTickLower,
-                positionTickUpper,
-                rangeLower,
-                config.autoRangeLowerDelta,
-                config.autoRangeUpperDelta,
-                tickSpacing,
-                false
-            )
-                || _rangeTriggerCanResolveToSamePosition(
-                    positionTickLower,
-                    positionTickUpper,
-                    rangeUpper,
-                    config.autoRangeLowerDelta,
-                    config.autoRangeUpperDelta,
-                    tickSpacing,
-                    true
-                )
-        ) {
-            revert InvalidConfig();
-        }
-    }
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator) {}
 
     // ==================== Auto Exit ====================
 
@@ -91,16 +46,16 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         }
 
         address owner = _getOwner(tokenId, false);
-        address realOwner = owner;
+        address beneficiary = owner;
 
         // Check if this is a vault position with debt
         if (_vaults[owner]) {
-            realOwner = IVault(owner).ownerOf(tokenId);
+            beneficiary = IVault(owner).ownerOf(tokenId);
             uint256 debtShares = IVault(owner).loans(tokenId);
 
             if (debtShares > 0) {
                 _autoExitWithDebtRepayment(
-                    tokenId, poolKey, IVault(owner), realOwner, isUpperTrigger, currency0, currency1, amount0, amount1
+                    tokenId, poolKey, IVault(owner), beneficiary, isUpperTrigger, currency0, currency1, amount0, amount1
                 );
                 return;
             }
@@ -112,7 +67,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         BalanceDelta swapDelta = _executeSwap(_getSwapPoolKey(tokenId, poolKey), swapZeroForOne, swapAmount, tokenId);
         (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
 
-        _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
+        _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
         _disablePosition(tokenId);
 
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
@@ -124,7 +79,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         uint256 tokenId,
         PoolKey memory poolKey,
         IVault vault,
-        address realOwner,
+        address beneficiary,
         bool isUpperTrigger,
         Currency currency0,
         Currency currency1,
@@ -158,7 +113,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             }
         }
 
-        _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
+        _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
         _disablePosition(tokenId);
 
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
@@ -198,7 +153,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         (amount0, amount1) = _calculateAndSwap(tokenId, poolKey, newTickLower, newTickUpper, amount0, amount1);
 
         address owner = _getOwner(tokenId, false);
-        address realOwner = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
+        address beneficiary = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
 
         // Approve tokens and mint new position
         _approveToken(currency0, amount0);
@@ -226,7 +181,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
             _approveToken(currency1, amount1);
             (uint256 restored0, uint256 restored1) =
                 _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
-            _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
+            _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
             if (restored0 != 0 || restored1 != 0) {
                 _removePositionTriggers(tokenId, poolKey);
                 _deactivatePosition(tokenId);
@@ -238,7 +193,7 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         }
 
         // Send leftover tokens and copy config to new position
-        _sendLeftoverTokens(tokenId, currency0, currency1, realOwner);
+        _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
         _migrateRemintedPosition(tokenId, newTokenId);
 
         emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
@@ -345,31 +300,4 @@ contract RevertHookPositionActions is RevertHookFunctionsBase {
         return (amount0 - reward0, amount1 - reward1);
     }
 
-    function _rangeTriggerCanResolveToSamePosition(
-        int24 currentTickLower,
-        int24 currentTickUpper,
-        int24 triggerTick,
-        int24 lowerDelta,
-        int24 upperDelta,
-        int24 tickSpacing,
-        bool isUpperTrigger
-    ) internal pure returns (bool) {
-        if (triggerTick == type(int24).min || triggerTick == type(int24).max) {
-            return false;
-        }
-
-        int256 sameRangeBaseTickLower = int256(currentTickLower) - int256(lowerDelta);
-        int256 sameRangeBaseTickUpper = int256(currentTickUpper) - int256(upperDelta);
-        if (sameRangeBaseTickLower != sameRangeBaseTickUpper) {
-            return false;
-        }
-
-        int256 sameRangeBaseTick = sameRangeBaseTickLower;
-        if (sameRangeBaseTick % int256(tickSpacing) != 0) {
-            return false;
-        }
-
-        int256 triggerTickInt = int256(triggerTick);
-        return isUpperTrigger ? sameRangeBaseTick >= triggerTickInt : sameRangeBaseTick <= triggerTickInt;
-    }
 }

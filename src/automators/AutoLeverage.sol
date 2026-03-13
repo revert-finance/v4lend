@@ -241,14 +241,14 @@ contract AutoLeverage is Automator {
             uint256 balanceBeforeAdd0 = token0.balanceOfSelf();
             uint256 balanceBeforeAdd1 = token1.balanceOfSelf();
 
-            (bytes memory actions, bytes[] memory params_array) =
+            (bytes memory actions, bytes[] memory paramsArray) =
                 _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
-            params_array[0] = abi.encode(
+            paramsArray[0] = abi.encode(
                 params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.increaseLiquidityHookData
             );
 
             positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
-                abi.encode(actions, params_array), params.deadline
+                abi.encode(actions, paramsArray), params.deadline
             );
 
             // Enforce minimum amounts added

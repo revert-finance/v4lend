@@ -267,7 +267,7 @@ contract V4UtilsChangeRangeTest is V4ForkTestBase {
             swapData0: hex"", // No swap for token0
             amountIn1: 873073, // Swap some USDC to WETH
             amountOut1Min: 188428045653858, // Min 0.0001 WETH
-            swapData1: _getUSDCtoWETHSwapData(),
+            swapData1: _getUsdcToWethSwapData(),
             amountAddMin0: 0,
             amountAddMin1: 0,
             testName: "NFT2 - Change Range With Swap",

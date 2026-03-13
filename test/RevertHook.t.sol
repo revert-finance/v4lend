@@ -99,9 +99,9 @@ contract RevertHookTest is BaseTest {
         liquidityCalculator = new LiquidityCalculator();
 
         // Deploy RevertHook action targets
-        RevertHookPositionActions hookFunctionsPositionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookAutoLeverageActions hookFunctionsAutoLeverageActions = new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookAutoLendActions hookFunctionsAutoLendActions =
+        RevertHookPositionActions positionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLeverageActions autoLeverageActions = new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
 
         bytes memory constructorArgs = abi.encode(
@@ -110,9 +110,9 @@ contract RevertHookTest is BaseTest {
             permit2,
             v4Oracle,
             liquidityCalculator,
-            hookFunctionsPositionActions,
-            hookFunctionsAutoLeverageActions,
-            hookFunctionsAutoLendActions
+            positionActions,
+            autoLeverageActions,
+            autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(flags);

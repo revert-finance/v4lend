@@ -130,7 +130,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4ForkTestBase {
             tokenId: nft1TokenId,
             owner: nft1Owner,
             swapTarget: Currency.wrap(address(0)), // Swap to ETH
-            swapData0: _getUSDCtoETHSwapData(),
+            swapData0: _getUsdcToEthSwapData(),
             swapData1: hex"",
             amountIn0: 6274987,
             amountOut0Min: 756050291375000,
@@ -169,7 +169,7 @@ contract V4UtilsWithdrawAndCollectAndSwapTest is V4ForkTestBase {
             owner: nft2Owner,
             swapTarget: Currency.wrap(address(weth)), // Swap to WETH
             swapData0: hex"",
-            swapData1: _get273073USDCtoWETHSwapData(),
+            swapData1: _get273073UsdcToWethSwapData(),
             amountIn0: 63079250674003,
             amountOut0Min: 63079250674003,
             amountIn1: 273073,

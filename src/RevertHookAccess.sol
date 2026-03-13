@@ -64,7 +64,7 @@ abstract contract RevertHookAccess is Constants {
         }
     }
 
-    // validates if caller is allowed to process position
+    // validates if caller is authorized to process a position
     function _validateCaller(IPositionManager positionManager, uint256 tokenId) internal view {
         if (_vaults[msg.sender]) {
             uint256 transformedTokenId = IVault(msg.sender).transformedTokenId();
