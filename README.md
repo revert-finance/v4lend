@@ -174,6 +174,47 @@ Check contract sizes:
 forge build --sizes
 ```
 
+## Hookathon demo
+
+The repo includes a fork-only end-to-end demo for the hook flow on Unichain:
+
+- [`script/demo/UnichainForkHookathonE2E.s.sol`](/Users/kalinbas/Code/v4lend/script/demo/UnichainForkHookathonE2E.s.sol)
+
+What it does:
+- deploys the full local demo stack on top of a Unichain fork,
+- deploys and wires the oracle, hook, vault, and transformer contracts,
+- initializes a hooked demo pool,
+- mints one wide ambient liquidity position so the pool stays swappable,
+- mints one narrow hooked position,
+- configures `MODE_AUTO_RANGE` on that position,
+- performs a swap on the hooked pool,
+- verifies that the hook executed by checking that the position was reminted into a new range.
+
+Run it with:
+
+```sh
+FOUNDRY_PROFILE=ci forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
+```
+
+Useful env vars:
+
+```sh
+UNICHAIN_RPC_URL=https://mainnet.unichain.org
+DEMO_PRIVATE_KEY=<optional-private-key>
+DEMO_POSITION_LIQUIDITY=<optional-liquidity>
+AMBIENT_POSITION_LIQUIDITY=<optional-liquidity>
+MAX_SWAP_STEPS=<optional-step-count>
+SWAP_STEP_AMOUNT_FAR=<optional-amount>
+SWAP_STEP_AMOUNT_MID=<optional-amount>
+SWAP_STEP_AMOUNT_CLOSE=<optional-amount>
+SWAP_STEP_AMOUNT_FINAL=<optional-amount>
+```
+
+Notes:
+- this script is a local fork demo, not a broadcast deployment flow,
+- it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
+- a successful run logs the old token id, the new token id, the old range, the reminted range, and the final current tick.
+
 ## Deployment scripts
 
 Deployment scripts live in [`script/`](script).
@@ -239,7 +280,9 @@ Relevant admin calls:
 
 ## Operational notes
 
+- `RevertHook` should be treated as an oracle-enabled-pool system. In practice, active hook automation depends on oracle pricing for position valuation and oracle-bounded trigger processing.
 - Long-tail pairs can still work in some automation flows when oracle-based slippage checks are intentionally disabled with `10000` bps and only `amountOutMin` is enforced.
+- That long-tail mode applies to selected standalone automator flows, not to the hook in the same way.
 - Vault lending and borrowing always depend on the oracle and token configuration being set correctly.
 - The hook and the automators are intentionally separate execution models. The hook is for swap-time automation; the automators are for operator-triggered workflows.
 - Delegatecall targets under [`src/hook`](src/hook) are execution helpers for the hook, not standalone products.

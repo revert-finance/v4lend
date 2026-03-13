@@ -4,15 +4,13 @@ pragma solidity ^0.8.0;
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -216,12 +214,12 @@ abstract contract Swapper is Constants {
         uint256 amount1
     ) internal pure returns (uint128 maxLiquidity) {
         // Calculate sqrt prices for tick range
-        uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
+        uint160 sqrtPriceAx96 = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtPriceBx96 = TickMath.getSqrtPriceAtTick(tickUpper);
 
         // Calculate max liquidity
         maxLiquidity =
-            LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, amount0, amount1);
+            LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtPriceAx96, sqrtPriceBx96, amount0, amount1);
     }
 
     function _calculateLiquidity(

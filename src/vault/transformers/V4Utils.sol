@@ -5,24 +5,19 @@ import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Recei
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
-import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
 import {Swapper} from "../../shared/swap/Swapper.sol";
-import {IVault} from "../interfaces/IVault.sol";
-import {Transformer, Ownable} from "./Transformer.sol";
+import {Transformer} from "./Transformer.sol";
 
 /// @title V4Utils v1.0
 /// @notice Utility contract for Uniswap V4 position management operations

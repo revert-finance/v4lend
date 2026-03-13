@@ -5,11 +5,6 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
-import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
-import {PositionInfoLibrary, PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 

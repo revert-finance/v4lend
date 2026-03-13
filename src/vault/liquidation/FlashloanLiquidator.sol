@@ -7,7 +7,6 @@ import {Swapper} from "../../shared/swap/Swapper.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import {Constants} from "../../shared/Constants.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
