@@ -6,7 +6,7 @@ import {console} from "forge-std/console.sol";
 
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
-import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
+import {LiquidityCalculator, ILiquidityCalculator} from "../src/utils/LiquidityCalculator.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";

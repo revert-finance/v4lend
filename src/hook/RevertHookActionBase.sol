@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -8,7 +7,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -18,16 +17,16 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
-import {IVault} from "./interfaces/IVault.sol";
-import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
-import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
-import {RevertHookTriggers} from "./RevertHookTriggers.sol";
+import {ILiquidityCalculator} from "../utils/LiquidityCalculator.sol";
+import {IVault} from "../interfaces/IVault.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {PositionModeFlags} from "../lib/PositionModeFlags.sol";
+import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 
 /// @title RevertHookActionBase
 /// @notice Base contract with shared helper functions for RevertHook action targets
 /// @dev Inherits from RevertHookTriggers for state access and trigger management
-abstract contract RevertHookActionBase is RevertHookTriggers {
+abstract contract RevertHookActionBase is RevertHookLookupBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
@@ -45,19 +44,12 @@ abstract contract RevertHookActionBase is RevertHookTriggers {
         poolManager = _v4Oracle.poolManager();
     }
 
-    // ==================== Abstract Function Implementation ====================
-
-    /// @notice Implementation of abstract function from RevertHookTriggers
-    function _getPoolAndPositionInfo(uint256 tokenId) internal view override returns (PoolKey memory, PositionInfo) {
-        return positionManager.getPoolAndPositionInfo(tokenId);
+    function _positionManagerRef() internal view override returns (IPositionManager) {
+        return positionManager;
     }
 
-    // ==================== Owner Helper ====================
-
-    /// @notice Returns the owner of the position
-    function _getOwner(uint256 tokenId, bool resolveVaultOwner) internal view override returns (address) {
-        address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-        return (resolveVaultOwner && _vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
+    function _poolManagerRef() internal view override returns (IPoolManager) {
+        return poolManager;
     }
 
     // ==================== Auth Helpers ====================
@@ -71,13 +63,6 @@ abstract contract RevertHookActionBase is RevertHookTriggers {
                 revert Unauthorized();
             }
         }
-    }
-
-    // ==================== Tick Helpers ====================
-
-    /// @notice Gets the current tick for a pool
-    function _getCurrentTick(PoolId poolId) internal view returns (int24 tick) {
-        (, tick,,) = StateLibrary.getSlot0(poolManager, poolId);
     }
 
     // ==================== Pool Key Helpers ====================

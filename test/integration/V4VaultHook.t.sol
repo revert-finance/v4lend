@@ -18,12 +18,12 @@ import {V4Oracle} from "../../src/V4Oracle.sol";
 import {InterestRateModel} from "../../src/InterestRateModel.sol";
 
 import {RevertHook} from "../../src/RevertHook.sol";
-import {RevertHookState} from "../../src/RevertHookState.sol";
+import {RevertHookState} from "../../src/hook/RevertHookState.sol";
 import {PositionModeFlags} from "../../src/lib/PositionModeFlags.sol";
-import {RevertHookPositionActions} from "../../src/RevertHookPositionActions.sol";
-import {RevertHookAutoLeverageActions} from "../../src/RevertHookAutoLeverageActions.sol";
-import {RevertHookAutoLendActions} from "../../src/RevertHookAutoLendActions.sol";
-import {LiquidityCalculator} from "../../src/LiquidityCalculator.sol";
+import {RevertHookPositionActions} from "../../src/hook/RevertHookPositionActions.sol";
+import {RevertHookAutoLeverageActions} from "../../src/hook/RevertHookAutoLeverageActions.sol";
+import {RevertHookAutoLendActions} from "../../src/hook/RevertHookAutoLendActions.sol";
+import {LiquidityCalculator} from "../../src/utils/LiquidityCalculator.sol";
 import {Constants} from "../../src/utils/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";

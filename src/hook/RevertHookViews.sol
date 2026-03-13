@@ -6,7 +6,7 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
-import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {TickLinkedList} from "../lib/TickLinkedList.sol";
 import {RevertHookBase} from "./RevertHookBase.sol";
 
 /// @title RevertHookViews

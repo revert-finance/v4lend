@@ -7,10 +7,10 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
-import {IVault} from "./interfaces/IVault.sol";
-import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
-import {AutoLeverageLib} from "./lib/AutoLeverageLib.sol";
+import {ILiquidityCalculator} from "../utils/LiquidityCalculator.sol";
+import {IVault} from "../interfaces/IVault.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {AutoLeverageLib} from "../lib/AutoLeverageLib.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 
 /// @title RevertHookAutoLeverageActions

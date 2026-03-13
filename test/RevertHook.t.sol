@@ -23,12 +23,12 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "../src/RevertHook.sol";
-import {RevertHookState} from "../src/RevertHookState.sol";
+import {RevertHookState} from "../src/hook/RevertHookState.sol";
 import {PositionModeFlags} from "../src/lib/PositionModeFlags.sol";
-import {RevertHookPositionActions} from "../src/RevertHookPositionActions.sol";
-import {RevertHookAutoLeverageActions} from "../src/RevertHookAutoLeverageActions.sol";
-import {RevertHookAutoLendActions} from "../src/RevertHookAutoLendActions.sol";
-import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
+import {RevertHookPositionActions} from "../src/hook/RevertHookPositionActions.sol";
+import {RevertHookAutoLeverageActions} from "../src/hook/RevertHookAutoLeverageActions.sol";
+import {RevertHookAutoLendActions} from "../src/hook/RevertHookAutoLendActions.sol";
+import {LiquidityCalculator, ILiquidityCalculator} from "../src/utils/LiquidityCalculator.sol";
 import {IV4Oracle} from "../src/interfaces/IV4Oracle.sol";
 import {MockV4Oracle} from "./utils/MockV4Oracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";

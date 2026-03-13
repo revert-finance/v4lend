@@ -2,28 +2,23 @@
 pragma solidity ^0.8.30;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
-import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
-import {IVault} from "./interfaces/IVault.sol";
+import {ILiquidityCalculator} from "../utils/LiquidityCalculator.sol";
+import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
 import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";
-import {RevertHookTriggers} from "./RevertHookTriggers.sol";
+import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 
 /// @title RevertHookBase
 /// @notice Hook-only shared base for constructor wiring, common lookups, and delegatecall helpers
-abstract contract RevertHookBase is RevertHookTriggers, BaseHook, IUnlockCallback {
+abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallback {
     IPermit2 internal immutable permit2;
     IPositionManager internal immutable positionManager;
     IV4Oracle internal immutable v4Oracle;
@@ -74,21 +69,16 @@ abstract contract RevertHookBase is RevertHookTriggers, BaseHook, IUnlockCallbac
         _setVault(vault);
     }
 
-    function _getPoolAndPositionInfo(uint256 tokenId) internal view override returns (PoolKey memory, PositionInfo) {
-        return positionManager.getPoolAndPositionInfo(tokenId);
+    function _positionManagerRef() internal view override returns (IPositionManager) {
+        return positionManager;
     }
 
-    function _getOwner(uint256 tokenId, bool resolveVaultOwner) internal view override returns (address) {
-        address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-        return (resolveVaultOwner && _vaults[owner]) ? IVault(owner).ownerOf(tokenId) : owner;
+    function _poolManagerRef() internal view override returns (IPoolManager) {
+        return poolManager;
     }
 
     function _getPositionValueNative(uint256 tokenId) internal view returns (uint256 value) {
         (value,,,) = v4Oracle.getValue(tokenId, address(0));
-    }
-
-    function _getTick(PoolId poolId) internal view returns (int24 tick) {
-        (, tick,,) = StateLibrary.getSlot0(poolManager, poolId);
     }
 
     function _delegatecall(address target, bytes memory data) internal {

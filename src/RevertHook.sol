@@ -3,13 +3,13 @@ pragma solidity ^0.8.30;
 
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "./LiquidityCalculator.sol";
+import {ILiquidityCalculator} from "./utils/LiquidityCalculator.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
-import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
-import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
-import {RevertHookBase} from "./RevertHookBase.sol";
-import {RevertHookCallbacks} from "./RevertHookCallbacks.sol";
-import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";
+import {RevertHookAutoLendActions} from "./hook/RevertHookAutoLendActions.sol";
+import {RevertHookAutoLeverageActions} from "./hook/RevertHookAutoLeverageActions.sol";
+import {RevertHookBase} from "./hook/RevertHookBase.sol";
+import {RevertHookCallbacks} from "./hook/RevertHookCallbacks.sol";
+import {RevertHookPositionActions} from "./hook/RevertHookPositionActions.sol";
 
 /// @title RevertHook
 /// @notice Uniswap V4 hook enabling automated LP position management features

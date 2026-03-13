@@ -9,11 +9,11 @@ import {V4Oracle, AggregatorV3Interface} from "../src/V4Oracle.sol";
 // import {InterestRateModel} from "../src/InterestRateModel.sol";
 // import {FlashloanLiquidator} from "../src/utils/FlashloanLiquidator.sol";
 // import {LeverageTransformer} from "../src/transformers/LeverageTransformer.sol";
-import {LiquidityCalculator, ILiquidityCalculator} from "../src/LiquidityCalculator.sol";
+import {LiquidityCalculator, ILiquidityCalculator} from "../src/utils/LiquidityCalculator.sol";
 import {RevertHook} from "../src/RevertHook.sol";
-import {RevertHookPositionActions} from "../src/RevertHookPositionActions.sol";
-import {RevertHookAutoLeverageActions} from "../src/RevertHookAutoLeverageActions.sol";
-import {RevertHookAutoLendActions} from "../src/RevertHookAutoLendActions.sol";
+import {RevertHookPositionActions} from "../src/hook/RevertHookPositionActions.sol";
+import {RevertHookAutoLeverageActions} from "../src/hook/RevertHookAutoLeverageActions.sol";
+import {RevertHookAutoLendActions} from "../src/hook/RevertHookAutoLendActions.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
