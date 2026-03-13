@@ -11,7 +11,7 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
-import {IV4Oracle} from "../../src/interfaces/IV4Oracle.sol";
+import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 
 /// @title MockV4Oracle
 /// @notice Mock implementation of V4Oracle that returns current pool price for getPoolSqrtPriceX96

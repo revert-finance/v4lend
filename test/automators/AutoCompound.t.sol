@@ -8,7 +8,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {AutoCompound} from "../../src/automators/AutoCompound.sol";
-import {Constants} from "../../src/utils/Constants.sol";
+import {Constants} from "src/shared/Constants.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
 
 contract AutoCompoundTest is AutomatorTestBase {
@@ -54,6 +54,39 @@ contract AutoCompoundTest is AutomatorTestBase {
         assertTrue(autoCompound.operators(newOperator));
         autoCompound.setOperator(newOperator, false);
         assertFalse(autoCompound.operators(newOperator));
+    }
+
+    function test_SetWithdrawer() public {
+        address newWithdrawer = makeAddr("newWithdrawer");
+
+        autoCompound.setWithdrawer(newWithdrawer);
+
+        assertEq(autoCompound.withdrawer(), newWithdrawer, "withdrawer should update");
+
+        vm.prank(withdrawer);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoCompound.withdrawETH(withdrawer);
+    }
+
+    function test_RevertWhenNonOwnerSetsWithdrawer() public {
+        vm.prank(makeAddr("notOwner"));
+        vm.expectRevert();
+        autoCompound.setWithdrawer(makeAddr("newWithdrawer"));
+    }
+
+    function test_RevertWhenNonWithdrawerCallsWithdrawETH() public {
+        vm.prank(makeAddr("notWithdrawer"));
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoCompound.withdrawETH(makeAddr("recipient"));
+    }
+
+    function test_RevertWhenNonWithdrawerCallsWithdrawBalances() public {
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(usdc);
+
+        vm.prank(makeAddr("notWithdrawer"));
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoCompound.withdrawBalances(tokens, makeAddr("recipient"));
     }
 
     // --- AutoCompound Mode Tests ---

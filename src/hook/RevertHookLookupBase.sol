@@ -10,7 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
-import {IVault} from "../interfaces/IVault.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
 import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 
 /// @title RevertHookLookupBase

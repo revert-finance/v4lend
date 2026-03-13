@@ -17,10 +17,10 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "../utils/LiquidityCalculator.sol";
-import {IVault} from "../interfaces/IVault.sol";
-import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
-import {PositionModeFlags} from "../lib/PositionModeFlags.sol";
+import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 
 /// @title RevertHookActionBase

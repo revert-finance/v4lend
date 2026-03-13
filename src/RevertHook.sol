@@ -3,8 +3,8 @@ pragma solidity ^0.8.30;
 
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "./utils/LiquidityCalculator.sol";
-import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
+import {ILiquidityCalculator} from "./shared/math/LiquidityCalculator.sol";
+import {IV4Oracle} from "./oracle/interfaces/IV4Oracle.sol";
 import {RevertHookAutoLendActions} from "./hook/RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookBase} from "./hook/RevertHookBase.sol";

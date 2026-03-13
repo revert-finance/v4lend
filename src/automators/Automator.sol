@@ -11,10 +11,10 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {Swapper} from "../utils/Swapper.sol";
-import {Transformer, Ownable} from "../transformers/Transformer.sol";
-import {IVault} from "../interfaces/IVault.sol";
-import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {Swapper} from "../shared/swap/Swapper.sol";
+import {Transformer, Ownable} from "../vault/transformers/Transformer.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 
 /// @title Automator
 /// @notice Base contract for V4 position automation. Provides operator access control,

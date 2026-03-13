@@ -7,8 +7,8 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {TickLinkedList} from "../lib/TickLinkedList.sol";
-import {PositionModeFlags} from "../lib/PositionModeFlags.sol";
+import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookAccess} from "./RevertHookAccess.sol";
 
 /// @title RevertHookState

@@ -3,12 +3,12 @@ pragma solidity ^0.8.0;
 
 import {Script} from "forge-std/Script.sol";
 
-import {V4Utils} from "../src/transformers/V4Utils.sol";
-import {V4Oracle, AggregatorV3Interface} from "../src/V4Oracle.sol";
-import {V4Vault} from "../src/V4Vault.sol";
-import {InterestRateModel} from "../src/InterestRateModel.sol";
-import {FlashloanLiquidator} from "../src/utils/FlashloanLiquidator.sol";
-import {LeverageTransformer} from "../src/transformers/LeverageTransformer.sol";
+import {V4Utils} from "src/vault/transformers/V4Utils.sol";
+import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
+import {V4Vault} from "src/vault/V4Vault.sol";
+import {InterestRateModel} from "src/vault/InterestRateModel.sol";
+import {FlashloanLiquidator} from "src/vault/liquidation/FlashloanLiquidator.sol";
+import {LeverageTransformer} from "src/vault/transformers/LeverageTransformer.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";

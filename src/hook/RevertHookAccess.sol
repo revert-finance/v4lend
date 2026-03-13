@@ -5,8 +5,8 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
-import {IVault} from "../interfaces/IVault.sol";
-import {Constants} from "../utils/Constants.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {Constants} from "../shared/Constants.sol";
 
 /// @title RevertHookAccess
 /// @notice Internal-only ownership and vault access helpers for the hook/delegatecall stack

@@ -9,8 +9,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
-import {IVault} from "../interfaces/IVault.sol";
-import {PositionModeFlags} from "../lib/PositionModeFlags.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookImmediate} from "./RevertHookImmediate.sol";
 
 /// @title RevertHookConfig

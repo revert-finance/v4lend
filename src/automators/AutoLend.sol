@@ -15,8 +15,8 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
-import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
-import {AutoLendLib} from "../lib/AutoLendLib.sol";
+import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
+import {AutoLendLib} from "../shared/planning/AutoLendLib.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoLend

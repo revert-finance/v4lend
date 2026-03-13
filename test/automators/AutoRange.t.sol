@@ -10,7 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {AutoRange} from "../../src/automators/AutoRange.sol";
-import {Constants} from "../../src/utils/Constants.sol";
+import {Constants} from "src/shared/Constants.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
 
 contract AutoRangeTest is AutomatorTestBase {

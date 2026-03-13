@@ -7,9 +7,9 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
-import {IVault} from "../interfaces/IVault.sol";
-import {TickLinkedList} from "../lib/TickLinkedList.sol";
-import {PositionModeFlags} from "../lib/PositionModeFlags.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookConfig} from "./RevertHookConfig.sol";
 
 /// @title RevertHookExecution

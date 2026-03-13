@@ -6,8 +6,8 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
-import {TickLinkedList} from "../lib/TickLinkedList.sol";
-import {PositionModeFlags} from "../lib/PositionModeFlags.sol";
+import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookState} from "./RevertHookState.sol";
 
 /// @title RevertHookTriggers

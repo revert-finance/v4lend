@@ -1,0 +1,378 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.26;
+
+import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
+
+import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+
+import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
+
+
+import {IUniswapV4Router04} from "hookmate/interfaces/router/IUniswapV4Router04.sol";
+import {AddressConstants} from "hookmate/constants/AddressConstants.sol";
+
+import {Permit2Deployer} from "hookmate/artifacts/Permit2.sol";
+import {V4PoolManagerDeployer} from "hookmate/artifacts/V4PoolManager.sol";
+import {V4PositionManagerDeployer} from "hookmate/artifacts/V4PositionManager.sol";
+import {V4RouterDeployer} from "hookmate/artifacts/V4Router.sol";
+
+import {V4Utils} from "src/vault/transformers/V4Utils.sol";
+import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
+
+/**
+ * @title V4TestBase
+ * @notice Base contract for V4Utils tests with shared setup and utilities
+ * @dev Contains common deployment, setup, and helper functions
+ */
+abstract contract V4TestBase is Test {
+    // V4 Contracts
+    IPermit2 public permit2;
+    IPoolManager public poolManager;
+    IPositionManager public positionManager;
+    IUniswapV4Router04 public swapRouter;
+    
+    V4Utils public v4Utils;
+    V4Oracle public v4Oracle;
+    
+    // Test tokens
+    ERC20Mock public token0;
+    ERC20Mock public token1;
+    ERC20Mock public mockWeth;
+    
+    // Test users
+    address public user1;
+    address public user2;
+    
+    // Common constants
+    uint24 public constant FEE = 3000;
+    int24 public constant TICK_LOWER = -887220; // Must be multiple of tick spacing (60)
+    int24 public constant TICK_UPPER = 887220;  // Must be multiple of tick spacing (60)
+    uint256 public constant INITIAL_LIQUIDITY = 1000 ether;
+    uint256 public constant USER_BALANCE = 10_000_000 ether; // Increased to ensure sufficient balance
+    uint256 public constant ETH_BALANCE = 100 ether;
+    
+    function setUp() public virtual {
+        // Set up test users
+        user1 = makeAddr("user1");
+        user2 = makeAddr("user2");
+        
+        // Deploy V4 contracts
+        _deployV4Contracts();
+        
+        // Deploy test tokens
+        _deployTestTokens();
+        
+        // Deploy V4Utils
+        v4Utils = new V4Utils(
+            positionManager,
+            address(swapRouter),
+            address(0), // zeroxAllowanceHolder - not used in this test
+            permit2
+        );
+        
+        // Fund test users
+        _fundUsers();
+        
+        console.log("=== Test Setup Complete ===");
+        console.log("V4Utils deployed at:", address(v4Utils));
+        console.log("PositionManager:", address(positionManager));
+        console.log("PoolManager:", address(poolManager));
+    }
+    
+    function _deployV4Contracts() internal {
+        // Deploy Permit2
+        address permit2Address = AddressConstants.getPermit2Address();
+        if (permit2Address.code.length == 0) {
+            address tempDeployAddress = address(Permit2Deployer.deploy());
+            vm.etch(permit2Address, tempDeployAddress.code);
+        }
+        permit2 = IPermit2(permit2Address);
+        
+        // Deploy PoolManager
+        poolManager = IPoolManager(address(V4PoolManagerDeployer.deploy(address(0x4444))));
+        
+        // Deploy PositionManager
+        positionManager = IPositionManager(
+            address(
+                V4PositionManagerDeployer.deploy(
+                    address(poolManager), 
+                    address(permit2), 
+                    300_000, 
+                    address(0), 
+                    address(0)
+                )
+            )
+        );
+        
+        // Deploy Router
+        swapRouter = IUniswapV4Router04(
+            payable(V4RouterDeployer.deploy(address(poolManager), address(permit2)))
+        );
+    }
+    
+    function _deployTestTokens() internal virtual {
+        // Deploy mock tokens
+        ERC20Mock tempToken0 = new ERC20Mock();
+        ERC20Mock tempToken1 = new ERC20Mock();
+        mockWeth = new ERC20Mock();
+        
+        // Ensure proper ordering: token0 < token1 (address-wise)
+        if (address(tempToken0) < address(tempToken1)) {
+            token0 = tempToken0;
+            token1 = tempToken1;
+        } else {
+            token0 = tempToken1;
+            token1 = tempToken0;
+        }
+        
+        // Mint tokens to this contract
+        token0.mint(address(this), 100_000_000 ether);
+        token1.mint(address(this), 100_000_000 ether);
+        mockWeth.mint(address(this), 100_000_000 ether);
+    }
+    
+    function _fundUsers() internal {
+        // Fund users with test tokens
+        token0.transfer(user1, USER_BALANCE);
+        token1.transfer(user1, USER_BALANCE);
+        token0.transfer(user2, USER_BALANCE);
+        token1.transfer(user2, USER_BALANCE);
+        
+        // Fund users with ETH
+        vm.deal(user1, ETH_BALANCE);
+        vm.deal(user2, ETH_BALANCE);
+    }
+    
+    function _createTestPosition(address owner) internal returns (uint256 tokenId) {
+        // Create a pool key
+        PoolKey memory poolKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        
+        // Initialize the pool
+        vm.prank(owner);
+        poolManager.initialize(poolKey, 79228162514264337593543950336); // sqrt price
+        
+        // First set up ERC20 allowances from user to Permit2
+        vm.prank(owner);
+        token0.approve(address(permit2), type(uint256).max);
+        vm.prank(owner);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Then set up Permit2 allowances for the user to allow PositionManager to transfer tokens
+        vm.prank(owner);
+        permit2.approve(
+            address(token0),
+            address(positionManager),
+            uint160(INITIAL_LIQUIDITY),
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        vm.prank(owner);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(INITIAL_LIQUIDITY),
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        
+        // Also set up Permit2 allowances for V4Utils (needed when V4Utils mints new positions)
+        token0.approve(address(permit2), type(uint256).max);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        permit2.approve(
+            address(token0),
+            address(positionManager),
+            uint160(10_000_000 ether), // Large allowance for V4Utils
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(10_000_000 ether), // Large allowance for V4Utils
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        
+        // Create position using modifyLiquidities with MINT_POSITION action
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] = abi.encode(
+            poolKey,
+            TICK_LOWER,
+            TICK_UPPER,
+            INITIAL_LIQUIDITY,
+            INITIAL_LIQUIDITY, // amount0Max
+            INITIAL_LIQUIDITY, // amount1Max
+            owner,             // recipient
+            ""                 // hookData
+        );
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(positionManager));
+        
+        vm.prank(owner);
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
+        
+        // Get the newly minted token ID
+        tokenId = positionManager.nextTokenId() - 1;
+        
+        return tokenId;
+    }
+    
+    function _createTestPositionWithETH(address owner) internal returns (uint256 tokenId) {
+        // Create a pool key with ETH as currency0
+        PoolKey memory poolKey = PoolKey({
+            currency0: CurrencyLibrary.ADDRESS_ZERO, // ETH
+            currency1: Currency.wrap(address(token1)),
+            fee: FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        
+        // Initialize the pool
+        vm.prank(owner);
+        poolManager.initialize(poolKey, 79228162514264337593543950336); // sqrt price
+        
+        // Set up ERC20 allowance for token1 only (ETH doesn't need approval)
+        vm.prank(owner);
+        token1.approve(address(permit2), type(uint256).max);
+        
+        // Set up Permit2 allowances for token1 only
+        vm.prank(owner);
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(INITIAL_LIQUIDITY),
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        
+        // Also set up Permit2 allowances for V4Utils
+        token1.approve(address(permit2), type(uint256).max);
+        
+        permit2.approve(
+            address(token1),
+            address(positionManager),
+            uint160(10_000_000 ether), // Large allowance for V4Utils
+            uint48(block.timestamp + 1 days) // 1 day expiration
+        );
+        
+        // Create position using modifyLiquidities with MINT_POSITION action
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        uint256 ethAmount = 10 ether; // Use smaller amount of ETH that fits within user balance
+        
+        paramsArray[0] = abi.encode(
+            poolKey,
+            TICK_LOWER,
+            TICK_UPPER,
+            ethAmount,
+            ethAmount, // amount0Max (ETH)
+            ethAmount, // amount1Max (token1)
+            owner,             // recipient
+            ""                 // hookData
+        );
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(positionManager));
+        
+        vm.prank(owner);
+        positionManager.modifyLiquidities{value: ethAmount}(abi.encode(actions, paramsArray), block.timestamp);
+        
+        // Get the newly minted token ID
+        tokenId = positionManager.nextTokenId() - 1;
+        
+        return tokenId;
+    }
+    
+    function _createInstructions(
+        V4Utils.WhatToDo whatToDo,
+        address targetToken,
+        uint128 liquidity,
+        uint256 deadline,
+        address owner
+    ) internal view returns (V4Utils.Instructions memory) {
+        return V4Utils.Instructions({
+            whatToDo: whatToDo,
+            targetToken: Currency.wrap(targetToken),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            fee: FEE,
+            tickSpacing: 60,
+            tickLower: TICK_LOWER,
+            tickUpper: TICK_UPPER,
+            liquidity: liquidity,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: deadline,
+            recipient: owner,
+            recipientNFT: owner,
+            returnData: "",
+            swapAndMintReturnData: "",
+            hook: address(0),
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
+        });
+    }
+    
+    function _executeInstructions(uint256 tokenId, V4Utils.Instructions memory instructions, address owner) internal virtual {
+        vm.prank(owner);
+        IERC721(address(positionManager)).safeTransferFrom(
+            owner, 
+            address(v4Utils), 
+            tokenId, 
+            abi.encode(instructions)
+        );
+    }
+    
+    function _checkBalances(address user, string memory label) internal view {
+        console.log("=== Balances for", label, "===");
+        console.log("Token0 balance:", token0.balanceOf(user));
+        console.log("Token1 balance:", token1.balanceOf(user));
+        console.log("ETH balance:", user.balance);
+        console.log("WETH balance:", mockWeth.balanceOf(user));
+    }
+    
+    function _approveTokens(address user, uint256 amount) internal {
+        vm.prank(user);
+        IERC20(address(token0)).approve(address(v4Utils), amount);
+        vm.prank(user);
+        IERC20(address(token1)).approve(address(v4Utils), amount);
+    }
+
+    // 873073 USDC -> min 188428045653858 WETH
+    function _getUsdcToWethSwapData() internal pure returns (bytes memory) {
+        return hex"2213bc0b000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000000d5271000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb3000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000004041fff991f0000000000000000000000003434567890123123789012345678901234567890000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000000000000000000000000000000000bcd89e5d691400000000000000000000000000000000000000000000000000000000000000a0dd9b66bbdcf30e24f7f14f1c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000e4c1fb425e000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000000d527100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000068d2f9de00000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001a4d92aadfb000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000000000000000000000000000000000bec0f2b6507827b94367ac03bd1f244951e1e0672a6cd43976e57d0ddd017eee250bb527079d0000000000000000000000000000000000000000000000000000000068d2f912000000000000000000000000bb289bc97591f70d8216462df40ed713011b968a0000000000000000000000000000000000000000000000000000000000000120000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000000d5271000000000000000000000000000000000000000000000000000000000000004128b63db3f144697ccea1342067674e4e85ddbe9a53dabadc973eee145cf21d6653c3891f8dc680c1d62717d478fad77526faf01c6aee8c6ee3267e9e0ddfd15b1c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    }
+
+    // 6274987 USDC -> min 756050291375000 ETH
+    function _getUsdcToEthSwapData() internal pure returns (bytes memory) {
+        return hex"2213bc0b000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000005fbfab000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb3000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000006841fff991f0000000000000000000000003434567890123123789012345678901234567890000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000000000000000000000000000000000000002af9fad0cbb9800000000000000000000000000000000000000000000000000000000000000a0f24bbbf132c564be948f525400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000001a00000000000000000000000000000000000000000000000000000000000000340000000000000000000000000000000000000000000000000000000000000048000000000000000000000000000000000000000000000000000000000000000e4c1fb425e000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000005fbfab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000068d3059c00000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000164af72634f000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000000000000000000000000000000000000000271000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000ffffffffffffffc5000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000034271001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000064000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010438c9c147000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000000000000000000000000000000000000000000000002710000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000024d0e30db000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010438c9c147000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000000000000000000000000000000000000000002710000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000242e1a7d4d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    }
+
+    // 1000000000000000 ETH -> min 4128717 USDC
+    function _getEthToUsdcSwapData() internal pure returns (bytes memory) {
+        return hex"2213bc0b000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038d7ea4c68000000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb3000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000004241fff991f0000000000000000000000003434567890123123789012345678901234567890000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000003ed14000000000000000000000000000000000000000000000000000000000000000a01dca3b33c8045d51c3499ad30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000180000000000000000000000000000000000000000000000000000000000000010438c9c147000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000000000000000000000000000000000000000000000002710000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000024d0e30db00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001a4d92aadfb000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000003f73a11ce41860fb181c8415800bd4d86f9ccd961aeb9ec8ab2f94748f3a56a19d09090000000000000000000000000000000000000000000000000000000068d2f8c8000000000000000000000000bb289bc97591f70d8216462df40ed713011b968a0000000000000000000000000000000000000000000000000000000000000120000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc200000000000000000000000000000000000000000000000000038d7ea4c680000000000000000000000000000000000000000000000000000000000000000041c8244819c04b0afaa83d44b0a77163f072b2265adb25c99a02886ab8652c66e41b746e0227e8a184d2cc0a2e6aca1a960e416457d21ee36b306bacbecce7f4f71b000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    }
+
+    // 273073 USDC -> min 32877460445000 WETH
+    function _get273073UsdcToWethSwapData() internal pure returns (bytes memory) {
+        return hex"2213bc0b000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb30000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000000000000042ab1000000000000000000000000d07c4f45bc9b389d286cb094f97bb6ba45f4bb3000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000002641fff991f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a04f1b87d521aca1f7659b0d6c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000144c3608b9d000000000000000000000000343456789012312378901234567890123456789079b948cb2b8343eea06501c9ab9ec47c2c007d0507f2997ad873e0d66ea67ed60000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000000000000042ab100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000068d303ba000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000001de6e159d74800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    }
+    
+}

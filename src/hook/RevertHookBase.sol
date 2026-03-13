@@ -9,8 +9,8 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "../utils/LiquidityCalculator.sol";
-import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
+import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
 import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";

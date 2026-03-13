@@ -10,7 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {AutoExit} from "../../src/automators/AutoExit.sol";
-import {Constants} from "../../src/utils/Constants.sol";
+import {Constants} from "src/shared/Constants.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
 
 contract AutoExitTest is AutomatorTestBase {

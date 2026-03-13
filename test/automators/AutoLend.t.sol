@@ -9,7 +9,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {AutoLend} from "../../src/automators/AutoLend.sol";
-import {Constants} from "../../src/utils/Constants.sol";
+import {Constants} from "src/shared/Constants.sol";
 import {MockERC4626Vault} from "../utils/MockERC4626Vault.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
 

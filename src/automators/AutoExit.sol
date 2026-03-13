@@ -12,8 +12,8 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
-import {IVault} from "../interfaces/IVault.sol";
-import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoExit

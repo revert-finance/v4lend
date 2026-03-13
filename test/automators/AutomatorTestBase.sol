@@ -17,13 +17,13 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
-import {V4Vault} from "../../src/V4Vault.sol";
-import {V4Oracle, AggregatorV3Interface} from "../../src/V4Oracle.sol";
-import {InterestRateModel} from "../../src/InterestRateModel.sol";
-import {Constants} from "../../src/utils/Constants.sol";
-import {Swapper} from "../../src/utils/Swapper.sol";
+import {V4Vault} from "src/vault/V4Vault.sol";
+import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
+import {InterestRateModel} from "src/vault/InterestRateModel.sol";
+import {Constants} from "src/shared/Constants.sol";
+import {Swapper} from "src/shared/swap/Swapper.sol";
 
-import {IUniversalRouter} from "../../src/lib/IUniversalRouter.sol";
+import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
 import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";

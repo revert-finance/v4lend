@@ -9,8 +9,8 @@ import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-cor
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {TickLinkedList} from "../lib/TickLinkedList.sol";
-import {PositionModeFlags} from "../lib/PositionModeFlags.sol";
+import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookExecution} from "./RevertHookExecution.sol";
 
 /// @title RevertHookCallbacks

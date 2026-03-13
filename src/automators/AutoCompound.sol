@@ -10,8 +10,8 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
-import {IVault} from "../interfaces/IVault.sol";
-import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoCompound

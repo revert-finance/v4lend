@@ -11,11 +11,11 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
-import {ILiquidityCalculator} from "../utils/LiquidityCalculator.sol";
-import {IVault} from "../interfaces/IVault.sol";
-import {IV4Oracle} from "../interfaces/IV4Oracle.sol";
-import {AutoLendLib} from "../lib/AutoLendLib.sol";
-import {TickLinkedList} from "../lib/TickLinkedList.sol";
+import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
+import {AutoLendLib} from "../shared/planning/AutoLendLib.sol";
+import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 
 /// @title RevertHookAutoLendActions
