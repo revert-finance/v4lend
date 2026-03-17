@@ -3,6 +3,7 @@
 `v4lend` is a Uniswap v4-native lending and automation codebase.
 
 It includes:
+
 - a lending vault that accepts Uniswap v4 LP NFTs as collateral,
 - an oracle for valuing LP positions with Chainlink-backed price checks,
 - a Uniswap v4 hook for on-swap automation,
@@ -15,11 +16,13 @@ The system is designed around Uniswap v4 positions as the core primitive: positi
 ## Main modules
 
 ### `V4Vault`
-[`src/vault/V4Vault.sol`](src/vault/V4Vault.sol)
+
+`[src/vault/V4Vault.sol](src/vault/V4Vault.sol)`
 
 An ERC4626 lending vault for a single borrow/lend asset. Users deposit the vault asset to lend, and borrowers post Uniswap v4 LP positions as collateral.
 
 Main responsibilities:
+
 - ERC4626 deposits, mints, withdrawals, and redeems
 - borrowing and repayment against LP collateral
 - liquidation and reserve accounting
@@ -27,22 +30,26 @@ Main responsibilities:
 - hook allowlisting and collateral token configuration
 
 ### `V4Oracle`
-[`src/oracle/V4Oracle.sol`](src/oracle/V4Oracle.sol)
+
+`[src/oracle/V4Oracle.sol](src/oracle/V4Oracle.sol)`
 
 Values Uniswap v4 LP positions using Chainlink feeds plus pool-price sanity checks.
 
 Main responsibilities:
+
 - price normalization into a common reference asset
 - LP value and fee valuation
 - pool price vs oracle price deviation checks
 - L2 sequencer uptime guard support
 
 ### `RevertHook`
-[`src/RevertHook.sol`](src/RevertHook.sol)
+
+`[src/RevertHook.sol](src/RevertHook.sol)`
 
 A Uniswap v4 hook that automates LP management from swap callbacks.
 
-The public hook entrypoint lives at the top level, while the hook implementation is split under [`src/hook`](src/hook):
+The public hook entrypoint lives at the top level, while the hook implementation is split under `[src/hook](src/hook)`:
+
 - views and admin/config logic
 - callback flow
 - trigger bookkeeping
@@ -50,6 +57,7 @@ The public hook entrypoint lives at the top level, while the hook implementation
 - execution delegates for position, auto-lend, and auto-leverage actions
 
 Supported hook-side automation modes include:
+
 - auto exit
 - auto range
 - auto compound
@@ -57,26 +65,31 @@ Supported hook-side automation modes include:
 - auto leverage
 
 ### Standalone automators
-[`src/automators`](src/automators)
+
+`[src/automators](src/automators)`
 
 Operator-driven contracts that execute one automation strategy at a time:
-- [`AutoCompound.sol`](src/automators/AutoCompound.sol)
-- [`AutoExit.sol`](src/automators/AutoExit.sol)
-- [`AutoLend.sol`](src/automators/AutoLend.sol)
-- [`AutoLeverage.sol`](src/automators/AutoLeverage.sol)
-- [`AutoRange.sol`](src/automators/AutoRange.sol)
+
+- `[AutoCompound.sol](src/automators/AutoCompound.sol)`
+- `[AutoExit.sol](src/automators/AutoExit.sol)`
+- `[AutoLend.sol](src/automators/AutoLend.sol)`
+- `[AutoLeverage.sol](src/automators/AutoLeverage.sol)`
+- `[AutoRange.sol](src/automators/AutoRange.sol)`
 
 These are useful when automation should be triggered by operators or keepers instead of fully inside the hook path.
 
 ### Vault transformers
-[`src/vault/transformers`](src/vault/transformers)
+
+`[src/vault/transformers](src/vault/transformers)`
 
 Atomic position-management helpers used directly or through `V4Vault.transform(...)`:
-- [`V4Utils.sol`](src/vault/transformers/V4Utils.sol) for range changes, compounding, swaps, and mint/increase flows
-- [`LeverageTransformer.sol`](src/vault/transformers/LeverageTransformer.sol) for leverage up/down and leveraged entry
+
+- `[V4Utils.sol](src/vault/transformers/V4Utils.sol)` for range changes, compounding, swaps, and mint/increase flows
+- `[LeverageTransformer.sol](src/vault/transformers/LeverageTransformer.sol)` for leverage up/down and leveraged entry
 
 ### Liquidation helper
-[`src/vault/liquidation/FlashloanLiquidator.sol`](src/vault/liquidation/FlashloanLiquidator.sol)
+
+`[src/vault/liquidation/FlashloanLiquidator.sol](src/vault/liquidation/FlashloanLiquidator.sol)`
 
 A helper that uses a Uniswap v3 flash loan to liquidate vault loans and route the seized collateral through swaps.
 
@@ -109,6 +122,7 @@ test/
 ```
 
 A few useful conventions in the current tree:
+
 - `src/hook/` contains hook internals; only `RevertHook.sol` stays at top level.
 - `src/shared/` contains reusable math, planning, and swap helpers.
 - `src/vault/` contains the lending system, its interfaces, transformers, and liquidation helpers.
@@ -117,6 +131,7 @@ A few useful conventions in the current tree:
 ## Development setup
 
 ### Requirements
+
 - [Foundry](https://book.getfoundry.sh/getting-started/installation)
 - git submodules
 
@@ -165,8 +180,9 @@ forge test --match-path test/automators/AutoRange.t.sol
 ```
 
 Invariant-heavy areas also have dedicated suites under:
-- [`test/hook/invariants`](test/hook/invariants)
-- [`test/vault/invariants`](test/vault/invariants)
+
+- `[test/hook/invariants](test/hook/invariants)`
+- `[test/vault/invariants](test/vault/invariants)`
 
 Check contract sizes:
 
@@ -176,9 +192,10 @@ forge build --sizes
 
 ## Hookathon demo
 
-The repo includes a small demo bundle under [`script/demo`](script/demo):
+The repo includes a small demo bundle under `[script/demo](script/demo)`:
 
-The fork-only end-to-end demo in [`UnichainForkHookathonE2E.s.sol`](script/demo/UnichainForkHookathonE2E.s.sol) does the following:
+The fork-only end-to-end demo in `[UnichainForkHookathonE2E.s.sol](script/demo/UnichainForkHookathonE2E.s.sol)` does the following:
+
 - deploys the full local demo stack on top of a Unichain fork,
 - deploys and wires the oracle, hook, vault, and transformer contracts,
 - initializes a hooked demo pool,
@@ -191,7 +208,7 @@ The fork-only end-to-end demo in [`UnichainForkHookathonE2E.s.sol`](script/demo/
 Run it with:
 
 ```sh
-FOUNDRY_PROFILE=ci forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
+FOUNDRY_PROFILE=ci forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv --skip-simulation
 ```
 
 Useful env vars:
@@ -207,22 +224,26 @@ DEMO_AUTO_LEVERAGE_TARGET_BPS=<optional-bps>
 DEMO_DEADLINE_BUFFER=<optional-seconds>
 DEMO_MAX_RANGE_STEPS=<optional-step-count>
 DEMO_RANGE_SWAP_STEP_AMOUNT=<optional-amount>
+HOOKATHON_SKIP_SIMULATION=<1 by default>
 ```
 
 Notes:
+
 - this script is a local fork demo, not a broadcast deployment flow,
 - it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
-- a successful run logs the immediate config-time leverage rebalance from zero debt, then the old token id and reminted token id from `AUTO_RANGE`.
+- a successful run logs the immediate config-time leverage rebalance from zero debt, then the old token id and reminted token id from `AUTO_RANGE`,
+- the recommended commands use `--skip-simulation` because the script run itself succeeds on the fork, but Foundry's final replay simulation is flaky for this CREATE2-heavy flow on Unichain.
 
 ## Deployment scripts
 
-Deployment scripts live in [`script/`](script).
+Deployment scripts live in `[script/](script)`.
 
 Main entrypoints:
-- [`DeployBase.s.sol`](script/DeployBase.s.sol): full Base deployment for oracle, vault, hook, and related contracts
-- [`DeployUnichain.s.sol`](script/DeployUnichain.s.sol): Unichain-focused deployment for the hook stack and oracle configuration
-- [`DeployMainnet.s.sol`](script/DeployMainnet.s.sol): example mainnet deployment flow
-- [`DeployV4Utils.s.sol`](script/DeployV4Utils.s.sol): standalone deployment for `V4Utils`
+
+- `[DeployBase.s.sol](script/DeployBase.s.sol)`: full Base deployment for oracle, vault, hook, and related contracts
+- `[DeployUnichain.s.sol](script/DeployUnichain.s.sol)`: Unichain-focused deployment for the hook stack and oracle configuration
+- `[DeployMainnet.s.sol](script/DeployMainnet.s.sol)`: example mainnet deployment flow
+- `[DeployV4Utils.s.sol](script/DeployV4Utils.s.sol)`: standalone deployment for `V4Utils`
 
 Example pattern:
 
@@ -240,28 +261,33 @@ The hook deployment scripts mine a CREATE2 salt so the deployed hook address has
 Token and feature support is configuration-dependent.
 
 ### Oracle configuration is required for
+
 - vault loan valuation and health checks,
 - hook value checks and oracle-distance guardrails,
 - automator slippage checks when slippage is not disabled.
 
 Relevant admin calls:
+
 - `V4Oracle.setTokenConfig(...)`
 - `V4Oracle.setMaxPoolPriceDifference(...)`
 - `V4Oracle.setSequencerUptimeFeed(...)`
 
 ### Vault configuration is required for
+
 - accepted collateral tokens,
 - collateral factors and value limits,
 - allowed position hooks,
 - allowed transformer contracts.
 
 Relevant admin calls:
+
 - `V4Vault.setTokenConfig(...)`
 - `V4Vault.setHookAllowList(...)`
 - `V4Vault.setTransformer(...)`
 - `V4Vault.setLimits(...)`
 
 ### Hook / automation configuration is required for
+
 - protocol fee parameters,
 - oracle-distance limits,
 - minimum position value,
@@ -269,6 +295,7 @@ Relevant admin calls:
 - auto-lend token-to-vault routing.
 
 Relevant admin calls:
+
 - `RevertHook.setGeneralConfig(...)`
 - `RevertHook.setPositionConfig(...)`
 - `RevertHook.setProtocolFeeBps(...)`
@@ -284,22 +311,24 @@ Relevant admin calls:
 - That long-tail mode applies to selected standalone automator flows, not to the hook in the same way.
 - Vault lending and borrowing always depend on the oracle and token configuration being set correctly.
 - The hook and the automators are intentionally separate execution models. The hook is for swap-time automation; the automators are for operator-triggered workflows.
-- Delegatecall targets under [`src/hook`](src/hook) are execution helpers for the hook, not standalone products.
+- Delegatecall targets under `[src/hook](src/hook)` are execution helpers for the hook, not standalone products.
 
 ## Security model
 
 This codebase is built around a few important trust assumptions:
+
 - owners/admins are trusted to configure feeds, collateral factors, hook allowlists, and transformers correctly,
 - oracle feeds are trusted subject to staleness and pool-difference checks,
 - transformer contracts are privileged and must be audited before allowlisting,
 - swap data for router-based operations is supplied off-chain and must be validated by the caller or operator.
 
 The source contains additional contract-level security notes in:
-- [`src/vault/V4Vault.sol`](src/vault/V4Vault.sol)
-- [`src/oracle/V4Oracle.sol`](src/oracle/V4Oracle.sol)
-- [`src/vault/transformers/V4Utils.sol`](src/vault/transformers/V4Utils.sol)
-- [`src/vault/transformers/LeverageTransformer.sol`](src/vault/transformers/LeverageTransformer.sol)
+
+- `[src/vault/V4Vault.sol](src/vault/V4Vault.sol)`
+- `[src/oracle/V4Oracle.sol](src/oracle/V4Oracle.sol)`
+- `[src/vault/transformers/V4Utils.sol](src/vault/transformers/V4Utils.sol)`
+- `[src/vault/transformers/LeverageTransformer.sol](src/vault/transformers/LeverageTransformer.sol)`
 
 ## License
 
-Most protocol contracts are released under `BUSL-1.1`. See individual file headers and [`LICENSE`](LICENSE) for details.
+Most protocol contracts are released under `BUSL-1.1`. See individual file headers and `[LICENSE](LICENSE)` for details.

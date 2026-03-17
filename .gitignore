@@ -14,5 +14,11 @@ docs/
 # Dotenv file
 .env
 
+# macOS
+.DS_Store
+
+# Demo artifacts
+script/demo/logs/
+
 # Node modules
 node_modules/
