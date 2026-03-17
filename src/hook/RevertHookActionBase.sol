@@ -169,7 +169,6 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 sqrtPriceLimitX96 = TickMath.MAX_SQRT_PRICE - 1;
             }
         }
-
         SwapParams memory params = SwapParams({
             zeroForOne: zeroForOne,
             amountSpecified: -int256(amountIn),
@@ -412,10 +411,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     ) internal returns (uint256) {
         PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
         if (lendToken == currency0) {
-            if (amount1 > 0) _executeSwap(swapPool, false, amount1, tokenId);
+            if (amount1 > 0) {
+                _executeSwap(swapPool, false, amount1, tokenId);
+            }
             return currency0.balanceOfSelf();
         } else {
-            if (amount0 > 0) _executeSwap(swapPool, true, amount0, tokenId);
+            if (amount0 > 0) {
+                _executeSwap(swapPool, true, amount0, tokenId);
+            }
             return currency1.balanceOfSelf();
         }
     }

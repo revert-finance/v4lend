@@ -1327,6 +1327,69 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
     }
 
+    function testVaultAutoExit_LowerRelativeRepaysDebtBeforeExit() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth for deterministic swaps
+
+        uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        int24 spacing = hookedPoolKey.tickSpacing;
+
+        vm.startPrank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(revertHook), true);
+        revertHook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), 10000, 10000);
+        revertHook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: true,
+                autoExitTickLower: spacing,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        vm.stopPrank();
+
+        (uint256 debtBefore,, uint256 collateralBefore,,) = vault.loanInfo(tokenId);
+        assertGt(debtBefore, 0, "Test setup should start with debt");
+        assertGt(collateralBefore, debtBefore, "Test setup should start healthy");
+
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        vm.recordLogs();
+        _moveTickDownUntil(hookedPoolKey, posInfo.tickLower() - 2 * spacing, 20e6, 80);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertFalse(
+            _sawHookActionFailed(logs, tokenId, RevertHookState.Mode.AUTO_EXIT),
+            "Lower relative AUTO_EXIT should complete without HookActionFailed"
+        );
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "AUTO_EXIT should remove all liquidity");
+        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
+        assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "AUTO_EXIT should disable the position");
+
+        (uint256 debtAfter, uint256 fullValueAfter, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "AUTO_EXIT should repay the outstanding vault debt");
+        assertEq(fullValueAfter, 0, "Exited vault position should not retain value");
+        assertEq(collateralAfter, 0, "Exited vault position should not retain collateral");
+        _assertHookHasNoTokenDust();
+    }
+
     function testAutoLeverageReconfiguration_ReplacesOldTriggerNodes() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         _createPositionInHookedPool(hookedPoolKey);

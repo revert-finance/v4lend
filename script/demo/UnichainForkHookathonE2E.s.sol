@@ -75,8 +75,12 @@ contract UnichainForkHookathonE2E is Script {
 
     bytes32 internal constant AUTO_RANGE_TOPIC =
         keccak256("AutoRange(uint256,uint256,address,address,uint256,uint256)");
+    bytes32 internal constant AUTO_EXIT_TOPIC =
+        keccak256("AutoExit(uint256,address,address,uint256,uint256)");
     bytes32 internal constant AUTO_LEVERAGE_TOPIC =
         keccak256("AutoLeverage(uint256,bool,uint256,uint256)");
+    uint256 internal constant DEFAULT_DEMO_PRIVATE_KEY =
+        0xA11CE00000000000000000000000000000000000000000000000000000001234;
 
     struct DeploymentResult {
         DemoERC20 demoUsd;
@@ -107,7 +111,7 @@ contract UnichainForkHookathonE2E is Script {
         string memory rpcUrl = vm.envOr("UNICHAIN_RPC_URL", string("https://mainnet.unichain.org"));
         vm.createSelectFork(rpcUrl);
 
-        uint256 deployerPrivateKey = vm.envOr("DEMO_PRIVATE_KEY", uint256(1));
+        uint256 deployerPrivateKey = vm.envOr("DEMO_PRIVATE_KEY", DEFAULT_DEMO_PRIVATE_KEY);
         address deployer = vm.addr(deployerPrivateKey);
         vm.deal(deployer, 100 ether);
 
@@ -123,8 +127,9 @@ contract UnichainForkHookathonE2E is Script {
         _setupVaultPosition(deployment, tokenId, deployer);
 
         RevertHookState.PositionConfig memory config =
-            _configureAutoRangeAndAutoLeverage(deployment, tokenId);
-        uint256 finalTokenId = _runAutoRangePhase(deployment, tokenId, deployer, config);
+            _configureAutoRangeAutoExitAndAutoLeverage(deployment, tokenId);
+        uint256 rangedTokenId = _runAutoRangePhase(deployment, tokenId, deployer, config);
+        uint256 exitedTokenId = _runAutoExitPhase(deployment, rangedTokenId, config);
 
         vm.stopBroadcast();
 
@@ -133,7 +138,8 @@ contract UnichainForkHookathonE2E is Script {
         console.log("Vault:", address(deployment.vault));
         console.log("Ambient tokenId:", ambientTokenId);
         console.log("Initial tokenId:", tokenId);
-        console.log("Final tokenId:", finalTokenId);
+        console.log("Ranged tokenId:", rangedTokenId);
+        console.log("Exited tokenId:", exitedTokenId);
     }
 
     function _deployAll(address deployer) internal returns (DeploymentResult memory deployment) {
@@ -314,27 +320,31 @@ contract UnichainForkHookathonE2E is Script {
         _logLoanState("Loan state before automation", _loanSnapshot(deployment.vault, tokenId));
     }
 
-    function _configureAutoRangeAndAutoLeverage(DeploymentResult memory deployment, uint256 tokenId)
+    function _configureAutoRangeAutoExitAndAutoLeverage(DeploymentResult memory deployment, uint256 tokenId)
         internal
         returns (RevertHookState.PositionConfig memory config)
     {
-        _logSection("3. Activate AUTO_LEVERAGE at 50% and AUTO_RANGE together");
+        _logSection("3. Activate AUTO_LEVERAGE, AUTO_RANGE, and lower-side AUTO_EXIT together");
 
         RevertHook hook = deployment.revertHook;
         LoanSnapshot memory before = _loanSnapshot(deployment.vault, tokenId);
+        uint32 maxPriceImpactBps = uint32(vm.envOr("DEMO_MAX_PRICE_IMPACT_BPS", uint256(10000)));
 
-        hook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), 100, 100);
+        hook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), maxPriceImpactBps, maxPriceImpactBps);
 
         int24 spacing = _poolTickSpacing(tokenId);
         int24 upperLimitSpacings = int24(vm.envOr("DEMO_AUTO_RANGE_UPPER_LIMIT_SPACINGS", int256(4)));
         int24 lowerLimitSpacings = int24(vm.envOr("DEMO_AUTO_RANGE_LOWER_LIMIT_SPACINGS", int256(20)));
+        int24 exitLowerDeltaSpacings = int24(vm.envOr("DEMO_AUTO_EXIT_LOWER_DELTA_SPACINGS", int256(1)));
         uint16 leverageTargetBps = uint16(vm.envOr("DEMO_AUTO_LEVERAGE_TARGET_BPS", uint256(5000)));
+        require(exitLowerDeltaSpacings > 0, "Demo: exit lower delta must be positive");
 
         config = RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEVERAGE,
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_EXIT
+                | PositionModeFlags.MODE_AUTO_LEVERAGE,
             autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
+            autoExitIsRelative: true,
+            autoExitTickLower: exitLowerDeltaSpacings * spacing,
             autoExitTickUpper: type(int24).max,
             autoRangeLowerLimit: lowerLimitSpacings * spacing,
             autoRangeUpperLimit: upperLimitSpacings * spacing,
@@ -416,11 +426,14 @@ contract UnichainForkHookathonE2E is Script {
         Vm.Log[] memory entries = vm.getRecordedLogs();
         (bool sawAutoRange, uint256 oldTokenIdFromEvent, uint256 newTokenIdFromEvent) =
             _findAutoRange(entries, address(deployment.revertHook));
+        (bool sawAutoExit, uint256 exitTokenIdFromEvent) = _findAutoExit(entries, address(deployment.revertHook));
         (bool sawAutoLeverage,, , ,) = _findAutoLeverage(entries, address(deployment.revertHook));
 
         require(sawAutoRange, "Demo: AutoRange event not found");
+        require(!sawAutoExit, "Demo: AUTO_EXIT should not fire during range phase");
         require(!sawAutoLeverage, "Demo: unexpected second leverage execution during range phase");
         require(oldTokenIdFromEvent == tokenId, "Demo: unexpected AutoRange source token");
+        require(exitTokenIdFromEvent == 0, "Demo: unexpected AutoExit token");
 
         newTokenId = POSITION_MANAGER.nextTokenId() - 1;
         require(newTokenId == newTokenIdFromEvent, "Demo: reminted tokenId mismatch");
@@ -448,6 +461,80 @@ contract UnichainForkHookathonE2E is Script {
         console.log("  current tick:", int256(_currentTick(deployment.poolKey)));
         console.log("  loan owner preserved:", deployment.vault.ownerOf(newTokenId));
         _logLoanState("Loan after range remint", afterRange);
+    }
+
+    function _runAutoExitPhase(
+        DeploymentResult memory deployment,
+        uint256 tokenId,
+        RevertHookState.PositionConfig memory expectedConfig
+    ) internal returns (uint256 exitedTokenId) {
+        exitedTokenId = tokenId;
+        _logSection("5. Push price downward until AUTO_EXIT unwinds the reminted position");
+        _assertPositionConfigEq(deployment.revertHook, tokenId, expectedConfig);
+
+        (bool lowerIncreasing, uint32 lowerSize, int24 lowerHead) =
+            deployment.revertHook.lowerTriggerAfterSwap(deployment.poolKey.toId());
+        (, PositionInfo positionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(tokenId);
+        uint256 maxSteps = vm.envOr("DEMO_MAX_EXIT_STEPS", uint256(16));
+        uint128 amountInPerStep = uint128(vm.envOr("DEMO_EXIT_SWAP_STEP_AMOUNT", uint256(0.03 ether)));
+        int24 exitLowerTrigger = positionInfo.tickLower() - expectedConfig.autoExitTickLower;
+
+        console.log("Starting tokenId for exit phase:", tokenId);
+        console.log("Current tick:", int256(_currentTick(deployment.poolKey)));
+        console.log("Current lower range edge:", int256(positionInfo.tickLower()));
+        console.log("Exit lower trigger:", int256(exitLowerTrigger));
+        console.log("Lower list increasing:", lowerIncreasing);
+        console.log("Lower list size:", uint256(lowerSize));
+        console.log("Lower list head:", int256(lowerHead));
+        console.log("Cursor before exit phase:", int256(deployment.revertHook.tickLowerLasts(deployment.poolKey.toId())));
+        console.log("The reminted position keeps the migrated automation config.");
+        console.log("On the way back down, the lower AUTO_EXIT trigger sits above the lower leverage and range triggers.");
+        console.log("So the next crossed lower trigger should unwind the position before anything else.");
+
+        vm.recordLogs();
+
+        bool triggered;
+        for (uint256 step; step < maxSteps; ++step) {
+            int24 tickBefore = _currentTick(deployment.poolKey);
+            _logSwapStep("Exit hunt", step + 1, tickBefore, amountInPerStep, true);
+            _swapExactInputSingle(deployment.poolKey, true, amountInPerStep);
+
+            int24 tickAfter = _currentTick(deployment.poolKey);
+            console.log("  tick after:", int256(tickAfter));
+            (, lowerSize, lowerHead) = deployment.revertHook.lowerTriggerAfterSwap(deployment.poolKey.toId());
+            console.log("  cursor after:", int256(deployment.revertHook.tickLowerLasts(deployment.poolKey.toId())));
+            console.log("  lower list size after:", uint256(lowerSize));
+            console.log("  lower list head after:", int256(lowerHead));
+
+            if (POSITION_MANAGER.getPositionLiquidity(tokenId) == 0) {
+                triggered = true;
+                break;
+            }
+        }
+
+        require(triggered, "Demo: AUTO_EXIT did not execute");
+
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        (bool sawAutoRange,,) = _findAutoRange(entries, address(deployment.revertHook));
+        (bool sawAutoExit, uint256 exitedTokenIdFromEvent) = _findAutoExit(entries, address(deployment.revertHook));
+        (bool sawAutoLeverage,, , ,) = _findAutoLeverage(entries, address(deployment.revertHook));
+
+        require(sawAutoExit, "Demo: AutoExit event not found");
+        require(!sawAutoRange, "Demo: AUTO_RANGE should not fire during exit phase");
+        require(!sawAutoLeverage, "Demo: AUTO_LEVERAGE should not fire during exit phase");
+        require(exitedTokenIdFromEvent == tokenId, "Demo: unexpected AutoExit token");
+
+        LoanSnapshot memory afterExit = _loanSnapshot(deployment.vault, tokenId);
+        (uint8 modeFlags,,,,,,,,,,) = deployment.revertHook.positionConfigs(tokenId);
+
+        require(POSITION_MANAGER.getPositionLiquidity(tokenId) == 0, "Demo: exited position should have no liquidity");
+        require(modeFlags == PositionModeFlags.MODE_NONE, "Demo: AUTO_EXIT should disable the position");
+        require(afterExit.debt == 0, "Demo: AUTO_EXIT should fully repay debt");
+
+        console.log("AUTO_EXIT executed.");
+        console.log("  exited tokenId:", tokenId);
+        console.log("  current tick:", int256(_currentTick(deployment.poolKey)));
+        _logLoanState("Loan after AUTO_EXIT", afterExit);
     }
 
     function _approveAll(DeploymentResult memory deployment, address owner) internal {
@@ -608,16 +695,20 @@ contract UnichainForkHookathonE2E is Script {
         int24 rangeLower = config.autoRangeLowerLimit == type(int24).min
             ? type(int24).min
             : positionInfo.tickLower() - config.autoRangeLowerLimit;
+        int24 exitLower = config.autoExitTickLower == type(int24).min
+            ? type(int24).min
+            : positionInfo.tickLower() - config.autoExitTickLower;
 
-        console.log("Both automations are now active on the same vault-backed position.");
+        console.log("Leverage, range, and lower-side exit are now active on the same vault-backed position.");
         console.log("  leverage target bps:", uint256(config.autoLeverageTargetBps));
         console.log("  current base tick:", int256(baseTick));
         console.log("  first leverage lower trigger:", int256(leverageLower));
         console.log("  first leverage upper trigger:", int256(leverageUpper));
+        console.log("  lower exit trigger:", int256(exitLower));
         console.log("  range lower trigger:", int256(rangeLower));
         console.log("  range upper trigger:", int256(rangeUpper));
         console.log("The config step already rebalanced leverage immediately.");
-        console.log("Next we cross the upper range trigger and let AUTO_RANGE remint the position.");
+        console.log("Next we cross the upper range trigger, remint with AUTO_RANGE, then come back down for AUTO_EXIT.");
     }
 
     function _logSwapStep(
@@ -711,6 +802,27 @@ contract UnichainForkHookathonE2E is Script {
             tokenId = uint256(entry.topics[1]);
             (isUpperTrigger, debtBefore, debtAfter) = abi.decode(entry.data, (bool, uint256, uint256));
             return (sawAutoLeverageEvent, tokenId, isUpperTrigger, debtBefore, debtAfter);
+        }
+    }
+
+    function _findAutoExit(Vm.Log[] memory entries, address emitter)
+        internal
+        pure
+        returns (bool sawAutoExitEvent, uint256 tokenId)
+    {
+        uint256 length = entries.length;
+        for (uint256 i; i < length; ++i) {
+            Vm.Log memory entry = entries[i];
+            if (entry.emitter != emitter) {
+                continue;
+            }
+            if (entry.topics.length == 0 || entry.topics[0] != AUTO_EXIT_TOPIC) {
+                continue;
+            }
+
+            sawAutoExitEvent = true;
+            tokenId = uint256(entry.topics[1]);
+            return (sawAutoExitEvent, tokenId);
         }
     }
 

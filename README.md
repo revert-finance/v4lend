@@ -201,9 +201,10 @@ The fork-only end-to-end demo in `[UnichainForkHookathonE2E.s.sol](script/demo/U
 - initializes a hooked demo pool,
 - mints one wide ambient liquidity position so the pool stays swappable,
 - mints one narrow hooked position and moves it into the vault with zero debt,
-- configures `MODE_AUTO_RANGE | MODE_AUTO_LEVERAGE`,
+- configures `MODE_AUTO_RANGE | MODE_AUTO_LEVERAGE | MODE_AUTO_EXIT`,
 - verifies that configuration itself immediately triggers `AUTO_LEVERAGE` from zero debt,
-- pushes price upward until `AUTO_RANGE` remints the position into a new range.
+- pushes price upward until `AUTO_RANGE` remints the position into a new range,
+- then swaps price back down until the reminted position is fully unwound by `AUTO_EXIT`.
 
 Run it with:
 
@@ -220,10 +221,14 @@ DEMO_POSITION_LIQUIDITY=<optional-liquidity>
 AMBIENT_POSITION_LIQUIDITY=<optional-liquidity>
 DEMO_AUTO_RANGE_UPPER_LIMIT_SPACINGS=<optional-int24-spacing-multiplier>
 DEMO_AUTO_RANGE_LOWER_LIMIT_SPACINGS=<optional-int24-spacing-multiplier>
+DEMO_AUTO_EXIT_LOWER_DELTA_SPACINGS=<optional-int24-spacing-multiplier>
 DEMO_AUTO_LEVERAGE_TARGET_BPS=<optional-bps>
+DEMO_MAX_PRICE_IMPACT_BPS=<optional-bps>
 DEMO_DEADLINE_BUFFER=<optional-seconds>
 DEMO_MAX_RANGE_STEPS=<optional-step-count>
 DEMO_RANGE_SWAP_STEP_AMOUNT=<optional-amount>
+DEMO_MAX_EXIT_STEPS=<optional-step-count>
+DEMO_EXIT_SWAP_STEP_AMOUNT=<optional-amount>
 HOOKATHON_SKIP_SIMULATION=<1 by default>
 ```
 
@@ -231,7 +236,7 @@ Notes:
 
 - this script is a local fork demo, not a broadcast deployment flow,
 - it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
-- a successful run logs the immediate config-time leverage rebalance from zero debt, then the old token id and reminted token id from `AUTO_RANGE`,
+- a successful run logs the immediate config-time leverage rebalance from zero debt, then the `AUTO_RANGE` remint, and finally the lower-side `AUTO_EXIT` unwind,
 - the recommended commands use `--skip-simulation` because the script run itself succeeds on the fork, but Foundry's final replay simulation is flaky for this CREATE2-heavy flow on Unichain.
 
 ## Deployment scripts

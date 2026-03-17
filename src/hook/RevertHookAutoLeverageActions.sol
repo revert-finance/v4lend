@@ -177,7 +177,15 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         Currency currency1 = poolKey.currency1;
 
         uint256 lendAmount =
-            _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, currency0.balanceOfSelf(), currency1.balanceOfSelf());
+            _swapToLendToken(
+                tokenId,
+                poolKey,
+                lendToken,
+                currency0,
+                currency1,
+                currency0.balanceOfSelf(),
+                currency1.balanceOfSelf()
+            );
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
         _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);

@@ -96,16 +96,15 @@ contract RevertHookPositionActions is RevertHookActionBase {
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
 
-        if (targetIsLendToken) {
-            // Target IS lend token: swap all to lend token first, then repay
-            uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
-            _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
-        } else {
-            // Target is NOT lend token: repay first with lend tokens, then swap remaining to target
-            uint256 lendAmount = lendIsToken0 ? amount0 : amount1;
-            _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
+        uint256 lendAmount = lendToken.balanceOfSelf();
+        if (lendAmount < currentDebt) {
+            lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
+        }
+        _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
 
-            // Swap remaining lend tokens (if any) to target token
+        if (!targetIsLendToken) {
+            // Repay against the lend asset first, then rotate any residual value back
+            // into the trigger-side token the strategy wants to leave the user with.
             uint256 remainingLend = lendToken.balanceOfSelf();
             if (remainingLend > 0) {
                 PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
