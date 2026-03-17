@@ -866,8 +866,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(leverageLowerPhase1, rangeLowerPhase1, "Expected leverage trigger to be above range trigger (phase 1)");
         assertGt(rangeLowerPhase1, exitLowerPhase1, "Expected range trigger to be above exit trigger (phase 1)");
 
-        vm.prank(WHALE_ACCOUNT);
-        revertHook.setPositionConfig(
+        _setPositionConfigAtTarget(
             tokenId,
             RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
@@ -883,6 +882,7 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoLeverageTargetBps: 5000
             })
         );
+        _alignLoanToTargetBps(tokenId, 3500);
 
         // C: auto-compound executes while trigger modes are active.
         uint128 liquidityBeforeCompound = positionManager.getPositionLiquidity(tokenId);
@@ -936,8 +936,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoLeverageTargetBps: 5000
         });
 
-        vm.prank(WHALE_ACCOUNT);
-        revertHook.setPositionConfig(tokenId, phase2Config);
+        _setPositionConfigAtTarget(tokenId, phase2Config);
 
         uint256 nextTokenIdBeforeRange = positionManager.nextTokenId();
         (uint256 debtBeforeRange,,,,) = vault.loanInfo(tokenId);
@@ -974,8 +973,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(exitLowerPhase3, leverageLowerPhase3, "Expected exit trigger to be above leverage trigger (phase 3)");
         assertGt(leverageLowerPhase3, rangeLowerPhase3, "Expected leverage trigger to be above range trigger (phase 3)");
 
-        vm.prank(WHALE_ACCOUNT);
-        revertHook.setPositionConfig(
+        _setPositionConfigAtTarget(
             rangedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
@@ -1142,6 +1140,11 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256 leverageTokenId = _createPositionInHookedPool(hookedPoolKey);
         (uint256 debtBefore,) = _setupCollateralizedPositionForAutoLeverage(leverageTokenId);
         _configurePositionForAutoLeverage(leverageTokenId, 1500);
+        (uint256 debtAfterConfig,,,,) = vault.loanInfo(leverageTokenId);
+        if (debtAfterConfig < debtBefore) {
+            vm.prank(WHALE_ACCOUNT);
+            vault.borrow(leverageTokenId, debtBefore - debtAfterConfig);
+        }
 
         (,,,,,,, int24 leverageBaseTick) = revertHook.positionStates(leverageTokenId);
 
@@ -1235,8 +1238,13 @@ contract V4VaultHookTest is V4ForkTestBase {
         _moveTickDownUntil(hookedPoolKey, stagedBaseTick, 25e6, 80);
 
         uint256 leverageTokenId = _createPositionInHookedPool(hookedPoolKey);
-        _setupCollateralizedPositionForAutoLeverage(leverageTokenId);
+        (uint256 leverageDebtBeforeConfig,) = _setupCollateralizedPositionForAutoLeverage(leverageTokenId);
         _configurePositionForAutoLeverage(leverageTokenId, 1500);
+        (uint256 leverageDebtAfterConfig,,,,) = vault.loanInfo(leverageTokenId);
+        if (leverageDebtAfterConfig < leverageDebtBeforeConfig) {
+            vm.prank(WHALE_ACCOUNT);
+            vault.borrow(leverageTokenId, leverageDebtBeforeConfig - leverageDebtAfterConfig);
+        }
 
         (,,,,,,, int24 leverageBaseTick) = revertHook.positionStates(leverageTokenId);
         int24 sharedLowerTrigger =
@@ -1390,8 +1398,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoLendToleranceTick: 0,
             autoLeverageTargetBps: 6500
         });
-        vm.prank(WHALE_ACCOUNT);
-        revertHook.setPositionConfig(activeTokenId, warmupConfig);
+        _setPositionConfigAtTarget(activeTokenId, warmupConfig);
 
         uint128 liquidityBeforeCompound = positionManager.getPositionLiquidity(activeTokenId);
         uint256[] memory tokenIds = new uint256[](1);
@@ -1417,8 +1424,6 @@ contract V4VaultHookTest is V4ForkTestBase {
 
             uint256 oldTokenId = activeTokenId;
             uint256 nextTokenIdBeforeRange = positionManager.nextTokenId();
-            (uint256 debtBeforeRange,,,,) = vault.loanInfo(oldTokenId);
-            (,,,,,,, int24 baseTickBeforeRange) = revertHook.positionStates(oldTokenId);
 
             RevertHookState.PositionConfig memory rangeFirstConfig = RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
@@ -1433,8 +1438,9 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoLendToleranceTick: 0,
                 autoLeverageTargetBps: 6500
             });
-            vm.prank(WHALE_ACCOUNT);
-            revertHook.setPositionConfig(activeTokenId, rangeFirstConfig);
+            _setPositionConfigAtTarget(activeTokenId, rangeFirstConfig);
+            (uint256 debtBeforeRange,,,,) = vault.loanInfo(oldTokenId);
+            (,,,,,,, int24 baseTickBeforeRange) = revertHook.positionStates(oldTokenId);
 
             _moveTickDownUntil(hookedPoolKey, rangeLower, 40e6, 40);
 
@@ -1478,10 +1484,9 @@ contract V4VaultHookTest is V4ForkTestBase {
             assertGt(leverageLowerFirst, rangeLowerFar, "Leverage should trigger before range in leverage-first phase");
             assertGt(rangeLowerFar, exitLowerVeryFar, "Range should trigger before exit in leverage-first phase");
 
-            uint256 nextTokenIdBeforeLeverage = positionManager.nextTokenId();
-            (uint256 debtBeforeLeverage,, uint256 collateralBeforeLeverage,,) = vault.loanInfo(activeTokenId);
-            (,,,,,,, int24 baseTickBeforeLeverage) = revertHook.positionStates(activeTokenId);
-            uint256 currentRatioBps = collateralBeforeLeverage > 0 ? debtBeforeLeverage * 10000 / collateralBeforeLeverage : 0;
+            (uint256 debtForTargetSelection,, uint256 collateralForTargetSelection,,) = vault.loanInfo(activeTokenId);
+            uint256 currentRatioBps =
+                collateralForTargetSelection > 0 ? debtForTargetSelection * 10000 / collateralForTargetSelection : 0;
             uint16 leverageTargetBps = currentRatioBps > 6000 ? 3000 : 8000;
 
             RevertHookState.PositionConfig memory leverageFirstConfig = RevertHookState.PositionConfig({
@@ -1497,8 +1502,13 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoLendToleranceTick: 0,
                 autoLeverageTargetBps: leverageTargetBps
             });
-            vm.prank(WHALE_ACCOUNT);
-            revertHook.setPositionConfig(activeTokenId, leverageFirstConfig);
+            _setPositionConfigAtTarget(activeTokenId, leverageFirstConfig);
+            _alignLoanToTargetBps(
+                activeTokenId, leverageTargetBps > 5000 ? leverageTargetBps - 1000 : leverageTargetBps + 1000
+            );
+            uint256 nextTokenIdBeforeLeverage = positionManager.nextTokenId();
+            (uint256 debtBeforeLeverage,, uint256 collateralBeforeLeverage,,) = vault.loanInfo(activeTokenId);
+            (,,,,,,, int24 baseTickBeforeLeverage) = revertHook.positionStates(activeTokenId);
 
             _moveTickDownUntil(hookedPoolKey, leverageLowerFirst, 40e6, 40);
 
@@ -1536,8 +1546,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoLendToleranceTick: 0,
             autoLeverageTargetBps: 6500
         });
-        vm.prank(WHALE_ACCOUNT);
-        revertHook.setPositionConfig(activeTokenId, exitFirstConfig);
+        _setPositionConfigAtTarget(activeTokenId, exitFirstConfig);
 
         _moveTickDownUntil(hookedPoolKey, exitLowerFirst, 20e6, 40);
 
@@ -1720,6 +1729,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Configure position for AUTO_LEVERAGE with 50% target (5000 bps)
         uint16 targetBps = 5000; // 50% debt/collateral ratio
         _configurePositionForAutoLeverage(hookedTokenId, targetBps);
+        _alignLoanToTargetBps(hookedTokenId, 3500);
 
         // Get initial base tick
         (,,,,,,, int24 initialBaseTick) = revertHook.positionStates(hookedTokenId);
@@ -1789,6 +1799,71 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("\nAutoLeverage configuration test completed successfully");
     }
 
+    function test_AutoLeverageExecutesImmediatelyWhenConfiguredOffTarget() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        uint16 targetBps = 5000;
+
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(hookedTokenId, 3500_000000);
+
+        (uint256 debtBefore,, uint256 collateralBefore,,) = vault.loanInfo(hookedTokenId);
+        uint256 ratioBefore = debtBefore * 10_000 / collateralBefore;
+        uint256 distanceBefore = ratioBefore - targetBps;
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        assertGt(ratioBefore, targetBps, "Test setup should start above the configured leverage target");
+
+        vm.recordLogs();
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(
+            hookedTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: targetBps
+            })
+        );
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(hookedTokenId);
+        uint256 ratioAfter = debtAfter * 10_000 / collateralAfter;
+        uint256 distanceAfter = ratioAfter > targetBps ? ratioAfter - targetBps : targetBps - ratioAfter;
+        (,,,,,,, int24 baseTickAfter) = revertHook.positionStates(hookedTokenId);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+
+        assertTrue(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "Configuring an off-target AUTO_LEVERAGE position should execute immediately"
+        );
+        assertFalse(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "Immediate AUTO_LEVERAGE config should not emit HookActionFailed"
+        );
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Immediate leverage should not remint the position");
+        assertEq(IERC721(address(positionManager)).ownerOf(hookedTokenId), address(vault), "Vault should retain NFT custody");
+        assertLt(debtAfter, debtBefore, "Immediate leverage should reduce debt toward the target ratio");
+        assertLt(distanceAfter, distanceBefore, "Immediate leverage should move the loan closer to target");
+        assertEq(
+            baseTickAfter,
+            _getTickLower(currentTick, hookedPoolKey.tickSpacing),
+            "Immediate leverage should refresh the leverage base tick to the new market tick"
+        );
+        _assertHookHasNoTokenDust();
+    }
+
     function _setupCollateralizedPositionForAutoLeverage(uint256 hookedTokenId)
         internal
         returns (uint256 initialDebt, uint256 collateralValue)
@@ -1836,8 +1911,7 @@ contract V4VaultHookTest is V4ForkTestBase {
     function _configurePositionForAutoLeverage(uint256 hookedTokenId, uint16 targetBps) internal {
         console.log("Configuring AUTO_LEVERAGE with target:", targetBps, "bps");
 
-        vm.prank(WHALE_ACCOUNT);
-        revertHook.setPositionConfig(
+        _setPositionConfigAtTarget(
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
@@ -1858,6 +1932,30 @@ contract V4VaultHookTest is V4ForkTestBase {
         (uint8 modeFlags,,,,,,,,,, uint16 autoLeverageTargetBps) = revertHook.positionConfigs(hookedTokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEVERAGE, "Mode should be AUTO_LEVERAGE");
         assertEq(autoLeverageTargetBps, targetBps, "Target bps should match");
+    }
+
+    function _setPositionConfigAtTarget(uint256 tokenId, RevertHookState.PositionConfig memory config) internal {
+        if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
+            _alignLoanToTargetBps(tokenId, config.autoLeverageTargetBps);
+        }
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(tokenId, config);
+    }
+
+    function _alignLoanToTargetBps(uint256 tokenId, uint16 targetBps) internal {
+        (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 targetDebt = (collateralValue * targetBps + 9999) / 10000;
+
+        if (currentDebt < targetDebt) {
+            vm.prank(WHALE_ACCOUNT);
+            vault.borrow(tokenId, targetDebt - currentDebt);
+        } else if (currentDebt > targetDebt) {
+            vm.startPrank(WHALE_ACCOUNT);
+            usdc.approve(address(vault), type(uint256).max);
+            vault.repay(tokenId, currentDebt - targetDebt, false);
+            vm.stopPrank();
+        }
     }
 
     function _movePriceUp(PoolKey memory hookedPoolKey) internal {
@@ -2132,6 +2230,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Configure AUTO_LEVERAGE
         uint16 targetBps = 5000;
         _configurePositionForAutoLeverage(hookedTokenId, targetBps);
+        _alignLoanToTargetBps(hookedTokenId, 3500);
 
         // Get initial base tick
         (,,,,,,, int24 initialBaseTick) = revertHook.positionStates(hookedTokenId);
@@ -2167,13 +2266,15 @@ contract V4VaultHookTest is V4ForkTestBase {
         _createPositionInHookedPool(hookedPoolKey);
         uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
 
-        (uint256 initialDebt,) = _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
         uint128 liquidityBefore = positionManager.getPositionLiquidity(hookedTokenId);
 
         vm.prank(WHALE_ACCOUNT);
         revertHook.setGeneralConfig(hookedTokenId, 123, hookedPoolKey.tickSpacing, IHooks(address(0)), 0, 0);
 
         _configurePositionForAutoLeverage(hookedTokenId, 5000);
+        _alignLoanToTargetBps(hookedTokenId, 3500);
+        (uint256 debtBeforeFailure,,,,) = vault.loanInfo(hookedTokenId);
         (,,,,,,, int24 baseTickBefore) = revertHook.positionStates(hookedTokenId);
 
         vm.recordLogs();
@@ -2183,7 +2284,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint128 liquidityAfter = positionManager.getPositionLiquidity(hookedTokenId);
         (,,,,,,, int24 baseTickAfter) = revertHook.positionStates(hookedTokenId);
 
-        assertLe(debtAfter, initialDebt, "Failed leverage-up must not increase debt");
+        assertEq(debtAfter, debtBeforeFailure, "Failed leverage-up must preserve debt");
         assertEq(liquidityAfter, liquidityBefore, "Failed leverage-up must restore original liquidity");
         assertGt(collateralAfter, debtAfter, "Restored position should remain healthy");
         assertEq(baseTickAfter, baseTickBefore, "Failed leverage-up must keep the previous base tick");

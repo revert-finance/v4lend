@@ -5,6 +5,8 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
+import {IVault} from "../vault/interfaces/IVault.sol";
+import {AutoLeverageLib} from "../shared/planning/AutoLeverageLib.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookViews} from "./RevertHookViews.sol";
@@ -26,6 +28,8 @@ abstract contract RevertHookImmediate is RevertHookViews {
         int24 autoExitTickUpper
     ) internal virtual;
 
+    function _handleAutoLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal virtual;
+
     function _checkAndExecuteImmediate(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config) internal {
         if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
             return;
@@ -38,7 +42,10 @@ abstract contract RevertHookImmediate is RevertHookViews {
 
         if (shouldExecute) {
             _executeImmediateAction(tokenId, isUpperTrigger, triggeredTick);
+            return;
         }
+
+        _checkAndExecuteImmediateAutoLeverage(tokenId, config.modeFlags, config.autoLeverageTargetBps);
     }
 
     function _checkTriggerConditions(
@@ -107,6 +114,10 @@ abstract contract RevertHookImmediate is RevertHookViews {
         poolManager.unlock(abi.encode(tokenId, isUpperTrigger, tick));
     }
 
+    function _executeImmediateAutoLeverage(uint256 tokenId, bool isUpperTrigger) internal {
+        poolManager.unlock(abi.encode(tokenId, isUpperTrigger, uint256(0), uint256(0)));
+    }
+
     function _executeImmediateActionUnlocked(uint256 tokenId, bool isUpperTrigger, int24 tick) internal {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
         PositionConfig storage config = _positionConfigs[tokenId];
@@ -124,8 +135,36 @@ abstract contract RevertHookImmediate is RevertHookViews {
         );
     }
 
+    function _executeImmediateAutoLeverageUnlocked(uint256 tokenId, bool isUpperTrigger) internal {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        _handleAutoLeverage(poolKey, tokenId, isUpperTrigger);
+    }
+
     function _consumeImmediateTrigger(uint256 tokenId, PoolId poolId, bool isUpperTrigger, int24 tick) internal {
         TickLinkedList.List storage list = isUpperTrigger ? _upperTriggerAfterSwap[poolId] : _lowerTriggerAfterSwap[poolId];
         list.remove(tick, tokenId);
+    }
+
+    function _checkAndExecuteImmediateAutoLeverage(
+        uint256 tokenId,
+        uint8 modeFlags,
+        uint16 targetRatioBps
+    ) internal {
+        if (!PositionModeFlags.hasAutoLeverage(modeFlags)) {
+            return;
+        }
+
+        address owner = _getOwner(tokenId, false);
+        if (!_vaults[owner]) {
+            return;
+        }
+
+        (uint256 currentDebt,, uint256 collateralValue,,) = IVault(owner).loanInfo(tokenId);
+        uint256 currentRatio = AutoLeverageLib.currentRatio(currentDebt, collateralValue);
+        if (currentRatio == targetRatioBps) {
+            return;
+        }
+
+        _executeImmediateAutoLeverage(tokenId, currentRatio < targetRatioBps);
     }
 }

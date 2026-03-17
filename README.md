@@ -176,19 +176,17 @@ forge build --sizes
 
 ## Hookathon demo
 
-The repo includes a fork-only end-to-end demo for the hook flow on Unichain:
+The repo includes a small demo bundle under [`script/demo`](script/demo):
 
-- [`script/demo/UnichainForkHookathonE2E.s.sol`](/Users/kalinbas/Code/v4lend/script/demo/UnichainForkHookathonE2E.s.sol)
-
-What it does:
+The fork-only end-to-end demo in [`UnichainForkHookathonE2E.s.sol`](script/demo/UnichainForkHookathonE2E.s.sol) does the following:
 - deploys the full local demo stack on top of a Unichain fork,
 - deploys and wires the oracle, hook, vault, and transformer contracts,
 - initializes a hooked demo pool,
 - mints one wide ambient liquidity position so the pool stays swappable,
-- mints one narrow hooked position,
-- configures `MODE_AUTO_RANGE` on that position,
-- performs a swap on the hooked pool,
-- verifies that the hook executed by checking that the position was reminted into a new range.
+- mints one narrow hooked position and moves it into the vault with zero debt,
+- configures `MODE_AUTO_RANGE | MODE_AUTO_LEVERAGE`,
+- verifies that configuration itself immediately triggers `AUTO_LEVERAGE` from zero debt,
+- pushes price upward until `AUTO_RANGE` remints the position into a new range.
 
 Run it with:
 
@@ -203,17 +201,18 @@ UNICHAIN_RPC_URL=https://mainnet.unichain.org
 DEMO_PRIVATE_KEY=<optional-private-key>
 DEMO_POSITION_LIQUIDITY=<optional-liquidity>
 AMBIENT_POSITION_LIQUIDITY=<optional-liquidity>
-MAX_SWAP_STEPS=<optional-step-count>
-SWAP_STEP_AMOUNT_FAR=<optional-amount>
-SWAP_STEP_AMOUNT_MID=<optional-amount>
-SWAP_STEP_AMOUNT_CLOSE=<optional-amount>
-SWAP_STEP_AMOUNT_FINAL=<optional-amount>
+DEMO_AUTO_RANGE_UPPER_LIMIT_SPACINGS=<optional-int24-spacing-multiplier>
+DEMO_AUTO_RANGE_LOWER_LIMIT_SPACINGS=<optional-int24-spacing-multiplier>
+DEMO_AUTO_LEVERAGE_TARGET_BPS=<optional-bps>
+DEMO_DEADLINE_BUFFER=<optional-seconds>
+DEMO_MAX_RANGE_STEPS=<optional-step-count>
+DEMO_RANGE_SWAP_STEP_AMOUNT=<optional-amount>
 ```
 
 Notes:
 - this script is a local fork demo, not a broadcast deployment flow,
 - it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
-- a successful run logs the old token id, the new token id, the old range, the reminted range, and the final current tick.
+- a successful run logs the immediate config-time leverage rebalance from zero debt, then the old token id and reminted token id from `AUTO_RANGE`.
 
 ## Deployment scripts
 

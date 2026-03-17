@@ -2,7 +2,6 @@
 pragma solidity ^0.8.30;
 
 import {Script, console} from "forge-std/Script.sol";
-import {StdCheats} from "forge-std/StdCheats.sol";
 import {Vm} from "forge-std/Vm.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -40,7 +39,7 @@ import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {DemoERC20} from "./support/DemoERC20.sol";
 import {MockAggregatorV3} from "./support/MockAggregatorV3.sol";
 
-contract UnichainForkHookathonE2E is Script, StdCheats {
+contract UnichainForkHookathonE2E is Script {
     using PoolIdLibrary for PoolKey;
 
     uint256 internal constant Q32 = 2 ** 32;
@@ -51,6 +50,7 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
     IUniversalRouter internal constant UNIVERSAL_ROUTER =
         IUniversalRouter(0xEf740bf23aCaE26f6492B10de645D6B98dC8Eaf3);
     IPermit2 internal constant PERMIT2 = IPermit2(0x000000000022D473030F116dDEE9F6B43aC78BA3);
+    address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
     IWETH9 internal constant WETH = IWETH9(0x4200000000000000000000000000000000000006);
     uint16 internal constant PROTOCOL_FEE_BPS = 100;
     int24 internal constant MAX_TICKS_FROM_ORACLE = 100;
@@ -71,9 +71,12 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
     uint256 internal constant GLOBAL_DEBT_LIMIT = 1_000_000 ether;
     uint256 internal constant DAILY_LEND_INCREASE_LIMIT_MIN = 100_000 ether;
     uint256 internal constant DAILY_DEBT_INCREASE_LIMIT_MIN = 100_000 ether;
+    uint256 internal constant MAX_LOOP = 500_000;
 
     bytes32 internal constant AUTO_RANGE_TOPIC =
         keccak256("AutoRange(uint256,uint256,address,address,uint256,uint256)");
+    bytes32 internal constant AUTO_LEVERAGE_TOPIC =
+        keccak256("AutoLeverage(uint256,bool,uint256,uint256)");
 
     struct DeploymentResult {
         DemoERC20 demoUsd;
@@ -94,6 +97,12 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         PoolKey poolKey;
     }
 
+    struct LoanSnapshot {
+        uint256 debt;
+        uint256 fullValue;
+        uint256 collateralValue;
+    }
+
     function run() external {
         string memory rpcUrl = vm.envOr("UNICHAIN_RPC_URL", string("https://mainnet.unichain.org"));
         vm.createSelectFork(rpcUrl);
@@ -102,25 +111,29 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         address deployer = vm.addr(deployerPrivateKey);
         vm.deal(deployer, 100 ether);
 
-        console.log("== Unichain fork hookathon e2e demo ==");
+        _logBanner("Unichain Fork Hookathon Demo");
         console.log("Fork RPC:", rpcUrl);
-        console.log("Deployer:", deployer);
+        console.log("Demo operator:", deployer);
 
-        vm.startPrank(deployer);
+        vm.startBroadcast(deployerPrivateKey);
 
         DeploymentResult memory deployment = _deployAll(deployer);
         uint256 ambientTokenId = _mintAmbientPosition(deployment, deployer);
         uint256 tokenId = _mintHookedPosition(deployment, deployer);
-        _configureAutoRange(deployment.revertHook, tokenId);
-        _swapAndVerify(deployment, tokenId, deployer);
+        _setupVaultPosition(deployment, tokenId, deployer);
 
-        vm.stopPrank();
+        RevertHookState.PositionConfig memory config =
+            _configureAutoRangeAndAutoLeverage(deployment, tokenId);
+        uint256 finalTokenId = _runAutoRangePhase(deployment, tokenId, deployer, config);
 
-        console.log("Demo completed successfully.");
+        vm.stopBroadcast();
+
+        _logBanner("Demo Completed Successfully");
         console.log("Hook:", address(deployment.revertHook));
         console.log("Vault:", address(deployment.vault));
         console.log("Ambient tokenId:", ambientTokenId);
         console.log("Initial tokenId:", tokenId);
+        console.log("Final tokenId:", finalTokenId);
     }
 
     function _deployAll(address deployer) internal returns (DeploymentResult memory deployment) {
@@ -159,9 +172,19 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
             deployment.autoLeverageActions,
             deployment.autoLendActions
         );
-        address hookAddress = address(uint160(getHookFlags()) ^ (uint160(0x484f) << 144));
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookAddress);
-        deployment.revertHook = RevertHook(payable(hookAddress));
+        bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
+        (address expectedHookAddress, bytes32 salt) = findHookSalt(CREATE2_DEPLOYER, creationCodeWithArgs);
+        deployment.revertHook = new RevertHook{salt: salt}(
+            deployer,
+            deployer,
+            PERMIT2,
+            deployment.oracle,
+            ILiquidityCalculator(deployment.liquidityCalculator),
+            deployment.positionActions,
+            deployment.autoLeverageActions,
+            deployment.autoLendActions
+        );
+        require(address(deployment.revertHook) == expectedHookAddress, "Demo: hook address mismatch");
         deployment.revertHook.setProtocolFeeBps(PROTOCOL_FEE_BPS);
         deployment.revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         deployment.revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
@@ -205,10 +228,12 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         _initializePool(deployment.poolKey);
         _approveAll(deployment, deployer);
 
-        console.log("Deployed hook:", address(deployment.revertHook));
-        console.log("Deployed vault:", address(deployment.vault));
+        _logSection("1. Deploy demo stack and initialize the hooked pool");
+        console.log("Hook:", address(deployment.revertHook));
+        console.log("Vault:", address(deployment.vault));
         console.log("Pool token0:", Currency.unwrap(deployment.poolKey.currency0));
         console.log("Pool token1:", Currency.unwrap(deployment.poolKey.currency1));
+        console.log("Starting tick:", int256(_currentTick(deployment.poolKey)));
     }
 
     function _mintHookedPosition(DeploymentResult memory deployment, address owner) internal returns (uint256 tokenId) {
@@ -250,56 +275,135 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         paramsArray[1] = abi.encode(deployment.poolKey.currency0, deployment.poolKey.currency1, owner);
 
         uint256 nextTokenIdBefore = POSITION_MANAGER.nextTokenId();
-        POSITION_MANAGER.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
+        POSITION_MANAGER.modifyLiquidities(abi.encode(actions, paramsArray), _deadline());
         tokenId = POSITION_MANAGER.nextTokenId() - 1;
         require(tokenId >= nextTokenIdBefore, "Demo: position mint failed");
 
-        console.log("Minted", label, "tokenId:", tokenId);
-        console.log("Minted tickLower:", int256(tickLower));
-        console.log("Minted tickUpper:", int256(tickUpper));
+        console.log("Minted position type:", label);
+        console.log("  tokenId:", tokenId);
+        console.log("  range lower:", int256(tickLower));
+        console.log("  range upper:", int256(tickUpper));
     }
 
-    function _configureAutoRange(RevertHook hook, uint256 tokenId) internal {
-        hook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), 100, 100);
-        hook.setPositionConfig(
-            tokenId,
-            RevertHookState.PositionConfig({
-                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-                autoExitIsRelative: false,
-                autoExitTickLower: type(int24).min,
-                autoExitTickUpper: type(int24).max,
-                autoRangeLowerLimit: 0,
-                autoRangeUpperLimit: 0,
-                autoRangeLowerDelta: -60,
-                autoRangeUpperDelta: 60,
-                autoLendToleranceTick: 0,
-                autoLeverageTargetBps: 0
-            })
+    function _setupVaultPosition(DeploymentResult memory deployment, uint256 tokenId, address owner) internal {
+        _logSection("2. Move the position into the vault with zero debt");
+
+        uint256 vaultDeposit = vm.envOr("DEMO_VAULT_DEPOSIT", uint256(100_000 ether));
+
+        deployment.oracle.setMaxPoolPriceDifference(10_000);
+        deployment.revertHook.setMaxTicksFromOracle(10_000);
+        deployment.vault.setLimits(
+            0,
+            GLOBAL_LEND_LIMIT,
+            GLOBAL_DEBT_LIMIT,
+            GLOBAL_LEND_LIMIT,
+            GLOBAL_DEBT_LIMIT
         );
-        console.log("Configured AutoRange for tokenId:", tokenId);
+        deployment.demoUsd.approve(address(deployment.vault), type(uint256).max);
+
+        deployment.vault.deposit(vaultDeposit, owner);
+        console.log("Vault funded with demo USD:", vaultDeposit);
+
+        IERC721(address(POSITION_MANAGER)).approve(address(deployment.vault), tokenId);
+        deployment.vault.create(tokenId, owner);
+        deployment.vault.approveTransform(tokenId, address(deployment.revertHook), true);
+
+        console.log("Position moved into vault custody.");
+        console.log("  NFT owner:", IERC721(address(POSITION_MANAGER)).ownerOf(tokenId));
+        console.log("  Loan owner:", deployment.vault.ownerOf(tokenId));
+        _logLoanState("Loan state before automation", _loanSnapshot(deployment.vault, tokenId));
     }
 
-    function _swapAndVerify(DeploymentResult memory deployment, uint256 tokenId, address owner) internal {
+    function _configureAutoRangeAndAutoLeverage(DeploymentResult memory deployment, uint256 tokenId)
+        internal
+        returns (RevertHookState.PositionConfig memory config)
+    {
+        _logSection("3. Activate AUTO_LEVERAGE at 50% and AUTO_RANGE together");
+
+        RevertHook hook = deployment.revertHook;
+        LoanSnapshot memory before = _loanSnapshot(deployment.vault, tokenId);
+
+        hook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), 100, 100);
+
+        int24 spacing = _poolTickSpacing(tokenId);
+        int24 upperLimitSpacings = int24(vm.envOr("DEMO_AUTO_RANGE_UPPER_LIMIT_SPACINGS", int256(4)));
+        int24 lowerLimitSpacings = int24(vm.envOr("DEMO_AUTO_RANGE_LOWER_LIMIT_SPACINGS", int256(20)));
+        uint16 leverageTargetBps = uint16(vm.envOr("DEMO_AUTO_LEVERAGE_TARGET_BPS", uint256(5000)));
+
+        config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: lowerLimitSpacings * spacing,
+            autoRangeUpperLimit: upperLimitSpacings * spacing,
+            autoRangeLowerDelta: -spacing,
+            autoRangeUpperDelta: spacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: leverageTargetBps
+        });
+
+        vm.recordLogs();
+        hook.setPositionConfig(tokenId, config);
+
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        (bool sawAutoLeverage, uint256 eventTokenId, bool isUpperTrigger, uint256 debtBeforeEvent, uint256 debtAfterEvent) =
+            _findAutoLeverage(entries, address(deployment.revertHook));
+        (bool sawAutoRange,,) = _findAutoRange(entries, address(deployment.revertHook));
+
+        require(sawAutoLeverage, "Demo: AutoLeverage event not found");
+        require(!sawAutoRange, "Demo: AUTO_RANGE should not fire during config");
+        require(eventTokenId == tokenId, "Demo: unexpected AutoLeverage tokenId");
+        require(isUpperTrigger, "Demo: expected immediate leverage-up during config");
+
+        LoanSnapshot memory afterLeverage = _loanSnapshot(deployment.vault, tokenId);
+        int24 baseTickAfter = _autoLeverageBaseTick(deployment.revertHook, tokenId);
+        require(afterLeverage.debt > before.debt, "Demo: immediate leverage should increase debt");
+
+        console.log("Configuration immediately triggered AUTO_LEVERAGE.");
+        console.log("  event debt before:", debtBeforeEvent);
+        console.log("  event debt after:", debtAfterEvent);
+        console.log("  refreshed base tick:", int256(baseTickAfter));
+        _logLoanState("Loan after immediate leverage", afterLeverage);
+        _logTriggerPlan(hook, tokenId, config);
+    }
+
+    function _runAutoRangePhase(
+        DeploymentResult memory deployment,
+        uint256 tokenId,
+        address owner,
+        RevertHookState.PositionConfig memory expectedConfig
+    ) internal returns (uint256 newTokenId) {
+        _logSection("4. Push price upward until AUTO_RANGE remints the position");
+
         (, PositionInfo oldPositionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(tokenId);
+        LoanSnapshot memory before = _loanSnapshot(deployment.vault, tokenId);
         uint256 nextTokenIdBefore = POSITION_MANAGER.nextTokenId();
-        uint256 maxSwapSteps = vm.envOr("MAX_SWAP_STEPS", uint256(16));
+        uint256 maxSteps = vm.envOr("DEMO_MAX_RANGE_STEPS", uint256(16));
+        uint128 amountInPerStep = uint128(vm.envOr("DEMO_RANGE_SWAP_STEP_AMOUNT", uint256(0.05 ether)));
+        int24 spacing = deployment.poolKey.tickSpacing;
+        int24 baseTick = _autoLeverageBaseTick(deployment.revertHook, tokenId);
+        int24 nextLeverageUpperTrigger = baseTick + 10 * spacing;
+        int24 rangeUpperTrigger = oldPositionInfo.tickUpper() + expectedConfig.autoRangeUpperLimit;
+
+        console.log("Starting tokenId for range phase:", tokenId);
+        console.log("Current tick:", int256(_currentTick(deployment.poolKey)));
+        console.log("Current upper range edge:", int256(oldPositionInfo.tickUpper()));
+        console.log("Next leverage upper trigger:", int256(nextLeverageUpperTrigger));
+        console.log("Range upper trigger:", int256(rangeUpperTrigger));
+        console.log("Range should fire before the next upper leverage trigger.");
 
         vm.recordLogs();
 
         bool triggered;
-        for (uint256 step; step < maxSwapSteps; ++step) {
-            int24 currentTickBefore = _currentTick(deployment.poolKey);
-            uint128 amountInPerStep = _nextSwapAmount(currentTickBefore, oldPositionInfo.tickLower());
+        for (uint256 step; step < maxSteps; ++step) {
+            int24 tickBefore = _currentTick(deployment.poolKey);
+            _logSwapStep("Range hunt", step + 1, tickBefore, amountInPerStep, false);
+            _swapExactInputSingle(deployment.poolKey, false, amountInPerStep);
 
-            console.log("Swap step:", step + 1);
-            console.log("Tick before:", int256(currentTickBefore));
-            console.log("Amount in:", uint256(amountInPerStep));
-
-            _swapExactInputSingle(deployment.poolKey, true, amountInPerStep);
-
-            int24 currentTickAfter = _currentTick(deployment.poolKey);
-            console.log("Tick after:", int256(currentTickAfter));
+            int24 tickAfter = _currentTick(deployment.poolKey);
+            console.log("  tick after:", int256(tickAfter));
 
             if (POSITION_MANAGER.nextTokenId() > nextTokenIdBefore) {
                 triggered = true;
@@ -307,51 +411,43 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
             }
         }
 
-        require(triggered, "Demo: hook did not remint the position");
+        require(triggered, "Demo: AUTO_RANGE did not remint the position");
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        (bool sawAutoRangeEvent, uint256 eventTokenId, uint256 newTokenIdFromEvent) = _findAutoRange(entries);
+        (bool sawAutoRange, uint256 oldTokenIdFromEvent, uint256 newTokenIdFromEvent) =
+            _findAutoRange(entries, address(deployment.revertHook));
+        (bool sawAutoLeverage,, , ,) = _findAutoLeverage(entries, address(deployment.revertHook));
 
-        require(sawAutoRangeEvent, "Demo: AutoRange event not found");
-        require(eventTokenId == tokenId, "Demo: unexpected AutoRange tokenId");
+        require(sawAutoRange, "Demo: AutoRange event not found");
+        require(!sawAutoLeverage, "Demo: unexpected second leverage execution during range phase");
+        require(oldTokenIdFromEvent == tokenId, "Demo: unexpected AutoRange source token");
 
-        uint256 newTokenId = POSITION_MANAGER.nextTokenId() - 1;
+        newTokenId = POSITION_MANAGER.nextTokenId() - 1;
         require(newTokenId == newTokenIdFromEvent, "Demo: reminted tokenId mismatch");
-        require(IERC721(address(POSITION_MANAGER)).ownerOf(newTokenId) == owner, "Demo: wrong new owner");
+        require(IERC721(address(POSITION_MANAGER)).ownerOf(newTokenId) == address(deployment.vault), "Demo: vault should own reminted NFT");
+        require(deployment.vault.ownerOf(newTokenId) == owner, "Demo: loan owner should remain unchanged");
 
         (, PositionInfo newPositionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(newTokenId);
+        LoanSnapshot memory afterRange = _loanSnapshot(deployment.vault, newTokenId);
+
         require(
             newPositionInfo.tickLower() != oldPositionInfo.tickLower()
                 || newPositionInfo.tickUpper() != oldPositionInfo.tickUpper(),
             "Demo: range did not change"
         );
+        require(afterRange.debt == before.debt, "Demo: debt should migrate across auto-range");
+        _assertPositionConfigEq(deployment.revertHook, newTokenId, expectedConfig);
 
-        (uint8 modeFlags,,,,,,,,,,) = deployment.revertHook.positionConfigs(newTokenId);
-        require(modeFlags == PositionModeFlags.MODE_AUTO_RANGE, "Demo: config did not migrate");
-
-        console.log("AutoRange executed.");
-        console.log("Old tokenId:", tokenId);
-        console.log("New tokenId:", newTokenId);
-        console.log("Old tickLower:", int256(oldPositionInfo.tickLower()));
-        console.log("Old tickUpper:", int256(oldPositionInfo.tickUpper()));
-        console.log("New tickLower:", int256(newPositionInfo.tickLower()));
-        console.log("New tickUpper:", int256(newPositionInfo.tickUpper()));
-        console.log("Current tick:", int256(_currentTick(deployment.poolKey)));
-    }
-
-    function _nextSwapAmount(int24 currentTick, int24 targetLowerTick) internal view returns (uint128 amountIn) {
-        if (currentTick <= targetLowerTick) {
-            return uint128(vm.envOr("SWAP_STEP_AMOUNT_FINAL", uint256(0.0002 ether)));
-        }
-
-        int24 distance = currentTick - targetLowerTick;
-        if (distance > 30) {
-            return uint128(vm.envOr("SWAP_STEP_AMOUNT_FAR", uint256(0.002 ether)));
-        }
-        if (distance > 10) {
-            return uint128(vm.envOr("SWAP_STEP_AMOUNT_MID", uint256(0.001 ether)));
-        }
-        return uint128(vm.envOr("SWAP_STEP_AMOUNT_CLOSE", uint256(0.0005 ether)));
+        console.log("AUTO_RANGE executed.");
+        console.log("  old tokenId:", tokenId);
+        console.log("  new tokenId:", newTokenId);
+        console.log("  old range lower:", int256(oldPositionInfo.tickLower()));
+        console.log("  old range upper:", int256(oldPositionInfo.tickUpper()));
+        console.log("  new range lower:", int256(newPositionInfo.tickLower()));
+        console.log("  new range upper:", int256(newPositionInfo.tickUpper()));
+        console.log("  current tick:", int256(_currentTick(deployment.poolKey)));
+        console.log("  loan owner preserved:", deployment.vault.ownerOf(newTokenId));
+        _logLoanState("Loan after range remint", afterRange);
     }
 
     function _approveAll(DeploymentResult memory deployment, address owner) internal {
@@ -395,7 +491,7 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         params[2] = abi.encode(zeroForOne ? poolKey.currency1 : poolKey.currency0, 0);
         inputs[0] = abi.encode(actions, params);
 
-        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp);
+        UNIVERSAL_ROUTER.execute(commands, inputs, _deadline());
     }
 
     function _buildHookedPoolKey(address tokenA, address tokenB, address hook) internal pure returns (PoolKey memory) {
@@ -422,7 +518,159 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         (, tick,,) = StateLibrary.getSlot0(POSITION_MANAGER.poolManager(), poolKey.toId());
     }
 
-    function _findAutoRange(Vm.Log[] memory entries)
+    function _poolTickSpacing(uint256 tokenId) internal view returns (int24 tickSpacing) {
+        (PoolKey memory poolKey,) = POSITION_MANAGER.getPoolAndPositionInfo(tokenId);
+        return poolKey.tickSpacing;
+    }
+
+    function _rangeUpperTrigger(uint256 tokenId, RevertHook hook) internal view returns (int24) {
+        (, PositionInfo positionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(tokenId);
+        (
+            uint8 modeFlags,
+            RevertHookState.AutoCompoundMode autoCompoundMode,
+            bool autoExitIsRelative,
+            int24 autoExitTickLower,
+            int24 autoExitTickUpper,
+            int24 autoRangeLowerLimit,
+            int24 autoRangeUpperLimit,
+            int24 autoRangeLowerDelta,
+            int24 autoRangeUpperDelta,
+            int24 autoLendToleranceTick,
+            uint16 autoLeverageTargetBps
+        ) = hook.positionConfigs(tokenId);
+
+        modeFlags;
+        autoCompoundMode;
+        autoExitIsRelative;
+        autoExitTickLower;
+        autoExitTickUpper;
+        autoRangeLowerLimit;
+        autoRangeLowerDelta;
+        autoRangeUpperDelta;
+        autoLendToleranceTick;
+        autoLeverageTargetBps;
+
+        if (autoRangeUpperLimit == type(int24).max) {
+            return type(int24).max;
+        }
+
+        return positionInfo.tickUpper() + autoRangeUpperLimit;
+    }
+
+    function _loanSnapshot(V4Vault vault, uint256 tokenId) internal view returns (LoanSnapshot memory snapshot) {
+        (snapshot.debt, snapshot.fullValue, snapshot.collateralValue,,) = vault.loanInfo(tokenId);
+    }
+
+    function _autoLeverageBaseTick(RevertHook hook, uint256 tokenId) internal view returns (int24 autoLeverageBaseTick) {
+        (,,,,,,, autoLeverageBaseTick) = hook.positionStates(tokenId);
+    }
+
+    function _ratioBps(uint256 debt, uint256 collateralValue) internal pure returns (uint256) {
+        if (collateralValue == 0) {
+            return 0;
+        }
+        return debt * 10_000 / collateralValue;
+    }
+
+    function _logBanner(string memory title) internal pure {
+        console.log("");
+        console.log("============================================================");
+        console.log(title);
+        console.log("============================================================");
+    }
+
+    function _logSection(string memory title) internal pure {
+        console.log("");
+        console.log("------------------------------------------------------------");
+        console.log(title);
+        console.log("------------------------------------------------------------");
+    }
+
+    function _logLoanState(string memory title, LoanSnapshot memory snapshot) internal pure {
+        console.log(title);
+        console.log("  debt:", snapshot.debt);
+        console.log("  full value:", snapshot.fullValue);
+        console.log("  collateral value:", snapshot.collateralValue);
+        console.log("  debt ratio bps:", _ratioBps(snapshot.debt, snapshot.collateralValue));
+    }
+
+    function _logTriggerPlan(
+        RevertHook hook,
+        uint256 tokenId,
+        RevertHookState.PositionConfig memory config
+    ) internal view {
+        (, PositionInfo positionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(tokenId);
+        int24 spacing = _poolTickSpacing(tokenId);
+        int24 baseTick = _autoLeverageBaseTick(hook, tokenId);
+        int24 leverageUpper = baseTick + 10 * spacing;
+        int24 leverageLower = baseTick - 10 * spacing;
+        int24 rangeUpper = positionInfo.tickUpper() + config.autoRangeUpperLimit;
+        int24 rangeLower = config.autoRangeLowerLimit == type(int24).min
+            ? type(int24).min
+            : positionInfo.tickLower() - config.autoRangeLowerLimit;
+
+        console.log("Both automations are now active on the same vault-backed position.");
+        console.log("  leverage target bps:", uint256(config.autoLeverageTargetBps));
+        console.log("  current base tick:", int256(baseTick));
+        console.log("  first leverage lower trigger:", int256(leverageLower));
+        console.log("  first leverage upper trigger:", int256(leverageUpper));
+        console.log("  range lower trigger:", int256(rangeLower));
+        console.log("  range upper trigger:", int256(rangeUpper));
+        console.log("The config step already rebalanced leverage immediately.");
+        console.log("Next we cross the upper range trigger and let AUTO_RANGE remint the position.");
+    }
+
+    function _logSwapStep(
+        string memory label,
+        uint256 step,
+        int24 currentTick,
+        uint128 amountIn,
+        bool zeroForOne
+    ) internal pure {
+        console.log(label);
+        console.log("  step:", step);
+        console.log("  tick before:", int256(currentTick));
+        console.log("  amount in:", uint256(amountIn));
+        console.log("  direction zeroForOne:", zeroForOne);
+    }
+
+    function _deadline() internal view returns (uint256) {
+        return block.timestamp + vm.envOr("DEMO_DEADLINE_BUFFER", uint256(1 hours));
+    }
+
+    function _assertPositionConfigEq(
+        RevertHook hook,
+        uint256 tokenId,
+        RevertHookState.PositionConfig memory expected
+    ) internal view {
+        (
+            uint8 modeFlags,
+            RevertHookState.AutoCompoundMode autoCompoundMode,
+            bool autoExitIsRelative,
+            int24 autoExitTickLower,
+            int24 autoExitTickUpper,
+            int24 autoRangeLowerLimit,
+            int24 autoRangeUpperLimit,
+            int24 autoRangeLowerDelta,
+            int24 autoRangeUpperDelta,
+            int24 autoLendToleranceTick,
+            uint16 autoLeverageTargetBps
+        ) = hook.positionConfigs(tokenId);
+
+        require(modeFlags == expected.modeFlags, "Demo: mode flags mismatch");
+        require(uint8(autoCompoundMode) == uint8(expected.autoCompoundMode), "Demo: auto compound mode mismatch");
+        require(autoExitIsRelative == expected.autoExitIsRelative, "Demo: auto exit mode mismatch");
+        require(autoExitTickLower == expected.autoExitTickLower, "Demo: auto exit lower mismatch");
+        require(autoExitTickUpper == expected.autoExitTickUpper, "Demo: auto exit upper mismatch");
+        require(autoRangeLowerLimit == expected.autoRangeLowerLimit, "Demo: auto range lower limit mismatch");
+        require(autoRangeUpperLimit == expected.autoRangeUpperLimit, "Demo: auto range upper limit mismatch");
+        require(autoRangeLowerDelta == expected.autoRangeLowerDelta, "Demo: auto range lower delta mismatch");
+        require(autoRangeUpperDelta == expected.autoRangeUpperDelta, "Demo: auto range upper delta mismatch");
+        require(autoLendToleranceTick == expected.autoLendToleranceTick, "Demo: auto lend tolerance mismatch");
+        require(autoLeverageTargetBps == expected.autoLeverageTargetBps, "Demo: auto leverage target mismatch");
+    }
+
+    function _findAutoRange(Vm.Log[] memory entries, address emitter)
         internal
         pure
         returns (bool sawAutoRangeEvent, uint256 tokenId, uint256 newTokenId)
@@ -430,6 +678,9 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         uint256 length = entries.length;
         for (uint256 i; i < length; ++i) {
             Vm.Log memory entry = entries[i];
+            if (entry.emitter != emitter) {
+                continue;
+            }
             if (entry.topics.length == 0 || entry.topics[0] != AUTO_RANGE_TOPIC) {
                 continue;
             }
@@ -441,11 +692,64 @@ contract UnichainForkHookathonE2E is Script, StdCheats {
         }
     }
 
+    function _findAutoLeverage(Vm.Log[] memory entries, address emitter)
+        internal
+        pure
+        returns (bool sawAutoLeverageEvent, uint256 tokenId, bool isUpperTrigger, uint256 debtBefore, uint256 debtAfter)
+    {
+        uint256 length = entries.length;
+        for (uint256 i; i < length; ++i) {
+            Vm.Log memory entry = entries[i];
+            if (entry.emitter != emitter) {
+                continue;
+            }
+            if (entry.topics.length == 0 || entry.topics[0] != AUTO_LEVERAGE_TOPIC) {
+                continue;
+            }
+
+            sawAutoLeverageEvent = true;
+            tokenId = uint256(entry.topics[1]);
+            (isUpperTrigger, debtBefore, debtAfter) = abi.decode(entry.data, (bool, uint256, uint256));
+            return (sawAutoLeverageEvent, tokenId, isUpperTrigger, debtBefore, debtAfter);
+        }
+    }
+
     function getHookFlags() internal pure returns (uint160) {
         return uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
                 | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
+        );
+    }
+
+    function findHookSalt(address deployer, bytes memory creationCodeWithArgs)
+        internal
+        view
+        returns (address hookAddress, bytes32 salt)
+    {
+        uint160 flags = getHookFlags() & Hooks.ALL_HOOK_MASK;
+
+        for (uint256 i; i < MAX_LOOP; ++i) {
+            salt = bytes32(i);
+            hookAddress = computeCreate2Address(deployer, salt, creationCodeWithArgs);
+
+            if (uint160(hookAddress) & Hooks.ALL_HOOK_MASK == flags && hookAddress.code.length == 0) {
+                return (hookAddress, salt);
+            }
+        }
+
+        revert("Demo: could not find valid hook salt");
+    }
+
+    function computeCreate2Address(address deployer, bytes32 salt, bytes memory creationCodeWithArgs)
+        internal
+        pure
+        returns (address)
+    {
+        return address(
+            uint160(
+                uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(creationCodeWithArgs))))
+            )
         );
     }
 

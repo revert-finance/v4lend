@@ -135,7 +135,7 @@ abstract contract RevertHookExecution is RevertHookConfig {
         }
     }
 
-    function _handleAutoLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
+    function _handleAutoLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal override {
         address owner = _getOwner(tokenId, false);
         if (!_vaults[owner]) {
             return;
@@ -225,6 +225,9 @@ abstract contract RevertHookExecution is RevertHookConfig {
         if (data.length == 64) {
             (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
             _executeAutoCompound(tokenId, caller);
+        } else if (data.length == 128) {
+            (uint256 tokenId, bool isUpperTrigger,,) = abi.decode(data, (uint256, bool, uint256, uint256));
+            _executeImmediateAutoLeverageUnlocked(tokenId, isUpperTrigger);
         } else {
             (uint256 tokenId, bool isUpperTrigger, int24 tick) = abi.decode(data, (uint256, bool, int24));
             _executeImmediateActionUnlocked(tokenId, isUpperTrigger, tick);
