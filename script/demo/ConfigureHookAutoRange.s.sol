@@ -50,6 +50,8 @@ contract ConfigureHookAutoRange is HookathonDemoBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: autoRangeLowerLimit,
                 autoRangeUpperLimit: autoRangeUpperLimit,
                 autoRangeLowerDelta: autoRangeLowerDelta,

@@ -75,15 +75,17 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Deploy RevertHook
         address hookFlags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
-                    | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                    | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
 
         // Deploy RevertHook action targets
-        RevertHookPositionActions positionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookAutoLeverageActions autoLeverageActions = new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookPositionActions positionActions =
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLeverageActions autoLeverageActions =
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
         RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
 
@@ -130,7 +132,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256 fullRangeHookedTokenId = _createPositionInHookedPool(hookedPoolKey);
         uint256 hookedTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
         _configurePositionForAutoRange(hookedTokenId, hookedPoolKey);
-        (uint256 collateralValue, int24 initialTickLower, int24 initialTickUpper) = _setupCollateralizedPositionForAutoRange(hookedTokenId, hookedPoolKey);
+        (uint256 collateralValue, int24 initialTickLower, int24 initialTickUpper) =
+            _setupCollateralizedPositionForAutoRange(hookedTokenId, hookedPoolKey);
         (uint256 initialDebt,,,,) = vault.loanInfo(hookedTokenId);
         _triggerAutoRange(hookedPoolKey, initialTickLower, initialTickUpper);
         _executeAndVerifyAutoRange(hookedTokenId, collateralValue, initialTickLower, initialTickUpper, initialDebt);
@@ -162,13 +165,12 @@ contract V4VaultHookTest is V4ForkTestBase {
         int24 tickLower = -887220; // Full range lower tick
         int24 tickUpper = 887220; // Full range upper tick
 
-       
         vm.prank(WHALE_ACCOUNT);
         usdc.approve(address(permit2), type(uint256).max);
         vm.prank(WHALE_ACCOUNT);
         weth.approve(address(permit2), type(uint256).max);
 
-         // Approve tokens for position manager
+        // Approve tokens for position manager
         vm.prank(WHALE_ACCOUNT);
         permit2.approve(address(usdc), address(positionManager), type(uint160).max, type(uint48).max);
         vm.prank(WHALE_ACCOUNT);
@@ -212,12 +214,14 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,
                 autoRangeUpperDelta: 0,
                 autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
+                autoLeverageTargetBps: 0
             })
         );
     }
@@ -236,7 +240,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         vault.create(hookedTokenId, WHALE_ACCOUNT);
 
         // Log collateral value after adding position to vault
-        (uint256 debtAfterCreate, uint256 fullValueAfterCreate, uint256 collateralValueAfterCreate,,) = vault.loanInfo(hookedTokenId);
+        (uint256 debtAfterCreate, uint256 fullValueAfterCreate, uint256 collateralValueAfterCreate,,) =
+            vault.loanInfo(hookedTokenId);
         console.log("Collateral value after adding position to vault:", collateralValueAfterCreate);
         console.log("Full value after adding position to vault:", fullValueAfterCreate);
         console.log("Debt after adding position to vault:", debtAfterCreate);
@@ -262,7 +267,6 @@ contract V4VaultHookTest is V4ForkTestBase {
     }
 
     function _generateFees(PoolKey memory hookedPoolKey) internal {
-
         vm.prank(WHALE_ACCOUNT);
         permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
         vm.prank(WHALE_ACCOUNT);
@@ -310,7 +314,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertTrue(collateralValueAfter > debtAfter, "Loan should remain healthy after autocompound");
     }
 
-    function _swapExactInputSingle(PoolKey memory key, bool zeroForOne,  uint128 amountIn, uint128 minAmountOut)
+    function _swapExactInputSingle(PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 minAmountOut)
         internal
     {
         // Encode the Universal Router command
@@ -325,7 +329,11 @@ contract V4VaultHookTest is V4ForkTestBase {
         bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(
             IV4Router.ExactInputSingleParams({
-                poolKey: key, zeroForOne: zeroForOne, amountIn: amountIn, amountOutMinimum: minAmountOut, hookData: bytes("")
+                poolKey: key,
+                zeroForOne: zeroForOne,
+                amountIn: amountIn,
+                amountOutMinimum: minAmountOut,
+                hookData: bytes("")
             })
         );
         params[1] = abi.encode(zeroForOne ? key.currency0 : key.currency1, amountIn);
@@ -339,19 +347,22 @@ contract V4VaultHookTest is V4ForkTestBase {
         IUniversalRouter(address(swapRouter)).execute(commands, inputs, block.timestamp);
     }
 
-    function _createPositionInHookedPoolForAutoRange(PoolKey memory hookedPoolKey) internal returns (uint256 hookedTokenId) {
+    function _createPositionInHookedPoolForAutoRange(PoolKey memory hookedPoolKey)
+        internal
+        returns (uint256 hookedTokenId)
+    {
         // Get current tick to create a narrow range around it
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
-        
+
         // Create a narrow range around current price (e.g., ±120 ticks = ±2 tick spacings)
         int24 tickSpacing = hookedPoolKey.tickSpacing;
         int24 tickLower = (currentTick / tickSpacing - 2) * tickSpacing; // 2 tick spacings below
         int24 tickUpper = (currentTick / tickSpacing + 2) * tickSpacing; // 2 tick spacings above
-        
+
         console.log("Current tick:", currentTick);
         console.log("Position tickLower:", tickLower);
         console.log("Position tickUpper:", tickUpper);
-        
+
         vm.prank(WHALE_ACCOUNT);
         usdc.approve(address(permit2), type(uint256).max);
         vm.prank(WHALE_ACCOUNT);
@@ -397,7 +408,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         int24 tickLower = posInfo.tickLower();
         int24 tickUpper = posInfo.tickUpper();
         int24 tickSpacing = hookedPoolKey.tickSpacing;
-        
+
         // Configure autorange:
         // - Trigger when price moves 1 tick spacing outside the range
         // - Move range by 2 tick spacings in the direction of price movement
@@ -405,13 +416,13 @@ contract V4VaultHookTest is V4ForkTestBase {
         int24 autoRangeUpperLimit = 0;
         int24 autoRangeLowerDelta = -tickSpacing; // Move lower bound down by 1 tick spacings
         int24 autoRangeUpperDelta = tickSpacing; // Move upper bound up by 1 tick spacings
-        
+
         console.log("AutoRange config:");
         console.log("  Lower limit:", autoRangeLowerLimit);
         console.log("  Upper limit:", autoRangeUpperLimit);
         console.log("  Lower delta:", autoRangeLowerDelta);
         console.log("  Upper delta:", autoRangeUpperDelta);
-        
+
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
@@ -421,12 +432,14 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: autoRangeLowerLimit,
                 autoRangeUpperLimit: autoRangeUpperLimit,
                 autoRangeLowerDelta: autoRangeLowerDelta,
                 autoRangeUpperDelta: autoRangeUpperDelta,
                 autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
+                autoLeverageTargetBps: 0
             })
         );
     }
@@ -439,7 +452,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(hookedTokenId);
         initialTickLower = posInfo.tickLower();
         initialTickUpper = posInfo.tickUpper();
-        
+
         // Lend USDC to vault
         _deposit(200000000, WHALE_ACCOUNT);
 
@@ -450,7 +463,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         vault.create(hookedTokenId, WHALE_ACCOUNT);
 
         // Log collateral value after adding position to vault
-        (uint256 debtAfterCreate, uint256 fullValueAfterCreate, uint256 collateralValueAfterCreate,,) = vault.loanInfo(hookedTokenId);
+        (uint256 debtAfterCreate, uint256 fullValueAfterCreate, uint256 collateralValueAfterCreate,,) =
+            vault.loanInfo(hookedTokenId);
         console.log("Collateral value after adding position to vault:", collateralValueAfterCreate);
         console.log("Full value after adding position to vault:", fullValueAfterCreate);
         console.log("Debt after adding position to vault:", debtAfterCreate);
@@ -477,23 +491,23 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Get current tick
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
         console.log("Current tick before swap:", currentTick);
-        
+
         // Calculate trigger tick (need to move price below tickLower - autoRangeLowerLimit)
         // autoRangeLowerLimit = tickSpacing, so trigger at tickLower - tickSpacing
         int24 triggerTick = initialTickLower - hookedPoolKey.tickSpacing;
         console.log("Trigger tick (lower):", triggerTick);
-        
+
         // Perform a large swap to move price below the trigger tick
         // Swap USDC for WETH (zeroForOne = true) to move price down
         uint256 swapAmount = 100e6; // 100 USDC - large enough to move price significantly
-        
+
         vm.prank(WHALE_ACCOUNT);
         permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
         vm.prank(WHALE_ACCOUNT);
         permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
-        
+
         _swapExactInputSingle(hookedPoolKey, true, uint128(swapAmount), 0);
-        
+
         // Check if autorange was triggered
         (, int24 newTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
         console.log("Current tick after swap:", newTick);
@@ -507,7 +521,6 @@ contract V4VaultHookTest is V4ForkTestBase {
         int24 initialTickUpper,
         uint256 initialDebt
     ) internal {
-        
         _verifyOriginalPositionAfterAutoRange(originalTokenId);
         uint256 newTokenId = _getAndVerifyNewPosition(originalTokenId);
         _verifyNewPositionRange(newTokenId, initialTickLower, initialTickUpper);
@@ -516,7 +529,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _verifyLoanTransfer(originalTokenId, newTokenId, initialDebt);
         _verifyOriginalPositionCleanup(originalTokenId);
         _verifyNewPositionPoolKey(newTokenId);
-        
+
         console.log("AutoRange verification completed successfully");
     }
 
@@ -530,7 +543,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         newTokenId = positionManager.nextTokenId() - 1;
         assertGt(newTokenId, originalTokenId, "New tokenId should be greater than original");
         console.log("New position tokenId:", newTokenId);
-        
+
         uint128 newLiquidity = positionManager.getPositionLiquidity(newTokenId);
         assertGt(newLiquidity, 0, "New position should have liquidity");
         console.log("New position liquidity:", newLiquidity);
@@ -542,7 +555,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         int24 newTickUpper = newPosInfo.tickUpper();
         console.log("New position tickLower:", newTickLower);
         console.log("New position tickUpper:", newTickUpper);
-        
+
         assertTrue(newTickLower <= initialTickLower, "New tickLower should be <= initial tickLower (range moved down)");
         assertTrue(newTickUpper <= initialTickUpper, "New tickUpper should be <= initial tickUpper (range moved down)");
     }
@@ -557,11 +570,11 @@ contract V4VaultHookTest is V4ForkTestBase {
         PoolKey memory poolKey = _getHookedPoolKey();
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
         console.log("Current tick after swap:", currentTick);
-        
+
         (, PositionInfo newPosInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
         int24 newTickLower = newPosInfo.tickLower();
         int24 newTickUpper = newPosInfo.tickUpper();
-        
+
         assertTrue(currentTick >= newTickLower, "Current tick should be >= new tickLower");
         assertTrue(currentTick <= newTickUpper, "Current tick should be <= new tickUpper");
     }
@@ -571,7 +584,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("New position debt:", newDebt);
         console.log("New position full value:", newFullValue);
         console.log("New position collateral value:", newCollateralValue);
-        
+
         assertEq(newDebt, initialDebt, "Debt should be unchanged after autorange");
         assertTrue(newCollateralValue > newDebt, "Loan should remain healthy after autorange");
         console.log("Loan health ratio:", (newCollateralValue * 100) / newDebt, "%");
@@ -587,8 +600,16 @@ contract V4VaultHookTest is V4ForkTestBase {
     function _verifyNewPositionPoolKey(uint256 newTokenId) internal {
         PoolKey memory poolKey = _getHookedPoolKey();
         (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
-        assertEq(Currency.unwrap(newPoolKey.currency0), Currency.unwrap(poolKey.currency0), "New position should have same currency0");
-        assertEq(Currency.unwrap(newPoolKey.currency1), Currency.unwrap(poolKey.currency1), "New position should have same currency1");
+        assertEq(
+            Currency.unwrap(newPoolKey.currency0),
+            Currency.unwrap(poolKey.currency0),
+            "New position should have same currency0"
+        );
+        assertEq(
+            Currency.unwrap(newPoolKey.currency1),
+            Currency.unwrap(poolKey.currency1),
+            "New position should have same currency1"
+        );
         assertEq(newPoolKey.fee, poolKey.fee, "New position should have same fee");
         assertEq(newPoolKey.tickSpacing, poolKey.tickSpacing, "New position should have same tickSpacing");
     }
@@ -631,15 +652,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
             (
                 uint8 storedMode,
-                RevertHookState.AutoCompoundMode storedAutoCompoundMode,
-                ,
-                ,
-                ,
-                ,
-                ,
-                ,
-                ,
-                ,
+                RevertHookState.AutoCompoundMode storedAutoCompoundMode,,,,,,,,,
                 uint16 storedLeverageTargetBps
             ) = revertHook.positionConfigs(hookedTokenId);
 
@@ -729,6 +742,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: nearExitTick,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: type(int24).min,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: 0,
@@ -745,6 +760,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: farExitTick,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: type(int24).min,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: 0,
@@ -774,7 +791,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         revertHook.setMaxTicksFromOracle(10000);
         _moveTickDownUntil(hookedPoolKey, farExitTick - 2 * spacing, 20e6, 20);
 
-        assertEq(positionManager.getPositionLiquidity(farTokenId), 0, "Deferred trigger should execute once clamp is relaxed");
+        assertEq(
+            positionManager.getPositionLiquidity(farTokenId), 0, "Deferred trigger should execute once clamp is relaxed"
+        );
         (uint8 farModeAfter,,,,,,,,,,) = revertHook.positionConfigs(farTokenId);
         assertEq(farModeAfter, PositionModeFlags.MODE_NONE, "Config should clear after deferred trigger execution");
     }
@@ -805,6 +824,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: autoRangeLowerLimit,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: -spacing,
@@ -825,7 +846,9 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         uint256 remintedTokenId = nextTokenIdBefore;
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Range should win tie-break and remint");
-        assertGt(positionManager.getPositionLiquidity(remintedTokenId), 0, "Tie-break should produce reminted range position");
+        assertGt(
+            positionManager.getPositionLiquidity(remintedTokenId), 0, "Tie-break should produce reminted range position"
+        );
 
         (uint256 debtAfter,,,,) = vault.loanInfo(remintedTokenId);
         assertEq(debtAfter, debtBefore, "Range path should preserve debt");
@@ -849,10 +872,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
         _generateFees(hookedPoolKey);
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
-            | PositionModeFlags.MODE_AUTO_RANGE
-            | PositionModeFlags.MODE_AUTO_EXIT
-            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
 
         int24 spacing = hookedPoolKey.tickSpacing;
         (, PositionInfo initialPosInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -874,6 +895,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerPhase1,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 20 * spacing,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: -spacing,
@@ -928,6 +951,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoExitIsRelative: false,
             autoExitTickLower: exitLowerPhase2,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: 15 * spacing,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: -spacing,
@@ -964,7 +989,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Base tick must be re-initialized for leverage-capable reminted positions.
         int24 expectedBaseTickAfterRange = _getTickLower(tickAfterRange, spacing);
         (,,,,,,, int24 baseTickAfterRange) = revertHook.positionStates(rangedTokenId);
-        assertEq(baseTickAfterRange, expectedBaseTickAfterRange, "Reminted C|R|E|V position should reset leverage base tick");
+        assertEq(
+            baseTickAfterRange, expectedBaseTickAfterRange, "Reminted C|R|E|V position should reset leverage base tick"
+        );
 
         // Phase 3: keep all flags active and make exit fire before range/leverage.
         int24 exitLowerPhase3 = expectedBaseTickAfterRange - spacing;
@@ -981,6 +1008,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerPhase3,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 20 * spacing,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: -spacing,
@@ -1025,10 +1054,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(rangeLowerTrigger, leverageLowerTrigger, "Range trigger should fire before leverage trigger");
         assertGt(leverageLowerTrigger, exitLowerTrigger, "Leverage trigger should fire before exit trigger");
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
-            | PositionModeFlags.MODE_AUTO_RANGE
-            | PositionModeFlags.MODE_AUTO_EXIT
-            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
 
         RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
             modeFlags: modeCREV,
@@ -1036,6 +1063,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoExitIsRelative: false,
             autoExitTickLower: exitLowerTrigger,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: autoRangeLowerLimit,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: -spacing,
@@ -1052,7 +1081,9 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         // Immediate dispatch should remint via AUTO_RANGE (not leverage/exit) because range lower trigger is first.
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Immediate C|R|E|V config should remint old token");
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate range should mint exactly one new token");
+        assertEq(
+            positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate range should mint exactly one new token"
+        );
 
         uint256 remintedTokenId = nextTokenIdBefore;
         assertGt(positionManager.getPositionLiquidity(remintedTokenId), 0, "Reminted token should hold liquidity");
@@ -1090,29 +1121,34 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(exitLowerTrigger, rangeLowerTrigger, "Exit trigger should fire before range trigger");
         assertGt(rangeLowerTrigger, leverageLowerTrigger, "Range trigger should fire before leverage trigger");
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
-            | PositionModeFlags.MODE_AUTO_RANGE
-            | PositionModeFlags.MODE_AUTO_EXIT
-            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
 
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
 
         vm.prank(WHALE_ACCOUNT);
-        revertHook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: modeCREV,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: exitLowerTrigger,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: autoRangeLowerLimit,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: -spacing,
-            autoRangeUpperDelta: spacing,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 5000
-        }));
+        revertHook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: modeCREV,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerTrigger,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: autoRangeLowerLimit,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 5000
+            })
+        );
 
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Immediate exit should not remint a replacement token");
+        assertEq(
+            positionManager.nextTokenId(), nextTokenIdBefore, "Immediate exit should not remint a replacement token"
+        );
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Immediate exit should fully unwind liquidity");
         (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
         assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Immediate exit should disable the position");
@@ -1161,6 +1197,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: exitUpperTrigger,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: type(int24).min,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: 0,
@@ -1209,14 +1247,20 @@ contract V4VaultHookTest is V4ForkTestBase {
             "Opposite-side AUTO_EXIT should complete without HookActionFailed"
         );
 
-        assertEq(positionManager.getPositionLiquidity(exitTokenId), 0, "Opposite-side AUTO_EXIT should remove liquidity");
+        assertEq(
+            positionManager.getPositionLiquidity(exitTokenId), 0, "Opposite-side AUTO_EXIT should remove liquidity"
+        );
         (uint8 exitModeFlags,,,,,,,,,,) = revertHook.positionConfigs(exitTokenId);
         assertEq(exitModeFlags, PositionModeFlags.MODE_NONE, "Opposite-side AUTO_EXIT token should be disabled");
 
         (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(leverageTokenId);
         assertLt(debtAfter, debtBefore, "Triggered lower AUTO_LEVERAGE should reduce debt");
         assertTrue(collateralAfter > debtAfter, "Leverage position should remain healthy");
-        assertGe(tickAfterAction, exitUpperTrigger, "Internal leverage swap should reverse price across the upper exit trigger");
+        assertGe(
+            tickAfterAction,
+            exitUpperTrigger,
+            "Internal leverage swap should reverse price across the upper exit trigger"
+        );
         _assertHookHasNoTokenDust();
     }
 
@@ -1247,8 +1291,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         }
 
         (,,,,,,, int24 leverageBaseTick) = revertHook.positionStates(leverageTokenId);
-        int24 sharedLowerTrigger =
-            leverageBaseTick - int24(revertHook.LEVERAGE_TICK_OFFSET_MULTIPLIER()) * spacing;
+        int24 sharedLowerTrigger = leverageBaseTick - int24(revertHook.LEVERAGE_TICK_OFFSET_MULTIPLIER()) * spacing;
 
         uint256 lowerExitTokenId1 = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
         uint256 lowerExitTokenId2 = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
@@ -1261,6 +1304,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoExitIsRelative: false,
             autoExitTickLower: sharedLowerTrigger,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -1286,11 +1331,15 @@ contract V4VaultHookTest is V4ForkTestBase {
             "Shared lower tick should execute AUTO_LEVERAGE first"
         );
         assertFalse(
-            _sawIndexedHookEvent(firstLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId1),
+            _sawIndexedHookEvent(
+                firstLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId1
+            ),
             "First remaining shared-tick AUTO_EXIT should be deferred after reversal"
         );
         assertFalse(
-            _sawIndexedHookEvent(firstLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId2),
+            _sawIndexedHookEvent(
+                firstLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId2
+            ),
             "Second remaining shared-tick AUTO_EXIT should be deferred after reversal"
         );
 
@@ -1308,22 +1357,32 @@ contract V4VaultHookTest is V4ForkTestBase {
         (uint8 lowerModeFlags2,,,,,,,,,,) = revertHook.positionConfigs(lowerExitTokenId2);
         assertEq(lowerModeFlags1, PositionModeFlags.MODE_AUTO_EXIT, "Deferred shared-tick exit should remain armed");
         assertEq(lowerModeFlags2, PositionModeFlags.MODE_AUTO_EXIT, "Deferred shared-tick exit should remain armed");
-        assertGt(tickAfterFirstSwap, sharedLowerTrigger, "First action should move price back above the shared trigger tick");
+        assertGt(
+            tickAfterFirstSwap, sharedLowerTrigger, "First action should move price back above the shared trigger tick"
+        );
 
         vm.recordLogs();
         _moveTickDownUntil(hookedPoolKey, sharedLowerTrigger - spacing, 25e6, 80);
 
         Vm.Log[] memory secondLogs = vm.getRecordedLogs();
         assertTrue(
-            _sawIndexedHookEvent(secondLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId1),
+            _sawIndexedHookEvent(
+                secondLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId1
+            ),
             "Deferred shared-tick exit should execute after a later downward recross"
         );
         assertTrue(
-            _sawIndexedHookEvent(secondLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId2),
+            _sawIndexedHookEvent(
+                secondLogs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), lowerExitTokenId2
+            ),
             "Both deferred shared-tick exits should execute on the later recross"
         );
-        assertEq(positionManager.getPositionLiquidity(lowerExitTokenId1), 0, "First deferred shared-tick exit should drain");
-        assertEq(positionManager.getPositionLiquidity(lowerExitTokenId2), 0, "Second deferred shared-tick exit should drain");
+        assertEq(
+            positionManager.getPositionLiquidity(lowerExitTokenId1), 0, "First deferred shared-tick exit should drain"
+        );
+        assertEq(
+            positionManager.getPositionLiquidity(lowerExitTokenId2), 0, "Second deferred shared-tick exit should drain"
+        );
         _assertHookHasNoTokenDust();
     }
 
@@ -1351,6 +1410,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: true,
                 autoExitTickLower: spacing,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: type(int24).min,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: 0,
@@ -1390,6 +1451,67 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
     }
 
+    function testVaultAutoExit_UpperWithoutSwap_StillRepaysDebt() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        revertHook.setMaxTicksFromOracle(10000);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey); // extra LP depth for deterministic swaps
+
+        uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 currentTickLower = _getTickLower(currentTick, hookedPoolKey.tickSpacing);
+        assertLt(posInfo.tickLower(), currentTickLower, "Test setup should keep the price inside the range");
+        assertGt(posInfo.tickUpper(), currentTickLower, "Test setup should keep the price inside the range");
+
+        uint256 usdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+        uint256 wethBefore = weth.balanceOf(WHALE_ACCOUNT);
+
+        vm.startPrank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(revertHook), true);
+        revertHook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), 10000, 10000);
+        revertHook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: currentTickLower,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: false,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        vm.stopPrank();
+
+        assertEq(
+            positionManager.getPositionLiquidity(tokenId), 0, "Immediate upper AUTO_EXIT should remove all liquidity"
+        );
+        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
+        assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Immediate upper AUTO_EXIT should disable the position");
+
+        (uint256 debtAfter, uint256 fullValueAfter, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "AUTO_EXIT should repay the outstanding vault debt");
+        assertEq(fullValueAfter, 0, "Exited vault position should not retain value");
+        assertEq(collateralAfter, 0, "Exited vault position should not retain collateral");
+        assertGt(
+            usdc.balanceOf(WHALE_ACCOUNT), usdcBefore, "No-swap upper AUTO_EXIT should leave lend token with the owner"
+        );
+        assertGt(
+            weth.balanceOf(WHALE_ACCOUNT), wethBefore, "In-range upper AUTO_EXIT should still return the paired token"
+        );
+        _assertHookHasNoTokenDust();
+    }
+
     function testAutoLeverageReconfiguration_ReplacesOldTriggerNodes() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         _createPositionInHookedPool(hookedPoolKey);
@@ -1399,8 +1521,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         _generateFees(hookedPoolKey);
 
         int24 spacing = hookedPoolKey.tickSpacing;
-        RevertHookState.PositionConfig memory initialConfig =
-            _buildVaultModeConfig(PositionModeFlags.MODE_AUTO_LEVERAGE, spacing, false, false, type(int24).min, type(int24).max);
+        RevertHookState.PositionConfig memory initialConfig = _buildVaultModeConfig(
+            PositionModeFlags.MODE_AUTO_LEVERAGE, spacing, false, false, type(int24).min, type(int24).max
+        );
 
         (uint32 lowerBaseline, uint32 upperBaseline) = _getTriggerListSizes(hookedPoolKey);
         vm.prank(WHALE_ACCOUNT);
@@ -1441,10 +1564,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         _setupCollateralizedPositionForAutoRange(activeTokenId, hookedPoolKey);
         _generateFees(hookedPoolKey);
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND
-            | PositionModeFlags.MODE_AUTO_RANGE
-            | PositionModeFlags.MODE_AUTO_EXIT
-            | PositionModeFlags.MODE_AUTO_LEVERAGE;
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+            | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
         int24 spacing = hookedPoolKey.tickSpacing;
 
         // Ensure C is exercised while all trigger flags are present.
@@ -1454,6 +1575,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: 20 * spacing,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: -spacing,
@@ -1494,6 +1617,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerFar,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: autoRangeLowerLimitRangeFirst,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: -spacing,
@@ -1510,18 +1635,26 @@ contract V4VaultHookTest is V4ForkTestBase {
             bool reminted = positionManager.nextTokenId() > nextTokenIdBeforeRange;
             if (reminted) {
                 activeTokenId = nextTokenIdBeforeRange;
-                assertEq(positionManager.getPositionLiquidity(oldTokenId), 0, "Old token should be fully exited after range");
+                assertEq(
+                    positionManager.getPositionLiquidity(oldTokenId), 0, "Old token should be fully exited after range"
+                );
                 assertGt(positionManager.getPositionLiquidity(activeTokenId), 0, "Range should mint replacement token");
                 _assertVaultHookPositionConfigEq(activeTokenId, rangeFirstConfig);
                 _assertOldPositionFullyCleaned(oldTokenId);
 
                 (uint256 debtAfterRange,,,,) = vault.loanInfo(activeTokenId);
                 assertEq(debtAfterRange, debtBeforeRange, "Debt should transfer exactly through range remint");
-                assertEq(IERC721(address(positionManager)).ownerOf(activeTokenId), address(vault), "Vault ownership must persist");
+                assertEq(
+                    IERC721(address(positionManager)).ownerOf(activeTokenId),
+                    address(vault),
+                    "Vault ownership must persist"
+                );
 
                 (, int24 tickAfterRange,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
                 (,,,,,,, int24 baseTickAfterRange) = revertHook.positionStates(activeTokenId);
-                assertEq(baseTickAfterRange, _getTickLower(tickAfterRange, spacing), "Base tick must reset on reminted token");
+                assertEq(
+                    baseTickAfterRange, _getTickLower(tickAfterRange, spacing), "Base tick must reset on reminted token"
+                );
             } else {
                 activeTokenId = oldTokenId;
                 assertGt(positionManager.getPositionLiquidity(activeTokenId), 0, "Fallback should restore liquidity");
@@ -1529,7 +1662,11 @@ contract V4VaultHookTest is V4ForkTestBase {
 
                 (uint256 debtAfterFallback,,,,) = vault.loanInfo(activeTokenId);
                 assertEq(debtAfterFallback, debtBeforeRange, "Fallback should preserve debt");
-                assertEq(IERC721(address(positionManager)).ownerOf(activeTokenId), address(vault), "Vault ownership must persist");
+                assertEq(
+                    IERC721(address(positionManager)).ownerOf(activeTokenId),
+                    address(vault),
+                    "Vault ownership must persist"
+                );
 
                 (,,,,,,, int24 baseTickAfterFallback) = revertHook.positionStates(activeTokenId);
                 assertEq(baseTickAfterFallback, baseTickBeforeRange, "Fallback should preserve base tick");
@@ -1558,6 +1695,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerVeryFar,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: autoRangeLowerLimitLeverageFirst,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: -spacing,
@@ -1576,7 +1715,9 @@ contract V4VaultHookTest is V4ForkTestBase {
             _moveTickDownUntil(hookedPoolKey, leverageLowerFirst, 40e6, 40);
 
             assertEq(positionManager.nextTokenId(), nextTokenIdBeforeLeverage, "Leverage should not mint a new token");
-            assertGt(positionManager.getPositionLiquidity(activeTokenId), 0, "Leverage phase should keep position active");
+            assertGt(
+                positionManager.getPositionLiquidity(activeTokenId), 0, "Leverage phase should keep position active"
+            );
             (uint256 debtAfterLeverage,, uint256 collateralAfterLeverage,,) = vault.loanInfo(activeTokenId);
             assertTrue(debtAfterLeverage != debtBeforeLeverage, "Leverage should adjust debt");
             assertTrue(collateralAfterLeverage > debtAfterLeverage, "Position should remain healthy after leverage");
@@ -1594,7 +1735,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         int24 rangeLowerExitPhase = leverageLowerExitPhase - 8 * spacing;
         int24 autoRangeLowerLimitExitFirst = posInfoExit.tickLower() - rangeLowerExitPhase;
         assertGt(exitLowerFirst, leverageLowerExitPhase, "Exit should trigger before leverage in exit-first phase");
-        assertGt(leverageLowerExitPhase, rangeLowerExitPhase, "Leverage should trigger before range in exit-first phase");
+        assertGt(
+            leverageLowerExitPhase, rangeLowerExitPhase, "Leverage should trigger before range in exit-first phase"
+        );
 
         RevertHookState.PositionConfig memory exitFirstConfig = RevertHookState.PositionConfig({
             modeFlags: modeCREV,
@@ -1602,6 +1745,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoExitIsRelative: false,
             autoExitTickLower: exitLowerFirst,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: autoRangeLowerLimitExitFirst,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: -spacing,
@@ -1639,6 +1784,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoExitIsRelative: false,
             autoExitTickLower: enableExit ? exitTickLower : type(int24).min,
             autoExitTickUpper: enableExit ? exitTickUpper : type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: hasRangeTriggers ? int24(0) : type(int24).min,
             autoRangeUpperLimit: hasRangeTriggers ? int24(0) : type(int24).max,
             autoRangeLowerDelta: hasRangeMode ? -tickSpacing : int24(0),
@@ -1668,15 +1815,19 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertLe(currentTick, targetTick, "Target tick was not reached");
     }
 
-    function _getTriggerListSizes(PoolKey memory hookedPoolKey) internal view returns (uint32 lowerSize, uint32 upperSize) {
+    function _getTriggerListSizes(PoolKey memory hookedPoolKey)
+        internal
+        view
+        returns (uint32 lowerSize, uint32 upperSize)
+    {
         (, lowerSize,) = revertHook.lowerTriggerAfterSwap(PoolIdLibrary.toId(hookedPoolKey));
         (, upperSize,) = revertHook.upperTriggerAfterSwap(PoolIdLibrary.toId(hookedPoolKey));
     }
 
-    function _assertVaultHookPositionConfigEq(
-        uint256 tokenId,
-        RevertHookState.PositionConfig memory expected
-    ) internal view {
+    function _assertVaultHookPositionConfigEq(uint256 tokenId, RevertHookState.PositionConfig memory expected)
+        internal
+        view
+    {
         (
             uint8 modeFlags,
             RevertHookState.AutoCompoundMode autoCompoundMode,
@@ -1787,7 +1938,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
 
         // Setup collateralized position with initial debt
-        (uint256 initialDebt, uint256 initialCollateralValue) = _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        (uint256 initialDebt, uint256 initialCollateralValue) =
+            _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
 
         // Configure position for AUTO_LEVERAGE with 50% target (5000 bps)
         uint16 targetBps = 5000; // 50% debt/collateral ratio
@@ -1891,6 +2043,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,
@@ -1916,7 +2070,9 @@ contract V4VaultHookTest is V4ForkTestBase {
             "Immediate AUTO_LEVERAGE config should not emit HookActionFailed"
         );
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Immediate leverage should not remint the position");
-        assertEq(IERC721(address(positionManager)).ownerOf(hookedTokenId), address(vault), "Vault should retain NFT custody");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(hookedTokenId), address(vault), "Vault should retain NFT custody"
+        );
         assertLt(debtAfter, debtBefore, "Immediate leverage should reduce debt toward the target ratio");
         assertLt(distanceAfter, distanceBefore, "Immediate leverage should move the loan closer to target");
         assertEq(
@@ -1982,6 +2138,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,
@@ -2086,6 +2244,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,
@@ -2124,6 +2284,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,
@@ -2144,6 +2306,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,
@@ -2193,6 +2357,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,
@@ -2351,12 +2517,18 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(liquidityAfter, liquidityBefore, "Failed leverage-up must restore original liquidity");
         assertGt(collateralAfter, debtAfter, "Restored position should remain healthy");
         assertEq(baseTickAfter, baseTickBefore, "Failed leverage-up must keep the previous base tick");
-        assertEq(IERC721(address(positionManager)).ownerOf(hookedTokenId), address(vault), "Position should remain in the vault");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(hookedTokenId),
+            address(vault),
+            "Position should remain in the vault"
+        );
         _assertHookHasNoTokenDust();
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertTrue(
-            _sawHookEventTopic(logs, keccak256("HookSwapFailed((address,address,uint24,int24,address),(bool,int256,uint160),bytes)")),
+            _sawHookEventTopic(
+                logs, keccak256("HookSwapFailed((address,address,uint24,int24,address),(bool,int256,uint160),bytes)")
+            ),
             "Failed leverage-up should emit HookSwapFailed"
         );
         assertTrue(
@@ -2448,6 +2620,8 @@ contract V4VaultHookTest is V4ForkTestBase {
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: 0,

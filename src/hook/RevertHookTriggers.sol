@@ -56,12 +56,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 autoRangeLowerLimit,
         int24 autoRangeUpperLimit
     ) internal pure returns (int24 rangeLower, int24 rangeUpper) {
-        rangeLower = autoRangeLowerLimit != type(int24).min
-            ? tickLower - autoRangeLowerLimit
-            : type(int24).min;
-        rangeUpper = autoRangeUpperLimit != type(int24).max
-            ? tickUpper + autoRangeUpperLimit
-            : type(int24).max;
+        rangeLower = autoRangeLowerLimit != type(int24).min ? tickLower - autoRangeLowerLimit : type(int24).min;
+        rangeUpper = autoRangeUpperLimit != type(int24).max ? tickUpper + autoRangeUpperLimit : type(int24).max;
     }
 
     /// @notice Calculates AUTO_LEVERAGE trigger ticks based on base tick
@@ -69,10 +65,11 @@ abstract contract RevertHookTriggers is RevertHookState {
     /// @param tickSpacing The pool's tick spacing
     /// @return leverageLower Lower trigger tick
     /// @return leverageUpper Upper trigger tick
-    function _calculateLeverageTriggerTicks(
-        int24 baseTick,
-        int24 tickSpacing
-    ) internal pure returns (int24 leverageLower, int24 leverageUpper) {
+    function _calculateLeverageTriggerTicks(int24 baseTick, int24 tickSpacing)
+        internal
+        pure
+        returns (int24 leverageLower, int24 leverageUpper)
+    {
         leverageLower = baseTick - _LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
         leverageUpper = baseTick + _LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing;
     }
@@ -93,6 +90,8 @@ abstract contract RevertHookTriggers is RevertHookState {
             modeFlags: PositionModeFlags.MODE_NONE,
             autoCompoundMode: AutoCompoundMode.NONE,
             autoExitIsRelative: false,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
             autoRangeLowerLimit: type(int24).min,
@@ -178,7 +177,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         TickLinkedList.List storage lowerList = _lowerTriggerAfterSwap[poolId];
         TickLinkedList.List storage upperList = _upperTriggerAfterSwap[poolId];
 
-        int24[4] memory ticks = _computeTriggerTicksMemory(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
+        int24[4] memory ticks =
+            _computeTriggerTicksMemory(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
 
         if (ticks[0] != type(int24).min) lowerList.remove(ticks[0], tokenId);
         if (ticks[1] != type(int24).min) lowerList.remove(ticks[1], tokenId);
@@ -187,12 +187,19 @@ abstract contract RevertHookTriggers is RevertHookState {
     }
 
     /// @notice Updates position triggers by computing diff between old and new configs
-    function _updatePositionTriggers(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig) internal {
+    function _updatePositionTriggers(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig)
+        internal
+    {
         _updatePositionTriggersInternal(tokenId, poolKey, newConfig, false);
     }
 
     /// @notice Updates position triggers with optional force flag
-    function _updatePositionTriggersInternal(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory newConfig, bool force) internal {
+    function _updatePositionTriggersInternal(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionConfig memory newConfig,
+        bool force
+    ) internal {
         PositionConfig storage oldConfig = _positionConfigs[tokenId];
 
         bool oldHasTriggers = !force && PositionModeFlags.hasTriggers(oldConfig.modeFlags);
@@ -221,7 +228,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         } else {
             oldTicks = _computeTriggerTicks(tokenId, poolKey, oldConfig, posInfo.tickLower(), posInfo.tickUpper());
         }
-        int24[4] memory newTicks = _computeTriggerTicksMemory(tokenId, poolKey, newConfig, posInfo.tickLower(), posInfo.tickUpper());
+        int24[4] memory newTicks =
+            _computeTriggerTicksMemory(tokenId, poolKey, newConfig, posInfo.tickLower(), posInfo.tickUpper());
 
         _updateTriggerList(lowerList, tokenId, oldTicks[0], oldTicks[1], newTicks[0], newTicks[1], type(int24).min);
         _updateTriggerList(upperList, tokenId, oldTicks[2], oldTicks[3], newTicks[2], newTicks[3], type(int24).max);
@@ -254,10 +262,17 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 tickUpper
     ) internal view returns (int24[4] memory ticks) {
         return _computeTriggerTicksCore(
-            tokenId, poolKey, config.modeFlags,
-            config.autoRangeLowerLimit, config.autoRangeUpperLimit,
-            config.autoExitIsRelative, config.autoExitTickLower, config.autoExitTickUpper,
-            config.autoLendToleranceTick, tickLower, tickUpper
+            tokenId,
+            poolKey,
+            config.modeFlags,
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper,
+            config.autoLendToleranceTick,
+            tickLower,
+            tickUpper
         );
     }
 
@@ -270,10 +285,17 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 tickUpper
     ) internal view returns (int24[4] memory ticks) {
         return _computeTriggerTicksCore(
-            tokenId, poolKey, config.modeFlags,
-            config.autoRangeLowerLimit, config.autoRangeUpperLimit,
-            config.autoExitIsRelative, config.autoExitTickLower, config.autoExitTickUpper,
-            config.autoLendToleranceTick, tickLower, tickUpper
+            tokenId,
+            poolKey,
+            config.modeFlags,
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit,
+            config.autoExitIsRelative,
+            config.autoExitTickLower,
+            config.autoExitTickUpper,
+            config.autoLendToleranceTick,
+            tickLower,
+            tickUpper
         );
     }
 
@@ -310,9 +332,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 rangeLower = type(int24).min;
         int24 rangeUpper = type(int24).max;
         if (hasAutoRange) {
-            (rangeLower, rangeUpper) = _calculateRangeTriggerTicks(
-                tickLower, tickUpper, autoRangeLowerLimit, autoRangeUpperLimit
-            );
+            (rangeLower, rangeUpper) =
+                _calculateRangeTriggerTicks(tickLower, tickUpper, autoRangeLowerLimit, autoRangeUpperLimit);
         }
 
         // Compute AUTO_LEVERAGE trigger ticks

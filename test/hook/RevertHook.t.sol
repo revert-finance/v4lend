@@ -83,16 +83,14 @@ contract RevertHookTest is BaseTest {
         // Deploy the hook to an address with the correct flags
         address flags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | 
-                Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
 
-
         // Deploy V4Oracle
-        v4Oracle = new MockV4Oracle(
-            positionManager
-        );
+        v4Oracle = new MockV4Oracle(positionManager);
 
         protocolFeeRecipient = makeAddr("protocolFeeRecipient");
 
@@ -100,8 +98,10 @@ contract RevertHookTest is BaseTest {
         liquidityCalculator = new LiquidityCalculator();
 
         // Deploy RevertHook action targets
-        RevertHookPositionActions positionActions = new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
-        RevertHookAutoLeverageActions autoLeverageActions = new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookPositionActions positionActions =
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+        RevertHookAutoLeverageActions autoLeverageActions =
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
         RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
 
@@ -119,21 +119,13 @@ contract RevertHookTest is BaseTest {
         hook = RevertHook(flags);
 
         // Deploy MockERC4626Vault for both currencies
-        vault0 = new MockERC4626Vault(
-            IERC20(Currency.unwrap(currency0)),
-            "Vault Token0",
-            "vT0"
-        );
-        vault1 = new MockERC4626Vault(
-            IERC20(Currency.unwrap(currency1)),
-            "Vault Token1",
-            "vT1"
-        );
+        vault0 = new MockERC4626Vault(IERC20(Currency.unwrap(currency0)), "Vault Token0", "vT0");
+        vault1 = new MockERC4626Vault(IERC20(Currency.unwrap(currency1)), "Vault Token1", "vT1");
 
         // Set vaults in hook using the setter function
         hook.setAutoLendVault(Currency.unwrap(currency0), vault0);
         hook.setAutoLendVault(Currency.unwrap(currency1), vault1);
-        
+
         // Verify vaults are set correctly
         assertEq(address(hook.autoLendVaults(Currency.unwrap(currency0))), address(vault0), "Vault0 should be set");
         assertEq(address(hook.autoLendVaults(Currency.unwrap(currency1))), address(vault1), "Vault1 should be set");
@@ -163,7 +155,7 @@ contract RevertHookTest is BaseTest {
             TickMath.getSqrtPriceAtTick(tickUpper),
             liquidityAmount
         );
-    
+
         // full range mint (non-hooked pool)
         (tokenId,) = positionManager.mint(
             nonHookedPoolKey,
@@ -176,7 +168,7 @@ contract RevertHookTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-    
+
         // full range mint
         (tokenId,) = positionManager.mint(
             poolKey,
@@ -226,20 +218,24 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoRange() public {
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
         // Assert that token3Id position has > 0 liquidity after swap (out of range)
@@ -248,12 +244,12 @@ contract RevertHookTest is BaseTest {
 
         // Store initial state
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
-        
+
         // Get initial position info
         (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token3Id);
         int24 initialTickLower = posInfoBefore.tickLower();
         int24 initialTickUpper = posInfoBefore.tickUpper();
-        
+
         // Perform swap to activate auto range
         uint256 amountIn = 7e17;
         BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
@@ -265,10 +261,10 @@ contract RevertHookTest is BaseTest {
             receiver: address(this),
             deadline: block.timestamp
         });
-                
+
         // Assert swap was successful
         assertEq(int256(swapDelta.amount0()), -int256(amountIn), "Swap should consume amountIn token0");
-        
+
         // Get current tick after swap
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
         console.log("currentTick after swap", currentTick);
@@ -296,16 +292,23 @@ contract RevertHookTest is BaseTest {
             assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "New position should have liquidity > 0");
 
             // Verify new position is owned by the same owner
-            assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(this), 
-                "New position should be owned by the same address");
+            assertEq(
+                IERC721(address(positionManager)).ownerOf(newTokenId),
+                address(this),
+                "New position should be owned by the same address"
+            );
 
             // Verify current tick is within the new position's range
-            assertTrue(currentTick >= newTickLower && currentTick <= newTickUpper, 
-                "Current tick should be within the new position's range");
+            assertTrue(
+                currentTick >= newTickLower && currentTick <= newTickUpper,
+                "Current tick should be within the new position's range"
+            );
 
             // Verify the old position's range is different from the new position's range
-            assertTrue(newTickLower != initialTickLower || newTickUpper != initialTickUpper, 
-                "New position should have a different range than the old position");
+            assertTrue(
+                newTickLower != initialTickLower || newTickUpper != initialTickUpper,
+                "New position should have a different range than the old position"
+            );
         }
 
         // Verify hook contract has no leftover token balances
@@ -316,19 +319,24 @@ contract RevertHookTest is BaseTest {
     function testAutoRangeCopiesGeneralConfigOnRemint() public {
         hook.setMaxTicksFromOracle(1000);
 
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
         hook.setGeneralConfig(token3Id, 3000, 60, IHooks(hook), 123, 456);
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
@@ -393,6 +401,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: -spacing,
@@ -408,6 +418,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - 2 * spacing,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -442,14 +454,30 @@ contract RevertHookTest is BaseTest {
 
         uint256 remintedTokenId = nextTokenIdBefore;
         uint256 remintedTokenId2 = nextTokenIdBefore + 1;
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 2, "Single swap should chain into a second auto-range remint");
+        assertEq(
+            positionManager.nextTokenId(),
+            nextTokenIdBefore + 2,
+            "Single swap should chain into a second auto-range remint"
+        );
 
         assertEq(positionManager.getPositionLiquidity(token2Id), 0, "Original AUTO_RANGE token should be emptied");
-        assertEq(positionManager.getPositionLiquidity(remintedTokenId), 0, "First AUTO_RANGE remint should be consumed again in the same swap");
-        assertGt(positionManager.getPositionLiquidity(remintedTokenId2), 0, "Final AUTO_RANGE remint should hold the active liquidity");
+        assertEq(
+            positionManager.getPositionLiquidity(remintedTokenId),
+            0,
+            "First AUTO_RANGE remint should be consumed again in the same swap"
+        );
+        assertGt(
+            positionManager.getPositionLiquidity(remintedTokenId2),
+            0,
+            "Final AUTO_RANGE remint should hold the active liquidity"
+        );
         _assertPositionConfigEq(remintedTokenId2, rangeConfig);
         (uint8 intermediateRangeModeFlags,,,,,,,,,,) = hook.positionConfigs(remintedTokenId);
-        assertEq(intermediateRangeModeFlags, PositionModeFlags.MODE_NONE, "Intermediate remint should be disabled after chaining");
+        assertEq(
+            intermediateRangeModeFlags,
+            PositionModeFlags.MODE_NONE,
+            "Intermediate remint should be disabled after chaining"
+        );
 
         (, PositionInfo finalRangePosInfo) = positionManager.getPoolAndPositionInfo(remintedTokenId2);
         assertTrue(
@@ -481,17 +509,15 @@ contract RevertHookTest is BaseTest {
                 ++hookActionFailedCount;
                 continue;
             }
-            if (
-                topic0 != autoRangeTopic
-                    && topic0 != autoLendDepositTopic
-                    && topic0 != autoExitTopic
-            ) {
+            if (topic0 != autoRangeTopic && topic0 != autoLendDepositTopic && topic0 != autoExitTopic) {
                 continue;
             }
 
             assertLt(matchedEvents, 4, "Only the expected chained actions should fire during the swap");
             assertEq(topic0, expectedTopics[matchedEvents], "Actions should execute in crossed-tick order");
-            assertEq(uint256(logs[i].topics[1]), expectedTokenIds[matchedEvents], "Unexpected token executed for action");
+            assertEq(
+                uint256(logs[i].topics[1]), expectedTokenIds[matchedEvents], "Unexpected token executed for action"
+            );
             unchecked {
                 ++matchedEvents;
             }
@@ -558,19 +584,24 @@ contract RevertHookTest is BaseTest {
             tokenIds[i] = stagedTokenId;
             triggerTicks[i] = nextUpperTrigger;
 
-            hook.setPositionConfig(stagedTokenId, RevertHookState.PositionConfig({
-                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-                autoExitIsRelative: false,
-                autoExitTickLower: type(int24).min,
-                autoExitTickUpper: nextUpperTrigger,
-                autoRangeLowerLimit: type(int24).min,
-                autoRangeUpperLimit: type(int24).max,
-                autoRangeLowerDelta: 0,
-                autoRangeUpperDelta: 0,
-                autoLendToleranceTick: 0,
-                autoLeverageTargetBps: 0
-            }));
+            hook.setPositionConfig(
+                stagedTokenId,
+                RevertHookState.PositionConfig({
+                    modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                    autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                    autoExitIsRelative: false,
+                    autoExitTickLower: type(int24).min,
+                    autoExitTickUpper: nextUpperTrigger,
+                    autoExitSwapOnLowerTrigger: true,
+                    autoExitSwapOnUpperTrigger: true,
+                    autoRangeLowerLimit: type(int24).min,
+                    autoRangeUpperLimit: type(int24).max,
+                    autoRangeLowerDelta: 0,
+                    autoRangeUpperDelta: 0,
+                    autoLendToleranceTick: 0,
+                    autoLeverageTargetBps: 0
+                })
+            );
 
             nextUpperTrigger += spacing;
         }
@@ -622,7 +653,9 @@ contract RevertHookTest is BaseTest {
 
         assertEq(firstExecutionCount, batchCap, "First swap should stop at the configured batch cap");
         assertEq(firstFailureCount, 0, "Capped processing should not emit HookActionFailed");
-        assertEq(hook.tickLowerLasts(poolId), triggerTicks[batchCap - 1], "Cursor should stop at the last processed trigger");
+        assertEq(
+            hook.tickLowerLasts(poolId), triggerTicks[batchCap - 1], "Cursor should stop at the last processed trigger"
+        );
 
         (, int24 currentTickAfterFirst,,) = StateLibrary.getSlot0(poolManager, poolId);
         int24 currentTickLowerAfterFirst = _getTickLower(currentTickAfterFirst, spacing);
@@ -728,6 +761,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -809,19 +844,24 @@ contract RevertHookTest is BaseTest {
         hook.setGeneralConfig(token3Id, 500, 60, IHooks(address(0)), 0, 0);
         (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
 
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: -poolKey.tickSpacing * 2,
-            autoRangeUpperDelta: -poolKey.tickSpacing,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -poolKey.tickSpacing * 2,
+                autoRangeUpperDelta: -poolKey.tickSpacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
         IERC721(address(positionManager)).approve(address(hook), token3Id);
         (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes();
         assertEq(lowerConfigured, lowerInitial + 1, "AUTO_RANGE config should add the lower trigger");
@@ -862,20 +902,28 @@ contract RevertHookTest is BaseTest {
     /// @notice Helper function to set up auto compound test: configures position, generates fees
     /// @param autoCompoundMode The auto compound mode to test
     /// @return token2Liquidity The initial liquidity of the position
-    function _setupAutoCompoundTest(RevertHook.AutoCompoundMode autoCompoundMode) internal returns (uint128 token2Liquidity) {
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: autoCompoundMode,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+    function _setupAutoCompoundTest(RevertHook.AutoCompoundMode autoCompoundMode)
+        internal
+        returns (uint128 token2Liquidity)
+    {
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: autoCompoundMode,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -932,7 +980,7 @@ contract RevertHookTest is BaseTest {
         address executor = address(this);
         address feeRecipient = hook.protocolFeeRecipient();
         address owner = address(this);
-        
+
         snapshot.executorBalance0 = currency0.balanceOf(executor);
         snapshot.executorBalance1 = currency1.balanceOf(executor);
         snapshot.ownerBalance0 = currency0.balanceOf(owner);
@@ -943,8 +991,16 @@ contract RevertHookTest is BaseTest {
 
     /// @notice Helper function to verify hook has no leftover balances
     function _verifyNoLeftoverBalances(string memory context) internal view {
-        assertEq(currency0.balanceOf(address(hook)), 0, string.concat("Hook should have 0 balance of currency0 after ", context));
-        assertEq(currency1.balanceOf(address(hook)), 0, string.concat("Hook should have 0 balance of currency1 after ", context));
+        assertEq(
+            currency0.balanceOf(address(hook)),
+            0,
+            string.concat("Hook should have 0 balance of currency0 after ", context)
+        );
+        assertEq(
+            currency1.balanceOf(address(hook)),
+            0,
+            string.concat("Hook should have 0 balance of currency1 after ", context)
+        );
     }
 
     function testBasicAutoCompound() public {
@@ -954,7 +1010,7 @@ contract RevertHookTest is BaseTest {
         uint256[] memory params = new uint256[](1);
         params[0] = token2Id;
         hook.autoCompound(params);
-   
+
         uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
         assertGt(token2LiquidityAfter, token2Liquidity, "token2Id should have more liquidity");
 
@@ -983,7 +1039,7 @@ contract RevertHookTest is BaseTest {
         uint256[] memory params = new uint256[](1);
         params[0] = token2Id;
         hook.autoCompound(params);
-   
+
         uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
         // Position liquidity should NOT increase (unlike auto-compound)
         assertEq(token2LiquidityAfter, token2Liquidity, "token2Id liquidity should remain the same after harvest");
@@ -1023,7 +1079,7 @@ contract RevertHookTest is BaseTest {
         uint256[] memory params = new uint256[](1);
         params[0] = token2Id;
         hook.autoCompound(params);
-   
+
         uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
         // Position liquidity should NOT increase (unlike auto-compound)
         assertEq(token2LiquidityAfter, token2Liquidity, "token2Id liquidity should remain the same after harvest");
@@ -1097,21 +1153,24 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoExit() public {
-
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
-
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -1160,19 +1219,24 @@ contract RevertHookTest is BaseTest {
         // Configure auto-exit with RELATIVE ticks
         // Setting autoExitTickLower = poolKey.tickSpacing means exit when price drops
         // to (posTickLower - poolKey.tickSpacing)
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: true, // Use RELATIVE ticks
-            autoExitTickLower: poolKey.tickSpacing, // Exit tick = posTickLower - tickSpacing
-            autoExitTickUpper: type(int24).max, // Don't exit on upper side
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: true, // Use RELATIVE ticks
+                autoExitTickLower: poolKey.tickSpacing, // Exit tick = posTickLower - tickSpacing
+                autoExitTickUpper: type(int24).max, // Don't exit on upper side
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -1218,21 +1282,25 @@ contract RevertHookTest is BaseTest {
     }
 
     function testAutoExitAndAutoRange() public {
-
         // Configure AUTO_EXIT_AND_AUTO_RANGE mode
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false, // Use absolute ticks
-            autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
-            autoExitTickUpper: tickUpper3 + poolKey.tickSpacing * 3,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false, // Use absolute ticks
+                autoExitTickLower: type(int24).min, // Set to min so it never triggers on lower side
+                autoExitTickUpper: tickUpper3 + poolKey.tickSpacing * 3,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // approve all positions to the hook
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
@@ -1249,7 +1317,7 @@ contract RevertHookTest is BaseTest {
 
         // ===== Test 1: Trigger Auto Range (should NOT trigger auto exit) =====
         console.log("=== Test 1: Trigger Auto Range ===");
-        
+
         // Swap down to trigger auto range on lower side (but not hit exit tick)
         uint256 amountIn = 2e17;
         BalanceDelta swapDelta1 = swapRouter.swapExactTokensForTokens({
@@ -1269,8 +1337,10 @@ contract RevertHookTest is BaseTest {
         console.log("currentTick after range swap", currentTickAfterRange);
 
         // Verify auto range happened: old position has 0 liquidity, new position was created
-        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Old position should have 0 liquidity after auto-range");
-        
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id), 0, "Old position should have 0 liquidity after auto-range"
+        );
+
         uint256 nextTokenIdAfter = positionManager.nextTokenId();
         assertEq(nextTokenIdAfter, nextTokenIdBefore + 1, "A new position should be minted after auto-range");
 
@@ -1281,22 +1351,26 @@ contract RevertHookTest is BaseTest {
         int24 newTickUpper = posInfoNew.tickUpper();
 
         // Verify new position has different range
-        assertTrue(newTickLower != initialTickLower || newTickUpper != initialTickUpper, 
-            "New position should have a different range than the old position");
-        
+        assertTrue(
+            newTickLower != initialTickLower || newTickUpper != initialTickUpper,
+            "New position should have a different range than the old position"
+        );
+
         // Verify new position has liquidity
         assertGt(positionManager.getPositionLiquidity(newTokenId), 0, "New position should have liquidity > 0");
 
         // Verify current tick is within the new position's range
-        assertTrue(currentTickAfterRange >= newTickLower && currentTickAfterRange <= newTickUpper, 
-            "Current tick should be within the new position's range");
+        assertTrue(
+            currentTickAfterRange >= newTickLower && currentTickAfterRange <= newTickUpper,
+            "Current tick should be within the new position's range"
+        );
 
         // Verify hook has no leftover balances
         _verifyNoLeftoverBalances("auto-range");
 
         // ===== Test 2: Trigger Auto Exit (should hit the absolute exit tick) =====
         console.log("=== Test 2: Trigger Auto Exit ===");
-        
+
         // Swap up to hit the absolute exit tick on the upper side
         // We need to swap enough to reach the exit tick
         uint256 exitAmountIn = 10e17;
@@ -1320,7 +1394,7 @@ contract RevertHookTest is BaseTest {
         // The exit triggers when the price crosses the exit tick during the swap
         uint128 finalLiquidity = positionManager.getPositionLiquidity(newTokenId);
         assertEq(finalLiquidity, 0, "Position should have 0 liquidity after auto-exit");
-        
+
         // Verify we crossed the exit tick (current tick should be at or above it)
         //assertTrue(currentTickAfterExit >= autoExitTickUpper, "Current tick should be at or above the exit tick after swap");
 
@@ -1329,22 +1403,26 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoExit_NonHookedPool() public {
-
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(address(0)), 0, 0);
 
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -1354,7 +1432,8 @@ contract RevertHookTest is BaseTest {
 
         // Record initial state of nonHookedPool before swap
         PoolId nonHookedPoolId = nonHookedPoolKey.toId();
-        (uint160 sqrtPriceX96NonHookedBefore, int24 tickNonHookedBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+        (uint160 sqrtPriceX96NonHookedBefore, int24 tickNonHookedBefore,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolId);
         console.log("NonHookedPool sqrtPrice BEFORE swap:", sqrtPriceX96NonHookedBefore);
         console.log("NonHookedPool tick BEFORE swap:", tickNonHookedBefore);
 
@@ -1388,29 +1467,28 @@ contract RevertHookTest is BaseTest {
         // Verify hook contract has no leftover token balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0 after auto-exit");
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
-        
+
         // Verify that the swap happened in the nonHookedPool by checking its state
         // The nonHookedPool should be initialized and have a price
-        (uint160 sqrtPriceX96NonHookedAfter, int24 tickNonHookedAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+        (uint160 sqrtPriceX96NonHookedAfter, int24 tickNonHookedAfter,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolId);
         assertGt(sqrtPriceX96NonHookedAfter, 0, "NonHookedPool should be initialized and have a price");
-        
+
         console.log("NonHookedPool sqrtPrice AFTER swap:", sqrtPriceX96NonHookedAfter);
         console.log("NonHookedPool tick AFTER swap:", tickNonHookedAfter);
-        
+
         // Verify the price changed in the nonHookedPool (proving swap happened there)
         assertTrue(
             sqrtPriceX96NonHookedAfter != sqrtPriceX96NonHookedBefore,
             "NonHookedPool price should have changed after swap"
         );
-        assertTrue(
-            tickNonHookedAfter != tickNonHookedBefore,
-            "NonHookedPool tick should have changed after swap"
+        assertTrue(tickNonHookedAfter != tickNonHookedBefore, "NonHookedPool tick should have changed after swap");
+
+        console.log(
+            "Price change:", sqrtPriceX96NonHookedAfter > sqrtPriceX96NonHookedBefore ? "increased" : "decreased"
         );
-        
-        console.log("Price change:", 
-            sqrtPriceX96NonHookedAfter > sqrtPriceX96NonHookedBefore ? "increased" : "decreased");
         console.log("Tick change:", int256(tickNonHookedAfter) - int256(tickNonHookedBefore));
-        
+
         // Verify the nonHookedPool has liquidity (from the initial mint in setUp)
         uint128 nonHookedLiquidity = poolManager.getLiquidity(nonHookedPoolId);
         assertGt(nonHookedLiquidity, 0, "NonHookedPool should have liquidity");
@@ -1419,19 +1497,24 @@ contract RevertHookTest is BaseTest {
 
     function testAutoExit_NotApproved() public {
         // Set up autoExit config for token2Id
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // DO NOT approve the position to the hook - this is the key difference
         // IERC721(address(positionManager)).approve(address(hook), token2Id); // COMMENTED OUT
@@ -1463,7 +1546,9 @@ contract RevertHookTest is BaseTest {
 
         // Verify that the position still has liquidity (autoExit failed due to lack of approval)
         uint128 token2LiquidityAfter = positionManager.getPositionLiquidity(token2Id);
-        assertGt(token2LiquidityAfter, 0, "token2Id should still have liquidity because autoExit failed without approval");
+        assertGt(
+            token2LiquidityAfter, 0, "token2Id should still have liquidity because autoExit failed without approval"
+        );
         assertEq(token2LiquidityAfter, token2LiquidityBefore, "Liquidity should remain unchanged since autoExit failed");
 
         // Verify hook contract has no leftover token balances (since autoExit didn't execute)
@@ -1474,14 +1559,14 @@ contract RevertHookTest is BaseTest {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bool eventFound = false;
         bytes32 eventSignature = keccak256("HookModifyLiquiditiesFailed(bytes,bytes[],bytes)");
-        
+
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == eventSignature && logs[i].emitter == address(hook)) {
                 eventFound = true;
                 break;
             }
         }
-        
+
         assertTrue(eventFound, "HookModifyLiquiditiesFailed event should have been emitted");
     }
 
@@ -1489,26 +1574,23 @@ contract RevertHookTest is BaseTest {
         // Create a new pool with a different fee to ensure it's separate
         PoolKey memory newPoolKey = PoolKey(currency0, currency1, 0, 10, IHooks(address(0)));
         PoolId newPoolId = newPoolKey.toId();
-        
+
         // Initialize the new pool
         poolManager.initialize(newPoolKey, Constants.SQRT_PRICE_1_1);
-        
+
         // Get initial tick
         int24 initialTick = TickMath.getTickAtSqrtPrice(Constants.SQRT_PRICE_1_1);
         console.log("Initial tick:", initialTick);
-        
+
         // Calculate liquidity amounts for the narrow range
         uint128 liquidityAmount = 50e18;
         (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-            Constants.SQRT_PRICE_1_1,
-            TickMath.getSqrtPriceAtTick(-10),
-            TickMath.getSqrtPriceAtTick(10),
-            liquidityAmount
+            Constants.SQRT_PRICE_1_1, TickMath.getSqrtPriceAtTick(-10), TickMath.getSqrtPriceAtTick(10), liquidityAmount
         );
-        
+
         console.log("Amount0 for liquidity:", amount0Expected);
         console.log("Amount1 for liquidity:", amount1Expected);
-        
+
         // Mint the narrow range position
         (uint256 newTokenId,) = positionManager.mint(
             newPoolKey,
@@ -1521,51 +1603,50 @@ contract RevertHookTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-        
+
         console.log("Minted position tokenId:", newTokenId);
-        
+
         // Get initial pool state
         (uint160 sqrtPriceBefore, int24 tickBefore,,) = StateLibrary.getSlot0(poolManager, newPoolId);
         console.log("Pool sqrtPrice before swaps:", sqrtPriceBefore);
         console.log("Pool tick before swaps:", tickBefore);
-        
+
         BalanceDelta swapDelta = swapRouter.swapExactTokensForTokens({
-                amountIn: amount0Expected * 101 / 100,
-                amountOutMin: 0,
-                zeroForOne: true,
-                poolKey: newPoolKey,
-                hookData: Constants.ZERO_BYTES,
-                receiver: address(this),
-                deadline: block.timestamp + 1
-            });
-        
+            amountIn: amount0Expected * 101 / 100,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: newPoolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
         console.log("swapDelta.amount0()", swapDelta.amount0());
         console.log("swapDelta.amount1()", swapDelta.amount1());
-        
+
         // Get final pool state
         (uint160 sqrtPriceAfter, int24 tickAfter,,) = StateLibrary.getSlot0(poolManager, newPoolId);
         console.log("Final sqrtPrice:", sqrtPriceAfter);
         console.log("Final tick:", tickAfter);
-        
+
         // Verify the tick changed
         assertTrue(tickAfter != tickBefore, "Tick should have changed after swapping");
-        
+
         // Verify we moved in the expected direction (swapping token0 -> token1 decreases price/tick)
         assertTrue(tickAfter < tickBefore, "Tick should have decreased after swapping token0 -> token1");
-        
+
         // Verify we're at or below the lower bound of the range
         assertTrue(tickAfter <= tickLower, "Final tick should be at or below the lower bound of the range");
     }
 
     function testBasicAutoLend() public {
-
         // set higher max ticks (10%) for mock oracle to avoid testing oracle price validation issues
         hook.setMaxTicksFromOracle(1000);
 
         // Create a new position for autolend testing
         int24 testTickLower = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
         int24 testTickUpper = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
-        
+
         uint128 liquidityAmount = 50e18;
         (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
             Constants.SQRT_PRICE_1_1,
@@ -1588,19 +1669,24 @@ contract RevertHookTest is BaseTest {
         );
 
         // Configure autolend for this position
-        hook.setPositionConfig(autolendTokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 60,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            autolendTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 60,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // for auto lend where new positions may be created we need to approve all positions to the hook
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
@@ -1632,11 +1718,11 @@ contract RevertHookTest is BaseTest {
         });
 
         // Verify currency0 deposit was triggered
-        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        (,,, autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency0 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency0), "Should have currency0 as autolend token");
         assertGt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have received assets");
-        
+
         uint128 liquidityAfterCurrency0Deposit = positionManager.getPositionLiquidity(autolendTokenId);
         assertEq(liquidityAfterCurrency0Deposit, 0, "Position liquidity should be 0 after currency0 deposit");
 
@@ -1657,14 +1743,17 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency0 withdraw was triggered
-        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        (,,, autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency0 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have less assets after withdraw");
-        
+
         uint128 liquidityAfterCurrency0Withdraw = positionManager.getPositionLiquidity(autolendTokenId);
-        assertGt(liquidityAfterCurrency0Withdraw, liquidityAfterCurrency0Deposit, 
-            "Position liquidity should increase after currency0 withdraw");
+        assertGt(
+            liquidityAfterCurrency0Withdraw,
+            liquidityAfterCurrency0Deposit,
+            "Position liquidity should increase after currency0 withdraw"
+        );
 
         // ===== Test 3: Currency1 Deposit (swap up more) =====
         console.log("=== Test 3: Currency1 Deposit ===");
@@ -1683,14 +1772,13 @@ contract RevertHookTest is BaseTest {
         console.log("currentTick after swap", currentTick);
 
         // Verify currency1 deposit was triggered
-        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        (,,, autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertGt(autoLendShares, 0, "Should have autolend shares after currency1 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency1), "Should have currency1 as autolend token");
         assertGt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have received assets");
-        
+
         uint128 liquidityAfterCurrency1Deposit = positionManager.getPositionLiquidity(autolendTokenId);
-        assertEq(liquidityAfterCurrency1Deposit, 0, 
-            "Position liquidity be 0 after currency1 deposit");
+        assertEq(liquidityAfterCurrency1Deposit, 0, "Position liquidity be 0 after currency1 deposit");
 
         vault1.simulateYield(1000); // 10% yield
 
@@ -1711,13 +1799,16 @@ contract RevertHookTest is BaseTest {
         autolendTokenId = positionManager.nextTokenId() - 1;
 
         // Verify currency1 withdraw was triggered
-        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        (,,, autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendShares, 0, "Should have no autolend shares after currency1 withdraw");
         assertEq(autoLendToken, address(0), "Should have no autolend token after withdraw");
         assertLt(vault1.totalAssets(), vault1BalanceBefore, "Vault1 should have less assets after withdraw");
 
-        assertGt(positionManager.getPositionLiquidity(autolendTokenId), liquidityAfterCurrency1Deposit, 
-            "Position liquidity should increase after currency1 withdraw");
+        assertGt(
+            positionManager.getPositionLiquidity(autolendTokenId),
+            liquidityAfterCurrency1Deposit,
+            "Position liquidity should increase after currency1 withdraw"
+        );
 
         // ===== Test 5: Currency0 Deposit Second Time (swap down again) =====
         console.log("=== Test 5: Currency0 Deposit Second Time ===");
@@ -1732,15 +1823,18 @@ contract RevertHookTest is BaseTest {
             deadline: block.timestamp
         });
 
-        (,,,autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        (,,, autoLendToken, autoLendShares,,,) = hook.positionStates(autolendTokenId);
 
         // Verify currency0 deposit was triggered again
         assertGt(autoLendShares, 0, "Should have autolend shares after second currency0 deposit");
         assertEq(autoLendToken, Currency.unwrap(currency0), "Should have currency0 as autolend token again");
         assertGt(vault0.totalAssets(), vault0BalanceBefore, "Vault0 should have received assets in second deposit");
-        
-        assertEq(positionManager.getPositionLiquidity(autolendTokenId), 0, 
-            "Position liquidity be 0 after second currency0 deposit");
+
+        assertEq(
+            positionManager.getPositionLiquidity(autolendTokenId),
+            0,
+            "Position liquidity be 0 after second currency0 deposit"
+        );
 
         // Final verification: hook contract has no leftover token balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
@@ -1772,19 +1866,24 @@ contract RevertHookTest is BaseTest {
             Constants.ZERO_BYTES
         );
 
-        hook.setPositionConfig(autolendTokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 60,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            autolendTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 60,
+                autoLeverageTargetBps: 0
+            })
+        );
         hook.setGeneralConfig(autolendTokenId, 3000, 60, IHooks(hook), 123, 456);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
 
@@ -1808,7 +1907,9 @@ contract RevertHookTest is BaseTest {
         });
 
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(autolendTokenId);
-        assertEq(positionManager.getPositionLiquidity(autolendTokenId), 0, "Deposit should remove the original liquidity");
+        assertEq(
+            positionManager.getPositionLiquidity(autolendTokenId), 0, "Deposit should remove the original liquidity"
+        );
         assertGt(autoLendShares, 0, "Deposit should create lend shares");
         assertEq(autoLendToken, Currency.unwrap(currency0), "Deposit should lend token0 on the lower side");
 
@@ -1823,7 +1924,9 @@ contract RevertHookTest is BaseTest {
             deadline: block.timestamp
         });
 
-        assertEq(positionManager.nextTokenId(), nextTokenIdBeforeWithdraw + 1, "Withdraw should remint exactly one token");
+        assertEq(
+            positionManager.nextTokenId(), nextTokenIdBeforeWithdraw + 1, "Withdraw should remint exactly one token"
+        );
         uint256 newTokenId = nextTokenIdBeforeWithdraw;
 
         (
@@ -1855,7 +1958,9 @@ contract RevertHookTest is BaseTest {
                 continue;
             }
 
-            hook.setPositionConfig(token3Id, _buildNonVaultModeConfig(mode, false, false, type(int24).min, type(int24).max));
+            hook.setPositionConfig(
+                token3Id, _buildNonVaultModeConfig(mode, false, false, type(int24).min, type(int24).max)
+            );
 
             (uint8 storedMode, RevertHookState.AutoCompoundMode storedAutoCompoundMode,,,,,,,,,) =
                 hook.positionConfigs(token3Id);
@@ -1897,7 +2002,9 @@ contract RevertHookTest is BaseTest {
             }
 
             vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
-            hook.setPositionConfig(token3Id, _buildNonVaultModeConfig(mode, false, false, type(int24).min, type(int24).max));
+            hook.setPositionConfig(
+                token3Id, _buildNonVaultModeConfig(mode, false, false, type(int24).min, type(int24).max)
+            );
 
             unchecked {
                 ++invalidCount;
@@ -2003,9 +2110,7 @@ contract RevertHookTest is BaseTest {
         hook.transferOwnership(newOwner);
         assertEq(hook.owner(), newOwner, "ownership should transfer");
 
-        vm.expectRevert(
-            abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, address(this))
-        );
+        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, address(this)));
         hook.setProtocolFeeBps(123);
 
         vm.prank(newOwner);
@@ -2024,12 +2129,13 @@ contract RevertHookTest is BaseTest {
     function testModeCRL_FullAutomationCoverage() public {
         hook.setMaxTicksFromOracle(1000);
 
-        uint8 modeCRL = PositionModeFlags.MODE_AUTO_COMPOUND
-            | PositionModeFlags.MODE_AUTO_RANGE
-            | PositionModeFlags.MODE_AUTO_LEND;
+        uint8 modeCRL =
+            PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEND;
 
         // ----- AutoCompound path (C) -----
-        hook.setPositionConfig(tokenId, _buildNonVaultModeConfig(modeCRL, true, false, type(int24).min, type(int24).max));
+        hook.setPositionConfig(
+            tokenId, _buildNonVaultModeConfig(modeCRL, true, false, type(int24).min, type(int24).max)
+        );
         IERC721(address(positionManager)).approve(address(hook), tokenId);
 
         uint128 liquidityBeforeCompound = positionManager.getPositionLiquidity(tokenId);
@@ -2097,8 +2203,12 @@ contract RevertHookTest is BaseTest {
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(rangedTokenId);
         assertEq(autoLendShares, 0, "AUTO_LEND should not hold shares when AUTO_RANGE took priority");
         assertEq(autoLendToken, address(0), "AUTO_LEND token should remain unset when AUTO_RANGE took priority");
-        assertEq(vault0.totalAssets(), vault0AssetsBefore, "Vault0 should remain unchanged when AUTO_LEND is not executed");
-        assertEq(vault1.totalAssets(), vault1AssetsBefore, "Vault1 should remain unchanged when AUTO_LEND is not executed");
+        assertEq(
+            vault0.totalAssets(), vault0AssetsBefore, "Vault0 should remain unchanged when AUTO_LEND is not executed"
+        );
+        assertEq(
+            vault1.totalAssets(), vault1AssetsBefore, "Vault1 should remain unchanged when AUTO_LEND is not executed"
+        );
 
         _verifyNoLeftoverBalances("C|R|L coverage");
     }
@@ -2121,6 +2231,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: enableExit ? exitTickLower : type(int24).min,
             autoExitTickUpper: enableExit ? exitTickUpper : type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: hasRangeTriggers ? int24(0) : type(int24).min,
             autoRangeUpperLimit: hasRangeTriggers ? int24(0) : type(int24).max,
             autoRangeLowerDelta: hasRangeMode ? -poolKey.tickSpacing : int24(0),
@@ -2170,19 +2282,24 @@ contract RevertHookTest is BaseTest {
         // Configure auto exit with maxPriceImpact = 0 (no limit)
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 0, 0);
 
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -2211,7 +2328,10 @@ contract RevertHookTest is BaseTest {
         bool partialSwapEventFound = false;
 
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature && logs[i].emitter == address(hook)) {
+            if (
+                logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature
+                    && logs[i].emitter == address(hook)
+            ) {
                 partialSwapEventFound = true;
                 break;
             }
@@ -2229,19 +2349,24 @@ contract RevertHookTest is BaseTest {
         uint32 maxPriceImpactBps = 10;
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), maxPriceImpactBps, maxPriceImpactBps);
 
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -2268,20 +2393,27 @@ contract RevertHookTest is BaseTest {
         uint256 swappedAmount;
 
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature && logs[i].emitter == address(hook)) {
+            if (
+                logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature
+                    && logs[i].emitter == address(hook)
+            ) {
                 partialSwapEventFound = true;
                 // Decode the event data
-                (,requestedAmount, swappedAmount) = abi.decode(logs[i].data, (bool,uint256, uint256));
+                (, requestedAmount, swappedAmount) = abi.decode(logs[i].data, (bool, uint256, uint256));
                 break;
             }
         }
 
         assertTrue(partialSwapEventFound, "HookSwapPartial should be emitted when price impact limit is reached");
-        assertLt(swappedAmount, requestedAmount, "Swapped amount should be less than requested due to price impact limit");
+        assertLt(
+            swappedAmount, requestedAmount, "Swapped amount should be less than requested due to price impact limit"
+        );
 
         // Verify that the partial swap amount is significantly less than the requested amount
         // With 10 bps limit, the hook's swap should be limited to a small fraction
-        assertLt(swappedAmount * 10, requestedAmount, "Partial swap should be much smaller than requested with strict limit");
+        assertLt(
+            swappedAmount * 10, requestedAmount, "Partial swap should be much smaller than requested with strict limit"
+        );
 
         console.log("Requested swap amount:", requestedAmount);
         console.log("Actual swapped amount:", swappedAmount);
@@ -2291,19 +2423,24 @@ contract RevertHookTest is BaseTest {
         // Configure auto exit with a moderate price impact limit (100 bps = 1%)
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 100, 100);
 
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -2341,19 +2478,24 @@ contract RevertHookTest is BaseTest {
         // maxPriceImpact1: 1000 bps (10%) - Loose for token1 -> token0
         hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 10, 1000);
 
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
-            autoExitTickUpper: tickUpper2,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -2378,7 +2520,10 @@ contract RevertHookTest is BaseTest {
         bool partialSwapEventFound = false;
 
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature && logs[i].emitter == address(hook)) {
+            if (
+                logs[i].topics.length > 0 && logs[i].topics[0] == partialSwapEventSignature
+                    && logs[i].emitter == address(hook)
+            ) {
                 partialSwapEventFound = true;
                 break;
             }
@@ -2392,19 +2537,24 @@ contract RevertHookTest is BaseTest {
         // Configure auto range with a moderate price impact limit (200 bps = 2%)
         hook.setGeneralConfig(token3Id, 3000, 60, IHooks(hook), 200, 200);
 
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: 0,
-            autoRangeUpperLimit: 0,
-            autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
@@ -2426,7 +2576,9 @@ contract RevertHookTest is BaseTest {
         });
 
         // Verify auto range happened
-        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Old position should have 0 liquidity after auto-range");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id), 0, "Old position should have 0 liquidity after auto-range"
+        );
 
         uint256 nextTokenIdAfter = positionManager.nextTokenId();
         assertEq(nextTokenIdAfter, nextTokenIdBefore + 1, "A new position should be minted after auto-range");
@@ -2467,19 +2619,24 @@ contract RevertHookTest is BaseTest {
 
         // Try to configure position - should revert
         vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
     }
 
     function testMinPositionValue_CanConfigureAboveMinimum() public {
@@ -2487,19 +2644,24 @@ contract RevertHookTest is BaseTest {
         v4Oracle.setMockPositionValue(1 ether); // Above default 0.01 ether minimum
 
         // Configure position - should succeed
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Verify position is configured and activated
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
@@ -2515,19 +2677,24 @@ contract RevertHookTest is BaseTest {
         v4Oracle.setMockPositionValue(1 ether);
 
         // Configure position
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Verify position is activated
         (,, uint32 lastActivatedBefore,,,,,) = hook.positionStates(tokenId);
@@ -2573,37 +2740,47 @@ contract RevertHookTest is BaseTest {
 
         // Try to configure - should revert due to low value
         vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
-        hook.setPositionConfig(newTokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            newTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Set mock oracle to return high value
         v4Oracle.setMockPositionValue(1 ether);
 
         // Now configure should succeed
-        hook.setPositionConfig(newTokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            newTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Verify position is activated
         (,, uint32 lastActivated,,,,,) = hook.positionStates(newTokenId);
@@ -2619,38 +2796,48 @@ contract RevertHookTest is BaseTest {
 
         // Try to configure - should revert (value below 0.01 ether)
         vm.expectRevert(abi.encodeWithSignature("PositionValueTooLow()"));
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Owner lowers the minimum
         hook.setMinPositionValueNative(0.001 ether);
         assertEq(hook.minPositionValueNative(), 0.001 ether, "Minimum should be updated");
 
         // Now configure should succeed
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Verify position is configured
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
@@ -2662,37 +2849,47 @@ contract RevertHookTest is BaseTest {
         v4Oracle.setMockPositionValue(1 ether);
 
         // Configure position
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Set mock oracle to return low value
         v4Oracle.setMockPositionValue(0.001 ether);
 
         // Disabling position (setting mode to NONE) should always work regardless of value
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_NONE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_NONE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Verify position is disabled
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
@@ -2711,19 +2908,24 @@ contract RevertHookTest is BaseTest {
         v4Oracle.setMockPositionValue(0);
 
         // Configure should succeed even with 0 value
-        hook.setPositionConfig(tokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // Verify position is configured
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
@@ -2765,19 +2967,24 @@ contract RevertHookTest is BaseTest {
 
         // Now configure auto-exit with a trigger that should already be met
         // Since the tick is already below tickLower2, setting autoExitTickLower to tickLower2 should trigger immediately
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower2,  // Trigger when tick <= -60
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2, // Trigger when tick <= -60
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // The auto-exit should have executed immediately
         uint128 liquidityAfter = positionManager.getPositionLiquidity(token2Id);
@@ -2827,19 +3034,24 @@ contract RevertHookTest is BaseTest {
 
         // Configure auto-range with a trigger that should already be met
         // autoRangeLowerLimit of 0 means trigger when tick reaches tickLower
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: 0,  // Trigger when tick <= tickLower
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: -60,
-            autoRangeUpperDelta: 60,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0, // Trigger when tick <= tickLower
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // The auto-range should have executed immediately
         uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
@@ -2857,8 +3069,11 @@ contract RevertHookTest is BaseTest {
         assertGt(newLiquidity, 0, "New position should have liquidity > 0");
 
         // Verify new position is owned by the same owner
-        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(this),
-            "New position should be owned by the same address");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(newTokenId),
+            address(this),
+            "New position should be owned by the same address"
+        );
 
         // Verify hook has no leftover balances
         assertEq(currency0.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency0");
@@ -2870,7 +3085,7 @@ contract RevertHookTest is BaseTest {
 
         // First, perform a swap to move the tick out of the position range
         // Need to swap more to get past the AUTO_LEND trigger which is at tickLower - tickSpacing
-        uint256 amountIn = 14e17;  // Larger swap to move tick further
+        uint256 amountIn = 14e17; // Larger swap to move tick further
         swapRouter.swapExactTokensForTokens({
             amountIn: amountIn,
             amountOutMin: 0,
@@ -2898,19 +3113,24 @@ contract RevertHookTest is BaseTest {
 
         // Configure auto-lend with a trigger that should already be met
         // autoLendToleranceTick controls when the deposit happens - price goes out of range + tolerance
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,  // No tolerance - trigger immediately when out of range
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0, // No tolerance - trigger immediately when out of range
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // The auto-lend deposit should have executed immediately
         uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
@@ -2937,7 +3157,9 @@ contract RevertHookTest is BaseTest {
 
         // Position 3 has range [tickLower3, tickUpper3] = [-60, 60]
         // Current tick should be at 0 (within range)
-        assertTrue(currentTick >= tickLower3 && currentTick <= tickUpper3, "Current tick should be within position range");
+        assertTrue(
+            currentTick >= tickLower3 && currentTick <= tickUpper3, "Current tick should be within position range"
+        );
 
         // Get initial liquidity
         uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
@@ -2948,19 +3170,24 @@ contract RevertHookTest is BaseTest {
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
         // Configure auto-exit with triggers outside current tick
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: tickLower3 - 60,  // Trigger at -120, but we're at 0
-            autoExitTickUpper: tickUpper3 + 60,  // Trigger at 120, but we're at 0
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower3 - 60, // Trigger at -120, but we're at 0
+                autoExitTickUpper: tickUpper3 + 60, // Trigger at 120, but we're at 0
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         // No immediate execution should happen - liquidity should remain
         uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
@@ -2983,19 +3210,24 @@ contract RevertHookTest is BaseTest {
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: exitLower,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: tickLower3 - rangeLower,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: -spacing,
-            autoRangeUpperDelta: spacing,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLower,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: tickLower3 - rangeLower,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Immediate lower-side setup should exit old token");
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Exit should win over range and avoid remint");
@@ -3015,19 +3247,24 @@ contract RevertHookTest is BaseTest {
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: exitUpper,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: rangeUpper - tickUpper3,
-            autoRangeLowerDelta: -spacing,
-            autoRangeUpperDelta: spacing,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: exitUpper,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: rangeUpper - tickUpper3,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Immediate upper-side setup should exit old token");
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Exit should win over range and avoid remint");
@@ -3045,21 +3282,28 @@ contract RevertHookTest is BaseTest {
         assertLt(currentTickLower, tickLower2, "Position must be below range before exact-boundary check");
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: currentTickLower,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: currentTickLower,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
-        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "Exact lower-tick AUTO_EXIT should execute immediately");
+        assertEq(
+            positionManager.getPositionLiquidity(token2Id), 0, "Exact lower-tick AUTO_EXIT should execute immediately"
+        );
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after exact-boundary exit");
     }
@@ -3074,22 +3318,31 @@ contract RevertHookTest is BaseTest {
 
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
         IERC721(address(positionManager)).approve(address(hook), token3Id);
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: tickLower3 - currentTickLower,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: -poolKey.tickSpacing,
-            autoRangeUpperDelta: poolKey.tickSpacing,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: tickLower3 - currentTickLower,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -poolKey.tickSpacing,
+                autoRangeUpperDelta: poolKey.tickSpacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
-        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Exact lower-tick AUTO_RANGE should remint immediately");
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate exact-boundary range should mint one token");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id), 0, "Exact lower-tick AUTO_RANGE should remint immediately"
+        );
+        assertEq(
+            positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate exact-boundary range should mint one token"
+        );
     }
 
     function testImmediateExecution_AutoLendTriggersAtExactLowerTick() public {
@@ -3099,19 +3352,24 @@ contract RevertHookTest is BaseTest {
         int24 currentTickLower = _moveTickDownUntilAutoLendEqualityTick(tickLower3, 5e15, 240);
         int24 tolerance = (tickLower3 - poolKey.tickSpacing - currentTickLower) / 2;
 
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: tolerance,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: tolerance,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
@@ -3129,21 +3387,28 @@ contract RevertHookTest is BaseTest {
         assertGe(currentTickLower, tickUpper2, "Position must be at or above range before exact upper-bound check");
 
         IERC721(address(positionManager)).approve(address(hook), token2Id);
-        hook.setPositionConfig(token2Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: currentTickLower,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: currentTickLower,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
-        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "Exact upper-tick AUTO_EXIT should execute immediately");
+        assertEq(
+            positionManager.getPositionLiquidity(token2Id), 0, "Exact upper-tick AUTO_EXIT should execute immediately"
+        );
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after exact upper-bound exit");
     }
@@ -3158,22 +3423,33 @@ contract RevertHookTest is BaseTest {
 
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
         IERC721(address(positionManager)).approve(address(hook), token3Id);
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: currentTickLower - tickUpper3,
-            autoRangeLowerDelta: -poolKey.tickSpacing,
-            autoRangeUpperDelta: poolKey.tickSpacing,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: currentTickLower - tickUpper3,
+                autoRangeLowerDelta: -poolKey.tickSpacing,
+                autoRangeUpperDelta: poolKey.tickSpacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
-        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Exact upper-tick AUTO_RANGE should remint immediately");
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "Immediate exact upper-bound range should mint one token");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id), 0, "Exact upper-tick AUTO_RANGE should remint immediately"
+        );
+        assertEq(
+            positionManager.nextTokenId(),
+            nextTokenIdBefore + 1,
+            "Immediate exact upper-bound range should mint one token"
+        );
     }
 
     function testSetPositionConfig_AutoRangeUpperTriggerSameRangeReverts() public {
@@ -3193,6 +3469,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: currentTickLower - tickUpper3,
             autoRangeLowerDelta: tickLower3 - currentTickLower,
@@ -3223,19 +3501,24 @@ contract RevertHookTest is BaseTest {
         (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
 
         vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: -spacing,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 2 * spacing,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: -spacing,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 2 * spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Rejected config should not mint a replacement");
         assertEq(
@@ -3256,19 +3539,24 @@ contract RevertHookTest is BaseTest {
         (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
 
         vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: -spacing,
-            autoRangeLowerDelta: -2 * spacing,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: -spacing,
+                autoRangeLowerDelta: -2 * spacing,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Rejected config should not mint a replacement");
         assertEq(
@@ -3289,19 +3577,24 @@ contract RevertHookTest is BaseTest {
         int24 currentTickLower = _moveTickUpUntilAutoLendEqualityTick(tickUpper3, 5e15, 240);
         int24 tolerance = (currentTickLower - tickUpper3) / 2;
 
-        hook.setPositionConfig(token3Id, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_LEND,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: false,
-            autoExitTickLower: type(int24).min,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: tolerance,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: tolerance,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(token3Id);
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
@@ -3327,7 +3620,9 @@ contract RevertHookTest is BaseTest {
         vm.recordLogs();
         _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
 
-        assertEq(positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Missing vault must not strip LP liquidity");
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Missing vault must not strip LP liquidity"
+        );
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Missing vault must not disable config");
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
@@ -3339,7 +3634,10 @@ contract RevertHookTest is BaseTest {
         _verifyNoLeftoverBalances("missing auto-lend vault");
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertTrue(_sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Missing vault path should emit HookAutoLendFailed");
+        assertTrue(
+            _sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")),
+            "Missing vault path should emit HookAutoLendFailed"
+        );
         assertTrue(
             _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
             "Missing vault path should emit HookActionFailed"
@@ -3365,7 +3663,9 @@ contract RevertHookTest is BaseTest {
         vm.recordLogs();
         _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
 
-        assertGe(positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Failed deposit must restore liquidity");
+        assertGe(
+            positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Failed deposit must restore liquidity"
+        );
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Failed deposit must keep config active");
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
@@ -3378,7 +3678,10 @@ contract RevertHookTest is BaseTest {
         _verifyNoLeftoverBalances("failed auto-lend deposit");
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertTrue(_sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Deposit failure should emit HookAutoLendFailed");
+        assertTrue(
+            _sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")),
+            "Deposit failure should emit HookAutoLendFailed"
+        );
         assertTrue(
             _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
             "Deposit failure should emit HookActionFailed"
@@ -3420,7 +3723,10 @@ contract RevertHookTest is BaseTest {
         assertEq(upperAfter, upperBefore + 1, "Immediate failure must leave the unfired upper trigger active");
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertTrue(_sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Immediate failure should emit HookAutoLendFailed");
+        assertTrue(
+            _sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")),
+            "Immediate failure should emit HookAutoLendFailed"
+        );
         assertTrue(
             _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
             "Immediate failure should emit HookActionFailed"
@@ -3460,7 +3766,10 @@ contract RevertHookTest is BaseTest {
         assertEq(upperAfterFailure, upperBeforeFailure - 1, "Failed withdraw must consume the fired re-entry trigger");
 
         Vm.Log[] memory failureLogs = vm.getRecordedLogs();
-        assertTrue(_sawEventTopic(failureLogs, keccak256("HookAutoLendFailed(address,address,bytes)")), "Failed withdraw should emit HookAutoLendFailed");
+        assertTrue(
+            _sawEventTopic(failureLogs, keccak256("HookAutoLendFailed(address,address,bytes)")),
+            "Failed withdraw should emit HookAutoLendFailed"
+        );
         assertTrue(
             _sawHookActionFailed(failureLogs, token3Id, RevertHookState.Mode.AUTO_LEND),
             "Failed withdraw should emit HookActionFailed"
@@ -3512,7 +3821,9 @@ contract RevertHookTest is BaseTest {
         vm.recordLogs();
         _moveTickUpUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
 
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Failed re-entry should not mint a replacement token");
+        assertEq(
+            positionManager.nextTokenId(), nextTokenIdBefore, "Failed re-entry should not mint a replacement token"
+        );
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Failed re-entry must leave the old token empty");
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Empty position must be disabled after failed re-entry");
@@ -3545,6 +3856,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2 + poolKey.tickSpacing,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -3569,6 +3882,51 @@ contract RevertHookTest is BaseTest {
         assertEq(upperAfter, upperInitial, "Triggered lower exit should remove stale upper node");
     }
 
+    function testAutoExitLowerWithoutSwap_LeavesBothTokens() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLower = _getTickLower(currentTick, poolKey.tickSpacing);
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(token2Id);
+        assertLt(posInfo.tickLower(), currentTickLower, "Test setup requires price inside the position range");
+        assertGt(posInfo.tickUpper(), currentTickLower, "Test setup requires price inside the position range");
+
+        uint256 balance0Before = IERC20(Currency.unwrap(currency0)).balanceOf(address(this));
+        uint256 balance1Before = IERC20(Currency.unwrap(currency1)).balanceOf(address(this));
+
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: currentTickLower,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: false,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        assertEq(
+            positionManager.getPositionLiquidity(token2Id), 0, "Immediate lower AUTO_EXIT should remove all liquidity"
+        );
+        (uint8 modeAfter,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(modeAfter, PositionModeFlags.MODE_NONE, "Immediate lower AUTO_EXIT should disable the position");
+
+        uint256 balance0After = IERC20(Currency.unwrap(currency0)).balanceOf(address(this));
+        uint256 balance1After = IERC20(Currency.unwrap(currency1)).balanceOf(address(this));
+        assertGt(balance0After, balance0Before, "No-swap lower AUTO_EXIT should return token0");
+        assertGt(balance1After, balance1Before, "No-swap lower AUTO_EXIT should keep token1 instead of forcing a swap");
+        _verifyNoLeftoverBalances("lower auto-exit without swap");
+    }
+
     function testSetPositionConfig_AutoRangeLowerTriggerSameRangeReverts() public {
         hook.setMaxTicksFromOracle(1000);
 
@@ -3579,6 +3937,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -3616,6 +3976,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: true,
             autoExitTickLower: 2 * spacing,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: -2 * spacing,
@@ -3639,22 +4001,29 @@ contract RevertHookTest is BaseTest {
 
         (, PositionInfo remintedPosInfo) = positionManager.getPoolAndPositionInfo(remintedTokenId);
         int24 newExitTickLower = remintedPosInfo.tickLower() - config.autoExitTickLower;
-        assertLt(newExitTickLower, oldExitTickLower, "Reminted position should compute a fresh, lower relative exit tick");
+        assertLt(
+            newExitTickLower, oldExitTickLower, "Reminted position should compute a fresh, lower relative exit tick"
+        );
 
         // Isolate relative AUTO_EXIT checks after remint so subsequent swaps cannot trigger another range remint.
-        hook.setPositionConfig(remintedTokenId, RevertHookState.PositionConfig({
-            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
-            autoExitIsRelative: true,
-            autoExitTickLower: config.autoExitTickLower,
-            autoExitTickUpper: type(int24).max,
-            autoRangeLowerLimit: type(int24).min,
-            autoRangeUpperLimit: type(int24).max,
-            autoRangeLowerDelta: 0,
-            autoRangeUpperDelta: 0,
-            autoLendToleranceTick: 0,
-            autoLeverageTargetBps: 0
-        }));
+        hook.setPositionConfig(
+            remintedTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoExitIsRelative: true,
+                autoExitTickLower: config.autoExitTickLower,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
 
         _moveTickDownUntil(oldExitTickLower, 1e16, 220);
         (, int24 tickAtOldThreshold,,) = StateLibrary.getSlot0(poolManager, poolId);
@@ -3666,7 +4035,11 @@ contract RevertHookTest is BaseTest {
         );
 
         _moveTickDownUntil(newExitTickLower - spacing, 2e16, 220);
-        assertEq(positionManager.getPositionLiquidity(remintedTokenId), 0, "Reminted position should exit at new relative trigger");
+        assertEq(
+            positionManager.getPositionLiquidity(remintedTokenId),
+            0,
+            "Reminted position should exit at new relative trigger"
+        );
         (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(remintedTokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Config should clear after reminted relative auto-exit");
     }
@@ -3683,6 +4056,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: tickLower3 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper3 + poolKey.tickSpacing,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -3693,8 +4068,12 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token3Id, exitConfig);
 
         (uint32 lowerAfterExitConfig, uint32 upperAfterExitConfig) = _getTriggerListSizes();
-        assertEq(lowerAfterExitConfig, lowerInitial + 1, "Lower trigger list should include configured AUTO_EXIT lower tick");
-        assertEq(upperAfterExitConfig, upperInitial + 1, "Upper trigger list should include configured AUTO_EXIT upper tick");
+        assertEq(
+            lowerAfterExitConfig, lowerInitial + 1, "Lower trigger list should include configured AUTO_EXIT lower tick"
+        );
+        assertEq(
+            upperAfterExitConfig, upperInitial + 1, "Upper trigger list should include configured AUTO_EXIT upper tick"
+        );
 
         hook.setPositionConfig(
             token3Id,
@@ -3710,6 +4089,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: 0,
             autoRangeUpperLimit: 0,
             autoRangeLowerDelta: -poolKey.tickSpacing,
@@ -3740,14 +4121,22 @@ contract RevertHookTest is BaseTest {
             }
         }
 
-        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "AUTO_RANGE should remint when lower trigger is crossed");
+        assertEq(
+            positionManager.nextTokenId(),
+            nextTokenIdBefore + 1,
+            "AUTO_RANGE should remint when lower trigger is crossed"
+        );
         uint256 remintedTokenId = nextTokenIdBefore;
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Original token should be emptied after remint");
         assertGt(positionManager.getPositionLiquidity(remintedTokenId), 0, "Reminted token should stay active");
 
         (uint32 lowerAfterRemint, uint32 upperAfterRemint) = _getTriggerListSizes();
-        assertEq(lowerAfterRemint, lowerInitial + 1, "Remint should replace lower tick entry without leaking stale ticks");
-        assertEq(upperAfterRemint, upperInitial + 1, "Remint should replace upper tick entry without leaking stale ticks");
+        assertEq(
+            lowerAfterRemint, lowerInitial + 1, "Remint should replace lower tick entry without leaking stale ticks"
+        );
+        assertEq(
+            upperAfterRemint, upperInitial + 1, "Remint should replace upper tick entry without leaking stale ticks"
+        );
 
         hook.setPositionConfig(
             remintedTokenId,
@@ -3768,6 +4157,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: staleExitTick,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -3791,7 +4182,11 @@ contract RevertHookTest is BaseTest {
         vm.recordLogs();
         _moveTickDownUntil(staleExitTick - poolKey.tickSpacing, 2e16, 160);
 
-        assertGt(positionManager.getPositionLiquidity(token3Id), 0, "Disabled out-of-range position must not execute stale AUTO_EXIT");
+        assertGt(
+            positionManager.getPositionLiquidity(token3Id),
+            0,
+            "Disabled out-of-range position must not execute stale AUTO_EXIT"
+        );
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertFalse(
             _sawIndexedTokenEvent(logs, keccak256("AutoExit(uint256,address,address,uint256,uint256)"), token3Id),
@@ -3810,6 +4205,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -3903,6 +4300,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -3943,7 +4342,10 @@ contract RevertHookTest is BaseTest {
         bool sawModifyFailed;
         for (uint256 i; i < logs.length; ++i) {
             if (logs[i].emitter != address(hook) || logs[i].topics.length == 0) continue;
-            if (logs[i].topics[0] == autoExitTopic && logs[i].topics.length > 1 && uint256(logs[i].topics[1]) == token2Id) {
+            if (
+                logs[i].topics[0] == autoExitTopic && logs[i].topics.length > 1
+                    && uint256(logs[i].topics[1]) == token2Id
+            ) {
                 sawAutoExitForToken2 = true;
             }
             if (logs[i].topics[0] == modifyFailedTopic) {
@@ -3961,6 +4363,8 @@ contract RevertHookTest is BaseTest {
             autoExitIsRelative: false,
             autoExitTickLower: tickLower2 - poolKey.tickSpacing,
             autoExitTickUpper: tickUpper2 + poolKey.tickSpacing,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: type(int24).min,
             autoRangeUpperLimit: type(int24).max,
             autoRangeLowerDelta: 0,
@@ -3986,13 +4390,7 @@ contract RevertHookTest is BaseTest {
                 liquidityStep = 1;
             }
             positionManager.decreaseLiquidity(
-                token2Id,
-                liquidityStep,
-                0,
-                0,
-                address(this),
-                block.timestamp,
-                Constants.ZERO_BYTES
+                token2Id, liquidityStep, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
             );
 
             (,, uint32 lastActivatedLow,,,,,) = hook.positionStates(token2Id);
@@ -4003,12 +4401,7 @@ contract RevertHookTest is BaseTest {
 
             v4Oracle.setMockPositionValue(1 ether);
             positionManager.increaseLiquidity(
-                token2Id,
-                liquidityStep,
-                type(uint256).max,
-                type(uint256).max,
-                block.timestamp,
-                Constants.ZERO_BYTES
+                token2Id, liquidityStep, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
             );
 
             (,, uint32 lastActivatedHigh,,,,,) = hook.positionStates(token2Id);
@@ -4079,11 +4472,10 @@ contract RevertHookTest is BaseTest {
         return false;
     }
 
-    function _moveTickDownUntil(
-        int24 targetTick,
-        uint256 amountInPerSwap,
-        uint256 maxSteps
-    ) internal returns (int24 currentTick) {
+    function _moveTickDownUntil(int24 targetTick, uint256 amountInPerSwap, uint256 maxSteps)
+        internal
+        returns (int24 currentTick)
+    {
         (, currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
 
         uint256 steps;
@@ -4106,11 +4498,10 @@ contract RevertHookTest is BaseTest {
         assertLe(currentTick, targetTick, "Target tick was not reached");
     }
 
-    function _moveTickUpUntil(
-        int24 targetTick,
-        uint256 amountInPerSwap,
-        uint256 maxSteps
-    ) internal returns (int24 currentTick) {
+    function _moveTickUpUntil(int24 targetTick, uint256 amountInPerSwap, uint256 maxSteps)
+        internal
+        returns (int24 currentTick)
+    {
         (, currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
 
         uint256 steps;
@@ -4133,21 +4524,18 @@ contract RevertHookTest is BaseTest {
         assertGe(currentTick, targetTick, "Target tick was not reached");
     }
 
-    function _moveTickDownUntilAutoLendEqualityTick(
-        int24 positionTickLower,
-        uint256 amountInPerSwap,
-        uint256 maxSteps
-    ) internal returns (int24 currentTickLower) {
+    function _moveTickDownUntilAutoLendEqualityTick(int24 positionTickLower, uint256 amountInPerSwap, uint256 maxSteps)
+        internal
+        returns (int24 currentTickLower)
+    {
         int24 spacing = poolKey.tickSpacing;
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
         currentTickLower = _getTickLower(currentTick, spacing);
 
         uint256 steps;
         while (
-            (
-                currentTickLower > positionTickLower - spacing
-                    || (positionTickLower - spacing - currentTickLower) % (2 * spacing) != 0
-            ) && steps < maxSteps
+            (currentTickLower > positionTickLower - spacing
+                    || (positionTickLower - spacing - currentTickLower) % (2 * spacing) != 0) && steps < maxSteps
         ) {
             swapRouter.swapExactTokensForTokens({
                 amountIn: amountInPerSwap,
@@ -4173,11 +4561,10 @@ contract RevertHookTest is BaseTest {
         );
     }
 
-    function _moveTickUpUntilAutoLendEqualityTick(
-        int24 positionTickUpper,
-        uint256 amountInPerSwap,
-        uint256 maxSteps
-    ) internal returns (int24 currentTickLower) {
+    function _moveTickUpUntilAutoLendEqualityTick(int24 positionTickUpper, uint256 amountInPerSwap, uint256 maxSteps)
+        internal
+        returns (int24 currentTickLower)
+    {
         int24 spacing = poolKey.tickSpacing;
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
         currentTickLower = _getTickLower(currentTick, spacing);
@@ -4213,9 +4600,7 @@ contract RevertHookTest is BaseTest {
 }
 
 contract RevertingERC4626Vault is MockERC4626Vault {
-    constructor(IERC20 asset_, string memory name_, string memory symbol_)
-        MockERC4626Vault(asset_, name_, symbol_)
-    {}
+    constructor(IERC20 asset_, string memory name_, string memory symbol_) MockERC4626Vault(asset_, name_, symbol_) {}
 
     function deposit(uint256, address) public pure override returns (uint256) {
         revert("deposit failed");
@@ -4226,9 +4611,7 @@ contract ConfigurableERC4626Vault is MockERC4626Vault {
     bool public failDeposit;
     bool public failRedeem;
 
-    constructor(IERC20 asset_, string memory name_, string memory symbol_)
-        MockERC4626Vault(asset_, name_, symbol_)
-    {}
+    constructor(IERC20 asset_, string memory name_, string memory symbol_) MockERC4626Vault(asset_, name_, symbol_) {}
 
     function setFailDeposit(bool value) external {
         failDeposit = value;

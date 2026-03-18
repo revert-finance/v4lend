@@ -21,11 +21,9 @@ contract RevertHookPositionActions is RevertHookActionBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
-    constructor(
-        IPermit2 _permit2,
-        IV4Oracle _v4Oracle,
-        ILiquidityCalculator _liquidityCalculator
-    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator) {}
+    constructor(IPermit2 _permit2, IV4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator)
+        RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator)
+    {}
 
     // ==================== Auto Exit ====================
 
@@ -62,10 +60,13 @@ contract RevertHookPositionActions is RevertHookActionBase {
         }
 
         // No debt case: swap based on trigger direction and send to owner
-        bool swapZeroForOne = !isUpperTrigger;
-        uint256 swapAmount = swapZeroForOne ? amount0 : amount1;
-        BalanceDelta swapDelta = _executeSwap(_getSwapPoolKey(tokenId, poolKey), swapZeroForOne, swapAmount, tokenId);
-        (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
+        if (_shouldSwapOnAutoExit(tokenId, isUpperTrigger)) {
+            bool swapZeroForOne = !isUpperTrigger;
+            uint256 swapAmount = swapZeroForOne ? amount0 : amount1;
+            BalanceDelta swapDelta =
+                _executeSwap(_getSwapPoolKey(tokenId, poolKey), swapZeroForOne, swapAmount, tokenId);
+            (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
+        }
 
         _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
         _disablePosition(tokenId);
@@ -89,6 +90,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
         address lendAsset = vault.asset();
         Currency lendToken = Currency.wrap(lendAsset);
         bool lendIsToken0 = (lendToken == currency0);
+        bool swapOnExit = _shouldSwapOnAutoExit(tokenId, isUpperTrigger);
 
         // Target token based on trigger direction: upper trigger -> token1, lower trigger -> token0
         bool targetIsToken0 = !isUpperTrigger;
@@ -102,7 +104,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
         }
         _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
 
-        if (!targetIsLendToken) {
+        if (swapOnExit && !targetIsLendToken) {
             // Repay against the lend asset first, then rotate any residual value back
             // into the trigger-side token the strategy wants to leave the user with.
             uint256 remainingLend = lendToken.balanceOfSelf();
@@ -116,6 +118,12 @@ contract RevertHookPositionActions is RevertHookActionBase {
         _disablePosition(tokenId);
 
         emit AutoExit(tokenId, currency0, currency1, amount0, amount1);
+    }
+
+    function _shouldSwapOnAutoExit(uint256 tokenId, bool isUpperTrigger) internal view returns (bool) {
+        return isUpperTrigger
+            ? _positionConfigs[tokenId].autoExitSwapOnUpperTrigger
+            : _positionConfigs[tokenId].autoExitSwapOnLowerTrigger;
     }
 
     // ==================== Auto Range ====================
@@ -136,7 +144,9 @@ contract RevertHookPositionActions is RevertHookActionBase {
         );
 
         // This should already be rejected at configuration time.
-        if (AutoRangeLib.isSameRange(oldPositionInfo.tickLower(), oldPositionInfo.tickUpper(), newTickLower, newTickUpper)) {
+        if (AutoRangeLib.isSameRange(
+                oldPositionInfo.tickLower(), oldPositionInfo.tickUpper(), newTickLower, newTickUpper
+            )) {
             revert InvalidConfig();
         }
 
@@ -157,24 +167,13 @@ contract RevertHookPositionActions is RevertHookActionBase {
         // Approve tokens and mint new position
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
-        (uint256 newTokenId,,) = _mintPosition(
-            poolKey,
-            newTickLower,
-            newTickUpper,
-            uint128(amount0),
-            uint128(amount1),
-            owner
-        );
+        (uint256 newTokenId,,) =
+            _mintPosition(poolKey, newTickLower, newTickUpper, uint128(amount0), uint128(amount1), owner);
 
         if (newTokenId == 0) {
             // If remint fails, restore liquidity on the original position without re-arming the consumed trigger.
             (amount0, amount1) = _calculateAndSwap(
-                tokenId,
-                poolKey,
-                oldPositionInfo.tickLower(),
-                oldPositionInfo.tickUpper(),
-                amount0,
-                amount1
+                tokenId, poolKey, oldPositionInfo.tickLower(), oldPositionInfo.tickUpper(), amount0, amount1
             );
             _approveToken(currency0, amount0);
             _approveToken(currency1, amount1);
@@ -209,11 +208,8 @@ contract RevertHookPositionActions is RevertHookActionBase {
             uint256 tokenId = tokenIds[i];
             address owner = _getOwner(tokenId, false);
             if (_vaults[owner]) {
-                IVault(owner).transform(
-                    tokenId,
-                    address(this),
-                    abi.encodeCall(this.autoCompoundForVault, (tokenId, caller))
-                );
+                IVault(owner)
+                    .transform(tokenId, address(this), abi.encodeCall(this.autoCompoundForVault, (tokenId, caller)));
             } else {
                 poolManager.unlock(abi.encode(tokenId, caller));
             }
@@ -253,9 +249,8 @@ contract RevertHookPositionActions is RevertHookActionBase {
         // Process based on compound mode
         if (compoundMode == AutoCompoundMode.AUTO_COMPOUND) {
             // Swap to optimal ratio and add back as liquidity
-            (fees0, fees1) = _calculateAndSwap(
-                tokenId, poolKey, positionInfo.tickLower(), positionInfo.tickUpper(), fees0, fees1
-            );
+            (fees0, fees1) =
+                _calculateAndSwap(tokenId, poolKey, positionInfo.tickLower(), positionInfo.tickUpper(), fees0, fees1);
         } else if (compoundMode == AutoCompoundMode.HARVEST_TOKEN_0) {
             // Swap token1 to token0
             (fees0, fees1) = _applyBalanceDelta(_executeSwap(poolKey, false, fees1, tokenId), fees0, fees1);
@@ -298,5 +293,4 @@ contract RevertHookPositionActions is RevertHookActionBase {
         emit SendRewards(tokenId, currency0, currency1, reward0, reward1, recipient);
         return (amount0 - reward0, amount1 - reward1);
     }
-
 }

@@ -45,10 +45,8 @@ contract UnichainForkHookathonE2E is Script {
     uint256 internal constant Q32 = 2 ** 32;
     uint256 internal constant Q64 = 2 ** 64;
 
-    IPositionManager internal constant POSITION_MANAGER =
-        IPositionManager(0x4529A01c7A0410167c5740C487A8DE60232617bf);
-    IUniversalRouter internal constant UNIVERSAL_ROUTER =
-        IUniversalRouter(0xEf740bf23aCaE26f6492B10de645D6B98dC8Eaf3);
+    IPositionManager internal constant POSITION_MANAGER = IPositionManager(0x4529A01c7A0410167c5740C487A8DE60232617bf);
+    IUniversalRouter internal constant UNIVERSAL_ROUTER = IUniversalRouter(0xEf740bf23aCaE26f6492B10de645D6B98dC8Eaf3);
     IPermit2 internal constant PERMIT2 = IPermit2(0x000000000022D473030F116dDEE9F6B43aC78BA3);
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
     IWETH9 internal constant WETH = IWETH9(0x4200000000000000000000000000000000000006);
@@ -75,10 +73,8 @@ contract UnichainForkHookathonE2E is Script {
 
     bytes32 internal constant AUTO_RANGE_TOPIC =
         keccak256("AutoRange(uint256,uint256,address,address,uint256,uint256)");
-    bytes32 internal constant AUTO_EXIT_TOPIC =
-        keccak256("AutoExit(uint256,address,address,uint256,uint256)");
-    bytes32 internal constant AUTO_LEVERAGE_TOPIC =
-        keccak256("AutoLeverage(uint256,bool,uint256,uint256)");
+    bytes32 internal constant AUTO_EXIT_TOPIC = keccak256("AutoExit(uint256,address,address,uint256,uint256)");
+    bytes32 internal constant AUTO_LEVERAGE_TOPIC = keccak256("AutoLeverage(uint256,bool,uint256,uint256)");
     uint256 internal constant DEFAULT_DEMO_PRIVATE_KEY =
         0xA11CE00000000000000000000000000000000000000000000000000000001234;
 
@@ -126,8 +122,7 @@ contract UnichainForkHookathonE2E is Script {
         uint256 tokenId = _mintHookedPosition(deployment, deployer);
         _setupVaultPosition(deployment, tokenId, deployer);
 
-        RevertHookState.PositionConfig memory config =
-            _configureAutoRangeAutoExitAndAutoLeverage(deployment, tokenId);
+        RevertHookState.PositionConfig memory config = _configureAutoRangeAutoExitAndAutoLeverage(deployment, tokenId);
         uint256 rangedTokenId = _runAutoRangePhase(deployment, tokenId, deployer, config);
         uint256 exitedTokenId = _runAutoExitPhase(deployment, rangedTokenId, config);
 
@@ -161,12 +156,15 @@ contract UnichainForkHookathonE2E is Script {
         deployment.oracle.setTokenConfig(address(deployment.demoEth), deployment.ethFeed, MAX_FEED_AGE);
         deployment.oracle.setTokenConfig(address(0), deployment.ethFeed, MAX_FEED_AGE);
 
-        deployment.positionActions =
-            new RevertHookPositionActions(PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator));
-        deployment.autoLeverageActions =
-            new RevertHookAutoLeverageActions(PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator));
-        deployment.autoLendActions =
-            new RevertHookAutoLendActions(PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator));
+        deployment.positionActions = new RevertHookPositionActions(
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator)
+        );
+        deployment.autoLeverageActions = new RevertHookAutoLeverageActions(
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator)
+        );
+        deployment.autoLendActions = new RevertHookAutoLendActions(
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator)
+        );
 
         bytes memory constructorArgs = abi.encode(
             deployer,
@@ -206,17 +204,19 @@ contract UnichainForkHookathonE2E is Script {
         );
         deployment.vault.setTokenConfig(address(deployment.demoUsd), CF_DEMO, type(uint32).max);
         deployment.vault.setTokenConfig(address(deployment.demoEth), CF_DEMO, type(uint32).max);
-        deployment.vault.setLimits(
-            MIN_LOAN_SIZE,
-            GLOBAL_LEND_LIMIT,
-            GLOBAL_DEBT_LIMIT,
-            DAILY_LEND_INCREASE_LIMIT_MIN,
-            DAILY_DEBT_INCREASE_LIMIT_MIN
-        );
+        deployment.vault
+            .setLimits(
+                MIN_LOAN_SIZE,
+                GLOBAL_LEND_LIMIT,
+                GLOBAL_DEBT_LIMIT,
+                DAILY_LEND_INCREASE_LIMIT_MIN,
+                DAILY_DEBT_INCREASE_LIMIT_MIN
+            );
         deployment.vault.setReserveFactor(uint32(Q32 * 10 / 100));
         deployment.vault.setReserveProtectionFactor(uint32(Q32 * 5 / 100));
 
-        deployment.flashloanLiquidator = new FlashloanLiquidator(POSITION_MANAGER, address(UNIVERSAL_ROUTER), address(0));
+        deployment.flashloanLiquidator =
+            new FlashloanLiquidator(POSITION_MANAGER, address(UNIVERSAL_ROUTER), address(0));
         deployment.v4Utils = new V4Utils(POSITION_MANAGER, address(UNIVERSAL_ROUTER), address(0), PERMIT2);
         deployment.leverageTransformer =
             new LeverageTransformer(POSITION_MANAGER, address(UNIVERSAL_ROUTER), address(0), PERMIT2);
@@ -230,7 +230,9 @@ contract UnichainForkHookathonE2E is Script {
         deployment.vault.setHookAllowList(address(deployment.revertHook), true);
         deployment.revertHook.setAutoLendVault(address(deployment.demoUsd), deployment.vault);
 
-        deployment.poolKey = _buildHookedPoolKey(address(deployment.demoUsd), address(deployment.demoEth), address(deployment.revertHook));
+        deployment.poolKey = _buildHookedPoolKey(
+            address(deployment.demoUsd), address(deployment.demoEth), address(deployment.revertHook)
+        );
         _initializePool(deployment.poolKey);
         _approveAll(deployment, deployer);
 
@@ -250,7 +252,10 @@ contract UnichainForkHookathonE2E is Script {
         tokenId = _mintPosition(deployment, owner, tickLower, tickUpper, liquidity, "hooked");
     }
 
-    function _mintAmbientPosition(DeploymentResult memory deployment, address owner) internal returns (uint256 tokenId) {
+    function _mintAmbientPosition(DeploymentResult memory deployment, address owner)
+        internal
+        returns (uint256 tokenId)
+    {
         int24 tickLower = int24(vm.envOr("AMBIENT_TICK_LOWER", int256(-6000)));
         int24 tickUpper = int24(vm.envOr("AMBIENT_TICK_UPPER", int256(6000)));
         uint128 liquidity = uint128(vm.envOr("AMBIENT_POSITION_LIQUIDITY", uint256(5e18)));
@@ -269,14 +274,7 @@ contract UnichainForkHookathonE2E is Script {
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
         bytes[] memory paramsArray = new bytes[](2);
         paramsArray[0] = abi.encode(
-            deployment.poolKey,
-            tickLower,
-            tickUpper,
-            liquidity,
-            type(uint256).max,
-            type(uint256).max,
-            owner,
-            bytes("")
+            deployment.poolKey, tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max, owner, bytes("")
         );
         paramsArray[1] = abi.encode(deployment.poolKey.currency0, deployment.poolKey.currency1, owner);
 
@@ -298,13 +296,7 @@ contract UnichainForkHookathonE2E is Script {
 
         deployment.oracle.setMaxPoolPriceDifference(10_000);
         deployment.revertHook.setMaxTicksFromOracle(10_000);
-        deployment.vault.setLimits(
-            0,
-            GLOBAL_LEND_LIMIT,
-            GLOBAL_DEBT_LIMIT,
-            GLOBAL_LEND_LIMIT,
-            GLOBAL_DEBT_LIMIT
-        );
+        deployment.vault.setLimits(0, GLOBAL_LEND_LIMIT, GLOBAL_DEBT_LIMIT, GLOBAL_LEND_LIMIT, GLOBAL_DEBT_LIMIT);
         deployment.demoUsd.approve(address(deployment.vault), type(uint256).max);
 
         deployment.vault.deposit(vaultDeposit, owner);
@@ -346,6 +338,8 @@ contract UnichainForkHookathonE2E is Script {
             autoExitIsRelative: true,
             autoExitTickLower: exitLowerDeltaSpacings * spacing,
             autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
             autoRangeLowerLimit: lowerLimitSpacings * spacing,
             autoRangeUpperLimit: upperLimitSpacings * spacing,
             autoRangeLowerDelta: -spacing,
@@ -358,8 +352,13 @@ contract UnichainForkHookathonE2E is Script {
         hook.setPositionConfig(tokenId, config);
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        (bool sawAutoLeverage, uint256 eventTokenId, bool isUpperTrigger, uint256 debtBeforeEvent, uint256 debtAfterEvent) =
-            _findAutoLeverage(entries, address(deployment.revertHook));
+        (
+            bool sawAutoLeverage,
+            uint256 eventTokenId,
+            bool isUpperTrigger,
+            uint256 debtBeforeEvent,
+            uint256 debtAfterEvent
+        ) = _findAutoLeverage(entries, address(deployment.revertHook));
         (bool sawAutoRange,,) = _findAutoRange(entries, address(deployment.revertHook));
 
         require(sawAutoLeverage, "Demo: AutoLeverage event not found");
@@ -427,7 +426,7 @@ contract UnichainForkHookathonE2E is Script {
         (bool sawAutoRange, uint256 oldTokenIdFromEvent, uint256 newTokenIdFromEvent) =
             _findAutoRange(entries, address(deployment.revertHook));
         (bool sawAutoExit, uint256 exitTokenIdFromEvent) = _findAutoExit(entries, address(deployment.revertHook));
-        (bool sawAutoLeverage,, , ,) = _findAutoLeverage(entries, address(deployment.revertHook));
+        (bool sawAutoLeverage,,,,) = _findAutoLeverage(entries, address(deployment.revertHook));
 
         require(sawAutoRange, "Demo: AutoRange event not found");
         require(!sawAutoExit, "Demo: AUTO_EXIT should not fire during range phase");
@@ -437,7 +436,10 @@ contract UnichainForkHookathonE2E is Script {
 
         newTokenId = POSITION_MANAGER.nextTokenId() - 1;
         require(newTokenId == newTokenIdFromEvent, "Demo: reminted tokenId mismatch");
-        require(IERC721(address(POSITION_MANAGER)).ownerOf(newTokenId) == address(deployment.vault), "Demo: vault should own reminted NFT");
+        require(
+            IERC721(address(POSITION_MANAGER)).ownerOf(newTokenId) == address(deployment.vault),
+            "Demo: vault should own reminted NFT"
+        );
         require(deployment.vault.ownerOf(newTokenId) == owner, "Demo: loan owner should remain unchanged");
 
         (, PositionInfo newPositionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(newTokenId);
@@ -486,9 +488,13 @@ contract UnichainForkHookathonE2E is Script {
         console.log("Lower list increasing:", lowerIncreasing);
         console.log("Lower list size:", uint256(lowerSize));
         console.log("Lower list head:", int256(lowerHead));
-        console.log("Cursor before exit phase:", int256(deployment.revertHook.tickLowerLasts(deployment.poolKey.toId())));
+        console.log(
+            "Cursor before exit phase:", int256(deployment.revertHook.tickLowerLasts(deployment.poolKey.toId()))
+        );
         console.log("The reminted position keeps the migrated automation config.");
-        console.log("On the way back down, the lower AUTO_EXIT trigger sits above the lower leverage and range triggers.");
+        console.log(
+            "On the way back down, the lower AUTO_EXIT trigger sits above the lower leverage and range triggers."
+        );
         console.log("So the next crossed lower trigger should unwind the position before anything else.");
 
         vm.recordLogs();
@@ -517,7 +523,7 @@ contract UnichainForkHookathonE2E is Script {
         Vm.Log[] memory entries = vm.getRecordedLogs();
         (bool sawAutoRange,,) = _findAutoRange(entries, address(deployment.revertHook));
         (bool sawAutoExit, uint256 exitedTokenIdFromEvent) = _findAutoExit(entries, address(deployment.revertHook));
-        (bool sawAutoLeverage,, , ,) = _findAutoLeverage(entries, address(deployment.revertHook));
+        (bool sawAutoLeverage,,,,) = _findAutoLeverage(entries, address(deployment.revertHook));
 
         require(sawAutoExit, "Demo: AutoExit event not found");
         require(!sawAutoRange, "Demo: AUTO_RANGE should not fire during exit phase");
@@ -567,11 +573,7 @@ contract UnichainForkHookathonE2E is Script {
         bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(
             IV4Router.ExactInputSingleParams({
-                poolKey: poolKey,
-                zeroForOne: zeroForOne,
-                amountIn: amountIn,
-                amountOutMinimum: 0,
-                hookData: bytes("")
+                poolKey: poolKey, zeroForOne: zeroForOne, amountIn: amountIn, amountOutMinimum: 0, hookData: bytes("")
             })
         );
         params[1] = abi.encode(zeroForOne ? poolKey.currency0 : poolKey.currency1, amountIn);
@@ -648,7 +650,11 @@ contract UnichainForkHookathonE2E is Script {
         (snapshot.debt, snapshot.fullValue, snapshot.collateralValue,,) = vault.loanInfo(tokenId);
     }
 
-    function _autoLeverageBaseTick(RevertHook hook, uint256 tokenId) internal view returns (int24 autoLeverageBaseTick) {
+    function _autoLeverageBaseTick(RevertHook hook, uint256 tokenId)
+        internal
+        view
+        returns (int24 autoLeverageBaseTick)
+    {
         (,,,,,,, autoLeverageBaseTick) = hook.positionStates(tokenId);
     }
 
@@ -681,11 +687,10 @@ contract UnichainForkHookathonE2E is Script {
         console.log("  debt ratio bps:", _ratioBps(snapshot.debt, snapshot.collateralValue));
     }
 
-    function _logTriggerPlan(
-        RevertHook hook,
-        uint256 tokenId,
-        RevertHookState.PositionConfig memory config
-    ) internal view {
+    function _logTriggerPlan(RevertHook hook, uint256 tokenId, RevertHookState.PositionConfig memory config)
+        internal
+        view
+    {
         (, PositionInfo positionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(tokenId);
         int24 spacing = _poolTickSpacing(tokenId);
         int24 baseTick = _autoLeverageBaseTick(hook, tokenId);
@@ -711,13 +716,10 @@ contract UnichainForkHookathonE2E is Script {
         console.log("Next we cross the upper range trigger, remint with AUTO_RANGE, then come back down for AUTO_EXIT.");
     }
 
-    function _logSwapStep(
-        string memory label,
-        uint256 step,
-        int24 currentTick,
-        uint128 amountIn,
-        bool zeroForOne
-    ) internal pure {
+    function _logSwapStep(string memory label, uint256 step, int24 currentTick, uint128 amountIn, bool zeroForOne)
+        internal
+        pure
+    {
         console.log(label);
         console.log("  step:", step);
         console.log("  tick before:", int256(currentTick));
@@ -729,11 +731,10 @@ contract UnichainForkHookathonE2E is Script {
         return block.timestamp + vm.envOr("DEMO_DEADLINE_BUFFER", uint256(1 hours));
     }
 
-    function _assertPositionConfigEq(
-        RevertHook hook,
-        uint256 tokenId,
-        RevertHookState.PositionConfig memory expected
-    ) internal view {
+    function _assertPositionConfigEq(RevertHook hook, uint256 tokenId, RevertHookState.PositionConfig memory expected)
+        internal
+        view
+    {
         (
             uint8 modeFlags,
             RevertHookState.AutoCompoundMode autoCompoundMode,
@@ -778,7 +779,7 @@ contract UnichainForkHookathonE2E is Script {
 
             sawAutoRangeEvent = true;
             tokenId = uint256(entry.topics[1]);
-            (newTokenId,, , ,) = abi.decode(entry.data, (uint256, address, address, uint256, uint256));
+            (newTokenId,,,,) = abi.decode(entry.data, (uint256, address, address, uint256, uint256));
             return (sawAutoRangeEvent, tokenId, newTokenId);
         }
     }
@@ -859,10 +860,7 @@ contract UnichainForkHookathonE2E is Script {
         returns (address)
     {
         return address(
-            uint160(
-                uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(creationCodeWithArgs))))
-            )
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(creationCodeWithArgs)))))
         );
     }
-
 }

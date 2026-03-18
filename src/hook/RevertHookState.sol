@@ -63,6 +63,8 @@ abstract contract RevertHookState is RevertHookAccess {
         uint8 modeFlags; // Combination of PositionModeFlags (e.g., MODE_AUTO_COMPOUND | MODE_AUTO_RANGE)
         AutoCompoundMode autoCompoundMode;
         bool autoExitIsRelative; // if true, the auto exit tick is relative to the position limits, if false, the auto exit tick is absolute
+        bool autoExitSwapOnLowerTrigger; // if true, lower-side AUTO_EXIT swaps into a single exit-side token after debt repayment
+        bool autoExitSwapOnUpperTrigger; // if true, upper-side AUTO_EXIT swaps into a single exit-side token after debt repayment
         int24 autoExitTickLower;
         int24 autoExitTickUpper;
         int24 autoRangeLowerLimit;
@@ -100,9 +102,7 @@ abstract contract RevertHookState is RevertHookAccess {
     event AutoLendDeposit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
     event AutoLendWithdraw(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
     event AutoLendForceExit(uint256 indexed tokenId, Currency currency, uint256 amount, uint256 shares);
-    event AutoLeverage(
-        uint256 indexed tokenId, bool isUpperTrigger, uint256 debtBefore, uint256 debtAfter
-    );
+    event AutoLeverage(uint256 indexed tokenId, bool isUpperTrigger, uint256 debtBefore, uint256 debtAfter);
 
     // Token transfer events
     event SendLeftoverTokens(
