@@ -12,7 +12,7 @@ SKIP_SIMULATION="${HOOKATHON_SKIP_SIMULATION:-1}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 RAW_LOG_PATH="${HOOKATHON_RAW_LOG_PATH:-$LOG_DIR/unichain-hookathon-demo-${TIMESTAMP}.raw.log}"
 REPLAY_LOG_PATH="${HOOKATHON_REPLAY_LOG_PATH:-$LOG_DIR/unichain-hookathon-demo-${TIMESTAMP}.replay.log}"
-TOTAL_DURATION="${HOOKATHON_REPLAY_TOTAL_DURATION:-30}"
+TOTAL_DURATION="${HOOKATHON_REPLAY_TOTAL_DURATION:-40}"
 JITTER="${HOOKATHON_REPLAY_JITTER:-0.45}"
 
 if [[ "${1:-}" == "--help" ]]; then
@@ -28,7 +28,7 @@ Environment overrides:
   HOOKATHON_RAW_LOG_PATH          Full path for raw Forge output
   HOOKATHON_REPLAY_LOG_PATH       Full path for cleaned replay log
   HOOKATHON_SKIP_SIMULATION       Set to 1 to pass --skip-simulation (default: 1)
-  HOOKATHON_REPLAY_TOTAL_DURATION Target total replay time in seconds (default: 30)
+  HOOKATHON_REPLAY_TOTAL_DURATION Target total replay time in seconds (default: 40)
   HOOKATHON_REPLAY_JITTER         Random timing variation per block, 0 to 1 (default: 0.45)
 EOF
   exit 0
@@ -128,6 +128,11 @@ def paint(line: str, *styles: str) -> str:
 
 def colorize(line: str) -> str:
     stripped = line.strip()
+    hook_execution_prefixes = (
+        "Configuration immediately triggered AUTO_LEVERAGE",
+        "AUTO_RANGE executed",
+        "AUTO_EXIT executed",
+    )
 
     if stripped == "":
         return line
@@ -139,9 +144,7 @@ def colorize(line: str) -> str:
         return paint(line, BOLD, GREEN)
     if is_header(line):
         return paint(line, BOLD, CYAN)
-    if stripped.startswith("Configuration immediately triggered AUTO_LEVERAGE"):
-        return paint(line, BOLD, GREEN)
-    if stripped.startswith("AUTO_RANGE executed"):
+    if any(stripped.startswith(prefix) for prefix in hook_execution_prefixes):
         return paint(line, BOLD, GREEN)
     if stripped.startswith("Range hunt"):
         return paint(line, BOLD, YELLOW)
@@ -149,7 +152,7 @@ def colorize(line: str) -> str:
         return paint(line, BOLD, CYAN)
     if stripped.startswith("Position moved into vault custody"):
         return paint(line, BOLD, CYAN)
-    if stripped.startswith("Both automations are now active"):
+    if stripped.startswith("Leverage, range, and lower-side exit are now active"):
         return paint(line, BOLD, CYAN)
     if line.startswith("    "):
         return paint(line, DIM)
