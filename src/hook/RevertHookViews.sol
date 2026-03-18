@@ -12,8 +12,8 @@ import {RevertHookBase} from "./RevertHookBase.sol";
 /// @title RevertHookViews
 /// @notice Hook read API grouped away from callbacks and execution flow
 abstract contract RevertHookViews is RevertHookBase {
-    function autoCompoundRewardBps() external pure returns (uint16) {
-        return _AUTO_COMPOUND_REWARD_BPS;
+    function autoCollectRewardBps() external pure returns (uint16) {
+        return _AUTO_COLLECT_REWARD_BPS;
     }
 
     function LEVERAGE_TICK_OFFSET_MULTIPLIER() external pure returns (int24) {
@@ -37,7 +37,7 @@ abstract contract RevertHookViews is RevertHookBase {
         view
         returns (
             uint8 modeFlags,
-            AutoCompoundMode autoCompoundMode,
+            AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
@@ -52,7 +52,7 @@ abstract contract RevertHookViews is RevertHookBase {
         PositionConfig storage config = _positionConfigs[tokenId];
         return (
             config.modeFlags,
-            config.autoCompoundMode,
+            config.autoCollectMode,
             config.autoExitIsRelative,
             config.autoExitTickLower,
             config.autoExitTickUpper,

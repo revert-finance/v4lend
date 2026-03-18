@@ -197,11 +197,11 @@ contract RevertHookPositionActions is RevertHookActionBase {
         emit AutoRange(tokenId, newTokenId, currency0, currency1, amount0, amount1);
     }
 
-    // ==================== Auto Compound ====================
+    // ==================== Auto Collect ====================
 
-    /// @notice Auto-compounds fees from multiple positions
-    /// @param tokenIds Array of token IDs to compound
-    function autoCompound(uint256[] calldata tokenIds) external {
+    /// @notice Auto-collects fees from multiple positions
+    /// @param tokenIds Array of token IDs to collect from
+    function autoCollect(uint256[] calldata tokenIds) external {
         address caller = msg.sender;
         uint256 length = tokenIds.length;
         for (uint256 i; i < length;) {
@@ -209,7 +209,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
             address owner = _getOwner(tokenId, false);
             if (_vaults[owner]) {
                 IVault(owner)
-                    .transform(tokenId, address(this), abi.encodeCall(this.autoCompoundForVault, (tokenId, caller)));
+                    .transform(tokenId, address(this), abi.encodeCall(this.autoCollectForVault, (tokenId, caller)));
             } else {
                 poolManager.unlock(abi.encode(tokenId, caller));
             }
@@ -219,24 +219,24 @@ contract RevertHookPositionActions is RevertHookActionBase {
         }
     }
 
-    /// @notice Auto-compound callback for vault-owned positions
-    /// @param tokenId The token ID to compound
+    /// @notice Auto-collect callback for vault-owned positions
+    /// @param tokenId The token ID to collect from
     /// @param caller The original caller (for rewards)
-    function autoCompoundForVault(uint256 tokenId, address caller) external {
+    function autoCollectForVault(uint256 tokenId, address caller) external {
         if (!_vaults[msg.sender]) revert Unauthorized();
         _validateCaller(positionManager, tokenId);
         poolManager.unlock(abi.encode(tokenId, caller));
     }
 
-    /// @notice Executes the auto-compound logic (called from unlockCallback)
-    /// @param tokenId The token ID to compound
+    /// @notice Executes the auto-collect logic (called from unlockCallback)
+    /// @param tokenId The token ID to collect from
     /// @param caller The original caller (for rewards)
-    function executeAutoCompound(uint256 tokenId, address caller) external {
+    function executeAutoCollect(uint256 tokenId, address caller) external {
         PositionConfig storage config = _positionConfigs[tokenId];
-        AutoCompoundMode compoundMode = config.autoCompoundMode;
+        AutoCollectMode collectMode = config.autoCollectMode;
 
-        // Skip if compound is disabled or position is not active
-        if (compoundMode == AutoCompoundMode.NONE || PositionModeFlags.isNone(config.modeFlags)) {
+        // Skip if collect is disabled or position is not active
+        if (collectMode == AutoCollectMode.NONE || PositionModeFlags.isNone(config.modeFlags)) {
             return;
         }
 
@@ -246,24 +246,24 @@ contract RevertHookPositionActions is RevertHookActionBase {
         (,, uint256 fees0, uint256 fees1) = _decreaseLiquidity(poolKey, tokenId, true);
         if (fees0 == 0 && fees1 == 0) return;
 
-        // Process based on compound mode
-        if (compoundMode == AutoCompoundMode.AUTO_COMPOUND) {
+        // Process based on collect mode
+        if (collectMode == AutoCollectMode.AUTO_COLLECT) {
             // Swap to optimal ratio and add back as liquidity
             (fees0, fees1) =
                 _calculateAndSwap(tokenId, poolKey, positionInfo.tickLower(), positionInfo.tickUpper(), fees0, fees1);
-        } else if (compoundMode == AutoCompoundMode.HARVEST_TOKEN_0) {
+        } else if (collectMode == AutoCollectMode.HARVEST_TOKEN_0) {
             // Swap token1 to token0
             (fees0, fees1) = _applyBalanceDelta(_executeSwap(poolKey, false, fees1, tokenId), fees0, fees1);
-        } else if (compoundMode == AutoCompoundMode.HARVEST_TOKEN_1) {
+        } else if (collectMode == AutoCollectMode.HARVEST_TOKEN_1) {
             // Swap token0 to token1
             (fees0, fees1) = _applyBalanceDelta(_executeSwap(poolKey, true, fees0, tokenId), fees0, fees1);
         }
         // HARVEST_TOKENS mode: no swap needed, fees are sent directly to owner
 
         // Pay rewards to caller
-        (fees0, fees1) = _payCompoundRewards(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, caller);
+        (fees0, fees1) = _payCollectRewards(tokenId, poolKey.currency0, poolKey.currency1, fees0, fees1, caller);
 
-        if (compoundMode == AutoCompoundMode.AUTO_COMPOUND) {
+        if (collectMode == AutoCollectMode.AUTO_COLLECT) {
             _approveToken(poolKey.currency0, fees0);
             _approveToken(poolKey.currency1, fees1);
             _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(fees0), uint128(fees1));
@@ -275,8 +275,8 @@ contract RevertHookPositionActions is RevertHookActionBase {
 
     // ==================== Internal Helpers ====================
 
-    /// @notice Pays compound rewards to the caller
-    function _payCompoundRewards(
+    /// @notice Pays collect rewards to the caller
+    function _payCollectRewards(
         uint256 tokenId,
         Currency currency0,
         Currency currency1,
@@ -284,8 +284,8 @@ contract RevertHookPositionActions is RevertHookActionBase {
         uint256 amount1,
         address recipient
     ) internal returns (uint256, uint256) {
-        uint256 reward0 = amount0 * _AUTO_COMPOUND_REWARD_BPS / 10000;
-        uint256 reward1 = amount1 * _AUTO_COMPOUND_REWARD_BPS / 10000;
+        uint256 reward0 = amount0 * _AUTO_COLLECT_REWARD_BPS / 10000;
+        uint256 reward1 = amount1 * _AUTO_COLLECT_REWARD_BPS / 10000;
 
         if (reward0 != 0) currency0.transfer(recipient, reward0);
         if (reward1 != 0) currency1.transfer(recipient, reward1);

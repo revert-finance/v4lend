@@ -209,12 +209,12 @@ abstract contract RevertHookExecution is RevertHookConfig {
         );
     }
 
-    function autoCompound(uint256[] calldata tokenIds) external {
-        _delegatecallPositionActions(abi.encodeCall(positionActions.autoCompound, (tokenIds)));
+    function autoCollect(uint256[] calldata tokenIds) external {
+        _delegatecallPositionActions(abi.encodeCall(positionActions.autoCollect, (tokenIds)));
     }
 
-    function autoCompoundForVault(uint256 tokenId, address caller) external {
-        _delegatecallPositionActions(abi.encodeCall(positionActions.autoCompoundForVault, (tokenId, caller)));
+    function autoCollectForVault(uint256 tokenId, address caller) external {
+        _delegatecallPositionActions(abi.encodeCall(positionActions.autoCollectForVault, (tokenId, caller)));
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
@@ -224,7 +224,7 @@ abstract contract RevertHookExecution is RevertHookConfig {
 
         if (data.length == 64) {
             (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
-            _executeAutoCompound(tokenId, caller);
+            _executeAutoCollect(tokenId, caller);
         } else if (data.length == 128) {
             (uint256 tokenId, bool isUpperTrigger,,) = abi.decode(data, (uint256, bool, uint256, uint256));
             _executeImmediateAutoLeverageUnlocked(tokenId, isUpperTrigger);
@@ -235,13 +235,13 @@ abstract contract RevertHookExecution is RevertHookConfig {
         return bytes("");
     }
 
-    function _executeAutoCompound(uint256 tokenId, address caller) internal {
+    function _executeAutoCollect(uint256 tokenId, address caller) internal {
         if (
             !_tryDelegatecallPositionActions(
-                abi.encodeCall(positionActions.executeAutoCompound, (tokenId, caller))
+                abi.encodeCall(positionActions.executeAutoCollect, (tokenId, caller))
             )
         ) {
-            _emitActionFailed(tokenId, Mode.AUTO_COMPOUND);
+            _emitActionFailed(tokenId, Mode.AUTO_COLLECT);
         }
     }
 

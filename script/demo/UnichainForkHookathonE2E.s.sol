@@ -334,7 +334,7 @@ contract UnichainForkHookathonE2E is Script {
         config = RevertHookState.PositionConfig({
             modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_EXIT
                 | PositionModeFlags.MODE_AUTO_LEVERAGE,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
             autoExitIsRelative: true,
             autoExitTickLower: exitLowerDeltaSpacings * spacing,
             autoExitTickUpper: type(int24).max,
@@ -616,7 +616,7 @@ contract UnichainForkHookathonE2E is Script {
         (, PositionInfo positionInfo) = POSITION_MANAGER.getPoolAndPositionInfo(tokenId);
         (
             uint8 modeFlags,
-            RevertHookState.AutoCompoundMode autoCompoundMode,
+            RevertHookState.AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
@@ -629,7 +629,7 @@ contract UnichainForkHookathonE2E is Script {
         ) = hook.positionConfigs(tokenId);
 
         modeFlags;
-        autoCompoundMode;
+        autoCollectMode;
         autoExitIsRelative;
         autoExitTickLower;
         autoExitTickUpper;
@@ -737,7 +737,7 @@ contract UnichainForkHookathonE2E is Script {
     {
         (
             uint8 modeFlags,
-            RevertHookState.AutoCompoundMode autoCompoundMode,
+            RevertHookState.AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
@@ -750,7 +750,7 @@ contract UnichainForkHookathonE2E is Script {
         ) = hook.positionConfigs(tokenId);
 
         require(modeFlags == expected.modeFlags, "Demo: mode flags mismatch");
-        require(uint8(autoCompoundMode) == uint8(expected.autoCompoundMode), "Demo: auto compound mode mismatch");
+        require(uint8(autoCollectMode) == uint8(expected.autoCollectMode), "Demo: auto compound mode mismatch");
         require(autoExitIsRelative == expected.autoExitIsRelative, "Demo: auto exit mode mismatch");
         require(autoExitTickLower == expected.autoExitTickLower, "Demo: auto exit lower mismatch");
         require(autoExitTickUpper == expected.autoExitTickUpper, "Demo: auto exit upper mismatch");

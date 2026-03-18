@@ -17,16 +17,16 @@ abstract contract RevertHookState is RevertHookAccess {
     // ==================== Enums ====================
 
     enum Mode {
-        AUTO_COMPOUND,
+        AUTO_COLLECT,
         AUTO_RANGE,
         AUTO_EXIT,
         AUTO_LEND,
         AUTO_LEVERAGE
     }
 
-    enum AutoCompoundMode {
+    enum AutoCollectMode {
         NONE,
-        AUTO_COMPOUND,
+        AUTO_COLLECT,
         HARVEST_TOKEN_0,
         HARVEST_TOKEN_1,
         HARVEST_TOKENS
@@ -60,8 +60,8 @@ abstract contract RevertHookState is RevertHookAccess {
     }
 
     struct PositionConfig {
-        uint8 modeFlags; // Combination of PositionModeFlags (e.g., MODE_AUTO_COMPOUND | MODE_AUTO_RANGE)
-        AutoCompoundMode autoCompoundMode;
+        uint8 modeFlags; // Combination of PositionModeFlags (e.g., MODE_AUTO_COLLECT | MODE_AUTO_RANGE)
+        AutoCollectMode autoCollectMode;
         bool autoExitIsRelative; // if true, the auto exit tick is relative to the position limits, if false, the auto exit tick is absolute
         bool autoExitSwapOnLowerTrigger; // if true, lower-side AUTO_EXIT swaps into a single exit-side token after debt repayment
         bool autoExitSwapOnUpperTrigger; // if true, upper-side AUTO_EXIT swaps into a single exit-side token after debt repayment
@@ -87,7 +87,7 @@ abstract contract RevertHookState is RevertHookAccess {
     event SetPositionConfig(uint256 indexed tokenId, PositionConfig positionConfig);
 
     // Auto action events
-    event AutoCompound(
+    event AutoCollect(
         uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1
     );
     event AutoExit(uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1);
@@ -148,7 +148,7 @@ abstract contract RevertHookState is RevertHookAccess {
     mapping(address token => IERC4626 vault) internal _autoLendVaults;
 
     // fees for auto compound execution 1% reward - of fees autocompounded / harvested
-    uint16 internal constant _AUTO_COMPOUND_REWARD_BPS = 100;
+    uint16 internal constant _AUTO_COLLECT_REWARD_BPS = 100;
 
     // auto-leverage triggers at baseTick ± (LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing)
     int24 internal constant _LEVERAGE_TICK_OFFSET_MULTIPLIER = 10;

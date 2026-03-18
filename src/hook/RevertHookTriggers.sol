@@ -88,7 +88,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _getEmptyPositionConfig() internal pure returns (PositionConfig memory config) {
         config = PositionConfig({
             modeFlags: PositionModeFlags.MODE_NONE,
-            autoCompoundMode: AutoCompoundMode.NONE,
+            autoCollectMode: AutoCollectMode.NONE,
             autoExitIsRelative: false,
             autoExitSwapOnLowerTrigger: true,
             autoExitSwapOnUpperTrigger: true,

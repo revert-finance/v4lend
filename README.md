@@ -70,7 +70,7 @@ Supported hook-side automation modes include:
 
 Operator-driven contracts that execute one automation strategy at a time:
 
-- `[AutoCompound.sol](src/automators/AutoCompound.sol)`
+- `[AutoCollect.sol](src/automators/AutoCollect.sol)`
 - `[AutoExit.sol](src/automators/AutoExit.sol)`
 - `[AutoLend.sol](src/automators/AutoLend.sol)`
 - `[AutoLeverage.sol](src/automators/AutoLeverage.sol)`

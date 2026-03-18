@@ -118,13 +118,13 @@ contract V4VaultHookTest is V4ForkTestBase {
         vault.deposit(amount, account);
     }
 
-    function test_CollateralizedPositionWithAutoCompound() public {
+    function test_CollateralizedPositionWithAutoCollect() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
-        _configurePositionForAutoCompound(hookedTokenId);
+        _configurePositionForAutoCollect(hookedTokenId);
         (uint256 collateralValue, uint128 initialLiquidity) = _setupCollateralizedPosition(hookedTokenId);
         _generateFees(hookedPoolKey);
-        _executeAndVerifyAutoCompound(hookedTokenId, collateralValue, initialLiquidity);
+        _executeAndVerifyAutoCollect(hookedTokenId, collateralValue, initialLiquidity);
     }
 
     function test_CollateralizedPositionWithAutoRange() public {
@@ -204,13 +204,13 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("Position owner:", IERC721(address(positionManager)).ownerOf(hookedTokenId));
     }
 
-    function _configurePositionForAutoCompound(uint256 hookedTokenId) internal {
+    function _configurePositionForAutoCollect(uint256 hookedTokenId) internal {
         vm.prank(WHALE_ACCOUNT);
         revertHook.setPositionConfig(
             hookedTokenId,
             RevertHookState.PositionConfig({
-                modeFlags: PositionModeFlags.MODE_AUTO_COMPOUND,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                modeFlags: PositionModeFlags.MODE_AUTO_COLLECT,
+                autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -278,7 +278,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("Swaps completed, fees should have accumulated");
     }
 
-    function _executeAndVerifyAutoCompound(uint256 hookedTokenId, uint256 collateralValue, uint128 initialLiquidity)
+    function _executeAndVerifyAutoCollect(uint256 hookedTokenId, uint256 collateralValue, uint128 initialLiquidity)
         internal
     {
         // Verify position still has same liquidity (fees not yet compounded)
@@ -289,7 +289,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256[] memory tokenIds = new uint256[](1);
         tokenIds[0] = hookedTokenId;
         vm.prank(WHALE_ACCOUNT);
-        revertHook.autoCompound(tokenIds);
+        revertHook.autoCollect(tokenIds);
 
         // Verify liquidity increased after autocompound
         uint128 liquidityAfterCompound = positionManager.getPositionLiquidity(hookedTokenId);
@@ -428,7 +428,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -652,21 +652,21 @@ contract V4VaultHookTest is V4ForkTestBase {
 
             (
                 uint8 storedMode,
-                RevertHookState.AutoCompoundMode storedAutoCompoundMode,,,,,,,,,
+                RevertHookState.AutoCollectMode storedAutoCollectMode,,,,,,,,,
                 uint16 storedLeverageTargetBps
             ) = revertHook.positionConfigs(hookedTokenId);
 
             assertEq(storedMode, mode, "Stored mode flags mismatch");
-            if ((mode & PositionModeFlags.MODE_AUTO_COMPOUND) != 0) {
+            if ((mode & PositionModeFlags.MODE_AUTO_COLLECT) != 0) {
                 assertEq(
-                    uint8(storedAutoCompoundMode),
-                    uint8(RevertHookState.AutoCompoundMode.AUTO_COMPOUND),
-                    "AUTO_COMPOUND mode should be enabled"
+                    uint8(storedAutoCollectMode),
+                    uint8(RevertHookState.AutoCollectMode.AUTO_COLLECT),
+                    "AUTO_COLLECT mode should be enabled"
                 );
             } else {
                 assertEq(
-                    uint8(storedAutoCompoundMode),
-                    uint8(RevertHookState.AutoCompoundMode.NONE),
+                    uint8(storedAutoCollectMode),
+                    uint8(RevertHookState.AutoCollectMode.NONE),
                     "Auto compound mode should be NONE"
                 );
             }
@@ -738,7 +738,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             nearTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: nearExitTick,
                 autoExitTickUpper: type(int24).max,
@@ -756,7 +756,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             farTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: farExitTick,
                 autoExitTickUpper: type(int24).max,
@@ -820,7 +820,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             tokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -872,7 +872,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
         _generateFees(hookedPoolKey);
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_RANGE
             | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
 
         int24 spacing = hookedPoolKey.tickSpacing;
@@ -891,7 +891,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             tokenId,
             RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerPhase1,
                 autoExitTickUpper: type(int24).max,
@@ -912,9 +912,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256[] memory tokenIds = new uint256[](1);
         tokenIds[0] = tokenId;
         vm.prank(WHALE_ACCOUNT);
-        revertHook.autoCompound(tokenIds);
+        revertHook.autoCollect(tokenIds);
         uint128 liquidityAfterCompound = positionManager.getPositionLiquidity(tokenId);
-        assertGt(liquidityAfterCompound, liquidityBeforeCompound, "AUTO_COMPOUND should increase liquidity");
+        assertGt(liquidityAfterCompound, liquidityBeforeCompound, "AUTO_COLLECT should increase liquidity");
 
         // Move down only to leverage trigger band.
         uint256 nextTokenIdBeforeLeverage = positionManager.nextTokenId();
@@ -947,7 +947,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         RevertHookState.PositionConfig memory phase2Config = RevertHookState.PositionConfig({
             modeFlags: modeCREV,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
             autoExitIsRelative: false,
             autoExitTickLower: exitLowerPhase2,
             autoExitTickUpper: type(int24).max,
@@ -1004,7 +1004,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             rangedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerPhase3,
                 autoExitTickUpper: type(int24).max,
@@ -1054,12 +1054,12 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(rangeLowerTrigger, leverageLowerTrigger, "Range trigger should fire before leverage trigger");
         assertGt(leverageLowerTrigger, exitLowerTrigger, "Leverage trigger should fire before exit trigger");
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_RANGE
             | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
 
         RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
             modeFlags: modeCREV,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
             autoExitIsRelative: false,
             autoExitTickLower: exitLowerTrigger,
             autoExitTickUpper: type(int24).max,
@@ -1121,7 +1121,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(exitLowerTrigger, rangeLowerTrigger, "Exit trigger should fire before range trigger");
         assertGt(rangeLowerTrigger, leverageLowerTrigger, "Range trigger should fire before leverage trigger");
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_RANGE
             | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
 
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
@@ -1131,7 +1131,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             tokenId,
             RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerTrigger,
                 autoExitTickUpper: type(int24).max,
@@ -1193,7 +1193,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             exitTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: exitUpperTrigger,
@@ -1300,7 +1300,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         IERC721(address(positionManager)).setApprovalForAll(address(revertHook), true);
         RevertHookState.PositionConfig memory sharedLowerExitConfig = RevertHookState.PositionConfig({
             modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: sharedLowerTrigger,
             autoExitTickUpper: type(int24).max,
@@ -1433,7 +1433,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             tokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: !isUpperTrigger,
                 autoExitTickLower: isUpperTrigger ? type(int24).min : spacing,
                 autoExitTickUpper: isUpperTrigger ? currentTickLower : type(int24).max,
@@ -1543,14 +1543,14 @@ contract V4VaultHookTest is V4ForkTestBase {
         _setupCollateralizedPositionForAutoRange(activeTokenId, hookedPoolKey);
         _generateFees(hookedPoolKey);
 
-        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COMPOUND | PositionModeFlags.MODE_AUTO_RANGE
+        uint8 modeCREV = PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_RANGE
             | PositionModeFlags.MODE_AUTO_EXIT | PositionModeFlags.MODE_AUTO_LEVERAGE;
         int24 spacing = hookedPoolKey.tickSpacing;
 
         // Ensure C is exercised while all trigger flags are present.
         RevertHookState.PositionConfig memory warmupConfig = RevertHookState.PositionConfig({
             modeFlags: modeCREV,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
             autoExitIsRelative: false,
             autoExitTickLower: type(int24).min,
             autoExitTickUpper: type(int24).max,
@@ -1569,9 +1569,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256[] memory tokenIds = new uint256[](1);
         tokenIds[0] = activeTokenId;
         vm.prank(WHALE_ACCOUNT);
-        revertHook.autoCompound(tokenIds);
+        revertHook.autoCollect(tokenIds);
         uint128 liquidityAfterCompound = positionManager.getPositionLiquidity(activeTokenId);
-        assertGt(liquidityAfterCompound, liquidityBeforeCompound, "AUTO_COMPOUND should increase liquidity");
+        assertGt(liquidityAfterCompound, liquidityBeforeCompound, "AUTO_COLLECT should increase liquidity");
         _assertHookHasNoTokenDust();
 
         // Run repeated transitions to catch state drift bugs.
@@ -1592,7 +1592,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
             RevertHookState.PositionConfig memory rangeFirstConfig = RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerFar,
                 autoExitTickUpper: type(int24).max,
@@ -1670,7 +1670,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
             RevertHookState.PositionConfig memory leverageFirstConfig = RevertHookState.PositionConfig({
                 modeFlags: modeCREV,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+                autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
                 autoExitIsRelative: false,
                 autoExitTickLower: exitLowerVeryFar,
                 autoExitTickUpper: type(int24).max,
@@ -1720,7 +1720,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         RevertHookState.PositionConfig memory exitFirstConfig = RevertHookState.PositionConfig({
             modeFlags: modeCREV,
-            autoCompoundMode: RevertHookState.AutoCompoundMode.AUTO_COMPOUND,
+            autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
             autoExitIsRelative: false,
             autoExitTickLower: exitLowerFirst,
             autoExitTickUpper: type(int24).max,
@@ -1757,9 +1757,9 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         config = RevertHookState.PositionConfig({
             modeFlags: modeFlags,
-            autoCompoundMode: PositionModeFlags.hasAutoCompound(modeFlags)
-                ? RevertHookState.AutoCompoundMode.AUTO_COMPOUND
-                : RevertHookState.AutoCompoundMode.NONE,
+            autoCollectMode: PositionModeFlags.hasAutoCollect(modeFlags)
+                ? RevertHookState.AutoCollectMode.AUTO_COLLECT
+                : RevertHookState.AutoCollectMode.NONE,
             autoExitIsRelative: false,
             autoExitTickLower: enableExit ? exitTickLower : type(int24).min,
             autoExitTickUpper: enableExit ? exitTickUpper : type(int24).max,
@@ -1809,7 +1809,7 @@ contract V4VaultHookTest is V4ForkTestBase {
     {
         (
             uint8 modeFlags,
-            RevertHookState.AutoCompoundMode autoCompoundMode,
+            RevertHookState.AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
@@ -1822,7 +1822,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         ) = revertHook.positionConfigs(tokenId);
 
         assertEq(modeFlags, expected.modeFlags, "modeFlags mismatch");
-        assertEq(uint8(autoCompoundMode), uint8(expected.autoCompoundMode), "autoCompoundMode mismatch");
+        assertEq(uint8(autoCollectMode), uint8(expected.autoCollectMode), "autoCollectMode mismatch");
         assertEq(autoExitIsRelative, expected.autoExitIsRelative, "autoExitIsRelative mismatch");
         assertEq(autoExitTickLower, expected.autoExitTickLower, "autoExitTickLower mismatch");
         assertEq(autoExitTickUpper, expected.autoExitTickUpper, "autoExitTickUpper mismatch");
@@ -2018,7 +2018,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -2113,7 +2113,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -2219,7 +2219,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -2259,7 +2259,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -2281,7 +2281,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -2332,7 +2332,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
@@ -2595,7 +2595,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             hookedTokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_NONE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,

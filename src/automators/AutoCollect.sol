@@ -14,12 +14,12 @@ import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {Automator} from "./Automator.sol";
 
-/// @title AutoCompound
-/// @notice Allows operators to compound fees or harvest them to a single token.
+/// @title AutoCollect
+/// @notice Allows operators to collect fees by compounding them back into liquidity or harvesting them.
 /// Positions need to be approved (approve or setApprovalForAll) for the contract when outside vault.
 /// When position is inside Vault - owner needs to approve the position to be transformed by the contract.
-contract AutoCompound is Automator {
-    event AutoCompound(
+contract AutoCollect is Automator {
+    event AutoCollectExecuted(
         uint256 indexed tokenId,
         address account,
         uint256 amount0,
@@ -41,8 +41,8 @@ contract AutoCompound is Automator {
 
     mapping(uint256 => PositionConfig) public positionConfigs;
 
-    enum CompoundMode {
-        AUTO_COMPOUND,
+    enum CollectMode {
+        AUTO_COLLECT,
         HARVEST_TOKENS,
         HARVEST_TOKEN_0,
         HARVEST_TOKEN_1
@@ -60,7 +60,7 @@ contract AutoCompound is Automator {
 
     struct ExecuteParams {
         uint256 tokenId;
-        CompoundMode mode;
+        CollectMode mode;
         bool swap0To1;
         uint256 amountIn;
         uint256 amountOutMin;
@@ -105,30 +105,30 @@ contract AutoCompound is Automator {
         }
         uint256 amount0 = feeAmount0;
         uint256 amount1 = feeAmount1;
-        // AutoCompound only collects fees (liquidity=0), so reward base is always fee-only.
+        // AutoCollect only collects fees (liquidity=0), so reward base is always fee-only.
         (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, true, params.rewardX64);
 
         address owner = _positionOwner(params.tokenId);
 
         uint256 a0;
         uint256 a1;
-        if (params.mode == CompoundMode.AUTO_COMPOUND) {
-            (a0, a1) = _executeAutoCompound(params, config, poolKey, positionInfo, token0, token1, owner, amount0, amount1);
+        if (params.mode == CollectMode.AUTO_COLLECT) {
+            (a0, a1) = _executeAutoCollect(params, config, poolKey, positionInfo, token0, token1, owner, amount0, amount1);
         } else {
             (a0, a1) = _executeHarvest(params, config, token0, token1, owner, amount0, amount1);
         }
 
-        emit AutoCompound(
+        emit AutoCollectExecuted(
             params.tokenId,
             msg.sender,
             a0, a1,
             token0Addr,
             token1Addr,
-            params.mode != CompoundMode.AUTO_COMPOUND
+            params.mode != CollectMode.AUTO_COLLECT
         );
     }
 
-    function _executeAutoCompound(
+    function _executeAutoCollect(
         ExecuteParams calldata params,
         PositionConfig memory config,
         PoolKey memory poolKey,
@@ -200,14 +200,14 @@ contract AutoCompound is Automator {
         uint256 amount1
     ) internal returns (uint256, uint256) {
         // Perform swap based on harvest mode
-        if (params.mode == CompoundMode.HARVEST_TOKEN_0 && amount1 != 0) {
+        if (params.mode == CollectMode.HARVEST_TOKEN_0 && amount1 != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token1, token0, params.amountIn, params.amountOutMin, params.swapData),
                 config.token1SlippageBps
             );
             amount1 -= amountInDelta;
             amount0 += amountOutDelta;
-        } else if (params.mode == CompoundMode.HARVEST_TOKEN_1 && amount0 != 0) {
+        } else if (params.mode == CollectMode.HARVEST_TOKEN_1 && amount0 != 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token0, token1, params.amountIn, params.amountOutMin, params.swapData),
                 config.token0SlippageBps

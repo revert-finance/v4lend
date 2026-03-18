@@ -18,8 +18,8 @@ TOKEN_ID="2461350"
 
 # ==================== Position Configuration ====================
 # PositionConfig struct:
-#   PositionMode mode;              // enum: 0=NONE, 1=AUTO_COMPOUND_ONLY, 2=AUTO_RANGE, 3=AUTO_EXIT, 4=AUTO_EXIT_AND_AUTO_RANGE, 5=AUTO_LEND, 6=AUTO_LEVERAGE
-#   AutoCompoundMode autoCompoundMode; // enum: 0=NONE, 1=AUTO_COMPOUND, 2=HARVEST_TOKEN_0, 3=HARVEST_TOKEN_1
+#   PositionMode mode;              // enum: 0=NONE, 1=AUTO_COLLECT_ONLY, 2=AUTO_RANGE, 3=AUTO_EXIT, 4=AUTO_EXIT_AND_AUTO_RANGE, 5=AUTO_LEND, 6=AUTO_LEVERAGE
+#   AutoCollectMode autoCollectMode; // enum: 0=NONE, 1=AUTO_COLLECT, 2=HARVEST_TOKEN_0, 3=HARVEST_TOKEN_1
 #   bool autoExitIsRelative;        // if true, auto exit ticks are relative to position limits
 #   int24 autoExitTickLower;        // lower tick for auto-exit trigger
 #   int24 autoExitTickUpper;        // upper tick for auto-exit trigger
@@ -30,9 +30,9 @@ TOKEN_ID="2461350"
 #   int24 autoLendToleranceTick;    // tolerance for auto-lend
 #   uint16 autoLeverageTargetBps;   // target leverage ratio in bps (0-10000)
 
-# Example: AUTO_COMPOUND_ONLY mode
-MODE="1"                           # AUTO_COMPOUND_ONLY
-AUTO_COMPOUND_MODE="1"             # AUTO_COMPOUND
+# Example: AUTO_COLLECT_ONLY mode
+MODE="1"                           # AUTO_COLLECT_ONLY
+AUTO_COLLECT_MODE="1"             # AUTO_COLLECT
 AUTO_EXIT_IS_RELATIVE="false"
 AUTO_EXIT_TICK_LOWER="-8388608"    # type(int24).min - disabled
 AUTO_EXIT_TICK_UPPER="8388607"     # type(int24).max - disabled
@@ -101,15 +101,15 @@ echo "General config set successfully!"
 print_header "Step 2: Set Position Config"
 
 echo "Setting position config for token $TOKEN_ID..."
-echo "  Mode: $MODE (1=AUTO_COMPOUND_ONLY)"
-echo "  Auto Compound Mode: $AUTO_COMPOUND_MODE (1=AUTO_COMPOUND)"
+echo "  Mode: $MODE (1=AUTO_COLLECT_ONLY)"
+echo "  Auto Compound Mode: $AUTO_COLLECT_MODE (1=AUTO_COLLECT)"
 
 # setPositionConfig(uint256 tokenId, (uint8,uint8,bool,int24,int24,int24,int24,int24,int24,int24,uint16) positionConfig)
 # The struct is passed as a tuple
 cast send "$REVERT_HOOK" \
     "setPositionConfig(uint256,(uint8,uint8,bool,int24,int24,int24,int24,int24,int24,int24,uint16))" \
     "$TOKEN_ID" \
-    "($MODE,$AUTO_COMPOUND_MODE,$AUTO_EXIT_IS_RELATIVE,$AUTO_EXIT_TICK_LOWER,$AUTO_EXIT_TICK_UPPER,$AUTO_RANGE_LOWER_LIMIT,$AUTO_RANGE_UPPER_LIMIT,$AUTO_RANGE_LOWER_DELTA,$AUTO_RANGE_UPPER_DELTA,$AUTO_LEND_TOLERANCE_TICK,$AUTO_LEVERAGE_TARGET_BPS)" \
+    "($MODE,$AUTO_COLLECT_MODE,$AUTO_EXIT_IS_RELATIVE,$AUTO_EXIT_TICK_LOWER,$AUTO_EXIT_TICK_UPPER,$AUTO_RANGE_LOWER_LIMIT,$AUTO_RANGE_UPPER_LIMIT,$AUTO_RANGE_LOWER_DELTA,$AUTO_RANGE_UPPER_DELTA,$AUTO_LEND_TOLERANCE_TICK,$AUTO_LEVERAGE_TARGET_BPS)" \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY"
 

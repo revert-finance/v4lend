@@ -127,7 +127,7 @@ contract TickLinkedListInvariantTest is Test {
 contract RevertHookConfigInvariantTest is Test {
     // Test position modes enum values
     uint8 constant MODE_NONE = 0;
-    uint8 constant MODE_AUTO_COMPOUND_ONLY = 1;
+    uint8 constant MODE_AUTO_COLLECT_ONLY = 1;
     uint8 constant MODE_AUTO_RANGE = 2;
     uint8 constant MODE_AUTO_EXIT = 3;
     uint8 constant MODE_AUTO_EXIT_AND_AUTO_RANGE = 4;
@@ -152,8 +152,8 @@ contract RevertHookConfigInvariantTest is Test {
 
     /// @notice Verify mode enum values don't overlap
     function test_mode_enum_unique() public pure {
-        assertTrue(MODE_NONE != MODE_AUTO_COMPOUND_ONLY, "Modes should be unique");
-        assertTrue(MODE_AUTO_COMPOUND_ONLY != MODE_AUTO_RANGE, "Modes should be unique");
+        assertTrue(MODE_NONE != MODE_AUTO_COLLECT_ONLY, "Modes should be unique");
+        assertTrue(MODE_AUTO_COLLECT_ONLY != MODE_AUTO_RANGE, "Modes should be unique");
         assertTrue(MODE_AUTO_RANGE != MODE_AUTO_EXIT, "Modes should be unique");
         assertTrue(MODE_AUTO_EXIT != MODE_AUTO_EXIT_AND_AUTO_RANGE, "Modes should be unique");
         assertTrue(MODE_AUTO_EXIT_AND_AUTO_RANGE != MODE_AUTO_LEND, "Modes should be unique");

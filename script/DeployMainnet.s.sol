@@ -81,9 +81,9 @@ contract DeployMainnet is Script {
         //autoRange.setVault(address(vault));
         //vault.setTransformer(address(autoRange), true);
  
-        //AutoCompound autoCompound = AutoCompound(payable(0x9D97c76102E72883CD25Fa60E0f4143516d5b6db));
-        //autoCompound.setVault(address(vault));
-        //vault.setTransformer(address(autoCompound), true);
+        //AutoCollect autoCollect = AutoCollect(payable(0x9D97c76102E72883CD25Fa60E0f4143516d5b6db));
+        //autoCollect.setVault(address(vault));
+        //vault.setTransformer(address(autoCollect), true);
 
         //AutoExit autoExit = AutoExit();
 

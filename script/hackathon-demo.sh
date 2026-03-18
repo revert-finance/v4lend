@@ -37,7 +37,7 @@ run_local() {
   echo "==> Running deterministic local hook demo tests"
 
   local tests=(
-    "test/RevertHook.t.sol::testBasicAutoCompound"
+    "test/RevertHook.t.sol::testBasicAutoCollect"
     "test/RevertHook.t.sol::testBasicAutoRange"
     "test/RevertHook.t.sol::testBasicAutoExit"
     "test/RevertHook.t.sol::testBasicAutoLend"

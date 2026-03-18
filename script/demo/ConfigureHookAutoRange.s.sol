@@ -46,7 +46,7 @@ contract ConfigureHookAutoRange is HookathonDemoBase {
             tokenId,
             RevertHookState.PositionConfig({
                 modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
-                autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
                 autoExitIsRelative: false,
                 autoExitTickLower: type(int24).min,
                 autoExitTickUpper: type(int24).max,
