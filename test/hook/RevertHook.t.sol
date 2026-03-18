@@ -3882,7 +3882,23 @@ contract RevertHookTest is BaseTest {
         assertEq(upperAfter, upperInitial, "Triggered lower exit should remove stale upper node");
     }
 
+    function testAutoExitLowerWithSwap_OneSidedToken1() public {
+        _assertImmediateNonVaultAutoExitCase(false, true);
+    }
+
     function testAutoExitLowerWithoutSwap_LeavesBothTokens() public {
+        _assertImmediateNonVaultAutoExitCase(false, false);
+    }
+
+    function testAutoExitUpperWithSwap_OneSidedToken0() public {
+        _assertImmediateNonVaultAutoExitCase(true, true);
+    }
+
+    function testAutoExitUpperWithoutSwap_LeavesBothTokens() public {
+        _assertImmediateNonVaultAutoExitCase(true, false);
+    }
+
+    function _assertImmediateNonVaultAutoExitCase(bool isUpperTrigger, bool swapOnExit) internal {
         hook.setMaxTicksFromOracle(1000);
         IERC721(address(positionManager)).approve(address(hook), token2Id);
 
@@ -3901,10 +3917,10 @@ contract RevertHookTest is BaseTest {
                 modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
                 autoCompoundMode: RevertHookState.AutoCompoundMode.NONE,
                 autoExitIsRelative: false,
-                autoExitTickLower: currentTickLower,
-                autoExitTickUpper: type(int24).max,
-                autoExitSwapOnLowerTrigger: false,
-                autoExitSwapOnUpperTrigger: true,
+                autoExitTickLower: isUpperTrigger ? type(int24).min : currentTickLower,
+                autoExitTickUpper: isUpperTrigger ? currentTickLower : type(int24).max,
+                autoExitSwapOnLowerTrigger: isUpperTrigger ? true : swapOnExit,
+                autoExitSwapOnUpperTrigger: isUpperTrigger ? swapOnExit : true,
                 autoRangeLowerLimit: type(int24).min,
                 autoRangeUpperLimit: type(int24).max,
                 autoRangeLowerDelta: 0,
@@ -3918,13 +3934,29 @@ contract RevertHookTest is BaseTest {
             positionManager.getPositionLiquidity(token2Id), 0, "Immediate lower AUTO_EXIT should remove all liquidity"
         );
         (uint8 modeAfter,,,,,,,,,,) = hook.positionConfigs(token2Id);
-        assertEq(modeAfter, PositionModeFlags.MODE_NONE, "Immediate lower AUTO_EXIT should disable the position");
+        assertEq(modeAfter, PositionModeFlags.MODE_NONE, "Immediate AUTO_EXIT should disable the position");
 
         uint256 balance0After = IERC20(Currency.unwrap(currency0)).balanceOf(address(this));
         uint256 balance1After = IERC20(Currency.unwrap(currency1)).balanceOf(address(this));
-        assertGt(balance0After, balance0Before, "No-swap lower AUTO_EXIT should return token0");
-        assertGt(balance1After, balance1Before, "No-swap lower AUTO_EXIT should keep token1 instead of forcing a swap");
-        _verifyNoLeftoverBalances("lower auto-exit without swap");
+
+        if (swapOnExit) {
+            if (isUpperTrigger) {
+                assertGt(balance0After, balance0Before, "Upper AUTO_EXIT with swap should finish in token0");
+                assertEq(balance1After, balance1Before, "Upper AUTO_EXIT with swap should fully rotate out of token1");
+            } else {
+                assertEq(balance0After, balance0Before, "Lower AUTO_EXIT with swap should fully rotate out of token0");
+                assertGt(balance1After, balance1Before, "Lower AUTO_EXIT with swap should finish in token1");
+            }
+        } else {
+            assertGt(balance0After, balance0Before, "No-swap AUTO_EXIT should return token0");
+            assertGt(balance1After, balance1Before, "No-swap AUTO_EXIT should keep token1");
+        }
+
+        _verifyNoLeftoverBalances(
+            isUpperTrigger
+                ? (swapOnExit ? "upper auto-exit with swap" : "upper auto-exit without swap")
+                : (swapOnExit ? "lower auto-exit with swap" : "lower auto-exit without swap")
+        );
     }
 
     function testSetPositionConfig_AutoRangeLowerTriggerSameRangeReverts() public {
