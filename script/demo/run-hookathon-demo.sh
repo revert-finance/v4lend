@@ -85,9 +85,9 @@ use_color = sys.stdout.isatty()
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
-CYAN = "\033[36m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
+NEON_GREEN = "\033[38;2;20;245;108m"
+SOFT_WHITE = "\033[38;2;241;236;244m"
+OCEAN_TEAL = "\033[38;2;35;193;190m"
 
 with open(path, "r", encoding="utf-8") as fh:
     lines = [line.rstrip("\n") for line in fh]
@@ -137,23 +137,23 @@ def colorize(line: str) -> str:
     if stripped == "":
         return line
     if is_divider(line):
-        return paint(line, BOLD, CYAN)
+        return paint(line, BOLD, SOFT_WHITE)
     if stripped == "Unichain Fork Hookathon Demo":
-        return paint(line, BOLD, CYAN)
+        return paint(line, BOLD, NEON_GREEN)
     if stripped == "Demo Completed Successfully":
-        return paint(line, BOLD, GREEN)
+        return paint(line, BOLD, NEON_GREEN)
     if is_header(line):
-        return paint(line, BOLD, CYAN)
+        return paint(line, BOLD, SOFT_WHITE)
     if any(stripped.startswith(prefix) for prefix in hook_execution_prefixes):
-        return paint(line, BOLD, GREEN)
+        return paint(line, BOLD, NEON_GREEN)
     if stripped.startswith("Range hunt"):
-        return paint(line, BOLD, YELLOW)
+        return paint(line, BOLD, OCEAN_TEAL)
     if stripped.startswith("Minted position type"):
-        return paint(line, BOLD, CYAN)
+        return paint(line, BOLD, OCEAN_TEAL)
     if stripped.startswith("Position moved into vault custody"):
-        return paint(line, BOLD, CYAN)
+        return paint(line, BOLD, OCEAN_TEAL)
     if stripped.startswith("Leverage, range, and lower-side exit are now active"):
-        return paint(line, BOLD, CYAN)
+        return paint(line, BOLD, OCEAN_TEAL)
     if line.startswith("    "):
         return paint(line, DIM)
     if any(
@@ -173,7 +173,7 @@ def colorize(line: str) -> str:
             "Range should fire before the next upper leverage trigger.",
         )
     ):
-        return paint(line, CYAN)
+        return paint(line, OCEAN_TEAL)
     return line
 
 
