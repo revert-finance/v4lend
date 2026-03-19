@@ -133,24 +133,22 @@ A few useful conventions in the current tree:
 ### Requirements
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation)
-- git submodules
+- git
 
 ### Clone and install
 
 ```sh
-git clone --recurse-submodules https://github.com/revert-finance/v4lend.git
+git clone https://github.com/revert-finance/v4lend.git
 cd v4lend
+forge build
 ```
 
-If you already cloned the repo without submodules:
+On a fresh clone, the first `forge build` will automatically fetch the missing dependencies.
+
+If you want to prefetch them yourself instead:
 
 ```sh
 git submodule update --init --recursive
-```
-
-Build the contracts:
-
-```sh
 forge build
 ```
 
