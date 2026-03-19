@@ -207,7 +207,7 @@ The fork-only end-to-end demo in `[UnichainForkHookathonE2E.s.sol](script/demo/U
 Run it with:
 
 ```sh
-FOUNDRY_PROFILE=ci forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
+forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
 ```
 
 Notes:
