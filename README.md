@@ -210,25 +210,6 @@ Run it with:
 FOUNDRY_PROFILE=ci forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
 ```
 
-Useful env vars:
-
-```sh
-UNICHAIN_RPC_URL=https://mainnet.unichain.org
-DEMO_PRIVATE_KEY=<optional-private-key>
-DEMO_POSITION_LIQUIDITY=<optional-liquidity>
-AMBIENT_POSITION_LIQUIDITY=<optional-liquidity>
-DEMO_AUTO_RANGE_UPPER_LIMIT_SPACINGS=<optional-int24-spacing-multiplier>
-DEMO_AUTO_RANGE_LOWER_LIMIT_SPACINGS=<optional-int24-spacing-multiplier>
-DEMO_AUTO_EXIT_LOWER_DELTA_SPACINGS=<optional-int24-spacing-multiplier>
-DEMO_AUTO_LEVERAGE_TARGET_BPS=<optional-bps>
-DEMO_MAX_PRICE_IMPACT_BPS=<optional-bps>
-DEMO_DEADLINE_BUFFER=<optional-seconds>
-DEMO_MAX_RANGE_STEPS=<optional-step-count>
-DEMO_RANGE_SWAP_STEP_AMOUNT=<optional-amount>
-DEMO_MAX_EXIT_STEPS=<optional-step-count>
-DEMO_EXIT_SWAP_STEP_AMOUNT=<optional-amount>
-```
-
 Notes:
 
 - this script is a local fork demo, not a broadcast deployment flow,
@@ -242,8 +223,9 @@ Deployment scripts live in `[script/](script)`.
 Main entrypoints:
 
 - `[DeployBase.s.sol](script/DeployBase.s.sol)`: full Base deployment for oracle, vault, hook, and related contracts
-- `[DeployUnichain.s.sol](script/DeployUnichain.s.sol)`: Unichain-focused deployment for the hook stack and oracle configuration
-- `[DeployMainnet.s.sol](script/DeployMainnet.s.sol)`: example mainnet deployment flow
+- `[DeployArbitrum.s.sol](script/DeployArbitrum.s.sol)`: full Arbitrum deployment for oracle, vault, hook, and related contracts
+- `[DeployUnichain.s.sol](script/DeployUnichain.s.sol)`: full Unichain deployment for oracle, vault, hook, and related contracts
+- `[DeployMainnet.s.sol](script/DeployMainnet.s.sol)`: full Ethereum mainnet deployment for oracle, vault, hook, and related contracts
 - `[DeployV4Utils.s.sol](script/DeployV4Utils.s.sol)`: standalone deployment for `V4Utils`
 
 Example pattern:
