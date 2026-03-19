@@ -138,7 +138,7 @@ A few useful conventions in the current tree:
 ### Clone and install
 
 ```sh
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules https://github.com/revert-finance/v4lend.git
 cd v4lend
 ```
 
