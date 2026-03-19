@@ -13,6 +13,42 @@ It includes:
 
 The system is designed around Uniswap v4 positions as the core primitive: positions can be valued, financed, transformed, and automatically managed.
 
+## Hookathon demo
+
+This repo includes a working end-to-end hook demo for judges in [script/demo](script/demo).
+
+Quick start:
+
+```sh
+git clone https://github.com/revert-finance/v4lend.git
+cd v4lend
+forge build
+forge test
+forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
+```
+
+The fork-only end-to-end demo in [UnichainForkHookathonE2E.s.sol](script/demo/UnichainForkHookathonE2E.s.sol) does the following:
+
+- deploys the full local demo stack on top of a Unichain fork,
+- deploys and wires the oracle, hook, vault, and transformer contracts,
+- initializes a hooked demo pool,
+- mints one wide ambient liquidity position so the pool stays swappable,
+- mints one narrow hooked position and moves it into the vault with zero debt,
+- configures `MODE_AUTO_RANGE | MODE_AUTO_LEVERAGE | MODE_AUTO_EXIT`,
+- verifies that configuration itself immediately triggers `AUTO_LEVERAGE` from zero debt,
+- pushes price upward until `AUTO_RANGE` remints the position into a new range,
+- then swaps price back down until the reminted position is fully unwound by `AUTO_EXIT`.
+
+Notes:
+
+- this script is a local fork demo, not a broadcast deployment flow,
+- it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
+- a successful run logs the immediate config-time leverage rebalance from zero debt, then the `AUTO_RANGE` remint, and finally the lower-side `AUTO_EXIT` unwind.
+
+### Partner integrations
+
+This project was built for use with Unichain.
+
 ## Main modules
 
 ### `V4Vault`
@@ -187,34 +223,6 @@ Check contract sizes:
 ```sh
 forge build --sizes
 ```
-
-## Hookathon demo
-
-The repo includes a small demo bundle under [script/demo](script/demo):
-
-The fork-only end-to-end demo in [UnichainForkHookathonE2E.s.sol](script/demo/UnichainForkHookathonE2E.s.sol) does the following:
-
-- deploys the full local demo stack on top of a Unichain fork,
-- deploys and wires the oracle, hook, vault, and transformer contracts,
-- initializes a hooked demo pool,
-- mints one wide ambient liquidity position so the pool stays swappable,
-- mints one narrow hooked position and moves it into the vault with zero debt,
-- configures `MODE_AUTO_RANGE | MODE_AUTO_LEVERAGE | MODE_AUTO_EXIT`,
-- verifies that configuration itself immediately triggers `AUTO_LEVERAGE` from zero debt,
-- pushes price upward until `AUTO_RANGE` remints the position into a new range,
-- then swaps price back down until the reminted position is fully unwound by `AUTO_EXIT`.
-
-Run it with:
-
-```sh
-forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
-```
-
-Notes:
-
-- this script is a local fork demo, not a broadcast deployment flow,
-- it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
-- a successful run logs the immediate config-time leverage rebalance from zero debt, then the `AUTO_RANGE` remint, and finally the lower-side `AUTO_EXIT` unwind.
 
 ## Deployment scripts
 
