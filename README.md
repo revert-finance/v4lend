@@ -91,7 +91,7 @@ Atomic position-management helpers used directly or through `V4Vault.transform(.
 
 `[src/vault/liquidation/FlashloanLiquidator.sol](src/vault/liquidation/FlashloanLiquidator.sol)`
 
-A helper that uses a Uniswap v3 flash loan to liquidate vault loans and route the seized collateral through swaps.
+A helper that uses a flash loan to liquidate vault loans and route the seized collateral through swaps.
 
 ## Repository layout
 
