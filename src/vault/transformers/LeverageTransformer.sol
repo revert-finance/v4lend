@@ -451,12 +451,13 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         int24 currentTick
     ) internal pure returns (int24 dummyTickLower, int24 dummyTickUpper) {
         // Round current tick to tick spacing
+        // forge-lint: disable-next-line(divide-before-multiply)
         int24 roundedTick = (currentTick / tickSpacing) * tickSpacing;
 
         // Use MIN_TICK and MAX_TICK aligned to tick spacing to create a wide range
         // This ensures all tokens can be deposited into the dummy position
-        int24 minTick = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
-        int24 maxTick = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
+        int24 minTick = TickMath.minUsableTick(tickSpacing);
+        int24 maxTick = TickMath.maxUsableTick(tickSpacing);
 
         if (otherToken == poolKey.currency0) {
             // Token0 only position: must be above current price

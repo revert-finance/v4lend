@@ -20,7 +20,7 @@ import {Automator} from "./Automator.sol";
 /// (stop loss order) when it reaches a certain tick.
 /// Positions need to be approved (approve or setApprovalForAll) for the contract and configured with configToken method.
 contract AutoExit is Automator {
-    event AutoExit(
+    event AutoExitExecuted(
         uint256 indexed tokenId,
         address account,
         bool isSwap,
@@ -207,7 +207,7 @@ contract AutoExit is Automator {
         delete positionConfigs[params.tokenId];
         emit PositionConfigured(params.tokenId, false, false, false, 0, 0, 0, 0, 0, false);
 
-        emit AutoExit(
+        emit AutoExitExecuted(
             params.tokenId,
             msg.sender,
             isSwap,

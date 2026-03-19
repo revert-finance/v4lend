@@ -100,7 +100,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @return priceX96 Price of token in quote token terms in X96
     function getPoolSqrtPriceX96(address token0, address token1) external view returns (uint160) {
         if (token0 == token1) {
-            return uint160(Q96);
+            return SafeCast.toUint160(Q96);
         }
 
         (uint256 price0X96, uint256 chainlinkReferencePriceX96) = _getReferenceTokenPriceX96(token0, 0);
@@ -321,7 +321,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             revert ChainlinkPriceError();
         }
 
-        return uint256(answer) * Q96 / (10 ** feedConfig.feedDecimals);
+        return FullMath.mulDiv(SafeCast.toUint256(answer), Q96, 10 ** feedConfig.feedDecimals);
     }
 
     /// @notice Validates that price difference between two sources doesn't exceed maximum threshold

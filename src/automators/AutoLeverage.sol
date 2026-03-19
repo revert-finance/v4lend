@@ -20,7 +20,7 @@ import {Automator} from "./Automator.sol";
 /// @notice Automatically rebalances leverage ratio when price moves.
 /// Operator-triggered, works through vault.transform() for vault-owned positions.
 contract AutoLeverage is Automator {
-    event AutoLeverage(uint256 indexed tokenId, bool leverageUp, uint256 debtBefore, uint256 debtAfter);
+    event AutoLeverageExecuted(uint256 indexed tokenId, bool leverageUp, uint256 debtBefore, uint256 debtAfter);
     event PositionConfigured(
         uint256 indexed tokenId,
         bool isActive,
@@ -173,7 +173,7 @@ contract AutoLeverage is Automator {
         }
 
         (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
-        emit AutoLeverage(params.tokenId, params.leverageUp, currentDebt, newDebt);
+        emit AutoLeverageExecuted(params.tokenId, params.leverageUp, currentDebt, newDebt);
     }
 
     function _leverageUp(

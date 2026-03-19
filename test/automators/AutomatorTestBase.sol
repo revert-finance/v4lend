@@ -103,8 +103,11 @@ contract AutomatorTestBase is Test {
         // Deploy interest rate model and vault
         interestRateModel = new InterestRateModel(0, Q64 * 5 / 100, Q64 * 109 / 100, Q64 * 80 / 100);
         vault = new V4Vault("Revert Lend usdc", "rlusdc", USDC_ADDRESS, positionManager, interestRateModel, v4Oracle, IWETH9(WETH_ADDRESS));
+        // forge-lint: disable-next-line(unsafe-typecast)
         vault.setTokenConfig(USDC_ADDRESS, uint32(Q32 * 9 / 10), type(uint32).max);
+        // forge-lint: disable-next-line(unsafe-typecast)
         vault.setTokenConfig(WETH_ADDRESS, uint32(Q32 * 9 / 10), type(uint32).max);
+        // forge-lint: disable-next-line(unsafe-typecast)
         vault.setTokenConfig(address(0), uint32(Q32 * 9 / 10), type(uint32).max);
         vault.setLimits(0, 100000000000, 100000000000, 100000000000, 100000000000);
         vault.setReserveFactor(0);
@@ -117,7 +120,7 @@ contract AutomatorTestBase is Test {
 
     // --- Pool helpers ---
 
-    function _createPool() internal returns (PoolKey memory poolKey) {
+    function _createPool() internal view returns (PoolKey memory poolKey) {
         poolKey = PoolKey({
             currency0: Currency.wrap(address(usdc)),
             currency1: Currency.wrap(address(weth)),

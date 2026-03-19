@@ -22,7 +22,7 @@ import {Automator} from "./Automator.sol";
 /// When executed, a new position is created and automatically configured the same way as the original position.
 /// Positions need to be approved (setApprovalForAll) for the contract and configured with configToken method.
 contract AutoRange is Automator {
-    event AutoRange(uint256 indexed oldTokenId, uint256 indexed newTokenId);
+    event AutoRangeExecuted(uint256 indexed oldTokenId, uint256 indexed newTokenId);
     event PositionConfigured(
         uint256 indexed tokenId,
         int32 lowerTickLimit,
@@ -237,7 +237,7 @@ contract AutoRange is Automator {
             _transferToken(owner, token1, leftover1, true);
         }
 
-        emit AutoRange(params.tokenId, newTokenId);
+        emit AutoRangeExecuted(params.tokenId, newTokenId);
     }
 
     function _mintNewPosition(

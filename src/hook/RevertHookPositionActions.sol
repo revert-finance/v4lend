@@ -168,6 +168,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
         (uint256 newTokenId,,) =
+            // forge-lint: disable-next-line(unsafe-typecast)
             _mintPosition(poolKey, newTickLower, newTickUpper, uint128(amount0), uint128(amount1), owner);
 
         if (newTokenId == 0) {
@@ -178,6 +179,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
             _approveToken(currency0, amount0);
             _approveToken(currency1, amount1);
             (uint256 restored0, uint256 restored1) =
+                // forge-lint: disable-next-line(unsafe-typecast)
                 _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
             _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
             if (restored0 != 0 || restored1 != 0) {
@@ -266,6 +268,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
         if (collectMode == AutoCollectMode.AUTO_COLLECT) {
             _approveToken(poolKey.currency0, fees0);
             _approveToken(poolKey.currency1, fees1);
+            // forge-lint: disable-next-line(unsafe-typecast)
             _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(fees0), uint128(fees1));
         }
 

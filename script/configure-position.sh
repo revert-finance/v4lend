@@ -18,22 +18,26 @@ TOKEN_ID="2461350"
 
 # ==================== Position Configuration ====================
 # PositionConfig struct:
-#   PositionMode mode;              // enum: 0=NONE, 1=AUTO_COLLECT_ONLY, 2=AUTO_RANGE, 3=AUTO_EXIT, 4=AUTO_EXIT_AND_AUTO_RANGE, 5=AUTO_LEND, 6=AUTO_LEVERAGE
-#   AutoCollectMode autoCollectMode; // enum: 0=NONE, 1=AUTO_COLLECT, 2=HARVEST_TOKEN_0, 3=HARVEST_TOKEN_1
-#   bool autoExitIsRelative;        // if true, auto exit ticks are relative to position limits
-#   int24 autoExitTickLower;        // lower tick for auto-exit trigger
-#   int24 autoExitTickUpper;        // upper tick for auto-exit trigger
-#   int24 autoRangeLowerLimit;      // lower limit for auto-range
-#   int24 autoRangeUpperLimit;      // upper limit for auto-range
-#   int24 autoRangeLowerDelta;      // delta below current tick for new range
-#   int24 autoRangeUpperDelta;      // delta above current tick for new range
-#   int24 autoLendToleranceTick;    // tolerance for auto-lend
-#   uint16 autoLeverageTargetBps;   // target leverage ratio in bps (0-10000)
+#   uint8 modeFlags;                    // bitwise PositionModeFlags; 1 = MODE_AUTO_COLLECT
+#   AutoCollectMode autoCollectMode;    // enum: 0=NONE, 1=AUTO_COLLECT, 2=HARVEST_TOKEN_0, 3=HARVEST_TOKEN_1, 4=HARVEST_TOKENS
+#   bool autoExitIsRelative;            // if true, auto exit ticks are relative to position limits
+#   bool autoExitSwapOnLowerTrigger;    // if true, lower-side AUTO_EXIT swaps into one token after debt repayment
+#   bool autoExitSwapOnUpperTrigger;    // if true, upper-side AUTO_EXIT swaps into one token after debt repayment
+#   int24 autoExitTickLower;            // lower tick for auto-exit trigger
+#   int24 autoExitTickUpper;            // upper tick for auto-exit trigger
+#   int24 autoRangeLowerLimit;          // lower limit for auto-range
+#   int24 autoRangeUpperLimit;          // upper limit for auto-range
+#   int24 autoRangeLowerDelta;          // delta below current tick for new range
+#   int24 autoRangeUpperDelta;          // delta above current tick for new range
+#   int24 autoLendToleranceTick;        // tolerance for auto-lend
+#   uint16 autoLeverageTargetBps;       // target leverage ratio in bps (0-10000)
 
 # Example: AUTO_COLLECT_ONLY mode
 MODE="1"                           # AUTO_COLLECT_ONLY
-AUTO_COLLECT_MODE="1"             # AUTO_COLLECT
+AUTO_COLLECT_MODE="1"              # AUTO_COLLECT
 AUTO_EXIT_IS_RELATIVE="false"
+AUTO_EXIT_SWAP_ON_LOWER_TRIGGER="true"
+AUTO_EXIT_SWAP_ON_UPPER_TRIGGER="true"
 AUTO_EXIT_TICK_LOWER="-8388608"    # type(int24).min - disabled
 AUTO_EXIT_TICK_UPPER="8388607"     # type(int24).max - disabled
 AUTO_RANGE_LOWER_LIMIT="-8388608"  # type(int24).min - disabled
@@ -102,14 +106,14 @@ print_header "Step 2: Set Position Config"
 
 echo "Setting position config for token $TOKEN_ID..."
 echo "  Mode: $MODE (1=AUTO_COLLECT_ONLY)"
-echo "  Auto Compound Mode: $AUTO_COLLECT_MODE (1=AUTO_COLLECT)"
+echo "  Auto Collect Mode: $AUTO_COLLECT_MODE (1=AUTO_COLLECT)"
 
-# setPositionConfig(uint256 tokenId, (uint8,uint8,bool,int24,int24,int24,int24,int24,int24,int24,uint16) positionConfig)
+# setPositionConfig(uint256 tokenId, (uint8,uint8,bool,bool,bool,int24,int24,int24,int24,int24,int24,int24,uint16) positionConfig)
 # The struct is passed as a tuple
 cast send "$REVERT_HOOK" \
-    "setPositionConfig(uint256,(uint8,uint8,bool,int24,int24,int24,int24,int24,int24,int24,uint16))" \
+    "setPositionConfig(uint256,(uint8,uint8,bool,bool,bool,int24,int24,int24,int24,int24,int24,int24,uint16))" \
     "$TOKEN_ID" \
-    "($MODE,$AUTO_COLLECT_MODE,$AUTO_EXIT_IS_RELATIVE,$AUTO_EXIT_TICK_LOWER,$AUTO_EXIT_TICK_UPPER,$AUTO_RANGE_LOWER_LIMIT,$AUTO_RANGE_UPPER_LIMIT,$AUTO_RANGE_LOWER_DELTA,$AUTO_RANGE_UPPER_DELTA,$AUTO_LEND_TOLERANCE_TICK,$AUTO_LEVERAGE_TARGET_BPS)" \
+    "($MODE,$AUTO_COLLECT_MODE,$AUTO_EXIT_IS_RELATIVE,$AUTO_EXIT_SWAP_ON_LOWER_TRIGGER,$AUTO_EXIT_SWAP_ON_UPPER_TRIGGER,$AUTO_EXIT_TICK_LOWER,$AUTO_EXIT_TICK_UPPER,$AUTO_RANGE_LOWER_LIMIT,$AUTO_RANGE_UPPER_LIMIT,$AUTO_RANGE_LOWER_DELTA,$AUTO_RANGE_UPPER_DELTA,$AUTO_LEND_TOLERANCE_TICK,$AUTO_LEVERAGE_TARGET_BPS)" \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
@@ -125,5 +129,5 @@ cast call "$REVERT_HOOK" \
 
 print_header "Configuration Complete!"
 
-echo "Position $TOKEN_ID is now configured for auto-compounding on RevertHook"
+echo "Position $TOKEN_ID is now configured for auto-collect on RevertHook"
 echo ""

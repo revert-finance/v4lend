@@ -322,10 +322,10 @@ contract AutoLend is Automator {
             );
         } else {
             if (newUpper > TickMath.MAX_TICK) {
-                newUpper = (TickMath.MAX_TICK / poolKey.tickSpacing) * poolKey.tickSpacing;
+                newUpper = TickMath.maxUsableTick(poolKey.tickSpacing);
             }
             if (newLower < TickMath.MIN_TICK) {
-                newLower = (TickMath.MIN_TICK / poolKey.tickSpacing) * poolKey.tickSpacing;
+                newLower = TickMath.minUsableTick(poolKey.tickSpacing);
             }
             if (newLower >= newUpper) {
                 revert InvalidConfig();

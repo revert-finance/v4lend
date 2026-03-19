@@ -144,10 +144,10 @@ abstract contract V4TestBase is Test {
     
     function _fundUsers() internal {
         // Fund users with test tokens
-        token0.transfer(user1, USER_BALANCE);
-        token1.transfer(user1, USER_BALANCE);
-        token0.transfer(user2, USER_BALANCE);
-        token1.transfer(user2, USER_BALANCE);
+        require(token0.transfer(user1, USER_BALANCE), "TOKEN0_USER1_TRANSFER_FAILED");
+        require(token1.transfer(user1, USER_BALANCE), "TOKEN1_USER1_TRANSFER_FAILED");
+        require(token0.transfer(user2, USER_BALANCE), "TOKEN0_USER2_TRANSFER_FAILED");
+        require(token1.transfer(user2, USER_BALANCE), "TOKEN1_USER2_TRANSFER_FAILED");
         
         // Fund users with ETH
         vm.deal(user1, ETH_BALANCE);
@@ -179,6 +179,7 @@ abstract contract V4TestBase is Test {
         permit2.approve(
             address(token0),
             address(positionManager),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint160(INITIAL_LIQUIDITY),
             uint48(block.timestamp + 1 days) // 1 day expiration
         );
@@ -186,6 +187,7 @@ abstract contract V4TestBase is Test {
         permit2.approve(
             address(token1),
             address(positionManager),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint160(INITIAL_LIQUIDITY),
             uint48(block.timestamp + 1 days) // 1 day expiration
         );
@@ -197,12 +199,14 @@ abstract contract V4TestBase is Test {
         permit2.approve(
             address(token0),
             address(positionManager),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint160(10_000_000 ether), // Large allowance for V4Utils
             uint48(block.timestamp + 1 days) // 1 day expiration
         );
         permit2.approve(
             address(token1),
             address(positionManager),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint160(10_000_000 ether), // Large allowance for V4Utils
             uint48(block.timestamp + 1 days) // 1 day expiration
         );
@@ -254,6 +258,7 @@ abstract contract V4TestBase is Test {
         permit2.approve(
             address(token1),
             address(positionManager),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint160(INITIAL_LIQUIDITY),
             uint48(block.timestamp + 1 days) // 1 day expiration
         );
@@ -300,7 +305,7 @@ abstract contract V4TestBase is Test {
         uint128 liquidity,
         uint256 deadline,
         address owner
-    ) internal view returns (V4Utils.Instructions memory) {
+    ) internal pure returns (V4Utils.Instructions memory) {
         return V4Utils.Instructions({
             whatToDo: whatToDo,
             targetToken: Currency.wrap(targetToken),

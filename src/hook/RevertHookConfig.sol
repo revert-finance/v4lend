@@ -205,7 +205,7 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         }
     }
 
-    function _validateModeFlags(uint8 modeFlags, uint256 tokenId, PoolKey memory poolKey) internal {
+    function _validateModeFlags(uint8 modeFlags, uint256 tokenId, PoolKey memory poolKey) internal view {
         if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoLeverage(modeFlags)) {
             revert InvalidConfig();
         }

@@ -227,7 +227,7 @@ contract V4ForkTestBase is V4TestBase {
         v4Utils.execute(tokenId, instructions);
     }
 
-    function _verifyContractCleanup() internal {
+    function _verifyContractCleanup() internal view {
         // Verify V4Utils contract has no leftover tokens
         assertEq(address(v4Utils).balance, 0, "V4Utils ETH balance should be 0");
         assertEq(weth.balanceOf(address(v4Utils)), 0, "V4Utils WETH balance should be 0");
@@ -286,8 +286,11 @@ contract V4ForkTestBase is V4TestBase {
         console.log("Final USDC balance:", finalUsdcBalance);
         console.log("Final ETH balance:", finalEthBalance);
         
+        // forge-lint: disable-next-line(unsafe-typecast)
         console.log("WETH balance change:", int256(finalWethBalance) - int256(initialWethBalance));
+        // forge-lint: disable-next-line(unsafe-typecast)
         console.log("USDC balance change:", int256(finalUsdcBalance) - int256(initialUsdcBalance));
+        // forge-lint: disable-next-line(unsafe-typecast)
         console.log("ETH balance change:", int256(finalEthBalance) - int256(initialEthBalance));
     }
 

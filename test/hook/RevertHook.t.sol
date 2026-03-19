@@ -29,8 +29,7 @@ import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
-import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
-import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
+import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -1572,7 +1571,7 @@ contract RevertHookTest is BaseTest {
 
     function testSwapAllLiquidityNarrowRange() public {
         // Create a new pool with a different fee to ensure it's separate
-        PoolKey memory newPoolKey = PoolKey(currency0, currency1, 0, 10, IHooks(address(0)));
+        PoolKey memory newPoolKey = PoolKey({ currency0: currency0, currency1: currency1, fee: 0, tickSpacing: 10, hooks: IHooks(address(0)) });
         PoolId newPoolId = newPoolKey.toId();
 
         // Initialize the new pool

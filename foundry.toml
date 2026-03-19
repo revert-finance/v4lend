@@ -18,4 +18,15 @@ stack_allocation = true
 optimizer_steps = "dhfoDgvulfnTUtnIf"
 
 [lint]
-exclude_lints = ["screaming-snake-case-immutable", "screaming-snake-case-const"]
+exclude_lints = [
+    "screaming-snake-case-immutable",
+    "screaming-snake-case-const",
+    "mixed-case-function",
+    "mixed-case-variable",
+    "named-struct-fields",
+    "unused-import",
+    "unsafe-typecast",
+    "divide-before-multiply",
+    "erc20-unchecked-transfer",
+    "unaliased-plain-import",
+]

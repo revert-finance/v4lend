@@ -146,7 +146,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         PoolKey calldata,
         ModifyLiquidityParams calldata,
         bytes calldata
-    ) internal override returns (bytes4) {
+    ) internal view override returns (bytes4) {
         if (sender != address(positionManager) && sender != address(this)) {
             revert Unauthorized();
         }
@@ -228,14 +228,18 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         }
 
         int128 protocolFee0 =
+            // forge-lint: disable-next-line(unsafe-typecast)
             int32(accumulatedActiveTime) * feeDelta.amount0() * int16(_protocolFeeBps) / (10000 * int32(feeTime));
         int128 protocolFee1 =
+            // forge-lint: disable-next-line(unsafe-typecast)
             int32(accumulatedActiveTime) * feeDelta.amount1() * int16(_protocolFeeBps) / (10000 * int32(feeTime));
 
         if (protocolFee0 > 0) {
+            // forge-lint: disable-next-line(unsafe-typecast)
             poolManager.take(key.currency0, feeRecipient, uint256(int256(protocolFee0)));
         }
         if (protocolFee1 > 0) {
+            // forge-lint: disable-next-line(unsafe-typecast)
             poolManager.take(key.currency1, feeRecipient, uint256(int256(protocolFee1)));
         }
 
@@ -243,7 +247,9 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             tokenId,
             key.currency0,
             key.currency1,
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256(int256(protocolFee0)),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256(int256(protocolFee1)),
             feeRecipient
         );

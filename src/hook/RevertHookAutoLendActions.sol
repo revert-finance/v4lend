@@ -152,7 +152,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 tokenId,
                 poolKey,
                 positionInfo,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 isToken0Lent ? uint128(redeemedAmount) : 0,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 isToken0Lent ? 0 : uint128(redeemedAmount)
             );
             restoredExistingPosition = restored0 != 0 || restored1 != 0;
@@ -161,7 +163,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 poolKey,
                 newTickLower,
                 newTickUpper,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 isToken0Lent ? uint128(redeemedAmount) : 0,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 isToken0Lent ? 0 : uint128(redeemedAmount),
                 owner
             );
@@ -229,6 +233,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
         (uint256 restored0, uint256 restored1) =
+            // forge-lint: disable-next-line(unsafe-typecast)
             _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
         _sendLeftoverTokens(tokenId, currency0, currency1, owner);
 

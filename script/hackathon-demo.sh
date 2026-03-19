@@ -37,12 +37,12 @@ run_local() {
   echo "==> Running deterministic local hook demo tests"
 
   local tests=(
-    "test/RevertHook.t.sol::testBasicAutoCollect"
-    "test/RevertHook.t.sol::testBasicAutoRange"
-    "test/RevertHook.t.sol::testBasicAutoExit"
-    "test/RevertHook.t.sol::testBasicAutoLend"
-    "test/RevertHook.t.sol::testPriceImpactLimit_LimitEnforced"
-    "test/RevertHook.t.sol::testImmediateExecution_AutoRange"
+    "test/hook/RevertHook.t.sol::testBasicAutoCollect"
+    "test/hook/RevertHook.t.sol::testBasicAutoRange"
+    "test/hook/RevertHook.t.sol::testBasicAutoExit"
+    "test/hook/RevertHook.t.sol::testBasicAutoLend"
+    "test/hook/RevertHook.t.sol::testPriceImpactLimit_LimitEnforced"
+    "test/hook/RevertHook.t.sol::testImmediateExecution_AutoRange"
     "test/automators/AutoLend.t.sol::test_DepositAndWithdrawETHNativePosition"
   )
 

@@ -66,7 +66,9 @@ abstract contract RevertHookImmediate is RevertHookViews {
         bool upperSatisfied = upperTrigger != type(int24).max;
 
         if (lowerSatisfied && upperSatisfied) {
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 lowerDistance = uint256(int256(lowerTrigger) - int256(currentTickLower));
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 upperDistance = uint256(int256(currentTickLower) - int256(upperTrigger));
             return lowerDistance <= upperDistance ? (true, false, lowerTrigger) : (true, true, upperTrigger);
         }

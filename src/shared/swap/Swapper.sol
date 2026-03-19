@@ -261,7 +261,9 @@ abstract contract Swapper is Constants {
         paramsArray[0] = abi.encode(
             tokenId,
             uint256(liquidityRemove),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint128(amount0Min),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint128(amount1Min),
             decreaseLiquidityHookData
         );

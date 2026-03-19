@@ -40,14 +40,20 @@ import {Constants} from "../shared/Constants.sol";
 contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Constants {
     using Math for uint256;
 
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MAX_COLLATERAL_FACTOR_X32 = uint32(Q32 * 90 / 100); // 90%
 
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MIN_LIQUIDATION_PENALTY_X32 = uint32(Q32 * 2 / 100); // 2%
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MAX_LIQUIDATION_PENALTY_X32 = uint32(Q32 * 10 / 100); // 10%
 
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MIN_RESERVE_PROTECTION_FACTOR_X32 = uint32(Q32 / 100); //1%
 
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MAX_DAILY_LEND_INCREASE_X32 = uint32(Q32 / 10); //10%
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MAX_DAILY_DEBT_INCREASE_X32 = uint32(Q32 / 10); //10%
 
     /// @notice Uniswap v4 position manager
@@ -1191,7 +1197,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         if (amount > 0) {
             if (currency.isAddressZero()) {
                 weth.deposit{value: amount}();
-                weth.transfer(recipient, amount);
+                require(weth.transfer(recipient, amount), "WETH_TRANSFER_FAILED");
             } else {
                 currency.transfer(recipient, amount);
             }
@@ -1500,7 +1506,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         if (value > type(uint192).max) {
             revert();
         }
-        return uint192(value);
+        return SafeCast.toUint192(value);
     }
 
     // recieves ETH from fees or when decreasing liquidity

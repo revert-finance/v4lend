@@ -60,7 +60,7 @@ Supported hook-side automation modes include:
 
 - auto exit
 - auto range
-- auto compound
+- auto collect
 - auto lend
 - auto leverage
 
@@ -209,7 +209,7 @@ The fork-only end-to-end demo in `[UnichainForkHookathonE2E.s.sol](script/demo/U
 Run it with:
 
 ```sh
-FOUNDRY_PROFILE=ci forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv --skip-simulation
+FOUNDRY_PROFILE=ci forge script script/demo/UnichainForkHookathonE2E.s.sol:UnichainForkHookathonE2E -vv
 ```
 
 Useful env vars:
@@ -229,15 +229,13 @@ DEMO_MAX_RANGE_STEPS=<optional-step-count>
 DEMO_RANGE_SWAP_STEP_AMOUNT=<optional-amount>
 DEMO_MAX_EXIT_STEPS=<optional-step-count>
 DEMO_EXIT_SWAP_STEP_AMOUNT=<optional-amount>
-HOOKATHON_SKIP_SIMULATION=<1 by default>
 ```
 
 Notes:
 
 - this script is a local fork demo, not a broadcast deployment flow,
 - it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
-- a successful run logs the immediate config-time leverage rebalance from zero debt, then the `AUTO_RANGE` remint, and finally the lower-side `AUTO_EXIT` unwind,
-- the recommended commands use `--skip-simulation` because the script run itself succeeds on the fork, but Foundry's final replay simulation is flaky for this CREATE2-heavy flow on Unichain.
+- a successful run logs the immediate config-time leverage rebalance from zero debt, then the `AUTO_RANGE` remint, and finally the lower-side `AUTO_EXIT` unwind.
 
 ## Deployment scripts
 

@@ -576,6 +576,7 @@ contract LiquidityCalculator is ILiquidityCalculator {
                     searchCompressedTick = int24(searchWordPosition) * 256;
                     if (!searchLeft) searchCompressedTick++;
                 }
+                // forge-lint: disable-next-line(unsafe-typecast)
                 uint8 searchBitPosition = uint8(uint24(searchCompressedTick) & 0xff);
                 result.nextTick = _findTickInWord(
                     tickBitmap, searchCompressedTick, searchBitPosition, params.tickSpacing, searchLeft
@@ -618,9 +619,10 @@ contract LiquidityCalculator is ILiquidityCalculator {
             } else {
                 // Search right: start from next compressed tick
                 compressedTick++;
+                // forge-lint: disable-next-line(unsafe-typecast)
                 bitPosition = uint8(uint24(compressedTick) & 0xff);
                 // Mask all bits at or to the left of current position
-                uint256 bitMask = ~((1 << bitPosition) - 1);
+                uint256 bitMask = type(uint256).max << bitPosition;
                 uint256 maskedWord = word & bitMask;
                 if (maskedWord != 0) {
                     // Found initialized tick - find the least significant set bit

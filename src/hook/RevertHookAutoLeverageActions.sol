@@ -94,6 +94,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         _approveToken(poolKey.currency0, amount0);
         _approveToken(poolKey.currency1, amount1);
         (uint256 used0, uint256 used1) =
+            // forge-lint: disable-next-line(unsafe-typecast)
             _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
         if (used0 != 0 || used1 != 0) {
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, vault.ownerOf(tokenId));
@@ -156,7 +157,9 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             tokenId,
             poolKey,
             positionInfo,
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint128(balance0),
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint128(balance1)
         );
         if (positionManager.getPositionLiquidity(tokenId) < currentLiquidity) {

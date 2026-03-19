@@ -3,6 +3,7 @@ pragma solidity ^0.8.30;
 
 library AutoRangeLib {
     function floorToSpacing(int24 tick, int24 tickSpacing) internal pure returns (int24 baseTick) {
+        // forge-lint: disable-next-line(divide-before-multiply)
         baseTick = (tick / tickSpacing) * tickSpacing;
         if (tick < 0 && tick % tickSpacing != 0) {
             baseTick -= tickSpacing;

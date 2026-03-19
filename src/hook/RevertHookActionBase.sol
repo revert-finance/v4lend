@@ -171,6 +171,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         }
         SwapParams memory params = SwapParams({
             zeroForOne: zeroForOne,
+            // forge-lint: disable-next-line(unsafe-typecast)
             amountSpecified: -int256(amountIn),
             sqrtPriceLimitX96: sqrtPriceLimitX96
         });
@@ -196,6 +197,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     /// @notice Settles a single currency delta
     function _settleCurrencyDelta(Currency currency, int256 delta) internal {
         if (delta < 0) {
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 amount = uint256(-delta);
             poolManager.sync(currency);
             if (currency.isAddressZero()) {
@@ -205,6 +207,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 poolManager.settle();
             }
         } else if (delta > 0) {
+            // forge-lint: disable-next-line(unsafe-typecast)
             poolManager.take(currency, address(this), uint256(delta));
         }
     }
@@ -455,7 +458,9 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         int128 delta0 = delta.amount0();
         int128 delta1 = delta.amount1();
         return (
+            // forge-lint: disable-next-line(unsafe-typecast)
             delta0 < 0 ? amount0 - uint256(int256(-delta0)) : amount0 + uint256(int256(delta0)),
+            // forge-lint: disable-next-line(unsafe-typecast)
             delta1 < 0 ? amount1 - uint256(int256(-delta1)) : amount1 + uint256(int256(delta1))
         );
     }
