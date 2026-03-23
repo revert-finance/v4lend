@@ -47,7 +47,7 @@ contract DeployUnichain is Script {
     address constant WETH = 0x4200000000000000000000000000000000000006; // Standard OP Stack WETH
     address constant ETH = address(0);
 
-    // Stablecoins - placeholder addresses, update with actual Unichain addresses
+    // Stablecoins
     address constant USDC = 0x078D782b760474a361dDA0AF3839290b0EF57AD6;
     address constant USDT = 0x9151434b16b9763660705744891fA906F660EcC5;
     address constant DAI = 0x20CAb320A855b39F724131C69424240519573f81;
