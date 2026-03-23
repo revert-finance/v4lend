@@ -185,36 +185,36 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function autoExit(PoolKey calldata poolKey, uint256 tokenId, bool isUpper) external {
-        _delegatecallPositionActions(
+        _delegatecallPositionActionsPassthrough(
             abi.encodeCall(positionActions.autoExit, (poolKey, tokenId, isUpper))
         );
     }
 
     function autoRange(PoolKey calldata poolKey, uint256 tokenId) external {
-        _delegatecallPositionActions(
+        _delegatecallPositionActionsPassthrough(
             abi.encodeCall(positionActions.autoRange, (poolKey, tokenId))
         );
     }
 
     function autoLeverage(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
-        _delegatecallAutoLeverageActions(
+        _delegatecallAutoLeverageActionsPassthrough(
             abi.encodeCall(autoLeverageActions.autoLeverage, (poolKey, tokenId, isUpperTrigger))
         );
     }
 
     function autoLendForceExit(uint256 tokenId) external {
-        _delegatecall(
+        _delegatecallPassthrough(
             address(autoLendActions),
             abi.encodeCall(autoLendActions.autoLendForceExit, (tokenId))
         );
     }
 
     function autoCollect(uint256[] calldata tokenIds) external {
-        _delegatecallPositionActions(abi.encodeCall(positionActions.autoCollect, (tokenIds)));
+        _delegatecallPositionActionsPassthrough(abi.encodeCall(positionActions.autoCollect, (tokenIds)));
     }
 
     function autoCollectForVault(uint256 tokenId, address caller) external {
-        _delegatecallPositionActions(abi.encodeCall(positionActions.autoCollectForVault, (tokenId, caller)));
+        _delegatecallPositionActionsPassthrough(abi.encodeCall(positionActions.autoCollectForVault, (tokenId, caller)));
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {

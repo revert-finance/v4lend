@@ -105,8 +105,16 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         _delegatecall(address(positionActions), data);
     }
 
+    function _delegatecallPositionActionsPassthrough(bytes memory data) internal {
+        _delegatecallPassthrough(address(positionActions), data);
+    }
+
     function _delegatecallAutoLeverageActions(bytes memory data) internal {
         _delegatecall(address(autoLeverageActions), data);
+    }
+
+    function _delegatecallAutoLeverageActionsPassthrough(bytes memory data) internal {
+        _delegatecallPassthrough(address(autoLeverageActions), data);
     }
 
     function _tryDelegatecallPositionActions(bytes memory data) internal returns (bool success) {

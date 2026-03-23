@@ -1840,6 +1840,54 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
     }
 
+    function testDirectAutoExit_RevertsWhenCalledExternally() public {
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.autoExit(poolKey, token3Id, false);
+    }
+
+    function testDirectAutoRange_RevertsWhenCalledExternally() public {
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.autoRange(poolKey, token3Id);
+    }
+
+    function testDirectAutoLeverage_RevertsWhenCalledExternally() public {
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.autoLeverage(poolKey, token3Id, false);
+    }
+
+    function testDirectAutoCollectForVault_RevertsWhenCalledExternally() public {
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.autoCollectForVault(token3Id, address(this));
+    }
+
+    function testDirectAutoLendForceExit_RevertsWhenCallerIsNotOwner() public {
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+        address notOwner = makeAddr("notOwner");
+
+        vm.prank(notOwner);
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.autoLendForceExit(autolendTokenId);
+    }
+
+    function testDirectAutoLendForceExit_OwnerCanExit() public {
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+
+        (,,, address autoLendTokenBefore, uint256 sharesBefore,,,) = hook.positionStates(autolendTokenId);
+        assertEq(autoLendTokenBefore, Currency.unwrap(currency0), "Position should be parked in vault0 before exit");
+        assertGt(sharesBefore, 0, "Position should hold auto-lend shares before exit");
+
+        hook.autoLendForceExit(autolendTokenId);
+
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(autolendTokenId);
+        (,,, address autoLendTokenAfter, uint256 sharesAfter,,,) = hook.positionStates(autolendTokenId);
+
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Force exit should disable the position");
+        assertEq(autoLendTokenAfter, address(0), "Auto-lend token should be cleared after force exit");
+        assertEq(sharesAfter, 0, "Auto-lend shares should be cleared after force exit");
+        assertEq(currency0.balanceOf(address(hook)), 0, "Hook should not retain currency0 after force exit");
+        assertEq(currency1.balanceOf(address(hook)), 0, "Hook should not retain currency1 after force exit");
+    }
+
     function testAutoLendWithdrawRemintCopiesGeneralConfig() public {
         hook.setMaxTicksFromOracle(1000);
 
@@ -2239,6 +2287,68 @@ contract RevertHookTest is BaseTest {
             autoLendToleranceTick: int24(0),
             autoLeverageTargetBps: 0
         });
+    }
+
+    function _createActiveAutoLendPosition() internal returns (uint256 autolendTokenId) {
+        hook.setMaxTicksFromOracle(1000);
+
+        int24 testTickLower = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
+        int24 testTickUpper = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
+        uint128 liquidityAmount = 50e18;
+
+        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
+            Constants.SQRT_PRICE_1_1,
+            TickMath.getSqrtPriceAtTick(testTickLower),
+            TickMath.getSqrtPriceAtTick(testTickUpper),
+            liquidityAmount
+        );
+
+        (autolendTokenId,) = positionManager.mint(
+            poolKey,
+            testTickLower,
+            testTickUpper,
+            liquidityAmount,
+            amount0Expected + 1,
+            amount1Expected + 1,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        hook.setPositionConfig(
+            autolendTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 60,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 20e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        assertEq(autoLendToken, Currency.unwrap(currency0), "Position should lend currency0 after setup");
+        assertGt(autoLendShares, 0, "Position should hold auto-lend shares after setup");
     }
 
     function _assertPositionConfigEq(uint256 tokenId_, RevertHookState.PositionConfig memory expected) internal view {
