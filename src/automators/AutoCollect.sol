@@ -30,13 +30,20 @@ contract AutoCollect is Automator {
     );
 
     event PositionConfigured(
-        uint256 indexed tokenId, uint64 maxRewardX64, uint16 token0SlippageBps, uint16 token1SlippageBps
+        uint256 indexed tokenId,
+        uint64 maxRewardX64,
+        uint16 token0SlippageBps,
+        uint16 token1SlippageBps,
+        uint128 minCollectAmount0,
+        uint128 minCollectAmount1
     );
 
     struct PositionConfig {
         uint64 maxRewardX64;
         uint16 token0SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
         uint16 token1SlippageBps; // 10000 disables oracle slippage check (uses only amountOutMin)
+        uint128 minCollectAmount0;
+        uint128 minCollectAmount1;
     }
 
     mapping(uint256 => PositionConfig) public positionConfigs;
@@ -170,9 +177,7 @@ contract AutoCollect is Automator {
 
             (bytes memory actions, bytes[] memory paramsArray) =
                 _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
-            paramsArray[0] = abi.encode(
-                params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.hookData
-            );
+            paramsArray[0] = abi.encode(params.tokenId, liquidity, amount0, amount1, params.hookData);
 
             uint256 balance0Before = token0.balanceOfSelf();
             uint256 balance1Before = token1.balanceOfSelf();
@@ -183,6 +188,10 @@ contract AutoCollect is Automator {
 
             compounded0 = balance0Before - token0.balanceOfSelf();
             compounded1 = balance1Before - token1.balanceOfSelf();
+
+            if (compounded0 < config.minCollectAmount0 || compounded1 < config.minCollectAmount1) {
+                revert AmountError();
+            }
         }
 
         // Send leftover (slippage diff) to position owner immediately.
@@ -217,6 +226,10 @@ contract AutoCollect is Automator {
         }
         // HARVEST_TOKENS: no swap
 
+        if (amount0 < config.minCollectAmount0 || amount1 < config.minCollectAmount1) {
+            revert AmountError();
+        }
+
         // Send tokens to owner
         _transferToken(owner, token0, amount0, true);
         _transferToken(owner, token1, amount1, true);
@@ -237,7 +250,12 @@ contract AutoCollect is Automator {
 
         positionConfigs[tokenId] = config;
         emit PositionConfigured(
-            tokenId, config.maxRewardX64, config.token0SlippageBps, config.token1SlippageBps
+            tokenId,
+            config.maxRewardX64,
+            config.token0SlippageBps,
+            config.token1SlippageBps,
+            config.minCollectAmount0,
+            config.minCollectAmount1
         );
     }
 

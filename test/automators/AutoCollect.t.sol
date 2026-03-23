@@ -24,6 +24,22 @@ contract AutoCollectTest is AutomatorTestBase {
         vault.setTransformer(address(autoCollect), true);
     }
 
+    function _collectConfig(
+        uint64 maxRewardX64,
+        uint16 token0SlippageBps,
+        uint16 token1SlippageBps,
+        uint128 minCollectAmount0,
+        uint128 minCollectAmount1
+    ) internal pure returns (AutoCollect.PositionConfig memory) {
+        return AutoCollect.PositionConfig({
+            maxRewardX64: maxRewardX64,
+            token0SlippageBps: token0SlippageBps,
+            token1SlippageBps: token1SlippageBps,
+            minCollectAmount0: minCollectAmount0,
+            minCollectAmount1: minCollectAmount1
+        });
+    }
+
     // --- Access Control Tests ---
 
     function test_RevertWhenNonOperatorCallsExecute() public {
@@ -124,6 +140,35 @@ contract AutoCollectTest is AutomatorTestBase {
         assertGt(liquidityAfter, liquidityBefore, "Liquidity should increase after auto-compound");
     }
 
+    function test_AutoCollectRevertsWhenBelowMinAmounts() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        _generateFees(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCollect), tokenId);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoCollect.configToken(tokenId, _collectConfig(0, 10000, 10000, type(uint128).max, 0));
+
+        AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCollect.CollectMode.AUTO_COLLECT,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.AmountError.selector);
+        autoCollect.execute(params);
+    }
+
     function test_AutoCollectWithVault() public {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
@@ -205,6 +250,35 @@ contract AutoCollectTest is AutomatorTestBase {
         // Liquidity should not change (harvest doesn't add liquidity)
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
         assertGt(liquidity, 0, "Position should still have liquidity");
+    }
+
+    function test_HarvestTokensRevertsWhenBelowMinAmounts() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        _generateFees(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCollect), tokenId);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoCollect.configToken(tokenId, _collectConfig(0, 10000, 10000, type(uint128).max, 0));
+
+        AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCollect.CollectMode.HARVEST_TOKENS,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.AmountError.selector);
+        autoCollect.execute(params);
     }
 
     function test_HarvestToken0() public {
@@ -430,7 +504,7 @@ contract AutoCollectTest is AutomatorTestBase {
         // Configure with reward so protocol reward accumulates in contract
         uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
-        autoCollect.configToken(tokenId, AutoCollect.PositionConfig({maxRewardX64: maxReward, token0SlippageBps: 10000, token1SlippageBps: 10000}));
+        autoCollect.configToken(tokenId, _collectConfig(maxReward, 10000, 10000, 0, 0));
 
         // Take 100% of collected fees as protocol reward.
         AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
@@ -473,7 +547,7 @@ contract AutoCollectTest is AutomatorTestBase {
         // Configure with reward
         uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
-        autoCollect.configToken(tokenId, AutoCollect.PositionConfig({maxRewardX64: maxReward, token0SlippageBps: 10000, token1SlippageBps: 10000}));
+        autoCollect.configToken(tokenId, _collectConfig(maxReward, 10000, 10000, 0, 0));
 
         // Take 100% of collected fees as protocol reward.
         AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
