@@ -924,6 +924,7 @@ contract V4VaultTest is V4ForkTestBase {
         // all debt is payed
         assertEq(vault.loans(nft7TokenId), 0);
         assertEq(vault.debtSharesTotal(), 0);
+        assertEq(vault.lastLendExchangeRateX96(), 0);
     }
 
     function testLiquidationWithZeroCollateralFactor() external {

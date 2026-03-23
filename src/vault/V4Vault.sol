@@ -1312,8 +1312,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
             uint256 totalLent = _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil);
 
-            // this lines distribute missing amount and remove it from all lent amount proportionally
-            newLendExchangeRateX96 = (totalLent - missing) * newLendExchangeRateX96 / totalLent;
+            // If liquidation losses wipe all lender principal, the lender exchange rate collapses to zero.
+            if (totalLent == 0 || missing >= totalLent) {
+                newLendExchangeRateX96 = 0;
+            } else {
+                // Distribute the missing amount proportionally across all lent assets.
+                newLendExchangeRateX96 = (totalLent - missing) * newLendExchangeRateX96 / totalLent;
+            }
             lastLendExchangeRateX96 = newLendExchangeRateX96;
             emit ExchangeRateUpdate(newDebtExchangeRateX96, newLendExchangeRateX96);
         }
