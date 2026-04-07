@@ -1888,6 +1888,54 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should not retain currency1 after force exit");
     }
 
+    function testUnlockCallback_RevertsWhenCallerIsNotPoolManager() public {
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.unlockCallback(bytes(""));
+    }
+
+    function testUnlockCallback_AutoCollectPayloadExecutes() public {
+        _setupAutoCollectTest(RevertHookState.AutoCollectMode.AUTO_COLLECT);
+
+        vm.recordLogs();
+        vm.prank(address(poolManager));
+        bytes memory result = hook.unlockCallback(abi.encode(token2Id, address(this)));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(result.length, 0, "unlockCallback should return empty bytes");
+        assertTrue(
+            _sawEventTopic(logs, keccak256("HookModifyLiquiditiesFailed(bytes,bytes[],bytes)")),
+            "64-byte payload should route to the auto-collect liquidity path"
+        );
+        assertFalse(
+            _sawHookActionFailed(logs, token2Id, RevertHookState.Mode.AUTO_COLLECT),
+            "Auto-collect routing failures inside modifyLiquidities should not be masked as HookActionFailed"
+        );
+    }
+
+    function testUnlockCallback_RevertsOnMalformedPayload() public {
+        vm.prank(address(poolManager));
+        vm.expectRevert();
+        hook.unlockCallback(abi.encode(uint256(1)));
+    }
+
+    function testUnlockCallback_ImmediateActionPayloadExecutes() public {
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_RANGE, true, false, type(int24).min, type(int24).max)
+        );
+
+        vm.recordLogs();
+        vm.prank(address(poolManager));
+        bytes memory result = hook.unlockCallback(abi.encode(token3Id, true, int24(0)));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(result.length, 0, "unlockCallback should return empty bytes");
+        assertTrue(
+            _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_RANGE),
+            "96-byte payload should route to the immediate action path"
+        );
+    }
+
     function testAutoLendWithdrawRemintCopiesGeneralConfig() public {
         hook.setMaxTicksFromOracle(1000);
 
@@ -2117,14 +2165,38 @@ contract RevertHookTest is BaseTest {
         );
     }
 
+    function testSetGeneralConfig_RevertsWhenCallerIsNotOwner() public {
+        address notOwner = makeAddr("notOwner");
+
+        vm.prank(notOwner);
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.setGeneralConfig(token3Id, 3000, 60, IHooks(address(0)), 0, 0);
+    }
+
+    function testSetPositionConfig_RevertsWhenCallerIsNotOwner() public {
+        address notOwner = makeAddr("notOwner");
+        RevertHookState.PositionConfig memory config =
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_RANGE, true, false, type(int24).min, type(int24).max);
+
+        vm.prank(notOwner);
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        hook.setPositionConfig(token3Id, config);
+    }
+
     function testAdminSetters_OwnerCanUpdateProtocolConfigAndVault() public {
         address newRecipient = makeAddr("newRecipient");
         address newVault = makeAddr("newVault");
 
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(0)));
+        hook.setMaxTicksFromOracle(321);
+        hook.setMinPositionValueNative(0.123 ether);
         hook.setProtocolFeeBps(321);
         hook.setProtocolFeeRecipient(newRecipient);
         hook.setVault(newVault);
 
+        assertEq(address(hook.autoLendVaults(Currency.unwrap(currency0))), address(0), "auto-lend vault should update");
+        assertEq(hook.maxTicksFromOracle(), 321, "max ticks from oracle should update");
+        assertEq(hook.minPositionValueNative(), 0.123 ether, "minimum position value should update");
         assertEq(hook.protocolFeeBps(), 321, "protocol fee bps should update");
         assertEq(hook.protocolFeeRecipient(), newRecipient, "protocol fee recipient should update");
         assertTrue(hook.vaults(newVault), "vault should be allowlisted");
@@ -2144,6 +2216,45 @@ contract RevertHookTest is BaseTest {
         vm.prank(notOwner);
         vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, notOwner));
         hook.setVault(makeAddr("vault"));
+
+        vm.prank(notOwner);
+        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, notOwner));
+        hook.setAutoLendVault(Currency.unwrap(currency0), vault0);
+
+        vm.prank(notOwner);
+        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, notOwner));
+        hook.setMaxTicksFromOracle(123);
+
+        vm.prank(notOwner);
+        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, notOwner));
+        hook.setMinPositionValueNative(1 ether);
+    }
+
+    function testGetHookPermissions() public view {
+        Hooks.Permissions memory permissions = hook.getHookPermissions();
+
+        assertFalse(permissions.beforeInitialize, "beforeInitialize should be disabled");
+        assertTrue(permissions.afterInitialize, "afterInitialize should be enabled");
+        assertTrue(permissions.beforeAddLiquidity, "beforeAddLiquidity should be enabled");
+        assertTrue(permissions.afterAddLiquidity, "afterAddLiquidity should be enabled");
+        assertFalse(permissions.beforeRemoveLiquidity, "beforeRemoveLiquidity should be disabled");
+        assertTrue(permissions.afterRemoveLiquidity, "afterRemoveLiquidity should be enabled");
+        assertFalse(permissions.beforeSwap, "beforeSwap should be disabled");
+        assertTrue(permissions.afterSwap, "afterSwap should be enabled");
+        assertFalse(permissions.beforeDonate, "beforeDonate should be disabled");
+        assertFalse(permissions.afterDonate, "afterDonate should be disabled");
+        assertFalse(permissions.beforeSwapReturnDelta, "beforeSwapReturnDelta should be disabled");
+        assertFalse(permissions.afterSwapReturnDelta, "afterSwapReturnDelta should be disabled");
+        assertTrue(permissions.afterAddLiquidityReturnDelta, "afterAddLiquidityReturnDelta should be enabled");
+        assertTrue(permissions.afterRemoveLiquidityReturnDelta, "afterRemoveLiquidityReturnDelta should be enabled");
+    }
+
+    function testAfterInitialize_SeedsTickCursor() public view {
+        assertEq(
+            hook.tickLowerLasts(poolId),
+            _getTickLower(tickStart, poolKey.tickSpacing),
+            "afterInitialize should seed the pool cursor to the initial tick lower"
+        );
     }
 
     function testSetProtocolFeeBps_RevertWhenAboveMax() public {
@@ -2171,6 +2282,11 @@ contract RevertHookTest is BaseTest {
         vm.prank(newOwner);
         vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, newOwner));
         hook.setProtocolFeeRecipient(makeAddr("recipientAfterRenounce"));
+    }
+
+    function testTransferOwnership_RevertWhenNewOwnerIsZeroAddress() public {
+        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableInvalidOwner.selector, address(0)));
+        hook.transferOwnership(address(0));
     }
 
     function testModeCRL_FullAutomationCoverage() public {

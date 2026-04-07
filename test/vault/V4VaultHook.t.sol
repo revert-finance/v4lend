@@ -2062,6 +2062,51 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
     }
 
+    function testUnlockCallback_ImmediateAutoLeveragePayloadExecutes() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+
+        uint16 targetBps = 5000;
+        _configurePositionForAutoLeverage(hookedTokenId, targetBps);
+
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(hookedTokenId, 3500_000000);
+
+        (uint256 debtBefore,, uint256 collateralBefore,,) = vault.loanInfo(hookedTokenId);
+        uint256 ratioBefore = debtBefore * 10_000 / collateralBefore;
+
+        assertGt(ratioBefore, targetBps, "Test setup should start above the configured leverage target");
+
+        vm.recordLogs();
+        vm.prank(address(poolManager));
+        bytes memory result = revertHook.unlockCallback(abi.encode(hookedTokenId, false, uint256(0), uint256(0)));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(hookedTokenId);
+        uint256 ratioAfter = debtAfter * 10_000 / collateralAfter;
+
+        assertEq(result.length, 0, "unlockCallback should return empty bytes");
+        assertTrue(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "128-byte payload should route to the immediate auto-leverage path"
+        );
+        assertEq(
+            debtAfter,
+            debtBefore,
+            "Direct unlockCallback testing does not execute a real unlock, so debt should stay unchanged"
+        );
+        assertEq(
+            ratioAfter,
+            ratioBefore,
+            "Direct unlockCallback testing should only validate routing in this context"
+        );
+        _assertHookHasNoTokenDust();
+    }
+
     function _setupCollateralizedPositionForAutoLeverage(uint256 hookedTokenId)
         internal
         returns (uint256 initialDebt, uint256 collateralValue)
