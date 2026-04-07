@@ -222,14 +222,24 @@ abstract contract RevertHookExecution is RevertHookConfig {
             revert Unauthorized();
         }
 
-        if (data.length == 64) {
-            (uint256 tokenId, address caller) = abi.decode(data, (uint256, address));
+        uint256 rawAction;
+        assembly ("memory-safe") {
+            rawAction := calldataload(data.offset)
+        }
+
+        if (rawAction > uint8(UnlockAction.IMMEDIATE_AUTO_LEVERAGE)) {
+            revert InvalidConfig();
+        }
+
+        if (rawAction == uint8(UnlockAction.AUTO_COLLECT)) {
+            (, uint256 tokenId, address caller) = abi.decode(data, (UnlockAction, uint256, address));
             _executeAutoCollect(tokenId, caller);
-        } else if (data.length == 128) {
-            (uint256 tokenId, bool isUpperTrigger,,) = abi.decode(data, (uint256, bool, uint256, uint256));
+        } else if (rawAction == uint8(UnlockAction.IMMEDIATE_AUTO_LEVERAGE)) {
+            (, uint256 tokenId, bool isUpperTrigger) = abi.decode(data, (UnlockAction, uint256, bool));
             _executeImmediateAutoLeverageUnlocked(tokenId, isUpperTrigger);
         } else {
-            (uint256 tokenId, bool isUpperTrigger, int24 tick) = abi.decode(data, (uint256, bool, int24));
+            (, uint256 tokenId, bool isUpperTrigger, int24 tick) =
+                abi.decode(data, (UnlockAction, uint256, bool, int24));
             _executeImmediateActionUnlocked(tokenId, isUpperTrigger, tick);
         }
         return bytes("");

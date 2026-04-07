@@ -113,11 +113,11 @@ abstract contract RevertHookImmediate is RevertHookViews {
     }
 
     function _executeImmediateAction(uint256 tokenId, bool isUpperTrigger, int24 tick) internal {
-        poolManager.unlock(abi.encode(tokenId, isUpperTrigger, tick));
+        poolManager.unlock(abi.encode(UnlockAction.IMMEDIATE_ACTION, tokenId, isUpperTrigger, tick));
     }
 
     function _executeImmediateAutoLeverage(uint256 tokenId, bool isUpperTrigger) internal {
-        poolManager.unlock(abi.encode(tokenId, isUpperTrigger, uint256(0), uint256(0)));
+        poolManager.unlock(abi.encode(UnlockAction.IMMEDIATE_AUTO_LEVERAGE, tokenId, isUpperTrigger));
     }
 
     function _executeImmediateActionUnlocked(uint256 tokenId, bool isUpperTrigger, int24 tick) internal {

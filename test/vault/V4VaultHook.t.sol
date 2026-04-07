@@ -2083,7 +2083,9 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         vm.recordLogs();
         vm.prank(address(poolManager));
-        bytes memory result = revertHook.unlockCallback(abi.encode(hookedTokenId, false, uint256(0), uint256(0)));
+        bytes memory result = revertHook.unlockCallback(
+            abi.encode(RevertHookState.UnlockAction.IMMEDIATE_AUTO_LEVERAGE, hookedTokenId, false)
+        );
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(hookedTokenId);
@@ -2092,7 +2094,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(result.length, 0, "unlockCallback should return empty bytes");
         assertTrue(
             _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
-            "128-byte payload should route to the immediate auto-leverage path"
+            "Tagged immediate auto-leverage payload should route to the immediate auto-leverage path"
         );
         assertEq(
             debtAfter,

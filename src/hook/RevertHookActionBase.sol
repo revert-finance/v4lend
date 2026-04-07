@@ -20,6 +20,7 @@ import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
+import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
@@ -279,7 +280,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
         uint256 balance0Before = poolKey.currency0.balanceOfSelf();
         uint256 balance1Before = poolKey.currency1.balanceOfSelf();
-        uint256 nativeValue = _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
+        uint256 nativeValue = NativeAssetLib.nativeValue(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
 
         bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
         if (
@@ -314,7 +315,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             return (0, 0, 0);
         }
 
-        uint256 nativeValue = _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
+        uint256 nativeValue = NativeAssetLib.nativeValue(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
         if (
             _modifyLiquiditiesWithPair(
@@ -416,16 +417,6 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 _permit2Approved[tokenAddress] = true;
             }
         }
-    }
-
-    function _getNativeAmount(Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)
-        internal
-        pure
-        returns (uint256)
-    {
-        if (currency0.isAddressZero()) return amount0;
-        if (currency1.isAddressZero()) return amount1;
-        return 0;
     }
 
     /// @notice Swaps tokens to the lend token

@@ -213,7 +213,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
                 IVault(owner)
                     .transform(tokenId, address(this), abi.encodeCall(this.autoCollectForVault, (tokenId, caller)));
             } else {
-                poolManager.unlock(abi.encode(tokenId, caller));
+                poolManager.unlock(abi.encode(UnlockAction.AUTO_COLLECT, tokenId, caller));
             }
             unchecked {
                 ++i;
@@ -227,7 +227,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
     function autoCollectForVault(uint256 tokenId, address caller) external {
         if (!_vaults[msg.sender]) revert Unauthorized();
         _validateCaller(positionManager, tokenId);
-        poolManager.unlock(abi.encode(tokenId, caller));
+        poolManager.unlock(abi.encode(UnlockAction.AUTO_COLLECT, tokenId, caller));
     }
 
     /// @notice Executes the auto-collect logic (called from unlockCallback)

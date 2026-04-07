@@ -24,7 +24,7 @@ abstract contract RevertHookViews is RevertHookBase {
         return _MAX_TRIGGER_BATCHES_PER_SWAP;
     }
 
-    function owner() public view returns (address) {
+    function owner() external view returns (address) {
         return _owner;
     }
 

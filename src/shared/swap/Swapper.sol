@@ -20,6 +20,7 @@ import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import {IUniversalRouter} from "./IUniversalRouter.sol";
 import {Constants} from "../Constants.sol";
+import {NativeAssetLib} from "../NativeAssetLib.sol";
 
 
 // base functionality to do swaps with different routing protocols
@@ -88,9 +89,9 @@ abstract contract Swapper is Constants {
             uint256 balanceOutBefore = params.tokenOut.balanceOfSelf();
 
             // Check for direct WETH/ETH swaps
-            bool isDirectWethSwap = _isDirectWethSwap(params.tokenIn, params.tokenOut);
+            bool isDirectWethSwap = NativeAssetLib.isDirectWrappedNativeSwap(weth, params.tokenIn, params.tokenOut);
             if (isDirectWethSwap) {
-                _handleDirectWethSwap(params.tokenIn, params.tokenOut, params.amountIn);
+                NativeAssetLib.handleDirectWrappedNativeSwap(weth, params.tokenIn, params.tokenOut, params.amountIn);
             } else if (params.swapData.length > 0) {
                 // Check if this is Universal Router data by looking at first 32 bytes
                 bool isUniversalRouter;
@@ -138,35 +139,6 @@ abstract contract Swapper is Constants {
         }
     }
 
-    /// @notice Check if this is a direct WETH/ETH swap
-    /// @param tokenIn Input token
-    /// @param tokenOut Output token
-    /// @return true if this is a direct WETH/ETH swap
-    function _isDirectWethSwap(Currency tokenIn, Currency tokenOut) internal view returns (bool) {
-        Currency wethCurrency = Currency.wrap(address(weth));
-        // Check for WETH -> ETH (WETH to zero address) OR ETH -> WETH (zero address to WETH)
-        return (tokenIn == wethCurrency && tokenOut.isAddressZero()) ||
-               (tokenIn.isAddressZero() && tokenOut == wethCurrency);
-    }
-
-    /// @notice Handle direct WETH/ETH swaps using IWETH functions
-    /// @param tokenIn Input token
-    /// @param tokenOut Output token
-    /// @param amount Amount to swap
-    function _handleDirectWethSwap(Currency tokenIn, Currency tokenOut, uint256 amount) internal {
-        address wethAddress = address(weth);
-        address tokenInAddress = Currency.unwrap(tokenIn);
-        address tokenOutAddress = Currency.unwrap(tokenOut);
-        
-        if (tokenInAddress == wethAddress && tokenOutAddress == address(0)) {
-            // WETH -> ETH: withdraw WETH to get ETH
-            weth.withdraw(amount);
-        } else if (tokenInAddress == address(0) && tokenOutAddress == wethAddress) {
-            // ETH -> WETH: deposit ETH to get WETH
-            weth.deposit{value: amount}();
-        }
-    }
-
     function _handleApproval(IPermit2 permit2, Currency token, uint256 amount) internal {
         if (amount > 0 && !token.isAddressZero()) {
             address tokenAddr = Currency.unwrap(token);
@@ -201,9 +173,7 @@ abstract contract Swapper is Constants {
     function _getNativeAmount(Currency token0, Currency token1, uint256 amount0, uint256 amount1)
         internal pure returns (uint256)
     {
-        if (token0.isAddressZero()) return amount0;
-        if (token1.isAddressZero()) return amount1;
-        return 0;
+        return NativeAssetLib.nativeValue(token0, token1, amount0, amount1);
     }
 
     function _calculateLiquidity(

@@ -12,6 +12,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
+import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoLendLib} from "../shared/planning/AutoLendLib.sol";
@@ -47,9 +48,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             Currency lendCurrency = Currency.wrap(autoLendToken);
             uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(shares, address(this), address(this));
             (, uint256 protocolFee) = _processLendingGain(redeemedAmount, autoLendAmount);
-            if (autoLendToken == address(0) && redeemedAmount > 0) {
-                weth.withdraw(redeemedAmount);
-            }
+            NativeAssetLib.unwrapIfNative(weth, lendCurrency, redeemedAmount);
             _resetAutoLendState(tokenId);
             _disablePosition(tokenId);
             _sendLendingProtocolFee(tokenId, poolKey, lendCurrency, protocolFee);
@@ -73,7 +72,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         Currency lendCurrency = isUpperTrigger ? poolKey.currency1 : poolKey.currency0;
         address tokenAddress = Currency.unwrap(lendCurrency);
         IERC4626 lendVault = _autoLendVaults[tokenAddress];
-        if (address(lendVault) == address(0) && tokenAddress == address(0)) {
+        if (address(lendVault) == address(0) && lendCurrency.isAddressZero()) {
             lendVault = _autoLendVaults[address(weth)];
         }
         if (address(lendVault) == address(0)) {
@@ -90,11 +89,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             return;
         }
 
-        address depositToken = tokenAddress;
-        if (tokenAddress == address(0)) {
-            weth.deposit{value: lendAmount}();
-            depositToken = address(weth);
-        }
+        address depositToken = NativeAssetLib.wrapIfNative(weth, lendCurrency, lendAmount);
 
         SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), lendAmount);
         try lendVault.deposit(lendAmount, address(this)) returns (uint256 shares) {
@@ -111,9 +106,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
         } catch (bytes memory reason) {
             SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), 0);
-            if (tokenAddress == address(0) && lendAmount > 0) {
-                weth.withdraw(lendAmount);
-            }
+            NativeAssetLib.unwrapIfNative(weth, lendCurrency, lendAmount);
             _restoreAutoLendPosition(
                 tokenId, poolKey, positionInfo, currency0, currency1, amount0, amount1, owner, isUpperTrigger
             );
@@ -153,9 +146,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         Currency lendCurrency = Currency.wrap(tokenAddress);
 
         (uint256 reentryAmount, uint256 protocolFee) = _processLendingGain(redeemedAmount, originalLendAmount);
-        if (tokenAddress == address(0) && redeemedAmount > 0) {
-            weth.withdraw(redeemedAmount);
-        }
+        NativeAssetLib.unwrapIfNative(weth, lendCurrency, redeemedAmount);
 
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _approveToken(lendCurrency, reentryAmount);

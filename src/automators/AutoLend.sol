@@ -200,7 +200,7 @@ contract AutoLend is Automator {
         address idleTokenAddr = Currency.unwrap(idleToken);
         IERC4626 lendVault = autoLendVaults[idleTokenAddr];
         // Backward-compatible fallback for native token configuration keyed by WETH.
-        if (address(lendVault) == address(0) && idleTokenAddr == address(0)) {
+        if (address(lendVault) == address(0) && idleToken.isAddressZero()) {
             lendVault = autoLendVaults[address(weth)];
         }
         if (address(lendVault) == address(0)) {
@@ -209,7 +209,7 @@ contract AutoLend is Automator {
 
         // Deposit into ERC4626 vault (wrap native ETH to WETH first if needed)
         address depositTokenAddr = idleTokenAddr;
-        if (idleTokenAddr == address(0)) {
+        if (idleToken.isAddressZero()) {
             weth.deposit{value: idleAmount}();
             depositTokenAddr = address(weth);
         }

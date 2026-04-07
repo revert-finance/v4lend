@@ -1898,13 +1898,14 @@ contract RevertHookTest is BaseTest {
 
         vm.recordLogs();
         vm.prank(address(poolManager));
-        bytes memory result = hook.unlockCallback(abi.encode(token2Id, address(this)));
+        bytes memory result =
+            hook.unlockCallback(abi.encode(RevertHookState.UnlockAction.AUTO_COLLECT, token2Id, address(this)));
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         assertEq(result.length, 0, "unlockCallback should return empty bytes");
         assertTrue(
             _sawEventTopic(logs, keccak256("HookModifyLiquiditiesFailed(bytes,bytes[],bytes)")),
-            "64-byte payload should route to the auto-collect liquidity path"
+            "Tagged payload should route to the auto-collect liquidity path"
         );
         assertFalse(
             _sawHookActionFailed(logs, token2Id, RevertHookState.Mode.AUTO_COLLECT),
@@ -1926,13 +1927,14 @@ contract RevertHookTest is BaseTest {
 
         vm.recordLogs();
         vm.prank(address(poolManager));
-        bytes memory result = hook.unlockCallback(abi.encode(token3Id, true, int24(0)));
+        bytes memory result =
+            hook.unlockCallback(abi.encode(RevertHookState.UnlockAction.IMMEDIATE_ACTION, token3Id, true, int24(0)));
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         assertEq(result.length, 0, "unlockCallback should return empty bytes");
         assertTrue(
             _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_RANGE),
-            "96-byte payload should route to the immediate action path"
+            "Tagged payload should route to the immediate action path"
         );
     }
 

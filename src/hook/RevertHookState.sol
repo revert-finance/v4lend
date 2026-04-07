@@ -32,6 +32,12 @@ abstract contract RevertHookState is RevertHookAccess {
         HARVEST_TOKENS
     }
 
+    enum UnlockAction {
+        AUTO_COLLECT,
+        IMMEDIATE_ACTION,
+        IMMEDIATE_AUTO_LEVERAGE
+    }
+
     // ==================== Structs ====================
 
     struct PositionState {
