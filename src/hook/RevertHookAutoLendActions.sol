@@ -47,7 +47,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             Currency lendCurrency = Currency.wrap(autoLendToken);
             uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(shares, address(this), address(this));
             (, uint256 protocolFee) = _processLendingGain(redeemedAmount, autoLendAmount);
-            if (autoLendToken == address(0) && redeemedAmount != 0) {
+            if (autoLendToken == address(0) && redeemedAmount > 0) {
                 weth.withdraw(redeemedAmount);
             }
             _resetAutoLendState(tokenId);
@@ -111,7 +111,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
         } catch (bytes memory reason) {
             SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), 0);
-            if (tokenAddress == address(0) && lendAmount != 0) {
+            if (tokenAddress == address(0) && lendAmount > 0) {
                 weth.withdraw(lendAmount);
             }
             _restoreAutoLendPosition(
@@ -153,7 +153,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         Currency lendCurrency = Currency.wrap(tokenAddress);
 
         (uint256 reentryAmount, uint256 protocolFee) = _processLendingGain(redeemedAmount, originalLendAmount);
-        if (tokenAddress == address(0) && redeemedAmount != 0) {
+        if (tokenAddress == address(0) && redeemedAmount > 0) {
             weth.withdraw(redeemedAmount);
         }
 
@@ -181,7 +181,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 // forge-lint: disable-next-line(unsafe-typecast)
                 isToken0Lent ? 0 : uint128(reentryAmount)
             );
-            restoredExistingPosition = restored0 != 0 || restored1 != 0;
+            restoredExistingPosition = restored0 > 0 || restored1 > 0;
         } else {
             (newTokenId,,) = _mintPosition(
                 poolKey,
@@ -220,7 +220,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         uint256 gain = redeemedAmount > originalAmount ? redeemedAmount - originalAmount : 0;
         if (gain > 0) {
             protocolFee = gain * _protocolFeeBps / 10000;
-            if (protocolFee != 0) {
+            if (protocolFee > 0) {
                 netRedeemedAmount -= protocolFee;
             }
         }

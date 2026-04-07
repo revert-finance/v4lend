@@ -173,7 +173,7 @@ contract AutoExit is Automator {
             }
 
             uint256 swapAmount = isAbove ? amount1 : amount0;
-            if (swapAmount != 0) {
+            if (swapAmount > 0) {
                 (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                     RouterSwapParams(
                         isAbove ? token1 : token0,

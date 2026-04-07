@@ -83,7 +83,7 @@ abstract contract Swapper is Constants {
         internal
         returns (uint256 amountInDelta, uint256 amountOutDelta)
     {
-        if (params.amountIn != 0) {
+        if (params.amountIn > 0) {
             uint256 balanceInBefore = params.tokenIn.balanceOfSelf();
             uint256 balanceOutBefore = params.tokenOut.balanceOfSelf();
 
@@ -168,7 +168,7 @@ abstract contract Swapper is Constants {
     }
 
     function _handleApproval(IPermit2 permit2, Currency token, uint256 amount) internal {
-        if (amount != 0 && !token.isAddressZero()) {
+        if (amount > 0 && !token.isAddressZero()) {
             address tokenAddr = Currency.unwrap(token);
             if (!permit2Approved[tokenAddr]) {
                 SafeERC20.forceApprove(IERC20(tokenAddr), address(permit2), type(uint256).max);

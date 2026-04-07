@@ -137,7 +137,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint256 amount0,
         uint256 amount1
     ) internal returns (uint256, uint256) {
-        if (params.amountIn0 != 0) {
+        if (params.amountIn0 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
                 Swapper.RouterSwapParams(
                     token, token0, params.amountIn0, params.amountOut0Min, params.swapData0
@@ -148,7 +148,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             }
             amount0 += amountOut;
         }
-        if (params.amountIn1 != 0) {
+        if (params.amountIn1 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
                 Swapper.RouterSwapParams(
                     token, token1, params.amountIn1, params.amountOut1Min, params.swapData1
@@ -190,7 +190,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         }
         if (!(token == token0) && !(token == token1)) {
             uint256 leftover = token.balanceOfSelf();
-            if (leftover != 0) {
+            if (leftover > 0) {
                 token.transfer(params.recipient, leftover);
             }
         }
@@ -255,7 +255,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
         uint256 amount = token == token0 ? amount0 : (token == token1 ? amount1 : 0);
 
-        if (params.amountIn0 != 0 && !(token == token0)) {
+        if (params.amountIn0 > 0 && !(token == token0)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
                 Swapper.RouterSwapParams(
                     token0, token, params.amountIn0, params.amountOut0Min, params.swapData0
@@ -264,7 +264,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             amount0 -= amountIn;
             amount += amountOut;
         }
-        if (params.amountIn1 != 0 && !(token == token1)) {
+        if (params.amountIn1 > 0 && !(token == token1)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
                 Swapper.RouterSwapParams(
                     token1, token, params.amountIn1, params.amountOut1Min, params.swapData1
@@ -281,10 +281,10 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         if (amount > repayedAmount) {
             token.transfer(params.recipient, amount - repayedAmount);
         }
-        if (amount0 != 0 && !(token == token0)) {
+        if (amount0 > 0 && !(token == token0)) {
             token0.transfer(params.recipient, amount0);
         }
-        if (amount1 != 0 && !(token == token1)) {
+        if (amount1 > 0 && !(token == token1)) {
             token1.transfer(params.recipient, amount1);
         }
     }
@@ -599,7 +599,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         }
 
         // Perform optional swap if needed
-        if (params.amountIn != 0) {
+        if (params.amountIn > 0) {
             Currency tokenIn;
             Currency tokenOut;
 
@@ -707,10 +707,10 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint256 leftover0 = params.token0.balanceOfSelf();
         uint256 leftover1 = params.token1.balanceOfSelf();
 
-        if (leftover0 != 0) {
+        if (leftover0 > 0) {
             params.token0.transfer(params.recipient, leftover0);
         }
-        if (leftover1 != 0) {
+        if (leftover1 > 0) {
             params.token1.transfer(params.recipient, leftover1);
         }
     }

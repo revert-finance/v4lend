@@ -246,7 +246,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         bytes[] memory params = new bytes[](nativeValue == 0 ? 2 : 3);
         params[0] = primaryParams;
         params[1] = abi.encode(currency0, currency1, address(this));
-        if (nativeValue != 0) {
+        if (nativeValue > 0) {
             actionsWithSweep = abi.encodePacked(actions, uint8(Actions.SWEEP));
             params[2] = abi.encode(address(0), address(this));
         }
@@ -401,14 +401,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     function _sendLeftoverTokens(uint256 tokenId, Currency currency0, Currency currency1, address recipient) internal {
         uint256 amount0 = currency0.balanceOfSelf();
         uint256 amount1 = currency1.balanceOfSelf();
-        if (amount0 != 0) currency0.transfer(recipient, amount0);
-        if (amount1 != 0) currency1.transfer(recipient, amount1);
+        if (amount0 > 0) currency0.transfer(recipient, amount0);
+        if (amount1 > 0) currency1.transfer(recipient, amount1);
         emit SendLeftoverTokens(tokenId, currency0, currency1, amount0, amount1, recipient);
     }
 
     /// @notice Approves tokens for the position manager via permit2
     function _approveToken(Currency currency, uint256 amount) internal {
-        if (amount != 0 && !currency.isAddressZero()) {
+        if (amount > 0 && !currency.isAddressZero()) {
             address tokenAddress = Currency.unwrap(currency);
             if (!_permit2Approved[tokenAddress]) {
                 SafeERC20.forceApprove(IERC20(tokenAddress), address(permit2), type(uint256).max);

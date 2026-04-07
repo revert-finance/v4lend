@@ -79,7 +79,7 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         for (; i < count; ++i) {
             address token = tokens[i];
             uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance != 0) {
+            if (balance > 0) {
                 _transferToken(to, Currency.wrap(token), balance, true);
             }
         }
@@ -95,7 +95,7 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         }
 
         uint256 balance = address(this).balance;
-        if (balance != 0) {
+        if (balance > 0) {
             (bool sent,) = to.call{value: balance}("");
             if (!sent) {
                 revert EtherSendFailed();
@@ -162,7 +162,7 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         internal
         returns (uint256 amountInDelta, uint256 amountOutDelta)
     {
-        if (params.amountIn != 0) {
+        if (params.amountIn > 0) {
             if (maxSwapSlippageBps > 10000) {
                 revert InvalidConfig();
             }

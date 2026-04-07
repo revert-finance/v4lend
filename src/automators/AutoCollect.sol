@@ -147,7 +147,7 @@ contract AutoCollect is Automator {
         uint256 amount1
     ) internal returns (uint256 compounded0, uint256 compounded1) {
         // Optional swap to rebalance
-        if (params.amountIn != 0) {
+        if (params.amountIn > 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(
                     params.swap0To1 ? token0 : token1,
@@ -167,7 +167,7 @@ contract AutoCollect is Automator {
             }
         }
 
-        if (amount0 != 0 || amount1 != 0) {
+        if (amount0 > 0 || amount1 > 0) {
             _handleApproval(permit2, token0, amount0);
             _handleApproval(permit2, token1, amount1);
 
@@ -209,14 +209,14 @@ contract AutoCollect is Automator {
         uint256 amount1
     ) internal returns (uint256, uint256) {
         // Perform swap based on harvest mode
-        if (params.mode == CollectMode.HARVEST_TOKEN_0 && amount1 != 0) {
+        if (params.mode == CollectMode.HARVEST_TOKEN_0 && amount1 > 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token1, token0, params.amountIn, params.amountOutMin, params.swapData),
                 config.token1SlippageBps
             );
             amount1 -= amountInDelta;
             amount0 += amountOutDelta;
-        } else if (params.mode == CollectMode.HARVEST_TOKEN_1 && amount0 != 0) {
+        } else if (params.mode == CollectMode.HARVEST_TOKEN_1 && amount0 > 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token0, token1, params.amountIn, params.amountOutMin, params.swapData),
                 config.token0SlippageBps

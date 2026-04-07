@@ -791,12 +791,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             _calculateLiquidation(state.debt, state.fullValue, state.collateralValue);
 
         // calculate reserve (before transfering liquidation money - otherwise calculation is off)
-        if (state.reserveCost != 0) {
+        if (state.reserveCost > 0) {
             state.missing =
                 _handleReserveLiquidation(state.reserveCost, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
         }
 
-        if (state.liquidatorCost != 0) {
+        if (state.liquidatorCost > 0) {
             // take value from liquidator
             SafeERC20.safeTransferFrom(IERC20(asset), msg.sender, address(this), state.liquidatorCost);
         }
@@ -840,7 +840,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Unauthorized();
         }
 
-        if (loans[tokenId].debtShares != 0) {
+        if (loans[tokenId].debtShares > 0) {
             revert NeedsRepay();
         }
 
@@ -870,7 +870,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert InsufficientLiquidity();
         }
 
-        if (amount != 0) {
+        if (amount > 0) {
             SafeERC20.safeTransfer(IERC20(asset), receiver, amount);
         }
 
@@ -1085,7 +1085,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             assets = _convertToAssets(shares, newDebtExchangeRateX96, Math.Rounding.Ceil);
         }
 
-        if (assets != 0) {
+        if (assets > 0) {
             // fails if not enough token approved
             SafeERC20.safeTransferFrom(IERC20(asset), msg.sender, address(this), assets);
         }
@@ -1270,7 +1270,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         // if position is more valuable than debt with max penalty
         if (fullValue >= maxPenaltyValue) {
-            if (collateralValue != 0) {
+            if (collateralValue > 0) {
                 // position value when position started to be liquidatable
                 uint256 startLiquidationValue = debt * fullValue / collateralValue;
                 uint256 penaltyFractionX96 =
@@ -1361,7 +1361,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 lastRateUpdate = lastExchangeRateUpdate;
         uint256 timeElapsed = (block.timestamp - lastRateUpdate);
 
-        if (timeElapsed != 0 && lastRateUpdate != 0) {
+        if (timeElapsed > 0 && lastRateUpdate != 0) {
 
             (uint256 balance,) = _getBalanceAndReserves(oldDebtExchangeRateX96, oldLendExchangeRateX96);
             uint256 debt = _convertToAssets(debtSharesTotal, oldDebtExchangeRateX96, Math.Rounding.Ceil);

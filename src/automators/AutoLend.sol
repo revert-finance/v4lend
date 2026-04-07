@@ -139,7 +139,7 @@ contract AutoLend is Automator {
         if (!config.isActive) {
             revert NotConfigured();
         }
-        if (lendStates[params.tokenId].shares != 0) {
+        if (lendStates[params.tokenId].shares > 0) {
             revert InvalidConfig();
         }
 
@@ -441,7 +441,7 @@ contract AutoLend is Automator {
                 continue;
             }
             uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance != 0) {
+            if (balance > 0) {
                 _transferToken(to, Currency.wrap(token), balance, true);
             }
         }

@@ -423,7 +423,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @return amount0 Calculated amount of token0 based on oracle-derived sqrt price
     /// @return amount1 Calculated amount of token1 based on oracle-derived sqrt price
     function _getAmounts(PositionState memory state) internal pure returns (uint256 amount0, uint256 amount1) {
-        if (state.liquidity != 0) {
+        if (state.liquidity > 0) {
             // Calculate sqrt prices for tick range using derived price from oracle
             state.sqrtPriceX96Lower = TickMath.getSqrtPriceAtTick(state.tickLower);
             state.sqrtPriceX96Upper = TickMath.getSqrtPriceAtTick(state.tickUpper);

@@ -209,7 +209,7 @@ contract AutoLeverage is Automator {
         }
 
         // Swap borrowed lend token to position tokens
-        if (params.amountIn0 != 0) {
+        if (params.amountIn0 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(lendToken, token0, params.amountIn0, params.amountOut0Min, params.swapData0),
                 config.maxSwapSlippageBps
@@ -217,7 +217,7 @@ contract AutoLeverage is Automator {
             if (lendToken == token1) amount1 -= amountIn;
             amount0 += amountOut;
         }
-        if (params.amountIn1 != 0) {
+        if (params.amountIn1 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(lendToken, token1, params.amountIn1, params.amountOut1Min, params.swapData1),
                 config.maxSwapSlippageBps
@@ -320,7 +320,7 @@ contract AutoLeverage is Automator {
         // Swap position tokens to lend token
         uint256 lendAmount = lendToken == token0 ? amount0 : (lendToken == token1 ? amount1 : 0);
 
-        if (params.amountIn0 != 0 && !(lendToken == token0)) {
+        if (params.amountIn0 > 0 && !(lendToken == token0)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token0, lendToken, params.amountIn0, params.amountOut0Min, params.swapData0),
                 config.maxSwapSlippageBps
@@ -328,7 +328,7 @@ contract AutoLeverage is Automator {
             amount0 -= amountIn;
             lendAmount += amountOut;
         }
-        if (params.amountIn1 != 0 && !(lendToken == token1)) {
+        if (params.amountIn1 > 0 && !(lendToken == token1)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(token1, lendToken, params.amountIn1, params.amountOut1Min, params.swapData1),
                 config.maxSwapSlippageBps

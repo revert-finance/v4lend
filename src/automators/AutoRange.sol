@@ -186,7 +186,7 @@ contract AutoRange is Automator {
         );
 
         // Swap to rebalance for new range
-        if (params.amountIn != 0) {
+        if (params.amountIn > 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                 RouterSwapParams(
                     params.swap0To1 ? token0 : token1,

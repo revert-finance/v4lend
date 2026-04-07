@@ -476,7 +476,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         }
 
         // Transfer complete target amount to recipient
-        if (targetAmount != 0) {
+        if (targetAmount > 0) {
             targetToken.transfer(instructions.recipient, targetAmount);
         }
 
@@ -535,13 +535,13 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         );
 
         // send swapped amount of tokenOut
-        if (amountOut != 0) {
+        if (amountOut > 0) {
             params.tokenOut.transfer(params.recipient, amountOut);
         }
 
         // if not all was swapped - return leftovers of tokenIn
         uint256 leftOver = params.amountIn - amountInDelta;
-        if (leftOver != 0) {
+        if (leftOver > 0) {
             params.tokenIn.transfer(params.recipient, leftOver);
         }
     }
@@ -626,7 +626,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             _prepareAddApprovedToken(otherToken, amountOther);
         }
         // if msg.value > 0, then one of the tokens must be ether with amount > 0
-        if (msg.value != 0 && !(token0.isAddressZero() && amount0 > 0) && !(token1.isAddressZero() && amount1 > 0) && !(otherToken.isAddressZero() && amountOther > 0)) {
+        if (msg.value > 0 && !(token0.isAddressZero() && amount0 > 0) && !(token1.isAddressZero() && amount1 > 0) && !(otherToken.isAddressZero() && amountOther > 0)) {
             revert NoEtherToken();
         }
     }
@@ -690,10 +690,10 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         emit SwapAndMint(tokenId, liquidity, added0, added1);
 
         // Return leftover tokens
-        if (finalBalance0 != 0) {
+        if (finalBalance0 > 0) {
             params.token0.transfer(params.recipient, finalBalance0);
         }
-        if (finalBalance1 != 0) {
+        if (finalBalance1 > 0) {
             params.token1.transfer(params.recipient, finalBalance1);
         }
     }
@@ -781,10 +781,10 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             emit SwapAndIncreaseLiquidity(params.tokenId, liquidity, added0, added1);
 
             // Return leftover tokens
-            if (finalBalance0 != 0) {
+            if (finalBalance0 > 0) {
                 token0.transfer(params.recipient, finalBalance0);
             }
-            if (finalBalance1 != 0) {
+            if (finalBalance1 > 0) {
                 token1.transfer(params.recipient, finalBalance1);
             }
         }
@@ -830,7 +830,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             // return third token leftover if any
             uint256 leftOver = params.amountIn0 + params.amountIn1 - amountInDelta0 - amountInDelta1;
 
-            if (leftOver != 0) {
+            if (leftOver > 0) {
                 swapSource.transfer(params.recipient, leftOver);
             }
         }

@@ -182,7 +182,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
                 // forge-lint: disable-next-line(unsafe-typecast)
                 _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
             _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
-            if (restored0 != 0 || restored1 != 0) {
+            if (restored0 > 0 || restored1 > 0) {
                 _removePositionTriggers(tokenId, poolKey);
                 _deactivatePosition(tokenId);
             } else {
@@ -290,8 +290,8 @@ contract RevertHookPositionActions is RevertHookActionBase {
         uint256 reward0 = amount0 * _AUTO_COLLECT_REWARD_BPS / 10000;
         uint256 reward1 = amount1 * _AUTO_COLLECT_REWARD_BPS / 10000;
 
-        if (reward0 != 0) currency0.transfer(recipient, reward0);
-        if (reward1 != 0) currency1.transfer(recipient, reward1);
+        if (reward0 > 0) currency0.transfer(recipient, reward0);
+        if (reward1 > 0) currency1.transfer(recipient, reward1);
 
         emit SendRewards(tokenId, currency0, currency1, reward0, reward1, recipient);
         return (amount0 - reward0, amount1 - reward1);
