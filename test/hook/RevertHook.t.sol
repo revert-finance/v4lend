@@ -115,7 +115,7 @@ contract RevertHookTest is BaseTest {
             autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
-        hook = RevertHook(flags);
+        hook = RevertHook(payable(flags));
 
         // Deploy MockERC4626Vault for both currencies
         vault0 = new MockERC4626Vault(IERC20(Currency.unwrap(currency0)), "Vault Token0", "vT0");

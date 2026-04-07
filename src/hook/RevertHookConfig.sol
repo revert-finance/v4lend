@@ -16,25 +16,28 @@ import {RevertHookImmediate} from "./RevertHookImmediate.sol";
 /// @title RevertHookConfig
 /// @notice Hook configuration setters and validation helpers
 abstract contract RevertHookConfig is RevertHookImmediate {
-    function setAutoLendVault(address token, IERC4626 vault) external onlyOwner {
-        if (address(vault) != address(0) && vault.asset() != token) {
-            revert InvalidConfig();
+    function setAutoLendVault(address token, IERC4626 vault) external payable onlyOwner {
+        if (address(vault) != address(0)) {
+            address expectedAsset = token == address(0) ? address(weth) : token;
+            if (vault.asset() != expectedAsset) {
+                revert InvalidConfig();
+            }
         }
         _autoLendVaults[token] = vault;
         emit SetAutoLendVault(token, vault);
     }
 
-    function setMaxTicksFromOracle(int24 newMaxTicksFromOracle) external onlyOwner {
+    function setMaxTicksFromOracle(int24 newMaxTicksFromOracle) external payable onlyOwner {
         _maxTicksFromOracle = newMaxTicksFromOracle;
         emit SetMaxTicksFromOracle(newMaxTicksFromOracle);
     }
 
-    function setMinPositionValueNative(uint256 newMinPositionValueNative) external onlyOwner {
+    function setMinPositionValueNative(uint256 newMinPositionValueNative) external payable onlyOwner {
         _minPositionValueNative = newMinPositionValueNative;
         emit SetMinPositionValueNative(newMinPositionValueNative);
     }
 
-    function setProtocolFeeBps(uint16 newProtocolFeeBps) external onlyOwner {
+    function setProtocolFeeBps(uint16 newProtocolFeeBps) external payable onlyOwner {
         if (newProtocolFeeBps > 10000) {
             revert InvalidConfig();
         }
@@ -42,7 +45,7 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         emit SetProtocolFeeBps(newProtocolFeeBps);
     }
 
-    function setProtocolFeeRecipient(address newProtocolFeeRecipient) external onlyOwner {
+    function setProtocolFeeRecipient(address newProtocolFeeRecipient) external payable onlyOwner {
         _protocolFeeRecipient = newProtocolFeeRecipient;
         emit SetProtocolFeeRecipient(newProtocolFeeRecipient);
     }
@@ -54,7 +57,7 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         IHooks swapPoolHooks,
         uint32 maxPriceImpactBps0,
         uint32 maxPriceImpactBps1
-    ) external {
+    ) external payable {
         if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
@@ -79,7 +82,7 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         emit SetGeneralConfig(tokenId, generalConfig);
     }
 
-    function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external {
+    function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external payable {
         if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
@@ -226,12 +229,16 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         if (_vaults[tokenOwner]) {
             revert InvalidConfig();
         }
-        if (
-            address(_autoLendVaults[Currency.unwrap(poolKey.currency0)]) == address(0)
-                || address(_autoLendVaults[Currency.unwrap(poolKey.currency1)]) == address(0)
-        ) {
+        if (!_hasAutoLendVault(Currency.unwrap(poolKey.currency0)) || !_hasAutoLendVault(Currency.unwrap(poolKey.currency1))) {
             revert InvalidConfig();
         }
+    }
+
+    function _hasAutoLendVault(address token) internal view returns (bool) {
+        if (address(_autoLendVaults[token]) != address(0)) {
+            return true;
+        }
+        return token == address(0) && address(_autoLendVaults[address(weth)]) != address(0);
     }
 
     function _validateAutoLeverageMode(uint256 tokenId, PoolKey memory poolKey, uint8 modeFlags) internal view {

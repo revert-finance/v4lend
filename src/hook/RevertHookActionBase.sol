@@ -16,6 +16,8 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
+import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
+import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
@@ -32,12 +34,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
     IPermit2 internal immutable permit2;
     IPositionManager internal immutable positionManager;
+    IWETH9 internal immutable weth;
     IV4Oracle internal immutable v4Oracle;
     ILiquidityCalculator internal immutable liquidityCalculator;
     IPoolManager internal immutable poolManager;
 
     constructor(IPermit2 _permit2, IV4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) {
         positionManager = _v4Oracle.positionManager();
+        weth = NativeWrapper(payable(address(positionManager))).WETH9();
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
@@ -235,16 +239,22 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         bytes memory actions,
         bytes memory primaryParams,
         Currency currency0,
-        Currency currency1
+        Currency currency1,
+        uint256 nativeValue
     ) internal returns (bool success) {
-        bytes[] memory params = new bytes[](2);
+        bytes memory actionsWithSweep = actions;
+        bytes[] memory params = new bytes[](nativeValue == 0 ? 2 : 3);
         params[0] = primaryParams;
         params[1] = abi.encode(currency0, currency1, address(this));
+        if (nativeValue != 0) {
+            actionsWithSweep = abi.encodePacked(actions, uint8(Actions.SWEEP));
+            params[2] = abi.encode(address(0), address(this));
+        }
 
-        try positionManager.modifyLiquiditiesWithoutUnlock(actions, params) {
+        try positionManager.modifyLiquiditiesWithoutUnlock{value: nativeValue}(actionsWithSweep, params) {
             return true;
         } catch (bytes memory reason) {
-            emit HookModifyLiquiditiesFailed(actions, params, reason);
+            emit HookModifyLiquiditiesFailed(actionsWithSweep, params, reason);
             return false;
         }
     }
@@ -269,6 +279,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
         uint256 balance0Before = poolKey.currency0.balanceOfSelf();
         uint256 balance1Before = poolKey.currency1.balanceOfSelf();
+        uint256 nativeValue = _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
 
         bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
         if (
@@ -276,7 +287,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 actions,
                 abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, bytes("")),
                 poolKey.currency0,
-                poolKey.currency1
+                poolKey.currency1,
+                nativeValue
             )
         ) {
             return (balance0Before - poolKey.currency0.balanceOfSelf(), balance1Before - poolKey.currency1.balanceOfSelf());
@@ -302,13 +314,15 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             return (0, 0, 0);
         }
 
+        uint256 nativeValue = _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
         if (
             _modifyLiquiditiesWithPair(
                 actions,
                 abi.encode(poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, recipient, bytes("")),
                 poolKey.currency0,
-                poolKey.currency1
+                poolKey.currency1,
+                nativeValue
             )
         ) {
             amount0Used -= poolKey.currency0.balanceOfSelf();
@@ -348,7 +362,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                     bytes("")
                 ),
                 currency0,
-                currency1
+                currency1,
+                0
             )
         ) {
             amount0 = currency0.balanceOfSelf();
@@ -371,7 +386,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 actions,
                 abi.encode(tokenId, liquidityToRemove, 0, 0, bytes("")),
                 currency0,
-                currency1
+                currency1,
+                0
             )
         ) {
             amount0 = currency0.balanceOfSelf();
@@ -400,6 +416,16 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 _permit2Approved[tokenAddress] = true;
             }
         }
+    }
+
+    function _getNativeAmount(Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (currency0.isAddressZero()) return amount0;
+        if (currency1.isAddressZero()) return amount1;
+        return 0;
     }
 
     /// @notice Swaps tokens to the lend token
