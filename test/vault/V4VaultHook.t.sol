@@ -100,7 +100,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
-        revertHook = RevertHook(hookFlags);
+        revertHook = RevertHook(payable(hookFlags));
 
         // Register vault with RevertHook so it can handle collateralized positions
         revertHook.setVault(address(vault));

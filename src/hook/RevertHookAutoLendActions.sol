@@ -45,7 +45,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 state.autoLendShares, address(this), address(this)
             );
 
-            _processLendingGain(tokenId, poolKey, Currency.wrap(state.autoLendToken), redeemedAmount, state.autoLendAmount);
+            uint256 returnedAmount =
+                _processLendingGain(tokenId, poolKey, Currency.wrap(state.autoLendToken), redeemedAmount, state.autoLendAmount);
+            if (state.autoLendToken == address(0) && returnedAmount != 0) {
+                weth.withdraw(returnedAmount);
+            }
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
 
             emit AutoLendForceExit(tokenId, Currency.wrap(state.autoLendToken), redeemedAmount, state.autoLendShares);
@@ -65,6 +69,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         Currency lendCurrency = isUpperTrigger ? poolKey.currency1 : poolKey.currency0;
         address tokenAddress = Currency.unwrap(lendCurrency);
         IERC4626 lendVault = _autoLendVaults[tokenAddress];
+        if (address(lendVault) == address(0) && tokenAddress == address(0)) {
+            lendVault = _autoLendVaults[address(weth)];
+        }
         if (address(lendVault) == address(0)) {
             emit HookAutoLendFailed(address(0), lendCurrency, abi.encodeWithSignature("InvalidConfig()"));
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
@@ -79,7 +86,13 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             return;
         }
 
-        SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), lendAmount);
+        address depositToken = tokenAddress;
+        if (tokenAddress == address(0)) {
+            weth.deposit{value: lendAmount}();
+            depositToken = address(weth);
+        }
+
+        SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), lendAmount);
         try lendVault.deposit(lendAmount, address(this)) returns (uint256 shares) {
             PositionState storage state = _positionStates[tokenId];
             state.autoLendShares = shares;
@@ -93,7 +106,10 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
 
             emit AutoLendDeposit(tokenId, lendCurrency, lendAmount, shares);
         } catch (bytes memory reason) {
-            SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), 0);
+            SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), 0);
+            if (tokenAddress == address(0) && lendAmount != 0) {
+                weth.withdraw(lendAmount);
+            }
             _restoreAutoLendPosition(
                 tokenId, poolKey, positionInfo, currency0, currency1, amount0, amount1, owner, isUpperTrigger
             );
@@ -101,7 +117,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
             return;
         }
-        SafeERC20.forceApprove(IERC20(tokenAddress), address(lendVault), 0);
+        SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), 0);
     }
 
     /// @notice Withdraws from lending vault and adds liquidity back when in range
@@ -131,10 +147,14 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         address beneficiary = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
         uint256 shares = _positionStates[tokenId].autoLendShares;
 
-        _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
+        uint256 reentryAmount =
+            _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
+        if (tokenAddress == address(0) && reentryAmount != 0) {
+            weth.withdraw(reentryAmount);
+        }
 
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        _approveToken(Currency.wrap(tokenAddress), redeemedAmount);
+        _approveToken(Currency.wrap(tokenAddress), reentryAmount);
 
         bool isToken0Lent = tokenAddress == Currency.unwrap(poolKey.currency0);
         uint256 newTokenId;
@@ -153,9 +173,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 poolKey,
                 positionInfo,
                 // forge-lint: disable-next-line(unsafe-typecast)
-                isToken0Lent ? uint128(redeemedAmount) : 0,
+                isToken0Lent ? uint128(reentryAmount) : 0,
                 // forge-lint: disable-next-line(unsafe-typecast)
-                isToken0Lent ? 0 : uint128(redeemedAmount)
+                isToken0Lent ? 0 : uint128(reentryAmount)
             );
             restoredExistingPosition = restored0 != 0 || restored1 != 0;
         } else {
@@ -164,9 +184,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 newTickLower,
                 newTickUpper,
                 // forge-lint: disable-next-line(unsafe-typecast)
-                isToken0Lent ? uint128(redeemedAmount) : 0,
+                isToken0Lent ? uint128(reentryAmount) : 0,
                 // forge-lint: disable-next-line(unsafe-typecast)
-                isToken0Lent ? 0 : uint128(redeemedAmount),
+                isToken0Lent ? 0 : uint128(reentryAmount),
                 owner
             );
         }
@@ -193,12 +213,17 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         Currency lendCurrency,
         uint256 redeemedAmount,
         uint256 originalAmount
-    ) internal {
+    ) internal returns (uint256 netRedeemedAmount) {
+        netRedeemedAmount = redeemedAmount;
         uint256 gain = redeemedAmount > originalAmount ? redeemedAmount - originalAmount : 0;
         if (gain > 0) {
             bool isToken0 = poolKey.currency0 == lendCurrency;
             uint256 protocolFee = gain * _protocolFeeBps / 10000;
-            lendCurrency.transfer(_protocolFeeRecipient, protocolFee);
+            if (protocolFee != 0) {
+                netRedeemedAmount -= protocolFee;
+                Currency feeCurrency = Currency.unwrap(lendCurrency) == address(0) ? Currency.wrap(address(weth)) : lendCurrency;
+                feeCurrency.transfer(_protocolFeeRecipient, protocolFee);
+            }
             emit SendProtocolFee(
                 tokenId,
                 poolKey.currency0,

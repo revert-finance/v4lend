@@ -8,6 +8,8 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
+import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
+import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
@@ -21,6 +23,7 @@ import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallback {
     IPermit2 internal immutable permit2;
     IPositionManager internal immutable positionManager;
+    IWETH9 internal immutable weth;
     IV4Oracle internal immutable v4Oracle;
     ILiquidityCalculator internal immutable liquidityCalculator;
 
@@ -46,7 +49,9 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         _protocolFeeRecipient = protocolFeeRecipient_;
 
         permit2 = _permit2;
-        positionManager = _v4Oracle.positionManager();
+        IPositionManager positionManager_ = _v4Oracle.positionManager();
+        positionManager = positionManager_;
+        weth = NativeWrapper(payable(address(positionManager_))).WETH9();
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
         positionActions = _positionActions;
@@ -54,20 +59,22 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         autoLendActions = _autoLendActions;
     }
 
-    function transferOwnership(address newOwner) external onlyOwner {
+    function transferOwnership(address newOwner) external payable onlyOwner {
         if (newOwner == address(0)) {
             revert OwnableInvalidOwner(address(0));
         }
         _transferOwnership(newOwner);
     }
 
-    function renounceOwnership() external onlyOwner {
+    function renounceOwnership() external payable onlyOwner {
         _transferOwnership(address(0));
     }
 
-    function setVault(address vault) external onlyOwner {
+    function setVault(address vault) external payable onlyOwner {
         _setVault(vault);
     }
+
+    receive() external payable {}
 
     function _positionManagerRef() internal view override returns (IPositionManager) {
         return positionManager;

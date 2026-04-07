@@ -184,36 +184,36 @@ abstract contract RevertHookExecution is RevertHookConfig {
         }
     }
 
-    function autoExit(PoolKey calldata poolKey, uint256 tokenId, bool isUpper) external {
+    function autoExit(PoolKey calldata poolKey, uint256 tokenId, bool isUpper) external payable {
         _delegatecallPositionActionsPassthrough(
             abi.encodeCall(positionActions.autoExit, (poolKey, tokenId, isUpper))
         );
     }
 
-    function autoRange(PoolKey calldata poolKey, uint256 tokenId) external {
+    function autoRange(PoolKey calldata poolKey, uint256 tokenId) external payable {
         _delegatecallPositionActionsPassthrough(
             abi.encodeCall(positionActions.autoRange, (poolKey, tokenId))
         );
     }
 
-    function autoLeverage(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
+    function autoLeverage(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external payable {
         _delegatecallAutoLeverageActionsPassthrough(
             abi.encodeCall(autoLeverageActions.autoLeverage, (poolKey, tokenId, isUpperTrigger))
         );
     }
 
-    function autoLendForceExit(uint256 tokenId) external {
+    function autoLendForceExit(uint256 tokenId) external payable {
         _delegatecallPassthrough(
             address(autoLendActions),
             abi.encodeCall(autoLendActions.autoLendForceExit, (tokenId))
         );
     }
 
-    function autoCollect(uint256[] calldata tokenIds) external {
+    function autoCollect(uint256[] calldata tokenIds) external payable {
         _delegatecallPositionActionsPassthrough(abi.encodeCall(positionActions.autoCollect, (tokenIds)));
     }
 
-    function autoCollectForVault(uint256 tokenId, address caller) external {
+    function autoCollectForVault(uint256 tokenId, address caller) external payable {
         _delegatecallPositionActionsPassthrough(abi.encodeCall(positionActions.autoCollectForVault, (tokenId, caller)));
     }
 
