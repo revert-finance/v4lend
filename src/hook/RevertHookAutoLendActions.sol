@@ -40,19 +40,23 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         _removePositionTriggers(tokenId, poolKey);
 
         PositionState storage state = _positionStates[tokenId];
-        if (state.autoLendShares > 0) {
-            uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(
-                state.autoLendShares, address(this), address(this)
-            );
-
-            uint256 returnedAmount =
-                _processLendingGain(tokenId, poolKey, Currency.wrap(state.autoLendToken), redeemedAmount, state.autoLendAmount);
-            if (state.autoLendToken == address(0) && returnedAmount != 0) {
-                weth.withdraw(returnedAmount);
+        uint256 shares = state.autoLendShares;
+        address autoLendToken = state.autoLendToken;
+        uint256 autoLendAmount = state.autoLendAmount;
+        if (shares > 0) {
+            Currency lendCurrency = Currency.wrap(autoLendToken);
+            uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(shares, address(this), address(this));
+            (, uint256 protocolFee) = _processLendingGain(redeemedAmount, autoLendAmount);
+            if (autoLendToken == address(0) && redeemedAmount != 0) {
+                weth.withdraw(redeemedAmount);
             }
+            _resetAutoLendState(tokenId);
+            _disablePosition(tokenId);
+            _sendLendingProtocolFee(tokenId, poolKey, lendCurrency, protocolFee);
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
 
-            emit AutoLendForceExit(tokenId, Currency.wrap(state.autoLendToken), redeemedAmount, state.autoLendShares);
+            emit AutoLendForceExit(tokenId, lendCurrency, redeemedAmount, shares);
+            return;
         }
 
         _resetAutoLendState(tokenId);
@@ -146,15 +150,15 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         address owner = _getOwner(tokenId, false);
         address beneficiary = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
         uint256 shares = _positionStates[tokenId].autoLendShares;
+        Currency lendCurrency = Currency.wrap(tokenAddress);
 
-        uint256 reentryAmount =
-            _processLendingGain(tokenId, poolKey, Currency.wrap(tokenAddress), redeemedAmount, originalLendAmount);
-        if (tokenAddress == address(0) && reentryAmount != 0) {
-            weth.withdraw(reentryAmount);
+        (uint256 reentryAmount, uint256 protocolFee) = _processLendingGain(redeemedAmount, originalLendAmount);
+        if (tokenAddress == address(0) && redeemedAmount != 0) {
+            weth.withdraw(redeemedAmount);
         }
 
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        _approveToken(Currency.wrap(tokenAddress), reentryAmount);
+        _approveToken(lendCurrency, reentryAmount);
 
         bool isToken0Lent = tokenAddress == Currency.unwrap(poolKey.currency0);
         uint256 newTokenId;
@@ -192,8 +196,6 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         }
 
         _resetAutoLendState(tokenId);
-        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, beneficiary);
-
         if (newTokenId > 0) {
             _migrateRemintedPosition(tokenId, newTokenId);
         } else if (restoredExistingPosition) {
@@ -202,37 +204,44 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             _disablePosition(tokenId);
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
         }
+        _sendLendingProtocolFee(tokenId, poolKey, lendCurrency, protocolFee);
+        _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, beneficiary);
 
-        emit AutoLendWithdraw(tokenId, Currency.wrap(tokenAddress), redeemedAmount, shares);
+        emit AutoLendWithdraw(tokenId, lendCurrency, redeemedAmount, shares);
     }
 
     /// @notice Processes gain from lending (takes protocol fee on gain)
-    function _processLendingGain(
-        uint256 tokenId,
-        PoolKey memory poolKey,
-        Currency lendCurrency,
-        uint256 redeemedAmount,
-        uint256 originalAmount
-    ) internal returns (uint256 netRedeemedAmount) {
+    function _processLendingGain(uint256 redeemedAmount, uint256 originalAmount)
+        internal
+        view
+        returns (uint256 netRedeemedAmount, uint256 protocolFee)
+    {
         netRedeemedAmount = redeemedAmount;
         uint256 gain = redeemedAmount > originalAmount ? redeemedAmount - originalAmount : 0;
         if (gain > 0) {
-            bool isToken0 = poolKey.currency0 == lendCurrency;
-            uint256 protocolFee = gain * _protocolFeeBps / 10000;
+            protocolFee = gain * _protocolFeeBps / 10000;
             if (protocolFee != 0) {
                 netRedeemedAmount -= protocolFee;
-                Currency feeCurrency = Currency.unwrap(lendCurrency) == address(0) ? Currency.wrap(address(weth)) : lendCurrency;
-                feeCurrency.transfer(_protocolFeeRecipient, protocolFee);
             }
-            emit SendProtocolFee(
-                tokenId,
-                poolKey.currency0,
-                poolKey.currency1,
-                isToken0 ? protocolFee : 0,
-                isToken0 ? 0 : protocolFee,
-                _protocolFeeRecipient
-            );
         }
+    }
+
+    function _sendLendingProtocolFee(uint256 tokenId, PoolKey memory poolKey, Currency lendCurrency, uint256 protocolFee)
+        internal
+    {
+        if (protocolFee == 0) return;
+
+        lendCurrency.transfer(_protocolFeeRecipient, protocolFee);
+
+        bool isToken0 = poolKey.currency0 == lendCurrency;
+        emit SendProtocolFee(
+            tokenId,
+            poolKey.currency0,
+            poolKey.currency1,
+            isToken0 ? protocolFee : 0,
+            isToken0 ? 0 : protocolFee,
+            _protocolFeeRecipient
+        );
     }
 
     /// @notice Resets the auto-lend state for a position

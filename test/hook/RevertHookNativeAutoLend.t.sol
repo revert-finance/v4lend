@@ -34,6 +34,31 @@ import {MockERC4626Vault} from "test/utils/MockERC4626Vault.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
 import {V4PositionManagerDeployer} from "hookmate/artifacts/V4PositionManager.sol";
 
+contract NativeFeeRecipientProbe {
+    RevertHook internal immutable hook;
+    IWETH9 internal immutable weth;
+    uint256 internal immutable tokenId;
+
+    uint256 public nativeReceived;
+    uint256 public observedAutoLendShares;
+
+    constructor(RevertHook _hook, IWETH9 _weth, uint256 _tokenId) {
+        hook = _hook;
+        weth = _weth;
+        tokenId = _tokenId;
+    }
+
+    receive() external payable {
+        nativeReceived += msg.value;
+        (,,, , uint256 autoLendShares,,,) = hook.positionStates(tokenId);
+        observedAutoLendShares = autoLendShares;
+    }
+
+    function wethBalance() external view returns (uint256) {
+        return weth.balanceOf(address(this));
+    }
+}
+
 contract RevertHookNativeAutoLendTest is BaseTest {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
@@ -195,6 +220,30 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         assertEq(autoLendSharesAfter, 0, "force exit should clear parked shares");
         assertEq(address(hook).balance, 0, "force exit should not strand ETH in the hook");
         assertEq(weth.balanceOf(address(hook)), 0, "force exit should not strand WETH in the hook");
+    }
+
+    function testAutoLend_WithdrawSendsNativeProtocolFeesInEth() public {
+        _swapExactInputSingleEth(poolKey, true, 2e18, 0);
+
+        (,,, address autoLendToken, uint256 autoLendShares, uint256 autoLendAmount,,) = hook.positionStates(tokenId);
+        assertEq(autoLendToken, address(0), "position should be parked in native auto-lend");
+        assertGt(autoLendShares, 0, "position should hold vault shares before withdraw");
+
+        NativeFeeRecipientProbe feeRecipient = new NativeFeeRecipientProbe(hook, weth, tokenId);
+        hook.setProtocolFeeRecipient(address(feeRecipient));
+
+        uint256 donatedYield = autoLendAmount + 1;
+        weth.deposit{value: donatedYield}();
+        IERC20(address(weth)).transfer(address(wethVault), donatedYield);
+        wethVault.simulatePositiveYield(10000);
+
+        _pushTickToOrAbove(positionTickLower - 120);
+
+        assertGt(address(feeRecipient).balance, 0, "fee recipient should receive native ETH");
+        assertEq(feeRecipient.wethBalance(), 0, "fee recipient should not receive WETH");
+        assertEq(
+            feeRecipient.observedAutoLendShares(), 0, "auto-lend shares should already be cleared during fee callback"
+        );
     }
 
     function _mintPositionEth(PoolKey memory key, int24 tickLower, int24 tickUpper, uint128 liquidity)
