@@ -143,7 +143,7 @@ library TickLinkedList {
         if (current != _tick || count == 0) {
             self.next[insertAfter] = _tick;
             // insert inbetween
-            if (count != 0) {
+            if (count > 0) {
                 self.next[_tick] = current;
             }
             self.size++;

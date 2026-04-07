@@ -91,7 +91,7 @@ abstract contract Swapper is Constants {
             bool isDirectWethSwap = _isDirectWethSwap(params.tokenIn, params.tokenOut);
             if (isDirectWethSwap) {
                 _handleDirectWethSwap(params.tokenIn, params.tokenOut, params.amountIn);
-            } else if (params.swapData.length != 0) {
+            } else if (params.swapData.length > 0) {
                 // Check if this is Universal Router data by looking at first 32 bytes
                 bool isUniversalRouter;
                 bytes memory swapData = params.swapData;

@@ -472,7 +472,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         }
 
         address owner = from;
-        if (data.length != 0) {
+        if (data.length > 0) {
             owner = abi.decode(data, (address));
         }
 
