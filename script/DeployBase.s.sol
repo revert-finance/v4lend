@@ -232,15 +232,13 @@ contract DeployBase is Script {
 
         // Deploy RevertHookPositionActions (delegatecall target 1)
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(
-                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
-            );
+            new RevertHookPositionActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), swapActions);
         console.log("  RevertHookPositionActions deployed at:", address(positionActions));
 
         // Deploy RevertHookAutoLeverageActions (delegatecall target 2)
         RevertHookAutoLeverageActions autoLeverageActions =
             new RevertHookAutoLeverageActions(
-                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
+                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), swapActions
             );
         console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
 

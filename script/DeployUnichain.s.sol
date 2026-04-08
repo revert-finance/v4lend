@@ -278,7 +278,6 @@ contract DeployUnichain is Script {
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
-            feeController,
             swapActions
         );
         console.log("  RevertHookPositionActions deployed at:", address(positionActions));
@@ -288,7 +287,6 @@ contract DeployUnichain is Script {
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
-            feeController,
             swapActions
         );
         console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));

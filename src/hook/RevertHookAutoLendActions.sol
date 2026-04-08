@@ -27,13 +27,17 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     using PoolIdLibrary for PoolKey;
     using TickLinkedList for TickLinkedList.List;
 
+    IHookFeeController internal immutable hookFeeController;
+
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
         IHookFeeController _hookFeeController,
         RevertHookSwapActions _swapActions
-    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookFeeController, _swapActions) {}
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _swapActions) {
+        hookFeeController = _hookFeeController;
+    }
 
     /// @notice Forces exit from auto-lend position (called by position owner)
     /// @param tokenId The token ID of the position

@@ -117,9 +117,9 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
 
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, swapActions);
         RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
 
@@ -251,7 +251,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         );
     }
 
-    function testSwapFeeSchedule_AutoCollectNativeOutputSendsEth() public {
+    function testSwapFees_AutoCollectNativeOutputSendsEth() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
 

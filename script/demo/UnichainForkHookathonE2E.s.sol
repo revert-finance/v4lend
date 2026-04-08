@@ -185,10 +185,10 @@ contract UnichainForkHookathonE2E is Script {
         require(address(swapActions) == predictedSwapActions, "Demo: swap actions address mismatch");
 
         deployment.positionActions = new RevertHookPositionActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), feeController, swapActions
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), swapActions
         );
         deployment.autoLeverageActions = new RevertHookAutoLeverageActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), feeController, swapActions
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), swapActions
         );
         deployment.autoLendActions = new RevertHookAutoLendActions(
             PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), feeController, swapActions

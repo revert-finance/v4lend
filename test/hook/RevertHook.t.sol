@@ -103,9 +103,9 @@ contract RevertHookTest is BaseTest {
 
         // Deploy RevertHook action targets
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, swapActions);
         RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
 
@@ -1163,7 +1163,7 @@ contract RevertHookTest is BaseTest {
         assertGt(protocolFee1, 0, "ProtocolFeeRecipient should have received fees in token1");
     }
 
-    function testSwapFeeSchedule_AutoCollectRebalanceChargesSwapOutput() public {
+    function testSwapFees_AutoCollectRebalanceChargesSwapOutput() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
 
@@ -1198,7 +1198,7 @@ contract RevertHookTest is BaseTest {
         assertGt(positionManager.getPositionLiquidity(token2Id), token2Liquidity, "auto collect should still compound");
     }
 
-    function testSwapFeeSchedule_HarvestToken1ChargesBoughtToken() public {
+    function testSwapFees_HarvestToken1ChargesBoughtToken() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
 
@@ -1228,7 +1228,7 @@ contract RevertHookTest is BaseTest {
         );
     }
 
-    function testSwapFeeSchedule_AutoRangeUsesAlternateSwapPoolOverride() public {
+    function testSwapFees_AutoRangeUsesAlternateSwapPoolOverride() public {
         feeController.setLpFeeBps(0);
         feeController.setPoolOverrideSwapFeeBps(nonHookedPoolKey.toId(), uint8(RevertHookState.Mode.AUTO_RANGE), 500);
 
@@ -1282,7 +1282,7 @@ contract RevertHookTest is BaseTest {
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "auto range should consume the original position");
     }
 
-    function testSwapFeeSchedule_PartialSwapChargesOnActualOutput() public {
+    function testSwapFees_PartialSwapChargesOnActualOutput() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_EXIT), 500);
 

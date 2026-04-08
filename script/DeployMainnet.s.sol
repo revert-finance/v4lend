@@ -180,14 +180,12 @@ contract DeployMainnet is Script {
         console.log("  RevertHookSwapActions deployed at:", address(swapActions));
 
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(
-                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
-            );
+            new RevertHookPositionActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), swapActions);
         console.log("  RevertHookPositionActions deployed at:", address(positionActions));
 
         RevertHookAutoLeverageActions autoLeverageActions =
             new RevertHookAutoLeverageActions(
-                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
+                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), swapActions
             );
         console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
 

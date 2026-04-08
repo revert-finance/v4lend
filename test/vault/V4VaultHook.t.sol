@@ -88,9 +88,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         feeController = new HookFeeController(hookFlags, address(this), 200, 200);
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, swapActions);
         RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
 
@@ -1407,7 +1407,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertVaultAutoExitCase(true, false, 0);
     }
 
-    function testSwapFeeSchedule_VaultAutoExitUpperWithSwapChargesBothSwapOutputs() public {
+    function testSwapFees_VaultAutoExitUpperWithSwapChargesBothSwapOutputs() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_EXIT), 500);
 
@@ -2646,7 +2646,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(debtAfter, 0, "Debt should be created after leverage up from zero");
     }
 
-    function testSwapFeeSchedule_AutoLeverageChargesLeverageUpAndDown() public {
+    function testSwapFees_AutoLeverageChargesLeverageUpAndDown() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_LEVERAGE), 500);
 

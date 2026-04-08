@@ -22,14 +22,13 @@ import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
-import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
 /// @title RevertHookActionBase
 /// @notice Base contract with shared helper functions for RevertHook action targets
-/// @dev Inherits from RevertHookTriggers for state access and trigger management
+/// @dev Inherits from RevertHookLookupBase for shared state access and trigger management
 abstract contract RevertHookActionBase is RevertHookLookupBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
@@ -40,14 +39,12 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     IV4Oracle internal immutable v4Oracle;
     ILiquidityCalculator internal immutable liquidityCalculator;
     IPoolManager internal immutable poolManager;
-    IHookFeeController internal immutable hookFeeController;
     RevertHookSwapActions internal immutable swapActions;
 
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
-        IHookFeeController _hookFeeController,
         RevertHookSwapActions _swapActions
     ) {
         positionManager = _v4Oracle.positionManager();
@@ -56,7 +53,6 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
         poolManager = _v4Oracle.poolManager();
-        hookFeeController = _hookFeeController;
         swapActions = _swapActions;
     }
 

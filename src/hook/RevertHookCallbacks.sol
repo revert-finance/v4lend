@@ -209,8 +209,6 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         internal
         returns (BalanceDelta newFeeDelta)
     {
-        address feeRecipient = hookFeeController.protocolFeeRecipient();
-        uint16 lpFeeBps = hookFeeController.lpFeeBps();
         PositionState storage state = _positionStates[tokenId];
         uint32 accumulatedActiveTime = state.accumulatedActiveTime;
         uint32 lastActivated = state.lastActivated;
@@ -228,12 +226,23 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return BalanceDeltaLibrary.ZERO_DELTA;
         }
 
+        uint16 lpFeeBps = hookFeeController.lpFeeBps();
+        if (lpFeeBps == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+
         int128 protocolFee0 =
             // forge-lint: disable-next-line(unsafe-typecast)
             int32(accumulatedActiveTime) * feeDelta.amount0() * int16(lpFeeBps) / (10000 * int32(feeTime));
         int128 protocolFee1 =
             // forge-lint: disable-next-line(unsafe-typecast)
             int32(accumulatedActiveTime) * feeDelta.amount1() * int16(lpFeeBps) / (10000 * int32(feeTime));
+
+        if (protocolFee0 == 0 && protocolFee1 == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+
+        address feeRecipient = hookFeeController.protocolFeeRecipient();
 
         if (protocolFee0 > 0) {
             // forge-lint: disable-next-line(unsafe-typecast)
