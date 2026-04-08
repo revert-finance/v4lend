@@ -11,6 +11,8 @@ import {FlashloanLiquidator} from "src/vault/liquidation/FlashloanLiquidator.sol
 import {LeverageTransformer} from "src/vault/transformers/LeverageTransformer.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {RevertHook} from "src/RevertHook.sol";
+import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
@@ -193,51 +195,68 @@ contract DeployBase is Script {
         // ==================== Step 3: Deploy RevertHook action contracts ====================
 
         console.log("Step 3: Deploying RevertHook action contracts...");
+        uint64 hookSidecarNonce = vm.getNonce(deployer);
+        address predictedFeeController = vm.computeCreateAddress(deployer, hookSidecarNonce);
+        address predictedSwapActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 1);
+        address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 2);
+        address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
+        address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
 
-        // Deploy RevertHookPositionActions (delegatecall target 1)
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator));
-        console.log("  RevertHookPositionActions deployed at:", address(positionActions));
-
-        // Deploy RevertHookAutoLeverageActions (delegatecall target 2)
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator));
-        console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
-
-        RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator));
-        console.log("  RevertHookAutoLendActions deployed at:", address(autoLendActions));
-
-        // ==================== Step 4: Deploy RevertHook with CREATE2 ====================
-
-        console.log("Step 4: Deploying RevertHook with CREATE2 address mining...");
-
-        // Prepare constructor arguments for RevertHook
         bytes memory constructorArgs = abi.encode(
-            deployer,
             deployer,
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
-            positionActions,
-            autoLeverageActions,
-            autoLendActions
+            HookFeeController(predictedFeeController),
+            RevertHookPositionActions(predictedPositionActions),
+            RevertHookAutoLeverageActions(predictedAutoLeverageActions),
+            RevertHookAutoLendActions(predictedAutoLendActions)
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
 
-        // Mine for a valid hook address
+        // ==================== Step 4: Deploy RevertHook with CREATE2 ====================
+
+        console.log("Step 4: Deploying RevertHook with CREATE2 address mining...");
         console.log("  Mining for valid hook address...");
         (address expectedHookAddress, bytes32 salt) = findHookSalt(CREATE2_DEPLOYER, creationCodeWithArgs);
         console.log("  Found valid hook address:", expectedHookAddress);
         console.log("  Using salt:", vm.toString(salt));
 
+        HookFeeController feeController =
+            new HookFeeController(expectedHookAddress, deployer, PROTOCOL_FEE_BPS, PROTOCOL_FEE_BPS);
+        require(address(feeController) == predictedFeeController, "Fee controller address mismatch");
+        console.log("  HookFeeController deployed at:", address(feeController));
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(oracle, feeController);
+        require(address(swapActions) == predictedSwapActions, "Swap actions address mismatch");
+        console.log("  RevertHookSwapActions deployed at:", address(swapActions));
+
+        // Deploy RevertHookPositionActions (delegatecall target 1)
+        RevertHookPositionActions positionActions =
+            new RevertHookPositionActions(
+                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
+            );
+        console.log("  RevertHookPositionActions deployed at:", address(positionActions));
+
+        // Deploy RevertHookAutoLeverageActions (delegatecall target 2)
+        RevertHookAutoLeverageActions autoLeverageActions =
+            new RevertHookAutoLeverageActions(
+                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
+            );
+        console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
+
+        RevertHookAutoLendActions autoLendActions =
+            new RevertHookAutoLendActions(
+                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
+            );
+        console.log("  RevertHookAutoLendActions deployed at:", address(autoLendActions));
+
         // Deploy RevertHook using CREATE2
         RevertHook revertHook = new RevertHook{salt: salt}(
             deployer, // owner
-            deployer, // protocolFeeRecipient
             IPermit2(PERMIT2),
             oracle,
             ILiquidityCalculator(liquidityCalculator),
+            feeController,
             positionActions,
             autoLeverageActions,
             autoLendActions
@@ -246,7 +265,6 @@ contract DeployBase is Script {
         console.log("  RevertHook deployed at:", address(revertHook));
 
         // Configure RevertHook settings
-        revertHook.setProtocolFeeBps(PROTOCOL_FEE_BPS);
         revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
         console.log("  RevertHook configured");

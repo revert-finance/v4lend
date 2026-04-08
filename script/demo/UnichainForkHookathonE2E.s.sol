@@ -31,6 +31,8 @@ import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 import {LeverageTransformer} from "src/vault/transformers/LeverageTransformer.sol";
 import {RevertHook} from "src/RevertHook.sol";
 import {RevertHookState} from "src/hook/RevertHookState.sol";
+import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
@@ -156,40 +158,52 @@ contract UnichainForkHookathonE2E is Script {
         deployment.oracle.setTokenConfig(address(deployment.demoEth), deployment.ethFeed, MAX_FEED_AGE);
         deployment.oracle.setTokenConfig(address(0), deployment.ethFeed, MAX_FEED_AGE);
 
-        deployment.positionActions = new RevertHookPositionActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator)
-        );
-        deployment.autoLeverageActions = new RevertHookAutoLeverageActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator)
-        );
-        deployment.autoLendActions = new RevertHookAutoLendActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator)
-        );
+        uint64 hookSidecarNonce = vm.getNonce(deployer);
+        address predictedFeeController = vm.computeCreateAddress(deployer, hookSidecarNonce);
+        address predictedSwapActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 1);
+        address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 2);
+        address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
+        address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
-            deployer,
             PERMIT2,
             deployment.oracle,
             ILiquidityCalculator(deployment.liquidityCalculator),
-            deployment.positionActions,
-            deployment.autoLeverageActions,
-            deployment.autoLendActions
+            HookFeeController(predictedFeeController),
+            RevertHookPositionActions(predictedPositionActions),
+            RevertHookAutoLeverageActions(predictedAutoLeverageActions),
+            RevertHookAutoLendActions(predictedAutoLendActions)
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
         (address expectedHookAddress, bytes32 salt) = findHookSalt(CREATE2_DEPLOYER, creationCodeWithArgs);
+
+        HookFeeController feeController =
+            new HookFeeController(expectedHookAddress, deployer, PROTOCOL_FEE_BPS, PROTOCOL_FEE_BPS);
+        require(address(feeController) == predictedFeeController, "Demo: fee controller address mismatch");
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(deployment.oracle, feeController);
+        require(address(swapActions) == predictedSwapActions, "Demo: swap actions address mismatch");
+
+        deployment.positionActions = new RevertHookPositionActions(
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), feeController, swapActions
+        );
+        deployment.autoLeverageActions = new RevertHookAutoLeverageActions(
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), feeController, swapActions
+        );
+        deployment.autoLendActions = new RevertHookAutoLendActions(
+            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), feeController, swapActions
+        );
         deployment.revertHook = new RevertHook{salt: salt}(
-            deployer,
             deployer,
             PERMIT2,
             deployment.oracle,
             ILiquidityCalculator(deployment.liquidityCalculator),
+            feeController,
             deployment.positionActions,
             deployment.autoLeverageActions,
             deployment.autoLendActions
         );
         require(address(deployment.revertHook) == expectedHookAddress, "Demo: hook address mismatch");
-        deployment.revertHook.setProtocolFeeBps(PROTOCOL_FEE_BPS);
         deployment.revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         deployment.revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
 

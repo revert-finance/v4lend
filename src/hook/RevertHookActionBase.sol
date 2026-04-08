@@ -4,8 +4,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -23,8 +22,10 @@ import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
+import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
+import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
 /// @title RevertHookActionBase
 /// @notice Base contract with shared helper functions for RevertHook action targets
@@ -39,14 +40,24 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     IV4Oracle internal immutable v4Oracle;
     ILiquidityCalculator internal immutable liquidityCalculator;
     IPoolManager internal immutable poolManager;
+    IHookFeeController internal immutable hookFeeController;
+    RevertHookSwapActions internal immutable swapActions;
 
-    constructor(IPermit2 _permit2, IV4Oracle _v4Oracle, ILiquidityCalculator _liquidityCalculator) {
+    constructor(
+        IPermit2 _permit2,
+        IV4Oracle _v4Oracle,
+        ILiquidityCalculator _liquidityCalculator,
+        IHookFeeController _hookFeeController,
+        RevertHookSwapActions _swapActions
+    ) {
         positionManager = _v4Oracle.positionManager();
         weth = NativeWrapper(payable(address(positionManager))).WETH9();
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
         poolManager = _v4Oracle.poolManager();
+        hookFeeController = _hookFeeController;
+        swapActions = _swapActions;
     }
 
     function _positionManagerRef() internal view override returns (IPositionManager) {
@@ -120,7 +131,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         int24 tickLower,
         int24 tickUpper,
         uint256 amount0,
-        uint256 amount1
+        uint256 amount1,
+        Mode mode
     ) internal returns (uint256, uint256) {
         PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
         uint256 swapInput;
@@ -146,7 +158,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         }
 
         if (swapInput > 0) {
-            return _applyBalanceDelta(_executeSwap(swapPool, zeroForOne, swapInput, tokenId), amount0, amount1);
+            return _applyBalanceDelta(_executeSwap(swapPool, zeroForOne, swapInput, tokenId, mode), amount0, amount1);
         }
         return (amount0, amount1);
     }
@@ -156,65 +168,18 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         PoolKey memory poolKey,
         bool zeroForOne,
         uint256 amountIn,
-        uint256 tokenId
+        uint256 tokenId,
+        Mode mode
     ) internal returns (BalanceDelta delta) {
-        GeneralConfig storage config = _generalConfigs[tokenId];
-        uint128 priceMultiplier = zeroForOne ? config.sqrtPriceMultiplier0 : config.sqrtPriceMultiplier1;
-
-        uint160 sqrtPriceLimitX96;
-        if (priceMultiplier == 0) {
-            sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
-        } else {
-            (uint160 currentSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
-            sqrtPriceLimitX96 = uint160(FullMath.mulDiv(currentSqrtPriceX96, priceMultiplier, Q64));
-            if (zeroForOne && sqrtPriceLimitX96 <= TickMath.MIN_SQRT_PRICE) {
-                sqrtPriceLimitX96 = TickMath.MIN_SQRT_PRICE + 1;
-            }
-            if (!zeroForOne && sqrtPriceLimitX96 >= TickMath.MAX_SQRT_PRICE) {
-                sqrtPriceLimitX96 = TickMath.MAX_SQRT_PRICE - 1;
+        (bool success, bytes memory returndata) = address(swapActions).delegatecall(
+            abi.encodeCall(RevertHookSwapActions.executeSwap, (poolKey, zeroForOne, amountIn, tokenId, mode))
+        );
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returndata, 0x20), mload(returndata))
             }
         }
-        SwapParams memory params = SwapParams({
-            zeroForOne: zeroForOne,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            amountSpecified: -int256(amountIn),
-            sqrtPriceLimitX96: sqrtPriceLimitX96
-        });
-
-        try poolManager.swap(poolKey, params, "") returns (BalanceDelta result) {
-            delta = result;
-            _settleSwapDeltas(poolKey, delta);
-            uint256 actualSwapped = uint256(int256(-(zeroForOne ? result.amount0() : result.amount1())));
-            if (actualSwapped < amountIn) {
-                emit HookSwapPartial(tokenId, zeroForOne, amountIn, actualSwapped);
-            }
-        } catch (bytes memory reason) {
-            emit HookSwapFailed(poolKey, params, reason);
-        }
-    }
-
-    /// @notice Settles swap deltas with the pool manager
-    function _settleSwapDeltas(PoolKey memory poolKey, BalanceDelta delta) internal {
-        _settleCurrencyDelta(poolKey.currency0, delta.amount0());
-        _settleCurrencyDelta(poolKey.currency1, delta.amount1());
-    }
-
-    /// @notice Settles a single currency delta
-    function _settleCurrencyDelta(Currency currency, int256 delta) internal {
-        if (delta < 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256 amount = uint256(-delta);
-            poolManager.sync(currency);
-            if (currency.isAddressZero()) {
-                poolManager.settle{value: amount}();
-            } else {
-                currency.transfer(address(poolManager), amount);
-                poolManager.settle();
-            }
-        } else if (delta > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            poolManager.take(currency, address(this), uint256(delta));
-        }
+        delta = abi.decode(returndata, (BalanceDelta));
     }
 
     // ==================== Liquidity Helpers ====================
@@ -427,17 +392,18 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         Currency currency0,
         Currency currency1,
         uint256 amount0,
-        uint256 amount1
+        uint256 amount1,
+        Mode mode
     ) internal returns (uint256) {
         PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
         if (lendToken == currency0) {
             if (amount1 > 0) {
-                _executeSwap(swapPool, false, amount1, tokenId);
+                _executeSwap(swapPool, false, amount1, tokenId, mode);
             }
             return currency0.balanceOfSelf();
         } else {
             if (amount0 > 0) {
-                _executeSwap(swapPool, true, amount0, tokenId);
+                _executeSwap(swapPool, true, amount0, tokenId, mode);
             }
             return currency1.balanceOfSelf();
         }

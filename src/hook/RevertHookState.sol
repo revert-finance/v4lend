@@ -87,8 +87,6 @@ abstract contract RevertHookState is RevertHookAccess {
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event SetMaxTicksFromOracle(int24 maxTicksFromOracle);
     event SetMinPositionValueNative(uint256 minPositionValueNative);
-    event SetProtocolFeeBps(uint16 protocolFeeBps);
-    event SetProtocolFeeRecipient(address protocolFeeRecipient);
     event SetGeneralConfig(uint256 indexed tokenId, GeneralConfig generalConfig);
     event SetPositionConfig(uint256 indexed tokenId, PositionConfig positionConfig);
 
@@ -158,10 +156,6 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // auto-leverage triggers at baseTick ± (LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing)
     int24 internal constant _LEVERAGE_TICK_OFFSET_MULTIPLIER = 10;
-
-    // protocol fees (taken from the fees collected while position is active)
-    uint16 internal _protocolFeeBps = 200;
-    address internal _protocolFeeRecipient;
 
     // oracle price validation
     int24 internal _maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)

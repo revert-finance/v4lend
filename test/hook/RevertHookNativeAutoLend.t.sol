@@ -28,6 +28,8 @@ import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
+import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {MockERC4626Vault} from "test/utils/MockERC4626Vault.sol";
@@ -69,6 +71,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
     MockERC20 internal token1;
     IWETH9 internal weth;
     RevertHook internal hook;
+    HookFeeController internal feeController;
     LiquidityCalculator internal liquidityCalculator;
     MockV4Oracle internal v4Oracle;
     MockERC4626Vault internal wethVault;
@@ -110,20 +113,22 @@ contract RevertHookNativeAutoLendTest is BaseTest {
 
         v4Oracle = new MockV4Oracle(positionManager);
         liquidityCalculator = new LiquidityCalculator();
+        feeController = new HookFeeController(flags, makeAddr("protocolFeeRecipient"), 200, 200);
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
 
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
         RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
 
         bytes memory constructorArgs = abi.encode(
             address(this),
-            makeAddr("protocolFeeRecipient"),
             permit2,
             v4Oracle,
             liquidityCalculator,
+            feeController,
             positionActions,
             autoLeverageActions,
             autoLendActions
@@ -230,7 +235,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         assertGt(autoLendShares, 0, "position should hold vault shares before withdraw");
 
         NativeFeeRecipientProbe feeRecipient = new NativeFeeRecipientProbe(hook, weth, tokenId);
-        hook.setProtocolFeeRecipient(address(feeRecipient));
+        feeController.setProtocolFeeRecipient(address(feeRecipient));
 
         uint256 donatedYield = autoLendAmount + 1;
         weth.deposit{value: donatedYield}();
@@ -244,6 +249,44 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         assertEq(
             feeRecipient.observedAutoLendShares(), 0, "auto-lend shares should already be cleared during fee callback"
         );
+    }
+
+    function testSwapFeeSchedule_AutoCollectNativeOutputSendsEth() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
+
+        hook.setPositionConfig(
+            tokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COLLECT,
+                autoCollectMode: RevertHookState.AutoCollectMode.HARVEST_TOKEN_0,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        _swapExactInputSingleEth(poolKey, true, 1e16, 0);
+        _swapExactInputSingleEth(poolKey, false, 2e18, 0);
+        _swapExactInputSingleEth(poolKey, false, 2e18, 0);
+
+        NativeFeeRecipientProbe feeRecipient = new NativeFeeRecipientProbe(hook, weth, tokenId);
+        feeController.setProtocolFeeRecipient(address(feeRecipient));
+
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = tokenId;
+        hook.autoCollect(tokenIds);
+
+        assertGt(address(feeRecipient).balance, 0, "native output swap fee should arrive as ETH");
+        assertEq(feeRecipient.wethBalance(), 0, "native output swap fee should not arrive as WETH");
     }
 
     function _mintPositionEth(PoolKey memory key, int24 tickLower, int24 tickUpper, uint128 liquidity)

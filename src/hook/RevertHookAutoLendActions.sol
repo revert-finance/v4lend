@@ -17,7 +17,9 @@ import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoLendLib} from "../shared/planning/AutoLendLib.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
+import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
 /// @title RevertHookAutoLendActions
 /// @notice Contains auto-lend functions for RevertHook (called via delegatecall)
@@ -28,8 +30,10 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
-        ILiquidityCalculator _liquidityCalculator
-    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator) {}
+        ILiquidityCalculator _liquidityCalculator,
+        IHookFeeController _hookFeeController,
+        RevertHookSwapActions _swapActions
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookFeeController, _swapActions) {}
 
     /// @notice Forces exit from auto-lend position (called by position owner)
     /// @param tokenId The token ID of the position
@@ -210,7 +214,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         netRedeemedAmount = redeemedAmount;
         uint256 gain = redeemedAmount > originalAmount ? redeemedAmount - originalAmount : 0;
         if (gain > 0) {
-            protocolFee = gain * _protocolFeeBps / 10000;
+            protocolFee = gain * hookFeeController.autoLendFeeBps() / 10000;
             if (protocolFee > 0) {
                 netRedeemedAmount -= protocolFee;
             }
@@ -222,7 +226,8 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     {
         if (protocolFee == 0) return;
 
-        lendCurrency.transfer(_protocolFeeRecipient, protocolFee);
+        address protocolFeeRecipient = hookFeeController.protocolFeeRecipient();
+        lendCurrency.transfer(protocolFeeRecipient, protocolFee);
 
         bool isToken0 = poolKey.currency0 == lendCurrency;
         emit SendProtocolFee(
@@ -231,7 +236,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             poolKey.currency1,
             isToken0 ? protocolFee : 0,
             isToken0 ? 0 : protocolFee,
-            _protocolFeeRecipient
+            protocolFeeRecipient
         );
     }
 

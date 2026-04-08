@@ -5,6 +5,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 
 import {ILiquidityCalculator} from "./shared/math/LiquidityCalculator.sol";
 import {IV4Oracle} from "./oracle/interfaces/IV4Oracle.sol";
+import {IHookFeeController} from "./hook/interfaces/IHookFeeController.sol";
 import {RevertHookAutoLendActions} from "./hook/RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookBase} from "./hook/RevertHookBase.sol";
@@ -22,20 +23,20 @@ import {RevertHookPositionActions} from "./hook/RevertHookPositionActions.sol";
 contract RevertHook is RevertHookCallbacks {
     constructor(
         address owner_,
-        address protocolFeeRecipient_,
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
+        IHookFeeController _hookFeeController,
         RevertHookPositionActions _positionActions,
         RevertHookAutoLeverageActions _autoLeverageActions,
         RevertHookAutoLendActions _autoLendActions
     )
         RevertHookBase(
             owner_,
-            protocolFeeRecipient_,
             _permit2,
             _v4Oracle,
             _liquidityCalculator,
+            _hookFeeController,
             _positionActions,
             _autoLeverageActions,
             _autoLendActions

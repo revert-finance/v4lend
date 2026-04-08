@@ -29,6 +29,8 @@ import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
+import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
@@ -50,6 +52,7 @@ contract RevertHookTest is BaseTest {
     PoolKey poolKey;
 
     RevertHook hook;
+    HookFeeController feeController;
     LiquidityCalculator liquidityCalculator;
     PoolId poolId;
 
@@ -95,21 +98,23 @@ contract RevertHookTest is BaseTest {
 
         // Deploy LiquidityCalculator
         liquidityCalculator = new LiquidityCalculator();
+        feeController = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
 
         // Deploy RevertHook action targets
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
         RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
 
         bytes memory constructorArgs = abi.encode(
             address(this),
-            protocolFeeRecipient,
             permit2,
             v4Oracle,
             liquidityCalculator,
+            feeController,
             positionActions,
             autoLeverageActions,
             autoLendActions
@@ -973,11 +978,18 @@ contract RevertHookTest is BaseTest {
         uint256 protocolFeeRecipientBalance1;
     }
 
+    struct SendProtocolFeeEvent {
+        bool found;
+        uint256 amount0;
+        uint256 amount1;
+        address recipient;
+    }
+
     /// @notice Helper function to record balances before autoCollect
     /// @return snapshot The balance snapshot
     function _recordBalancesBeforeAutoCollect() internal view returns (BalanceSnapshot memory snapshot) {
         address executor = address(this);
-        address feeRecipient = hook.protocolFeeRecipient();
+        address feeRecipient = feeController.protocolFeeRecipient();
         address owner = address(this);
 
         snapshot.executorBalance0 = currency0.balanceOf(executor);
@@ -1023,7 +1035,7 @@ contract RevertHookTest is BaseTest {
         assertGt(executorFee0 + executorFee1, 0, "Executor should have received fees");
 
         // Verify protocolFeeRecipient received fees
-        address feeRecipient = hook.protocolFeeRecipient();
+        address feeRecipient = feeController.protocolFeeRecipient();
         uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
         uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
@@ -1062,7 +1074,7 @@ contract RevertHookTest is BaseTest {
         assertEq(ownerReceived1, 0, "Owner should not have received token1 (all swapped to token0)");
 
         // Verify protocolFeeRecipient received fees in token0
-        address feeRecipient = hook.protocolFeeRecipient();
+        address feeRecipient = feeController.protocolFeeRecipient();
         uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
         uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
@@ -1102,7 +1114,7 @@ contract RevertHookTest is BaseTest {
         assertEq(ownerReceived0, 0, "Owner should not have received token0 (all swapped to token1)");
 
         // Verify protocolFeeRecipient received fees in token1
-        address feeRecipient = hook.protocolFeeRecipient();
+        address feeRecipient = feeController.protocolFeeRecipient();
         uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
         uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
@@ -1142,13 +1154,191 @@ contract RevertHookTest is BaseTest {
         assertGt(ownerReceived1, 0, "Owner should have received harvested token1");
 
         // Verify protocolFeeRecipient received fees in both tokens
-        address feeRecipient = hook.protocolFeeRecipient();
+        address feeRecipient = feeController.protocolFeeRecipient();
         uint256 protocolFeeRecipientBalance0After = currency0.balanceOf(feeRecipient);
         uint256 protocolFeeRecipientBalance1After = currency1.balanceOf(feeRecipient);
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
         uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
         assertGt(protocolFee0, 0, "ProtocolFeeRecipient should have received fees in token0");
         assertGt(protocolFee1, 0, "ProtocolFeeRecipient should have received fees in token1");
+    }
+
+    function testSwapFeeSchedule_AutoCollectRebalanceChargesSwapOutput() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
+
+        uint128 token2Liquidity = _setupAutoCollectTest(RevertHookState.AutoCollectMode.AUTO_COLLECT);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+
+        vm.recordLogs();
+        hook.autoCollect(params);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, token2Id);
+        assertTrue(feeEvent.found, "swap fee event should be emitted");
+        assertEq(feeEvent.recipient, protocolFeeRecipient, "swap fee recipient mismatch");
+        assertTrue(
+            (feeEvent.amount0 > 0 && feeEvent.amount1 == 0) || (feeEvent.amount0 == 0 && feeEvent.amount1 > 0),
+            "swap fee should be charged on exactly one output token"
+        );
+
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            feeEvent.amount0,
+            "currency0 fee balance mismatch"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            feeEvent.amount1,
+            "currency1 fee balance mismatch"
+        );
+        assertGt(positionManager.getPositionLiquidity(token2Id), token2Liquidity, "auto collect should still compound");
+    }
+
+    function testSwapFeeSchedule_HarvestToken1ChargesBoughtToken() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
+
+        _setupAutoCollectTest(RevertHookState.AutoCollectMode.HARVEST_TOKEN_1);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+
+        vm.recordLogs();
+        hook.autoCollect(params);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, token2Id);
+        assertTrue(feeEvent.found, "swap fee event should be emitted");
+        assertEq(feeEvent.amount0, 0, "harvest token1 swap fee should not charge token0");
+        assertGt(feeEvent.amount1, 0, "harvest token1 swap fee should charge bought token1");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient),
+            before.protocolFeeRecipientBalance0,
+            "recipient should not receive token0 swap fees"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            feeEvent.amount1,
+            "recipient should receive token1 swap fees"
+        );
+    }
+
+    function testSwapFeeSchedule_AutoRangeUsesAlternateSwapPoolOverride() public {
+        feeController.setLpFeeBps(0);
+        feeController.setPoolOverrideSwapFeeBps(nonHookedPoolKey.toId(), uint8(RevertHookState.Mode.AUTO_RANGE), 500);
+
+        hook.setGeneralConfig(token3Id, 3000, 60, IHooks(address(0)), 0, 0);
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+        vm.recordLogs();
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, token3Id);
+        assertTrue(feeEvent.found, "pool override should enable swap fee collection");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            feeEvent.amount0,
+            "currency0 override fee balance mismatch"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            feeEvent.amount1,
+            "currency1 override fee balance mismatch"
+        );
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "auto range should consume the original position");
+    }
+
+    function testSwapFeeSchedule_PartialSwapChargesOnActualOutput() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_EXIT), 500);
+
+        uint32 maxPriceImpactBps = 10;
+        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), maxPriceImpactBps, maxPriceImpactBps);
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+        vm.recordLogs();
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(
+            _sawEventTopic(logs, keccak256("HookSwapPartial(uint256,bool,uint256,uint256)")),
+            "partial swap should still emit HookSwapPartial"
+        );
+
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, token2Id);
+        assertTrue(feeEvent.found, "partial swap should still charge a fee on actual output");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            feeEvent.amount0,
+            "currency0 partial fee balance mismatch"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            feeEvent.amount1,
+            "currency1 partial fee balance mismatch"
+        );
     }
 
     function testBasicAutoExit() public {
@@ -2192,15 +2382,17 @@ contract RevertHookTest is BaseTest {
         hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(0)));
         hook.setMaxTicksFromOracle(321);
         hook.setMinPositionValueNative(0.123 ether);
-        hook.setProtocolFeeBps(321);
-        hook.setProtocolFeeRecipient(newRecipient);
+        feeController.setLpFeeBps(321);
+        feeController.setAutoLendFeeBps(654);
+        feeController.setProtocolFeeRecipient(newRecipient);
         hook.setVault(newVault);
 
         assertEq(address(hook.autoLendVaults(Currency.unwrap(currency0))), address(0), "auto-lend vault should update");
         assertEq(hook.maxTicksFromOracle(), 321, "max ticks from oracle should update");
         assertEq(hook.minPositionValueNative(), 0.123 ether, "minimum position value should update");
-        assertEq(hook.protocolFeeBps(), 321, "protocol fee bps should update");
-        assertEq(hook.protocolFeeRecipient(), newRecipient, "protocol fee recipient should update");
+        assertEq(feeController.lpFeeBps(), 321, "lp fee bps should update");
+        assertEq(feeController.autoLendFeeBps(), 654, "auto-lend fee bps should update");
+        assertEq(feeController.protocolFeeRecipient(), newRecipient, "protocol fee recipient should update");
         assertTrue(hook.vaults(newVault), "vault should be allowlisted");
     }
 
@@ -2208,12 +2400,16 @@ contract RevertHookTest is BaseTest {
         address notOwner = makeAddr("notOwner");
 
         vm.prank(notOwner);
-        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, notOwner));
-        hook.setProtocolFeeBps(123);
+        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        feeController.setLpFeeBps(123);
 
         vm.prank(notOwner);
-        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, notOwner));
-        hook.setProtocolFeeRecipient(makeAddr("feeRecipient"));
+        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        feeController.setAutoLendFeeBps(456);
+
+        vm.prank(notOwner);
+        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        feeController.setProtocolFeeRecipient(makeAddr("feeRecipient"));
 
         vm.prank(notOwner);
         vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, notOwner));
@@ -2259,9 +2455,12 @@ contract RevertHookTest is BaseTest {
         );
     }
 
-    function testSetProtocolFeeBps_RevertWhenAboveMax() public {
+    function testFeeController_RevertWhenBpsAboveMax() public {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
-        hook.setProtocolFeeBps(10001);
+        feeController.setLpFeeBps(10001);
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        feeController.setAutoLendFeeBps(10001);
     }
 
     function testTransferOwnershipAndRenounceOwnership() public {
@@ -2270,20 +2469,20 @@ contract RevertHookTest is BaseTest {
         hook.transferOwnership(newOwner);
         assertEq(hook.owner(), newOwner, "ownership should transfer");
 
-        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, address(this)));
-        hook.setProtocolFeeBps(123);
+        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        feeController.setLpFeeBps(123);
 
         vm.prank(newOwner);
-        hook.setProtocolFeeBps(456);
-        assertEq(hook.protocolFeeBps(), 456, "new owner should control admin setters");
+        feeController.setLpFeeBps(456);
+        assertEq(feeController.lpFeeBps(), 456, "new owner should control fee controller");
 
         vm.prank(newOwner);
         hook.renounceOwnership();
         assertEq(hook.owner(), address(0), "ownership should be cleared");
 
         vm.prank(newOwner);
-        vm.expectRevert(abi.encodeWithSelector(RevertHookAccess.OwnableUnauthorizedAccount.selector, newOwner));
-        hook.setProtocolFeeRecipient(makeAddr("recipientAfterRenounce"));
+        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        feeController.setProtocolFeeRecipient(makeAddr("recipientAfterRenounce"));
     }
 
     function testTransferOwnership_RevertWhenNewOwnerIsZeroAddress() public {
@@ -4729,6 +4928,35 @@ contract RevertHookTest is BaseTest {
             }
         }
         return false;
+    }
+
+    function _findSendProtocolFee(Vm.Log[] memory logs, uint256 expectedTokenId)
+        internal
+        view
+        returns (SendProtocolFeeEvent memory feeEvent)
+    {
+        bytes32 eventTopic = keccak256("SendProtocolFee(uint256,address,address,uint256,uint256,address)");
+        uint256 length = logs.length;
+        for (uint256 i; i < length; ++i) {
+            if (logs[i].emitter != address(hook)) {
+                continue;
+            }
+            if (logs[i].topics.length < 2 || logs[i].topics[0] != eventTopic) {
+                continue;
+            }
+            if (uint256(logs[i].topics[1]) != expectedTokenId) {
+                continue;
+            }
+
+            feeEvent.found = true;
+            (, , feeEvent.amount0, feeEvent.amount1, feeEvent.recipient) =
+                abi.decode(logs[i].data, (address, address, uint256, uint256, address));
+            if (feeEvent.amount0 == 0 && feeEvent.amount1 == 0) {
+                feeEvent.found = false;
+                continue;
+            }
+            return feeEvent;
+        }
     }
 
     function _moveTickDownUntil(int24 targetTick, uint256 amountInPerSwap, uint256 maxSteps)

@@ -37,19 +37,6 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         emit SetMinPositionValueNative(newMinPositionValueNative);
     }
 
-    function setProtocolFeeBps(uint16 newProtocolFeeBps) external payable onlyOwner {
-        if (newProtocolFeeBps > 10000) {
-            revert InvalidConfig();
-        }
-        _protocolFeeBps = newProtocolFeeBps;
-        emit SetProtocolFeeBps(newProtocolFeeBps);
-    }
-
-    function setProtocolFeeRecipient(address newProtocolFeeRecipient) external payable onlyOwner {
-        _protocolFeeRecipient = newProtocolFeeRecipient;
-        emit SetProtocolFeeRecipient(newProtocolFeeRecipient);
-    }
-
     function setGeneralConfig(
         uint256 tokenId,
         uint24 swapPoolFee,

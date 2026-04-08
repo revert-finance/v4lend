@@ -11,7 +11,9 @@ import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoLeverageLib} from "../shared/planning/AutoLeverageLib.sol";
+import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
+import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
 /// @title RevertHookAutoLeverageActions
 /// @notice Contains auto-leverage functions for RevertHook (called via delegatecall)
@@ -23,8 +25,10 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
-        ILiquidityCalculator _liquidityCalculator
-    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator) {}
+        ILiquidityCalculator _liquidityCalculator,
+        IHookFeeController _hookFeeController,
+        RevertHookSwapActions _swapActions
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookFeeController, _swapActions) {}
 
     // ==================== Auto Leverage ====================
 
@@ -88,7 +92,8 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             positionInfo.tickLower(),
             positionInfo.tickUpper(),
             lendToken == poolKey.currency0 ? borrowAmount : 0,
-            lendToken == poolKey.currency1 ? borrowAmount : 0
+            lendToken == poolKey.currency1 ? borrowAmount : 0,
+            Mode.AUTO_LEVERAGE
         );
 
         _approveToken(poolKey.currency0, amount0);
@@ -139,7 +144,8 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             return false;
         }
 
-        uint256 lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1);
+        uint256 lendAmount =
+            _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1, Mode.AUTO_LEVERAGE);
 
         // Repay debt
         _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
@@ -187,7 +193,8 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
                 currency0,
                 currency1,
                 currency0.balanceOfSelf(),
-                currency1.balanceOfSelf()
+                currency1.balanceOfSelf(),
+                Mode.AUTO_LEVERAGE
             );
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);

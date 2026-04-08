@@ -23,6 +23,8 @@ import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
+import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -42,6 +44,7 @@ contract V4VaultHookTest is V4ForkTestBase {
     V4Vault vault;
     InterestRateModel interestRateModel;
     RevertHook revertHook;
+    HookFeeController feeController;
     LiquidityCalculator liquidityCalculator;
 
     function setUp() public override {
@@ -82,19 +85,21 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Deploy RevertHook action targets
+        feeController = new HookFeeController(hookFlags, address(this), 200, 200);
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
         RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator);
+            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
 
         bytes memory constructorArgs = abi.encode(
-            address(this),
             address(this),
             permit2,
             v4Oracle,
             liquidityCalculator,
+            feeController,
             positionActions,
             autoLeverageActions,
             autoLendActions
@@ -1387,22 +1392,35 @@ contract V4VaultHookTest is V4ForkTestBase {
     }
 
     function testVaultAutoExit_LowerWithSwap_RepaysDebt() public {
-        _assertVaultAutoExitCase(false, true);
+        _assertVaultAutoExitCase(false, true, 0);
     }
 
     function testVaultAutoExit_LowerWithoutSwap_RepaysDebt() public {
-        _assertVaultAutoExitCase(false, false);
+        _assertVaultAutoExitCase(false, false, 0);
     }
 
     function testVaultAutoExit_UpperWithSwap_RepaysDebt() public {
-        _assertVaultAutoExitCase(true, true);
+        _assertVaultAutoExitCase(true, true, 0);
     }
 
     function testVaultAutoExit_UpperWithoutSwap_StillRepaysDebt() public {
-        _assertVaultAutoExitCase(true, false);
+        _assertVaultAutoExitCase(true, false, 0);
     }
 
-    function _assertVaultAutoExitCase(bool isUpperTrigger, bool swapOnExit) internal {
+    function testSwapFeeSchedule_VaultAutoExitUpperWithSwapChargesBothSwapOutputs() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_EXIT), 500);
+
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+        uint256 wethBefore = weth.balanceOf(address(this));
+
+        _assertVaultAutoExitCase(true, true, 25_000000);
+
+        assertGt(usdc.balanceOf(address(this)), usdcBefore, "first debt-repayment swap should pay USDC fee");
+        assertGt(weth.balanceOf(address(this)), wethBefore, "second exit swap should pay WETH fee");
+    }
+
+    function _assertVaultAutoExitCase(bool isUpperTrigger, bool swapOnExit, uint256 extraDebt) internal {
         v4Oracle.setMaxPoolPriceDifference(10000);
         revertHook.setMaxTicksFromOracle(10000);
 
@@ -1411,6 +1429,10 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
         _setupCollateralizedPositionForAutoRange(tokenId, hookedPoolKey);
+        if (extraDebt > 0) {
+            vm.prank(WHALE_ACCOUNT);
+            vault.borrow(tokenId, extraDebt);
+        }
 
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         int24 spacing = hookedPoolKey.tickSpacing;
@@ -2516,6 +2538,9 @@ contract V4VaultHookTest is V4ForkTestBase {
     }
 
     function test_AutoLeverageSwapFailure_RestoresDebtAndLiquidity() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_LEVERAGE), 500);
+
         PoolKey memory hookedPoolKey = _createHookedPool();
 
         _createPositionInHookedPool(hookedPoolKey);
@@ -2531,6 +2556,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         _alignLoanToTargetBps(hookedTokenId, 3500);
         (uint256 debtBeforeFailure,,,,) = vault.loanInfo(hookedTokenId);
         (,,,,,,, int24 baseTickBefore) = revertHook.positionStates(hookedTokenId);
+        uint256 feeRecipientUsdcBefore = usdc.balanceOf(address(this));
+        uint256 feeRecipientWethBefore = weth.balanceOf(address(this));
 
         vm.recordLogs();
         _movePriceUp(hookedPoolKey);
@@ -2548,6 +2575,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             address(vault),
             "Position should remain in the vault"
         );
+        assertEq(usdc.balanceOf(address(this)), feeRecipientUsdcBefore, "failed swap should not send USDC swap fees");
+        assertEq(weth.balanceOf(address(this)), feeRecipientWethBefore, "failed swap should not send WETH swap fees");
         _assertHookHasNoTokenDust();
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -2615,6 +2644,35 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("Leverage:", debtAfter * 10000 / collateralAfter, "bps");
 
         assertGt(debtAfter, 0, "Debt should be created after leverage up from zero");
+    }
+
+    function testSwapFeeSchedule_AutoLeverageChargesLeverageUpAndDown() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_LEVERAGE), 500);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey);
+
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        _configurePositionForAutoLeverage(hookedTokenId, 5000);
+        _alignLoanToTargetBps(hookedTokenId, 3500);
+
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+        uint256 wethBefore = weth.balanceOf(address(this));
+
+        _movePriceUp(hookedPoolKey);
+
+        uint256 usdcAfterUp = usdc.balanceOf(address(this));
+        uint256 wethAfterUp = weth.balanceOf(address(this));
+        assertTrue(
+            usdcAfterUp > usdcBefore || wethAfterUp > wethBefore,
+            "leverage-up should charge a swap fee on the bought token"
+        );
+
+        _movePriceDown(hookedPoolKey);
+
+        assertGt(usdc.balanceOf(address(this)), usdcAfterUp, "leverage-down should charge a swap fee on lend token output");
     }
 
     /// @notice Test that disabling AUTO_LEVERAGE removes triggers

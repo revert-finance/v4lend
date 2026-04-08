@@ -13,6 +13,7 @@ import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
+import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
 import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";
@@ -26,6 +27,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
     IWETH9 internal immutable weth;
     IV4Oracle internal immutable v4Oracle;
     ILiquidityCalculator internal immutable liquidityCalculator;
+    IHookFeeController internal immutable hookFeeController;
 
     RevertHookPositionActions internal immutable positionActions;
     RevertHookAutoLeverageActions internal immutable autoLeverageActions;
@@ -33,10 +35,10 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
 
     constructor(
         address owner_,
-        address protocolFeeRecipient_,
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
+        IHookFeeController _hookFeeController,
         RevertHookPositionActions _positionActions,
         RevertHookAutoLeverageActions _autoLeverageActions,
         RevertHookAutoLendActions _autoLendActions
@@ -46,7 +48,6 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         }
 
         _transferOwnership(owner_);
-        _protocolFeeRecipient = protocolFeeRecipient_;
 
         permit2 = _permit2;
         IPositionManager positionManager_ = _v4Oracle.positionManager();
@@ -54,6 +55,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         weth = NativeWrapper(payable(address(positionManager_))).WETH9();
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
+        hookFeeController = _hookFeeController;
         positionActions = _positionActions;
         autoLeverageActions = _autoLeverageActions;
         autoLendActions = _autoLendActions;

@@ -117,14 +117,6 @@ abstract contract RevertHookViews is RevertHookBase {
         return _autoLendVaults[token];
     }
 
-    function protocolFeeBps() external view returns (uint16) {
-        return _protocolFeeBps;
-    }
-
-    function protocolFeeRecipient() external view returns (address) {
-        return _protocolFeeRecipient;
-    }
-
     function maxTicksFromOracle() external view returns (int24) {
         return _maxTicksFromOracle;
     }
