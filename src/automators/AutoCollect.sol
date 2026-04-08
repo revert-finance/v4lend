@@ -62,8 +62,18 @@ contract AutoCollect is Automator {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         address _operator,
-        address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
+        address protocolFeeRecipient_
+    )
+        Automator(
+            _positionManager,
+            _universalRouter,
+            _zeroxAllowanceHolder,
+            _permit2,
+            _v4Oracle,
+            _operator,
+            protocolFeeRecipient_
+        )
+    {}
 
     struct ExecuteParams {
         uint256 tokenId;
@@ -75,6 +85,13 @@ contract AutoCollect is Automator {
         uint256 deadline;
         bytes hookData;
         uint64 rewardX64;
+    }
+
+    struct ExecuteState {
+        uint256 amount0;
+        uint256 amount1;
+        uint256 protocolFee0;
+        uint256 protocolFee1;
     }
 
     /// @notice Adjust token (which is in a Vault) - via transform method
@@ -98,41 +115,64 @@ contract AutoCollect is Automator {
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
-        address token0Addr = Currency.unwrap(token0);
-        address token1Addr = Currency.unwrap(token1);
 
         // Collect fees (decrease liquidity by 0)
         (uint256 feeAmount0, uint256 feeAmount1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
 
-        // Deduct protocol reward (stays in contract for withdrawer)
         PositionConfig memory config = positionConfigs[params.tokenId];
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        uint256 amount0 = feeAmount0;
-        uint256 amount1 = feeAmount1;
-        // AutoCollect only collects fees (liquidity=0), so reward base is always fee-only.
-        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, true, params.rewardX64);
+        ExecuteState memory state;
+        state.amount0 = feeAmount0;
+        state.amount1 = feeAmount1;
+        (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
+            _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, true, params.rewardX64);
 
         address owner = _positionOwner(params.tokenId);
 
-        uint256 a0;
-        uint256 a1;
-        if (params.mode == CollectMode.AUTO_COLLECT) {
-            (a0, a1) = _executeAutoCollect(params, config, poolKey, positionInfo, token0, token1, owner, amount0, amount1);
-        } else {
-            (a0, a1) = _executeHarvest(params, config, token0, token1, owner, amount0, amount1);
-        }
+        (uint256 a0, uint256 a1) = _executeMode(params, config, poolKey, positionInfo, token0, token1, owner, state);
+
+        _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
 
         emit AutoCollectExecuted(
             params.tokenId,
             msg.sender,
             a0, a1,
-            token0Addr,
-            token1Addr,
+            Currency.unwrap(token0),
+            Currency.unwrap(token1),
             params.mode != CollectMode.AUTO_COLLECT
         );
+    }
+
+    function _executeMode(
+        ExecuteParams calldata params,
+        PositionConfig memory config,
+        PoolKey memory poolKey,
+        PositionInfo positionInfo,
+        Currency token0,
+        Currency token1,
+        address owner,
+        ExecuteState memory state
+    ) internal returns (uint256, uint256) {
+        if (params.mode == CollectMode.AUTO_COLLECT) {
+            return _executeAutoCollect(
+                params,
+                config,
+                poolKey,
+                positionInfo,
+                token0,
+                token1,
+                owner,
+                state.amount0,
+                state.amount1,
+                state.protocolFee0,
+                state.protocolFee1
+            );
+        }
+
+        return _executeHarvest(params, config, token0, token1, owner, state.amount0, state.amount1);
     }
 
     function _executeAutoCollect(
@@ -144,7 +184,9 @@ contract AutoCollect is Automator {
         Currency token1,
         address owner,
         uint256 amount0,
-        uint256 amount1
+        uint256 amount1,
+        uint256 protocolFee0,
+        uint256 protocolFee1
     ) internal returns (uint256 compounded0, uint256 compounded1) {
         // Optional swap to rebalance
         if (params.amountIn > 0) {
@@ -179,15 +221,14 @@ contract AutoCollect is Automator {
                 _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
             paramsArray[0] = abi.encode(params.tokenId, liquidity, amount0, amount1, params.hookData);
 
-            uint256 balance0Before = token0.balanceOfSelf();
-            uint256 balance1Before = token1.balanceOfSelf();
-
             positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
                 abi.encode(actions, paramsArray), params.deadline
             );
 
-            compounded0 = balance0Before - token0.balanceOfSelf();
-            compounded1 = balance1Before - token1.balanceOfSelf();
+            uint256 leftover0 = _availableBalance(token0, protocolFee0);
+            uint256 leftover1 = _availableBalance(token1, protocolFee1);
+            compounded0 = amount0 - leftover0;
+            compounded1 = amount1 - leftover1;
 
             if (compounded0 < config.minCollectAmount0 || compounded1 < config.minCollectAmount1) {
                 revert AmountError();
@@ -195,8 +236,8 @@ contract AutoCollect is Automator {
         }
 
         // Send leftover (slippage diff) to position owner immediately.
-        _transferToken(owner, token0, amount0 - compounded0, true);
-        _transferToken(owner, token1, amount1 - compounded1, true);
+        _transferToken(owner, token0, _availableBalance(token0, protocolFee0));
+        _transferToken(owner, token1, _availableBalance(token1, protocolFee1));
     }
 
     function _executeHarvest(
@@ -231,8 +272,8 @@ contract AutoCollect is Automator {
         }
 
         // Send tokens to owner
-        _transferToken(owner, token0, amount0, true);
-        _transferToken(owner, token1, amount1, true);
+        _transferToken(owner, token0, amount0);
+        _transferToken(owner, token1, amount1);
 
         return (amount0, amount1);
     }

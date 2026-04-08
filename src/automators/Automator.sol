@@ -17,12 +17,10 @@ import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 
 /// @title Automator
 /// @notice Base contract for V4 position automation. Provides operator access control,
-/// emergency withdrawal, and shared infrastructure for all automator contracts.
+/// protocol fee routing, and shared infrastructure for all automator contracts.
 abstract contract Automator is Transformer, Swapper, IERC721Receiver, ReentrancyGuard {
     event OperatorChanged(address newOperator, bool active);
-    event WithdrawerChanged(address newWithdrawer);
-    event BalancesWithdrawn(address[] tokens, address to);
-    event ETHWithdrawn(address to, uint256 amount);
+    event ProtocolFeeRecipientChanged(address newProtocolFeeRecipient);
 
     /// @notice Permit2 contract for token approvals
     IPermit2 public immutable permit2;
@@ -33,8 +31,8 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     /// @notice Authorized operators that can execute automations
     mapping(address => bool) public operators;
 
-    /// @notice Address authorized to withdraw accumulated token balances
-    address public withdrawer;
+    /// @notice Protocol fee recipient for automator fees
+    address internal _protocolFeeRecipient;
 
     constructor(
         IPositionManager _positionManager,
@@ -43,12 +41,12 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         address _operator,
-        address _withdrawer
+        address protocolFeeRecipient_
     ) Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) Ownable(msg.sender) {
         permit2 = _permit2;
         v4Oracle = _v4Oracle;
         setOperator(_operator, true);
-        setWithdrawer(_withdrawer);
+        setProtocolFeeRecipient(protocolFeeRecipient_);
     }
 
     /// @notice Owner controlled function to activate/deactivate operator address
@@ -59,98 +57,74 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         operators[_operator] = _active;
     }
 
-    /// @notice Owner controlled function to set withdrawer address
-    /// @param _withdrawer withdrawer address
-    function setWithdrawer(address _withdrawer) public onlyOwner {
-        emit WithdrawerChanged(_withdrawer);
-        withdrawer = _withdrawer;
+    /// @notice Owner controlled function to set protocol fee recipient
+    function setProtocolFeeRecipient(address newProtocolFeeRecipient) public onlyOwner {
+        emit ProtocolFeeRecipientChanged(newProtocolFeeRecipient);
+        _protocolFeeRecipient = newProtocolFeeRecipient;
     }
 
-    /// @notice Withdraws token balance
-    /// @param tokens Addresses of tokens to withdraw
-    /// @param to Address to send to
-    function withdrawBalances(address[] calldata tokens, address to) external virtual {
-        if (msg.sender != withdrawer) {
-            revert Unauthorized();
-        }
-
-        uint256 i;
-        uint256 count = tokens.length;
-        for (; i < count; ++i) {
-            address token = tokens[i];
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance > 0) {
-                _transferToken(to, Currency.wrap(token), balance, true);
-            }
-        }
-
-        emit BalancesWithdrawn(tokens, to);
+    function protocolFeeRecipient() external view returns (address) {
+        return _protocolFeeRecipient;
     }
 
-    /// @notice Withdraws ETH balance
-    /// @param to Address to send to
-    function withdrawETH(address to) external virtual {
-        if (msg.sender != withdrawer) {
-            revert Unauthorized();
-        }
-
-        uint256 balance = address(this).balance;
-        if (balance > 0) {
-            (bool sent,) = to.call{value: balance}("");
-            if (!sent) {
-                revert EtherSendFailed();
-            }
-            emit ETHWithdrawn(to, balance);
-        }
-    }
-
-    /// @notice Deducts protocol reward from amounts. Reward stays in contract for withdrawer.
-    /// @param feeAmount0 Fee portion of token0
-    /// @param feeAmount1 Fee portion of token1
-    /// @param totalAmount0 Total token0 (fees + principal)
-    /// @param totalAmount1 Total token1 (fees + principal)
-    /// @param onlyFees If true, reward is calculated on fees only; otherwise on total
-    /// @param rewardX64 Reward rate in Q64 format
-    /// @return Remaining amounts after reward deduction (token0, token1)
-    function _deductReward(
+    /// @notice Quotes protocol fees from two token amounts without transferring them.
+    /// @dev When `onlyFees` is true, fees are charged from the fee portion only; otherwise from total proceeds.
+    function _quoteProtocolFees(
         uint256 feeAmount0,
         uint256 feeAmount1,
         uint256 totalAmount0,
         uint256 totalAmount1,
         bool onlyFees,
         uint64 rewardX64
-    ) internal pure returns (uint256, uint256) {
+    ) internal pure returns (uint256, uint256, uint256, uint256) {
         uint256 base0 = onlyFees ? feeAmount0 : totalAmount0;
         uint256 base1 = onlyFees ? feeAmount1 : totalAmount1;
-        uint256 reward0 = base0 * rewardX64 / Q64;
-        uint256 reward1 = base1 * rewardX64 / Q64;
-        if (reward0 > totalAmount0) reward0 = totalAmount0;
-        if (reward1 > totalAmount1) reward1 = totalAmount1;
-        return (totalAmount0 - reward0, totalAmount1 - reward1);
+        (uint256 netAmount0, uint256 protocolFee0) = _calculateProtocolFee(totalAmount0, base0, rewardX64);
+        (uint256 netAmount1, uint256 protocolFee1) = _calculateProtocolFee(totalAmount1, base1, rewardX64);
+
+        return (netAmount0, netAmount1, protocolFee0, protocolFee1);
     }
 
-    /// @notice Transfers token to address, optionally unwrapping WETH to ETH
+    function _availableBalance(Currency token, uint256 reservedAmount) internal view returns (uint256) {
+        uint256 balance = token.balanceOfSelf();
+        return balance > reservedAmount ? balance - reservedAmount : 0;
+    }
+
+    function _sendProtocolFee(Currency token, uint256 protocolFee) internal {
+        _transferToken(_protocolFeeRecipient, token, protocolFee);
+    }
+
+    function _sendProtocolFees(Currency token0, Currency token1, uint256 protocolFee0, uint256 protocolFee1) internal {
+        _sendProtocolFee(token0, protocolFee0);
+        _sendProtocolFee(token1, protocolFee1);
+    }
+
+    function _calculateProtocolFee(uint256 totalAmount, uint256 feeBase, uint64 rewardX64)
+        internal
+        pure
+        returns (uint256 netAmount, uint256 protocolFee)
+    {
+        protocolFee = feeBase * rewardX64 / Q64;
+        if (protocolFee > totalAmount) {
+            protocolFee = totalAmount;
+        }
+
+        netAmount = totalAmount - protocolFee;
+    }
+
+    /// @notice Transfers the position token to the recipient without changing its representation.
     /// @param to Recipient address
     /// @param token Token to transfer
     /// @param amount Amount to transfer
-    /// @param unwrap If true and token is WETH, unwrap to ETH before sending
-    function _transferToken(address to, Currency token, uint256 amount, bool unwrap) internal {
+    function _transferToken(address to, Currency token, uint256 amount) internal {
         if (amount == 0) return;
-        if (unwrap && Currency.unwrap(token) == address(weth)) {
-            weth.withdraw(amount);
+        if (token.isAddressZero()) {
             (bool sent,) = to.call{value: amount}("");
             if (!sent) {
                 revert EtherSendFailed();
             }
         } else {
-            if (token.isAddressZero()) {
-                (bool sent,) = to.call{value: amount}("");
-                if (!sent) {
-                    revert EtherSendFailed();
-                }
-            } else {
-                SafeERC20.safeTransfer(IERC20(Currency.unwrap(token)), to, amount);
-            }
+            SafeERC20.safeTransfer(IERC20(Currency.unwrap(token)), to, amount);
         }
     }
 

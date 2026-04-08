@@ -17,7 +17,8 @@ contract AutoCollectTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoCollect = new AutoCollect(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
+        autoCollect =
+            new AutoCollect(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient);
 
         // Register vault
         autoCollect.setVault(address(vault));
@@ -72,37 +73,18 @@ contract AutoCollectTest is AutomatorTestBase {
         assertFalse(autoCollect.operators(newOperator));
     }
 
-    function test_SetWithdrawer() public {
-        address newWithdrawer = makeAddr("newWithdrawer");
+    function test_SetProtocolFeeRecipient() public {
+        address newRecipient = makeAddr("newRecipient");
 
-        autoCollect.setWithdrawer(newWithdrawer);
+        autoCollect.setProtocolFeeRecipient(newRecipient);
 
-        assertEq(autoCollect.withdrawer(), newWithdrawer, "withdrawer should update");
-
-        vm.prank(withdrawer);
-        vm.expectRevert(Constants.Unauthorized.selector);
-        autoCollect.withdrawETH(withdrawer);
+        assertEq(autoCollect.protocolFeeRecipient(), newRecipient, "protocol fee recipient should update");
     }
 
-    function test_RevertWhenNonOwnerSetsWithdrawer() public {
+    function test_RevertWhenNonOwnerSetsProtocolFeeRecipient() public {
         vm.prank(makeAddr("notOwner"));
         vm.expectRevert();
-        autoCollect.setWithdrawer(makeAddr("newWithdrawer"));
-    }
-
-    function test_RevertWhenNonWithdrawerCallsWithdrawETH() public {
-        vm.prank(makeAddr("notWithdrawer"));
-        vm.expectRevert(Constants.Unauthorized.selector);
-        autoCollect.withdrawETH(makeAddr("recipient"));
-    }
-
-    function test_RevertWhenNonWithdrawerCallsWithdrawBalances() public {
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(usdc);
-
-        vm.prank(makeAddr("notWithdrawer"));
-        vm.expectRevert(Constants.Unauthorized.selector);
-        autoCollect.withdrawBalances(tokens, makeAddr("recipient"));
+        autoCollect.setProtocolFeeRecipient(makeAddr("newRecipient"));
     }
 
     // --- AutoCollect Mode Tests ---
@@ -320,7 +302,7 @@ contract AutoCollectTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCollect), tokenId);
 
-        // Track ETH balance since WETH gets unwrapped by _transferToken
+        uint256 wethBefore = weth.balanceOf(WHALE_ACCOUNT);
         uint256 ethBefore = WHALE_ACCOUNT.balance;
 
         AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
@@ -338,9 +320,10 @@ contract AutoCollectTest is AutomatorTestBase {
         vm.prank(operator);
         autoCollect.execute(params);
 
+        uint256 wethAfter = weth.balanceOf(WHALE_ACCOUNT);
         uint256 ethAfter = WHALE_ACCOUNT.balance;
-        // Owner receives WETH unwrapped as ETH, or direct WETH
-        assertTrue(ethAfter > ethBefore || weth.balanceOf(WHALE_ACCOUNT) > 0, "Owner should receive token1 (WETH/ETH)");
+        assertGt(wethAfter, wethBefore, "Owner should receive token1 as WETH");
+        assertEq(ethAfter, ethBefore, "WETH positions should not unwrap to native ETH");
     }
 
     // --- Leftovers paid out immediately ---
@@ -373,7 +356,7 @@ contract AutoCollectTest is AutomatorTestBase {
         vm.prank(operator);
         autoCollect.execute(params);
 
-        // No protocol reward configured: contract must not keep position leftovers.
+        // With zero protocol fee, the contract should not keep position leftovers.
         assertEq(usdc.balanceOf(address(autoCollect)), contractUsdcBefore);
         assertEq(weth.balanceOf(address(autoCollect)), contractWethBefore);
         assertEq(address(autoCollect).balance, contractEthBefore);
@@ -484,14 +467,14 @@ contract AutoCollectTest is AutomatorTestBase {
         vm.prank(operator);
         autoCollect.execute(params);
 
-        // No protocol reward configured: contract must not keep position leftovers.
+        // With zero protocol fee, the contract should not keep position leftovers.
         assertEq(usdc.balanceOf(address(autoCollect)), contractUsdcBefore);
         assertEq(address(autoCollect).balance, contractEthBefore);
     }
 
     // --- Withdraw protocol fees ---
 
-    function test_WithdrawETHCollectsProtocolFees() public {
+    function test_ProtocolFeesAreSentToRecipientInETH() public {
         PoolKey memory poolKey = _createEthPool();
         uint256 tokenId = _createFullRangePositionEth(poolKey);
 
@@ -501,12 +484,11 @@ contract AutoCollectTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCollect), tokenId);
 
-        // Configure with reward so protocol reward accumulates in contract
+        // Configure a 100% fee capture so all collected fees go to the recipient.
         uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
         autoCollect.configToken(tokenId, _collectConfig(maxReward, 10000, 10000, 0, 0));
 
-        // Take 100% of collected fees as protocol reward.
         AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
             tokenId: tokenId,
             mode: AutoCollect.CollectMode.AUTO_COLLECT,
@@ -519,22 +501,15 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: type(uint64).max
         });
 
-        uint256 contractEthBefore = address(autoCollect).balance;
+        uint256 recipientEthBefore = protocolFeeRecipient.balance;
         vm.prank(operator);
         autoCollect.execute(params);
 
-        uint256 contractEthAfter = address(autoCollect).balance;
-        assertGt(contractEthAfter, contractEthBefore, "Contract should retain ETH protocol fees");
-
-        uint256 withdrawerEthBefore = withdrawer.balance;
-        vm.prank(withdrawer);
-        autoCollect.withdrawETH(withdrawer);
-
-        assertEq(address(autoCollect).balance, 0, "Withdrawer should be able to collect all ETH protocol fees");
-        assertGt(withdrawer.balance, withdrawerEthBefore, "Withdrawer should receive ETH protocol fees");
+        assertEq(address(autoCollect).balance, 0, "contract should not retain ETH protocol fees");
+        assertGt(protocolFeeRecipient.balance, recipientEthBefore, "recipient should receive ETH protocol fees");
     }
 
-    function test_WithdrawBalancesCollectsProtocolFees() public {
+    function test_ProtocolFeesAreSentToRecipientInTokens() public {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
 
@@ -544,12 +519,11 @@ contract AutoCollectTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).approve(address(autoCollect), tokenId);
 
-        // Configure with reward
+        // Configure a 100% fee capture so all collected fees go to the recipient.
         uint64 maxReward = type(uint64).max;
         vm.prank(WHALE_ACCOUNT);
         autoCollect.configToken(tokenId, _collectConfig(maxReward, 10000, 10000, 0, 0));
 
-        // Take 100% of collected fees as protocol reward.
         AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
             tokenId: tokenId,
             mode: AutoCollect.CollectMode.AUTO_COLLECT,
@@ -565,19 +539,13 @@ contract AutoCollectTest is AutomatorTestBase {
         vm.prank(operator);
         autoCollect.execute(params);
 
-        uint256 contractUsdcAfter = usdc.balanceOf(address(autoCollect));
-        uint256 contractWethAfter = weth.balanceOf(address(autoCollect));
-        assertTrue(contractUsdcAfter > 0 || contractWethAfter > 0, "Contract should retain protocol fees");
+        assertEq(usdc.balanceOf(address(autoCollect)), 0, "contract should not retain USDC protocol fees");
+        assertEq(weth.balanceOf(address(autoCollect)), 0, "contract should not retain WETH protocol fees");
 
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(usdc);
-        tokens[1] = address(weth);
-
-        vm.prank(withdrawer);
-        autoCollect.withdrawBalances(tokens, withdrawer);
-
-        assertEq(usdc.balanceOf(address(autoCollect)), 0, "Withdrawer should collect all USDC protocol fees");
-        assertEq(weth.balanceOf(address(autoCollect)), 0, "Withdrawer should collect all WETH protocol fees");
+        assertTrue(
+            usdc.balanceOf(protocolFeeRecipient) > 0 || weth.balanceOf(protocolFeeRecipient) > 0,
+            "recipient should receive protocol fees in the pool tokens"
+        );
     }
 
     function test_HarvestTokensETH() public {

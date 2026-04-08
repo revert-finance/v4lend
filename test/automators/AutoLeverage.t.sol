@@ -19,7 +19,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         super.setUp();
 
         autoLeverage =
-            new AutoLeverage(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
+            new AutoLeverage(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient);
         autoLeverage.setVault(address(vault));
         vault.setTransformer(address(autoLeverage), true);
 
@@ -586,7 +586,7 @@ contract AutoLeverageTest is AutomatorTestBase {
 
     // --- Reward Retention Test ---
 
-    function test_RewardStaysInContract() public {
+    function test_RewardSentToProtocolFeeRecipient() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createFullRangePosition(poolKey);
@@ -623,7 +623,8 @@ contract AutoLeverageTest is AutomatorTestBase {
         vault.approveTransform(tokenId, address(autoLeverage), true);
 
         // Check contract balances before
-        uint256 contractUsdcBefore = usdc.balanceOf(address(autoLeverage));
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
+        uint256 recipientWethBefore = weth.balanceOf(protocolFeeRecipient);
 
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
@@ -648,29 +649,15 @@ contract AutoLeverageTest is AutomatorTestBase {
         vm.prank(operator);
         autoLeverage.execute(params);
 
-        // Contract should retain reward (fees collected in both tokens)
         uint256 contractUsdcAfter = usdc.balanceOf(address(autoLeverage));
         uint256 contractWethAfter = weth.balanceOf(address(autoLeverage));
         assertTrue(
-            contractUsdcAfter > contractUsdcBefore || contractWethAfter > 0,
-            "Contract should retain protocol reward"
+            usdc.balanceOf(protocolFeeRecipient) > recipientUsdcBefore
+                || weth.balanceOf(protocolFeeRecipient) > recipientWethBefore,
+            "recipient should receive protocol fees"
         );
-
-        // Withdrawer can collect the reward
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(usdc);
-        tokens[1] = address(weth);
-
-        uint256 withdrawerUsdcBefore = usdc.balanceOf(withdrawer);
-        uint256 withdrawerWethBefore = weth.balanceOf(withdrawer);
-
-        vm.prank(withdrawer);
-        autoLeverage.withdrawBalances(tokens, withdrawer);
-
-        assertTrue(
-            usdc.balanceOf(withdrawer) > withdrawerUsdcBefore || weth.balanceOf(withdrawer) > withdrawerWethBefore,
-            "Withdrawer should be able to collect reward"
-        );
+        assertEq(contractUsdcAfter, 0, "contract should not retain USDC protocol fees");
+        assertEq(contractWethAfter, 0, "contract should not retain WETH protocol fees");
     }
 
     // --- Deactivation Test ---

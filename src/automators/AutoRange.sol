@@ -64,6 +64,14 @@ contract AutoRange is Automator {
         uint64 rewardX64;
     }
 
+    struct ExecuteState {
+        uint160 sqrtPriceX96;
+        uint256 amount0;
+        uint256 amount1;
+        uint256 protocolFee0;
+        uint256 protocolFee1;
+    }
+
     constructor(
         IPositionManager _positionManager,
         address _universalRouter,
@@ -71,8 +79,18 @@ contract AutoRange is Automator {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         address _operator,
-        address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
+        address protocolFeeRecipient_
+    )
+        Automator(
+            _positionManager,
+            _universalRouter,
+            _zeroxAllowanceHolder,
+            _permit2,
+            _v4Oracle,
+            _operator,
+            protocolFeeRecipient_
+        )
+    {}
 
     /// @notice Execute range change for a vault-owned position
     function executeWithVault(ExecuteParams calldata params, address vault) external {
@@ -117,12 +135,10 @@ contract AutoRange is Automator {
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
 
-        // Snapshot balances before any operation to isolate this execution's tokens
-        uint256 balance0Before = token0.balanceOfSelf();
-        uint256 balance1Before = token1.balanceOfSelf();
-
         // Reuse the current slot0 for both planning and liquidity math.
-        (uint160 sqrtPriceX96, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+        ExecuteState memory state;
+        int24 currentTick;
+        (state.sqrtPriceX96, currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
 
@@ -172,18 +188,14 @@ contract AutoRange is Automator {
             params.decreaseLiquidityHookData
         );
 
-        uint256 amount0 = feeAmount0 + liquidityAmount0;
-        uint256 amount1 = feeAmount1 + liquidityAmount1;
+        state.amount0 = feeAmount0 + liquidityAmount0;
+        state.amount1 = feeAmount1 + liquidityAmount1;
 
-        // Deduct protocol reward (stays in contract for withdrawer)
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        // Track rewards by updating balance snapshots — adding reward to "before" baseline
-        // so the delta (balanceOfSelf - balance0Before) excludes reward
-        (amount0, amount1, balance0Before, balance1Before) = _deductRewardAndUpdateBaselines(
-            config, params.rewardX64, feeAmount0, feeAmount1, amount0, amount1, balance0Before, balance1Before
-        );
+        (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
+            _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, config.onlyFees, params.rewardX64);
 
         // Swap to rebalance for new range
         if (params.amountIn > 0) {
@@ -198,46 +210,59 @@ contract AutoRange is Automator {
                 params.swap0To1 ? config.token0SlippageBps : config.token1SlippageBps
             );
             if (params.swap0To1) {
-                amount0 -= amountInDelta;
-                amount1 += amountOutDelta;
+                state.amount0 -= amountInDelta;
+                state.amount1 += amountOutDelta;
             } else {
-                amount1 -= amountInDelta;
-                amount0 += amountOutDelta;
+                state.amount1 -= amountInDelta;
+                state.amount0 += amountOutDelta;
             }
         }
 
         // Mint new position
         uint256 newTokenId = _mintNewPosition(
-            params, poolKey, token0, token1, newTickLower, newTickUpper, amount0, amount1, sqrtPriceX96
+            params,
+            poolKey,
+            token0,
+            token1,
+            newTickLower,
+            newTickUpper,
+            state.amount0,
+            state.amount1,
+            state.protocolFee0,
+            state.protocolFee1,
+            state.sqrtPriceX96
         );
 
-        // Get owner for sending leftover tokens
+        _finalizeRangeChange(params.tokenId, newTokenId, token0, token1, state.protocolFee0, state.protocolFee1);
+
+        emit AutoRangeExecuted(params.tokenId, newTokenId);
+    }
+
+    function _finalizeRangeChange(
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        Currency token0,
+        Currency token1,
+        uint256 protocolFee0,
+        uint256 protocolFee1
+    ) internal {
         address owner;
         if (vaults[msg.sender]) {
-            owner = IVault(msg.sender).ownerOf(params.tokenId);
+            owner = IVault(msg.sender).ownerOf(oldTokenId);
             // Send new NFT to vault (vault's onERC721Received handles position replacement)
             IERC721(address(positionManager)).safeTransferFrom(address(this), msg.sender, newTokenId);
         } else {
-            owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
+            owner = IERC721(address(positionManager)).ownerOf(oldTokenId);
             // Send new NFT to owner (use transferFrom - owner may not implement onERC721Received)
             IERC721(address(positionManager)).transferFrom(address(this), owner, newTokenId);
         }
 
-        // Copy config and delete old
-        positionConfigs[newTokenId] = config;
-        delete positionConfigs[params.tokenId];
+        positionConfigs[newTokenId] = positionConfigs[oldTokenId];
+        delete positionConfigs[oldTokenId];
 
-        // Send leftover tokens to owner (excludes protocol reward and pre-existing balances)
-        uint256 leftover0 = token0.balanceOfSelf() - balance0Before;
-        uint256 leftover1 = token1.balanceOfSelf() - balance1Before;
-        if (leftover0 > 0) {
-            _transferToken(owner, token0, leftover0, true);
-        }
-        if (leftover1 > 0) {
-            _transferToken(owner, token1, leftover1, true);
-        }
-
-        emit AutoRangeExecuted(params.tokenId, newTokenId);
+        _transferToken(owner, token0, _availableBalance(token0, protocolFee0));
+        _transferToken(owner, token1, _availableBalance(token1, protocolFee1));
+        _sendProtocolFees(token0, token1, protocolFee0, protocolFee1);
     }
 
     function _mintNewPosition(
@@ -249,6 +274,8 @@ contract AutoRange is Automator {
         int24 tickUpper,
         uint256 amount0,
         uint256 amount1,
+        uint256 protocolFee0,
+        uint256 protocolFee1,
         uint160 sqrtPriceX96
     ) internal returns (uint256 newTokenId) {
         uint128 liquidity = _calculateLiquidity(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
@@ -258,10 +285,6 @@ contract AutoRange is Automator {
 
         _handleApproval(permit2, token0, amount0);
         _handleApproval(permit2, token1, amount1);
-
-        // Track balances before mint to calculate actual amounts added
-        uint256 balance0Before = token0.balanceOfSelf();
-        uint256 balance1Before = token1.balanceOfSelf();
 
         (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), token0, token1);
@@ -276,32 +299,11 @@ contract AutoRange is Automator {
         newTokenId = positionManager.nextTokenId() - 1;
 
         // Check minimum amounts added
-        uint256 added0 = balance0Before - token0.balanceOfSelf();
-        uint256 added1 = balance1Before - token1.balanceOfSelf();
+        uint256 added0 = amount0 - _availableBalance(token0, protocolFee0);
+        uint256 added1 = amount1 - _availableBalance(token1, protocolFee1);
         if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
             revert InsufficientAmountAdded();
         }
-    }
-
-    function _deductRewardAndUpdateBaselines(
-        PositionConfig memory config,
-        uint64 rewardX64,
-        uint256 feeAmount0,
-        uint256 feeAmount1,
-        uint256 amount0,
-        uint256 amount1,
-        uint256 balance0Before,
-        uint256 balance1Before
-    ) internal pure returns (uint256, uint256, uint256, uint256) {
-        uint256 amount0Pre = amount0;
-        uint256 amount1Pre = amount1;
-        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, rewardX64);
-        return (
-            amount0,
-            amount1,
-            balance0Before + (amount0Pre - amount0),
-            balance1Before + (amount1Pre - amount1)
-        );
     }
 
     /// @notice Configure a token for auto-range

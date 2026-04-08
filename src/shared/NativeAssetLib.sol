@@ -21,7 +21,7 @@ library NativeAssetLib {
 
     function isDirectWrappedNativeSwap(IWETH9 weth, Currency tokenIn, Currency tokenOut)
         internal
-        view
+        pure
         returns (bool)
     {
         Currency wethCurrency = Currency.wrap(address(weth));

@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
@@ -19,7 +17,8 @@ contract AutoRangeTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoRange = new AutoRange(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
+        autoRange =
+            new AutoRange(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient);
         autoRange.setVault(address(vault));
         vault.setTransformer(address(autoRange), true);
     }
@@ -101,10 +100,6 @@ contract AutoRangeTest is AutomatorTestBase {
         // Need full-range position for swap liquidity
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createNarrowPosition(poolKey);
-
-        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
-        int24 tickLowerBefore = posInfo.tickLower();
-        int24 tickUpperBefore = posInfo.tickUpper();
 
         // Configure auto-range: trigger when 1 tick out of range
         // New range: above current tick (one-sided token0 position, no swap needed)
@@ -491,7 +486,7 @@ contract AutoRangeTest is AutomatorTestBase {
 
     // --- Reward Retention Test ---
 
-    function test_RewardStaysInContract() public {
+    function test_RewardSentToProtocolFeeRecipient() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createNarrowPosition(poolKey);
@@ -499,7 +494,7 @@ contract AutoRangeTest is AutomatorTestBase {
         // Generate fees so there's something to take reward from
         _generateFees(poolKey);
 
-        // Configure with reward enabled (10% reward on total = Q64 * 10 / 100)
+        // Configure a 10% protocol fee on total proceeds.
         uint64 maxReward = uint64(Q64 * 10 / 100);
         AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
             lowerTickLimit: 1,
@@ -520,9 +515,8 @@ contract AutoRangeTest is AutomatorTestBase {
         // Move price to trigger range change
         _swapExactInputSingle(poolKey, true, 10000e6, 0);
 
-        // Check contract balances before
-        uint256 contractUsdcBefore = usdc.balanceOf(address(autoRange));
-        uint256 contractWethBefore = weth.balanceOf(address(autoRange));
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
+        uint256 recipientWethBefore = weth.balanceOf(protocolFeeRecipient);
 
         AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
             tokenId: tokenId,
@@ -543,29 +537,15 @@ contract AutoRangeTest is AutomatorTestBase {
         vm.prank(operator);
         autoRange.execute(params);
 
-        // Contract should retain reward (at least one token should have increased)
         uint256 contractUsdcAfter = usdc.balanceOf(address(autoRange));
         uint256 contractWethAfter = weth.balanceOf(address(autoRange));
         assertTrue(
-            contractUsdcAfter > contractUsdcBefore || contractWethAfter > contractWethBefore,
-            "Contract should retain protocol reward"
+            usdc.balanceOf(protocolFeeRecipient) > recipientUsdcBefore
+                || weth.balanceOf(protocolFeeRecipient) > recipientWethBefore,
+            "recipient should receive protocol fees"
         );
-
-        // Withdrawer can collect the reward
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(usdc);
-        tokens[1] = address(weth);
-
-        uint256 withdrawerUsdcBefore = usdc.balanceOf(withdrawer);
-        uint256 withdrawerWethBefore = weth.balanceOf(withdrawer);
-
-        vm.prank(withdrawer);
-        autoRange.withdrawBalances(tokens, withdrawer);
-
-        assertTrue(
-            usdc.balanceOf(withdrawer) > withdrawerUsdcBefore || weth.balanceOf(withdrawer) > withdrawerWethBefore,
-            "Withdrawer should be able to collect reward"
-        );
+        assertEq(contractUsdcAfter, 0, "contract should not retain USDC protocol fees");
+        assertEq(contractWethAfter, 0, "contract should not retain WETH protocol fees");
     }
 
     // --- Vault Tests ---

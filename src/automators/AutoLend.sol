@@ -93,7 +93,7 @@ contract AutoLend is Automator {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         address _operator,
-        address _withdrawer
+        address protocolFeeRecipient_
     )
         Automator(
             _positionManager,
@@ -102,7 +102,7 @@ contract AutoLend is Automator {
             _permit2,
             _v4Oracle,
             _operator,
-            _withdrawer
+            protocolFeeRecipient_
         )
     {}
 
@@ -129,7 +129,7 @@ contract AutoLend is Automator {
     }
 
     /// @notice Operator triggers deposit when position is out of range
-    /// @dev Protocol reward is charged from LP fees only (not principal liquidity amount).
+    /// @dev Protocol fees are charged from LP fees only, not principal liquidity.
     function deposit(DepositParams calldata params) external nonReentrant {
         if (!operators[msg.sender]) {
             revert Unauthorized();
@@ -188,8 +188,10 @@ contract AutoLend is Automator {
             revert ExceedsMaxReward();
         }
 
-        // Fee basis: LP fees only
-        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, true, params.rewardX64);
+        uint256 protocolFee0;
+        uint256 protocolFee1;
+        (amount0, amount1, protocolFee0, protocolFee1) =
+            _quoteProtocolFees(feeAmount0, feeAmount1, amount0, amount1, true, params.rewardX64);
 
         // Determine idle token (token0 if tick below range, token1 if above)
         Currency idleToken = isAbove ? poolKey.currency1 : poolKey.currency0;
@@ -228,14 +230,15 @@ contract AutoLend is Automator {
         });
         vaultPositionCount[address(lendVault)]++;
 
-        // Send active token to position owner immediately
-        _transferToken(posOwner, activeToken, activeAmount, true);
+        // Send active token after lend state is finalized.
+        _transferToken(posOwner, activeToken, activeAmount);
+        _sendProtocolFees(poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1);
 
         emit AutoLendDeposit(params.tokenId, idleTokenAddr, idleAmount, shares);
     }
 
     /// @notice Operator triggers withdrawal when position is near range again
-    /// @dev Protocol reward is charged from generated vault yield only.
+    /// @dev Protocol fees are charged from generated vault yield only.
     function withdraw(WithdrawParams calldata params) external nonReentrant {
         if (!operators[msg.sender]) {
             revert Unauthorized();
@@ -248,11 +251,13 @@ contract AutoLend is Automator {
 
         PositionConfig memory config = positionConfigs[params.tokenId];
 
-        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
+        // Non-vault positions only
+        address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
+        if (vaults[posOwner]) {
+            revert Unauthorized();
+        }
 
-        // Snapshot balances before this operation to isolate leftovers from this execution only
-        uint256 balance0Before = poolKey.currency0.balanceOfSelf();
-        uint256 balance1Before = poolKey.currency1.balanceOfSelf();
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
@@ -278,25 +283,17 @@ contract AutoLend is Automator {
             revert ExceedsMaxReward();
         }
 
-        // Fee basis: generated yield only
-        uint256 rewardAmount;
+        Currency lendCurrency = Currency.wrap(state.lentToken);
+        uint256 protocolFee;
         {
             uint256 yieldAmount = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
-            rewardAmount = yieldAmount * params.rewardX64 / Q64;
-            if (rewardAmount > redeemedAmount) rewardAmount = redeemedAmount;
-            redeemedAmount -= rewardAmount;
+            (redeemedAmount, protocolFee) = _calculateProtocolFee(redeemedAmount, yieldAmount, params.rewardX64);
         }
 
-        // If lent token is native ETH (stored as WETH in vault), unwrap only the net redeemed amount.
-        // Reward remains as WETH protocol fees in this contract.
+        // If lent token is native ETH (stored as WETH in vault), unwrap the full redeemed amount so
+        // protocol fees and the re-entry amount are both handled in native ETH.
         if (state.lentToken == address(0)) {
-            weth.withdraw(redeemedAmount);
-        }
-
-        // Non-vault positions only
-        address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
-        if (vaults[posOwner]) {
-            revert Unauthorized();
+            weth.withdraw(redeemedAmount + protocolFee);
         }
 
         uint256 newTokenId;
@@ -355,19 +352,13 @@ contract AutoLend is Automator {
             IERC721(address(positionManager)).transferFrom(address(this), posOwner, newTokenId);
         }
 
-        // Leftovers exclude protocol reward retained in this contract.
-        // Native-lent case keeps reward in WETH, so it does not affect currency0(ETH) delta.
-        uint256 reward0 = isToken0Lent ? (state.lentToken == address(0) ? 0 : rewardAmount) : 0;
-        uint256 reward1 = isToken0Lent ? 0 : rewardAmount;
-
-        uint256 leftover0 = poolKey.currency0.balanceOfSelf() - balance0Before - reward0;
-        uint256 leftover1 = poolKey.currency1.balanceOfSelf() - balance1Before - reward1;
-        if (leftover0 > 0) {
-            _transferToken(posOwner, poolKey.currency0, leftover0, true);
-        }
-        if (leftover1 > 0) {
-            _transferToken(posOwner, poolKey.currency1, leftover1, true);
-        }
+        uint256 protocolFee0 = lendCurrency == poolKey.currency0 ? protocolFee : 0;
+        uint256 protocolFee1 = lendCurrency == poolKey.currency1 ? protocolFee : 0;
+        uint256 leftover0 = _availableBalance(poolKey.currency0, protocolFee0);
+        uint256 leftover1 = _availableBalance(poolKey.currency1, protocolFee1);
+        _transferToken(posOwner, poolKey.currency0, leftover0);
+        _transferToken(posOwner, poolKey.currency1, leftover1);
+        _sendProtocolFee(lendCurrency, protocolFee);
 
         emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
     }
@@ -424,29 +415,6 @@ contract AutoLend is Automator {
         );
 
         newTokenId = positionManager.nextTokenId() - 1;
-    }
-
-    /// @notice Withdraws token balances, skipping active vault share tokens
-    function withdrawBalances(address[] calldata tokens, address to) external override {
-        if (msg.sender != withdrawer) {
-            revert Unauthorized();
-        }
-
-        uint256 i;
-        uint256 count = tokens.length;
-        for (; i < count; ++i) {
-            address token = tokens[i];
-            // Skip native ETH (use withdrawETH) and active lend vault share tokens
-            if (token == address(0) || vaultPositionCount[token] > 0) {
-                continue;
-            }
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance > 0) {
-                _transferToken(to, Currency.wrap(token), balance, true);
-            }
-        }
-
-        emit BalancesWithdrawn(tokens, to);
     }
 
     /// @notice Position owner configures auto-lend

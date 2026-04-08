@@ -2,7 +2,6 @@
 pragma solidity ^0.8.0;
 
 import {Test} from "forge-std/Test.sol";
-import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
@@ -72,7 +71,7 @@ contract AutomatorTestBase is Test {
     InterestRateModel public interestRateModel;
 
     address public operator;
-    address public withdrawer;
+    address public protocolFeeRecipient;
 
     function setUp() public virtual {
         // Fork mainnet
@@ -113,9 +112,9 @@ contract AutomatorTestBase is Test {
         vault.setReserveFactor(0);
         vault.setHookAllowList(address(0), true);
 
-        // Set up operator and withdrawer
+        // Set up operator and protocol fee recipient
         operator = makeAddr("operator");
-        withdrawer = makeAddr("withdrawer");
+        protocolFeeRecipient = makeAddr("protocolFeeRecipient");
     }
 
     // --- Pool helpers ---

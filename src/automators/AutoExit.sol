@@ -67,6 +67,15 @@ contract AutoExit is Automator {
         uint64 rewardX64;
     }
 
+    struct ExecuteState {
+        uint256 amount0;
+        uint256 amount1;
+        uint256 protocolFee0;
+        uint256 protocolFee1;
+        address owner;
+        Currency lendToken;
+    }
+
     constructor(
         IPositionManager _positionManager,
         address _universalRouter,
@@ -74,8 +83,18 @@ contract AutoExit is Automator {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         address _operator,
-        address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
+        address protocolFeeRecipient_
+    )
+        Automator(
+            _positionManager,
+            _universalRouter,
+            _zeroxAllowanceHolder,
+            _permit2,
+            _v4Oracle,
+            _operator,
+            protocolFeeRecipient_
+        )
+    {}
 
     /// @notice Execute exit for a vault-owned position
     function executeWithVault(ExecuteParams calldata params, address vault) external {
@@ -88,8 +107,6 @@ contract AutoExit is Automator {
     /// @notice Handle token exit (must be in correct state)
     function execute(ExecuteParams calldata params) external nonReentrant {
         bool isVaultCall = vaults[msg.sender];
-        IVault vault;
-        Currency lendToken;
         if (!operators[msg.sender] && !isVaultCall) {
             revert Unauthorized();
         }
@@ -135,36 +152,36 @@ contract AutoExit is Automator {
             params.tokenId, liquidity, params.amountRemoveMin0, params.amountRemoveMin1, params.deadline, params.hookData
         );
 
-        uint256 amount0 = feeAmount0 + liquidityAmount0;
-        uint256 amount1 = feeAmount1 + liquidityAmount1;
+        ExecuteState memory state;
+        state.amount0 = feeAmount0 + liquidityAmount0;
+        state.amount1 = feeAmount1 + liquidityAmount1;
 
-        // Deduct protocol reward (stays in contract for withdrawer)
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        (amount0, amount1) = _deductReward(feeAmount0, feeAmount1, amount0, amount1, config.onlyFees, params.rewardX64);
+        (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
+            _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, config.onlyFees, params.rewardX64);
 
         // Resolve owner; for vault positions, repay debt before swap
-        address owner;
         if (isVaultCall) {
-            vault = IVault(msg.sender);
-            owner = vault.ownerOf(params.tokenId);
-            lendToken = Currency.wrap(vault.asset());
+            IVault vault = IVault(msg.sender);
+            state.owner = vault.ownerOf(params.tokenId);
+            state.lendToken = Currency.wrap(vault.asset());
 
             // Vault asset must be one of the pool tokens for debt repayment to work
-            if (!(lendToken == token0) && !(lendToken == token1)) {
+            if (!(state.lendToken == token0) && !(state.lendToken == token1)) {
                 revert InvalidConfig();
             }
 
             // Swap sells (isAbove ? token1 : token0) and buys the other
             // Repay before swap when lend token is on the sell side (or no swap)
-            bool repayBeforeSwap = !isSwap || (isAbove ? (lendToken == token1) : (lendToken == token0));
+            bool repayBeforeSwap = !isSwap || (isAbove ? (state.lendToken == token1) : (state.lendToken == token0));
             if (repayBeforeSwap) {
-                (amount0, amount1) =
-                    _repayVaultDebt(vault, params.tokenId, lendToken, token0, token1, amount0, amount1);
+                (state.amount0, state.amount1) =
+                    _repayVaultDebt(vault, params.tokenId, state.lendToken, token0, token1, state.amount0, state.amount1);
             }
         } else {
-            owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
+            state.owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
         }
 
         if (isSwap) {
@@ -172,7 +189,7 @@ contract AutoExit is Automator {
                 revert MissingSwapData();
             }
 
-            uint256 swapAmount = isAbove ? amount1 : amount0;
+            uint256 swapAmount = isAbove ? state.amount1 : state.amount0;
             if (swapAmount > 0) {
                 (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
                     RouterSwapParams(
@@ -185,34 +202,37 @@ contract AutoExit is Automator {
                     isAbove ? config.token1SlippageBps : config.token0SlippageBps
                 );
 
-                amount0 = isAbove ? amount0 + amountOutDelta : amount0 - amountInDelta;
-                amount1 = isAbove ? amount1 - amountInDelta : amount1 + amountOutDelta;
+                state.amount0 = isAbove ? state.amount0 + amountOutDelta : state.amount0 - amountInDelta;
+                state.amount1 = isAbove ? state.amount1 - amountInDelta : state.amount1 + amountOutDelta;
             }
         }
 
         // Post-swap repayment: when swap produced the lend token, repay remaining debt
         if (isVaultCall) {
-            bool repayAfterSwap = isSwap && (isAbove ? (lendToken == token0) : (lendToken == token1));
+            bool repayAfterSwap =
+                isSwap && (isAbove ? (state.lendToken == token0) : (state.lendToken == token1));
             if (repayAfterSwap) {
-                (amount0, amount1) =
-                    _repayVaultDebt(vault, params.tokenId, lendToken, token0, token1, amount0, amount1);
+                (state.amount0, state.amount1) = _repayVaultDebt(
+                    IVault(msg.sender), params.tokenId, state.lendToken, token0, token1, state.amount0, state.amount1
+                );
             }
         }
-
-        // Send remaining tokens to owner
-        _transferToken(owner, token0, amount0, true);
-        _transferToken(owner, token1, amount1, true);
 
         // Delete config
         delete positionConfigs[params.tokenId];
         emit PositionConfigured(params.tokenId, false, false, false, 0, 0, 0, 0, 0, false);
 
+        // Send remaining tokens after state is finalized.
+        _transferToken(state.owner, token0, state.amount0);
+        _transferToken(state.owner, token1, state.amount1);
+        _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
+
         emit AutoExitExecuted(
             params.tokenId,
             msg.sender,
             isSwap,
-            amount0,
-            amount1,
+            state.amount0,
+            state.amount1,
             Currency.unwrap(token0),
             Currency.unwrap(token1)
         );

@@ -12,10 +12,9 @@ import {AutoLend} from "../../src/automators/AutoLend.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {MockERC4626Vault} from "../utils/MockERC4626Vault.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
+import {ProtocolFeeRecipientProbe} from "./utils/ProtocolFeeRecipientProbe.sol";
 
 contract AutoLendTest is AutomatorTestBase {
-    event BalancesWithdrawn(address[] tokens, address to);
-
     AutoLend public autoLend;
     MockERC4626Vault public usdcLendVault;
     MockERC4626Vault public wethLendVault;
@@ -23,7 +22,8 @@ contract AutoLendTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoLend = new AutoLend(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
+        autoLend =
+            new AutoLend(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient);
 
         usdcLendVault = new MockERC4626Vault(usdc, "Lend USDC", "lUSDC");
         wethLendVault = new MockERC4626Vault(IERC20(address(weth)), "Lend WETH", "lWETH");
@@ -284,6 +284,53 @@ contract AutoLendTest is AutomatorTestBase {
         assertEq(address(autoLend).balance, 0, "no native ETH should remain in contract");
     }
 
+    function test_NativeProtocolFeeSendClearsLendStateBeforeCallback() public {
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
+
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+        _configureAndApprove(tokenId, _defaultConfig(maxReward));
+
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
+
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+
+        (, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "position should be lent");
+
+        uint256 donatedYield = principal + 1;
+        vm.prank(WHALE_ACCOUNT);
+        weth.transfer(address(wethLendVault), donatedYield);
+        wethLendVault.simulatePositiveYield(10000);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _pushTickToOrAboveETH(poolKey, posInfo.tickLower());
+
+        ProtocolFeeRecipientProbe probe = new ProtocolFeeRecipientProbe();
+        autoLend.setProtocolFeeRecipient(address(probe));
+        autoLend.setOperator(address(probe), true);
+
+        AutoLend.WithdrawParams memory withdrawParams = AutoLend.WithdrawParams({
+            tokenId: tokenId,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        probe.configure(address(autoLend), abi.encodeWithSignature("lendStates(uint256)", tokenId), 1);
+        probe.setReentry(address(autoLend), abi.encodeCall(autoLend.withdraw, (withdrawParams)));
+
+        vm.prank(address(probe));
+        autoLend.withdraw(withdrawParams);
+
+        assertGt(probe.totalNativeReceived(), 0, "probe should receive native protocol fees");
+        assertTrue(probe.attemptedReentry(), "probe should attempt reentry");
+        assertFalse(probe.reentrySucceeded(), "reentrant withdraw should fail");
+        assertEq(uint256(probe.observedWord()), 0, "lend shares should be cleared before native fee send");
+    }
+
     function test_WithdrawToken0LentAddsLiquidityBackToExistingPosition() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
@@ -480,7 +527,7 @@ contract AutoLendTest is AutomatorTestBase {
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _pushTickToOrAbove(poolKey, posInfo.tickLower());
 
-        uint256 usdcBeforeWithdraw = usdc.balanceOf(address(autoLend));
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
 
         AutoLend.WithdrawParams memory withdrawParams = AutoLend.WithdrawParams({
             tokenId: tokenId,
@@ -492,8 +539,12 @@ contract AutoLendTest is AutomatorTestBase {
         vm.prank(operator);
         autoLend.withdraw(withdrawParams);
 
-        uint256 usdcAfterWithdraw = usdc.balanceOf(address(autoLend));
-        assertGt(usdcAfterWithdraw, usdcBeforeWithdraw, "protocol fee should accrue from generated vault yield");
+        assertGt(
+            usdc.balanceOf(protocolFeeRecipient),
+            recipientUsdcBefore,
+            "protocol fee should be sent from generated vault yield"
+        );
+        assertEq(usdc.balanceOf(address(autoLend)), 0, "contract should not retain protocol fees");
     }
 
     function test_ConfigCopiedWhenNewPositionMinted() public {
@@ -553,7 +604,7 @@ contract AutoLendTest is AutomatorTestBase {
         assertFalse(isActiveOld, "old position config should be cleared");
     }
 
-    function test_WithdrawBalancesEmitsEvent() public {
+    function test_ProtocolFeesAreSentToRecipient() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createNarrowPosition(poolKey);
@@ -594,20 +645,7 @@ contract AutoLendTest is AutomatorTestBase {
         vm.prank(operator);
         autoLend.withdraw(withdrawParams);
 
-        uint256 protocolFees = usdc.balanceOf(address(autoLend));
-        assertGt(protocolFees, 0, "expected protocol fees in contract");
-
-        address recipient = makeAddr("recipient");
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(usdc);
-
-        vm.expectEmit(false, false, false, true, address(autoLend));
-        emit BalancesWithdrawn(tokens, recipient);
-
-        vm.prank(withdrawer);
-        autoLend.withdrawBalances(tokens, recipient);
-
-        assertEq(usdc.balanceOf(address(autoLend)), 0, "fees should be withdrawn");
-        assertEq(usdc.balanceOf(recipient), protocolFees, "recipient should receive withdrawn fees");
+        assertEq(usdc.balanceOf(address(autoLend)), 0, "contract should not retain protocol fees");
+        assertGt(usdc.balanceOf(protocolFeeRecipient), 0, "recipient should receive protocol fees");
     }
 }

@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {AutoExit} from "../../src/automators/AutoExit.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
+import {ProtocolFeeRecipientProbe} from "./utils/ProtocolFeeRecipientProbe.sol";
 
 contract AutoExitTest is AutomatorTestBase {
     AutoExit public autoExit;
@@ -19,7 +18,8 @@ contract AutoExitTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoExit = new AutoExit(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, withdrawer);
+        autoExit =
+            new AutoExit(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient);
         autoExit.setVault(address(vault));
         vault.setTransformer(address(autoExit), true);
     }
@@ -121,7 +121,6 @@ contract AutoExitTest is AutomatorTestBase {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createNarrowPosition(poolKey);
 
-        int24 tick = _getCurrentTick(poolKey);
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Set trigger ticks so that a large swap will trigger exit
@@ -146,10 +145,6 @@ contract AutoExitTest is AutomatorTestBase {
 
         // Move price below position range (large swap to move tick far enough)
         _swapExactInputSingle(poolKey, true, 10000e6, 0);
-
-        int24 newTick = _getCurrentTick(poolKey);
-        console.log("Tick after swap:", newTick);
-        console.log("Position tickLower:", posInfo.tickLower());
 
         // Execute exit
         AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
@@ -321,7 +316,6 @@ contract AutoExitTest is AutomatorTestBase {
         _createFullRangePositionEth(poolKey);
         uint256 tokenId = _createNarrowPositionEth(poolKey);
 
-        int24 tick = _getCurrentTick(poolKey);
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Set trigger ticks so exit triggers when price moves
@@ -372,6 +366,60 @@ contract AutoExitTest is AutomatorTestBase {
         uint256 ethAfter = WHALE_ACCOUNT.balance;
         uint256 usdcAfter = usdc.balanceOf(WHALE_ACCOUNT);
         assertTrue(ethAfter > ethBefore || usdcAfter > usdcBefore, "Owner should receive ETH/USDC after exit");
+    }
+
+    function test_NativeProtocolFeeSendFinalizesConfigBeforeCallback() public {
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: maxReward,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoExit), tokenId);
+
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
+
+        ProtocolFeeRecipientProbe probe = new ProtocolFeeRecipientProbe();
+        autoExit.setProtocolFeeRecipient(address(probe));
+        autoExit.setOperator(address(probe), true);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        probe.configure(address(autoExit), abi.encodeWithSignature("positionConfigs(uint256)", tokenId), 0);
+        probe.setReentry(address(autoExit), abi.encodeCall(autoExit.execute, (params)));
+
+        vm.prank(address(probe));
+        autoExit.execute(params);
+
+        assertGt(probe.totalNativeReceived(), 0, "probe should receive native protocol fees");
+        assertTrue(probe.attemptedReentry(), "probe should attempt reentry");
+        assertFalse(probe.reentrySucceeded(), "reentrant execute should fail");
+        assertEq(uint256(probe.observedWord()), 0, "config should be cleared before native fee send");
     }
 
     function test_ExecuteWithVaultETH() public {

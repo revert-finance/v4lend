@@ -9,7 +9,9 @@ out/
 /broadcast/**/dry-run/
 
 # Docs
-docs/
+docs/*
+!docs/
+!docs/hook-hierarchy.md
 
 # Dotenv file
 .env

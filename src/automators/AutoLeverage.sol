@@ -41,14 +41,12 @@ contract AutoLeverage is Automator {
 
     mapping(uint256 => PositionConfig) public positionConfigs;
 
-    /// @dev Internal struct to avoid stack-too-deep — tracks execution context for leftover calculation
+    /// @dev Internal struct to avoid stack-too-deep for fee reuse accounting
     struct ExecuteState {
-        uint256 balance0Start;
-        uint256 balance1Start;
-        uint256 reward0;
-        uint256 reward1;
         uint256 netFee0;
         uint256 netFee1;
+        uint256 protocolFee0;
+        uint256 protocolFee1;
     }
 
     struct ExecuteParams {
@@ -78,8 +76,18 @@ contract AutoLeverage is Automator {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         address _operator,
-        address _withdrawer
-    ) Automator(_positionManager, _universalRouter, _zeroxAllowanceHolder, _permit2, _v4Oracle, _operator, _withdrawer) {}
+        address protocolFeeRecipient_
+    )
+        Automator(
+            _positionManager,
+            _universalRouter,
+            _zeroxAllowanceHolder,
+            _permit2,
+            _v4Oracle,
+            _operator,
+            protocolFeeRecipient_
+        )
+    {}
 
     /// @notice Execute leverage rebalancing (always via vault.transform)
     function execute(ExecuteParams calldata params) external {
@@ -131,27 +139,21 @@ contract AutoLeverage is Automator {
         bool isThirdToken = !(lendToken == token0) && !(lendToken == token1);
 
         ExecuteState memory state;
-        state.balance0Start = token0.balanceOfSelf();
-        state.balance1Start = token1.balanceOfSelf();
-        uint256 lendBalanceBefore = isThirdToken ? lendToken.balanceOfSelf() : 0;
 
-        // Collect fees first and deduct protocol reward
-        // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively)
+        // Collect fees first and reserve protocol fees until the end of execution.
+        // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively).
         (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
             params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData
         );
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        state.reward0 = feeAmount0;
-        state.reward1 = feeAmount1;
-        (feeAmount0, feeAmount1) = _deductReward(feeAmount0, feeAmount1, feeAmount0, feeAmount1, true, params.rewardX64);
-        state.reward0 -= feeAmount0;
-        state.reward1 -= feeAmount1;
+        (feeAmount0, feeAmount1, state.protocolFee0, state.protocolFee1) =
+            _quoteProtocolFees(feeAmount0, feeAmount1, feeAmount0, feeAmount1, true, params.rewardX64);
         state.netFee0 = feeAmount0;
         state.netFee1 = feeAmount1;
 
-        // Adjust collateral: deduct only the reward value (net fees are reused)
+        // Adjust collateral: deduct only the protocol fee value because net fees are reused.
         {
             uint256 postCollateral;
             (currentDebt,, postCollateral,,) = vault.loanInfo(params.tokenId);
@@ -159,18 +161,21 @@ contract AutoLeverage is Automator {
         }
 
         if (params.leverageUp) {
-            _leverageUp(params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, state);
+            _leverageUp(
+                params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, state
+            );
         } else {
             _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, state);
         }
 
-        // Return residual lend token when it's a third token (excludes protocol reward and pre-existing balances)
+        // Return residual lend token when it's a third token.
         if (isThirdToken) {
-            uint256 lendBalance = lendToken.balanceOfSelf() - lendBalanceBefore;
+            uint256 lendBalance = lendToken.balanceOfSelf();
             if (lendBalance > 0) {
-                _transferToken(vault.ownerOf(params.tokenId), lendToken, lendBalance, true);
+                _transferToken(vault.ownerOf(params.tokenId), lendToken, lendBalance);
             }
         }
+        _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
 
         (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
         emit AutoLeverageExecuted(params.tokenId, params.leverageUp, currentDebt, newDebt);
@@ -197,15 +202,11 @@ contract AutoLeverage is Automator {
                 AutoLeverageLib.borrowAmountToTarget(currentDebt, collateralValue, config.targetLeverageBps);
             if (borrowAmount == 0) revert NotReady();
 
-            // Snapshot balances before borrow to calculate received amounts
-            uint256 balance0Before = token0.balanceOfSelf();
-            uint256 balance1Before = token1.balanceOfSelf();
-
             // Borrow from vault
             vault.borrow(params.tokenId, borrowAmount);
 
-            amount0 = token0.balanceOfSelf() - balance0Before + state.netFee0;
-            amount1 = token1.balanceOfSelf() - balance1Before + state.netFee1;
+            amount0 = _availableBalance(token0, state.protocolFee0);
+            amount1 = _availableBalance(token1, state.protocolFee1);
         }
 
         // Swap borrowed lend token to position tokens
@@ -257,16 +258,11 @@ contract AutoLeverage is Automator {
             }
         }
 
-        // Send leftover to owner (excludes protocol reward and pre-existing balances)
         address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = token0.balanceOfSelf() - state.balance0Start - state.reward0;
-        uint256 leftover1 = token1.balanceOfSelf() - state.balance1Start - state.reward1;
-        if (leftover0 > 0) {
-            _transferToken(owner, token0, leftover0, true);
-        }
-        if (leftover1 > 0) {
-            _transferToken(owner, token1, leftover1, true);
-        }
+        uint256 leftover0 = _availableBalance(token0, state.protocolFee0);
+        uint256 leftover1 = _availableBalance(token1, state.protocolFee1);
+        _transferToken(owner, token0, leftover0);
+        _transferToken(owner, token1, leftover1);
     }
 
     function _leverageDown(
@@ -304,7 +300,7 @@ contract AutoLeverage is Automator {
         uint256 amount0;
         uint256 amount1;
         if (liquidityToRemove > 0) {
-            (amount0, amount1) = _decreaseLiquidity(
+            _decreaseLiquidity(
                 params.tokenId,
                 liquidityToRemove,
                 params.amountRemoveMin0,
@@ -313,9 +309,8 @@ contract AutoLeverage is Automator {
                 params.decreaseLiquidityHookData
             );
         }
-        // Include net fees in available amounts for swap/repay
-        amount0 += state.netFee0;
-        amount1 += state.netFee1;
+        amount0 = _availableBalance(token0, state.protocolFee0);
+        amount1 = _availableBalance(token1, state.protocolFee1);
 
         // Swap position tokens to lend token
         uint256 lendAmount = lendToken == token0 ? amount0 : (lendToken == token1 ? amount1 : 0);
@@ -344,16 +339,11 @@ contract AutoLeverage is Automator {
             vault.repay(params.tokenId, lendAmount, false);
         }
 
-        // Send leftover to owner (excludes protocol reward and pre-existing balances)
         address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = token0.balanceOfSelf() - state.balance0Start - state.reward0;
-        uint256 leftover1 = token1.balanceOfSelf() - state.balance1Start - state.reward1;
-        if (leftover0 > 0) {
-            _transferToken(owner, token0, leftover0, true);
-        }
-        if (leftover1 > 0) {
-            _transferToken(owner, token1, leftover1, true);
-        }
+        uint256 leftover0 = _availableBalance(token0, state.protocolFee0);
+        uint256 leftover1 = _availableBalance(token1, state.protocolFee1);
+        _transferToken(owner, token0, leftover0);
+        _transferToken(owner, token1, leftover1);
     }
 
     /// @notice Position owner configures auto-leverage

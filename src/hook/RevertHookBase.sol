@@ -88,13 +88,6 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         (value,,,) = v4Oracle.getValue(tokenId, address(0));
     }
 
-    function _delegatecall(address target, bytes memory data) internal {
-        (bool success,) = target.delegatecall(data);
-        if (!success) {
-            revert TransformFailed();
-        }
-    }
-
     function _delegatecallPassthrough(address target, bytes memory data) internal {
         (bool success, bytes memory returndata) = target.delegatecall(data);
         if (!success) {
@@ -108,16 +101,8 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         (success,) = target.delegatecall(data);
     }
 
-    function _delegatecallPositionActions(bytes memory data) internal {
-        _delegatecall(address(positionActions), data);
-    }
-
     function _delegatecallPositionActionsPassthrough(bytes memory data) internal {
         _delegatecallPassthrough(address(positionActions), data);
-    }
-
-    function _delegatecallAutoLeverageActions(bytes memory data) internal {
-        _delegatecall(address(autoLeverageActions), data);
     }
 
     function _delegatecallAutoLeverageActionsPassthrough(bytes memory data) internal {
