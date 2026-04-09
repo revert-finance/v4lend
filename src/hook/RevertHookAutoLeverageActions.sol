@@ -11,6 +11,7 @@ import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoLeverageLib} from "../shared/planning/AutoLeverageLib.sol";
+import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
@@ -25,8 +26,9 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
+        IHookRouteController _hookRouteController,
         RevertHookSwapActions _swapActions
-    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _swapActions) {}
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {}
 
     // ==================== Auto Leverage ====================
 

@@ -85,6 +85,47 @@ contract HookFeeControllerTest is Test {
         assertEq(controller.swapFeeBps(OVERRIDE_POOL, uint8(RevertHookState.Mode.AUTO_LEVERAGE)), 555);
     }
 
+    function test_PoolOverridesAreScopedByPoolAndMode() public {
+        vm.startPrank(OWNER);
+        controller.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 100);
+        controller.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_RANGE), 200);
+        controller.setPoolOverrideSwapFeeBps(OVERRIDE_POOL, uint8(RevertHookState.Mode.AUTO_COLLECT), 777);
+        vm.stopPrank();
+
+        assertEq(controller.swapFeeBps(DEFAULT_POOL, uint8(RevertHookState.Mode.AUTO_COLLECT)), 100);
+        assertEq(controller.swapFeeBps(OVERRIDE_POOL, uint8(RevertHookState.Mode.AUTO_COLLECT)), 777);
+        assertEq(controller.swapFeeBps(DEFAULT_POOL, uint8(RevertHookState.Mode.AUTO_RANGE)), 200);
+        assertEq(
+            controller.swapFeeBps(OVERRIDE_POOL, uint8(RevertHookState.Mode.AUTO_RANGE)),
+            200,
+            "pool override should not leak across modes"
+        );
+    }
+
+    function test_UnsupportedModesReturnZeroAndRejectConfig() public {
+        uint8 unsupportedMode = uint8(RevertHookState.Mode.AUTO_LEND);
+        uint8 unknownMode = type(uint8).max;
+
+        assertEq(controller.swapFeeBps(DEFAULT_POOL, unsupportedMode), 0, "AUTO_LEND should not have swap fees");
+        assertEq(controller.swapFeeBps(DEFAULT_POOL, unknownMode), 0, "unknown modes should resolve to zero");
+
+        vm.startPrank(OWNER);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setDefaultSwapFeeBps(unsupportedMode, 100);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setPoolOverrideSwapFeeBps(OVERRIDE_POOL, unsupportedMode, 100);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.clearPoolOverrideSwapFeeBps(OVERRIDE_POOL, unsupportedMode);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setDefaultSwapFeeBps(unknownMode, 100);
+
+        vm.stopPrank();
+    }
+
     function test_FeeRecipientAndBpsUpdate() public {
         address newRecipient = makeAddr("newRecipient");
 

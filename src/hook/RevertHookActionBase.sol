@@ -3,7 +3,10 @@ pragma solidity ^0.8.30;
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -23,6 +26,7 @@ import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
+import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
@@ -39,12 +43,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     IV4Oracle internal immutable v4Oracle;
     ILiquidityCalculator internal immutable liquidityCalculator;
     IPoolManager internal immutable poolManager;
+    IHookRouteController internal immutable hookRouteController;
     RevertHookSwapActions internal immutable swapActions;
 
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
+        IHookRouteController _hookRouteController,
         RevertHookSwapActions _swapActions
     ) {
         positionManager = _v4Oracle.positionManager();
@@ -53,6 +59,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         v4Oracle = _v4Oracle;
         liquidityCalculator = _liquidityCalculator;
         poolManager = _v4Oracle.poolManager();
+        hookRouteController = _hookRouteController;
         swapActions = _swapActions;
     }
 
@@ -79,18 +86,20 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
     // ==================== Pool Key Helpers ====================
 
-    /// @notice Gets the swap pool key for a position (may differ from position pool)
-    function _getSwapPoolKey(uint256 tokenId, PoolKey memory poolKey) internal view returns (PoolKey memory) {
-        GeneralConfig storage config = _generalConfigs[tokenId];
-        if (config.swapPoolFee == 0 || config.swapPoolTickSpacing == 0) {
+    /// @notice Gets the protocol-managed swap pool key for a direction (falls back to the position pool)
+    function _getSwapPoolKey(PoolKey memory poolKey, bool zeroForOne) internal view returns (PoolKey memory) {
+        address tokenIn = Currency.unwrap(zeroForOne ? poolKey.currency0 : poolKey.currency1);
+        address tokenOut = Currency.unwrap(zeroForOne ? poolKey.currency1 : poolKey.currency0);
+        (bool hasRoute, uint24 fee, int24 tickSpacing, IHooks hooks) = hookRouteController.route(tokenIn, tokenOut);
+        if (!hasRoute) {
             return poolKey;
         }
         return PoolKey({
             currency0: poolKey.currency0,
             currency1: poolKey.currency1,
-            fee: config.swapPoolFee,
-            tickSpacing: config.swapPoolTickSpacing,
-            hooks: config.swapPoolHooks
+            fee: fee,
+            tickSpacing: tickSpacing,
+            hooks: hooks
         });
     }
 
@@ -113,7 +122,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
     /// @notice Migrates configuration from an old position to its reminted replacement
     function _migrateRemintedPosition(uint256 tokenId, uint256 newTokenId) internal {
-        _generalConfigs[newTokenId] = _generalConfigs[tokenId];
+        _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[tokenId];
         _copyPositionConfig(newTokenId, _positionConfigs[tokenId]);
         _disablePosition(tokenId);
     }
@@ -130,9 +139,11 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 amount1,
         Mode mode
     ) internal returns (uint256, uint256) {
-        PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
         uint256 swapInput;
-        bool zeroForOne;
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
+
+        bool zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
+        PoolKey memory swapPool = _getSwapPoolKey(poolKey, zeroForOne);
 
         if (swapPool.hooks == poolKey.hooks && swapPool.fee == poolKey.fee && swapPool.tickSpacing == poolKey.tickSpacing) {
             (swapInput,, zeroForOne,) = liquidityCalculator.calculateSamePool(
@@ -147,16 +158,37 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 amount1
             );
         } else {
-            (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
             (swapInput,, zeroForOne) = liquidityCalculator.calculateSimple(
                 sqrtPriceX96, tickLower, tickUpper, amount0, amount1, swapPool.fee
             );
         }
 
         if (swapInput > 0) {
-            return _applyBalanceDelta(_executeSwap(swapPool, zeroForOne, swapInput, tokenId, mode), amount0, amount1);
+            return _applyBalanceDelta(_executeSwap(poolKey, zeroForOne, swapInput, tokenId, mode), amount0, amount1);
         }
         return (amount0, amount1);
+    }
+
+    function _determineSwapDirection(
+        uint160 sqrtPriceX96,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0,
+        uint256 amount1
+    ) internal pure returns (bool) {
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
+
+        if (sqrtPriceX96 <= sqrtLower) {
+            return false;
+        }
+        if (sqrtPriceX96 >= sqrtUpper) {
+            return true;
+        }
+
+        return FullMath.mulDiv(
+            FullMath.mulDiv(amount0, sqrtPriceX96, FixedPoint96.Q96), sqrtPriceX96 - sqrtLower, FixedPoint96.Q96
+        ) > FullMath.mulDiv(amount1, sqrtUpper - sqrtPriceX96, sqrtUpper);
     }
 
     /// @notice Executes a swap on the pool manager
@@ -167,8 +199,9 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 tokenId,
         Mode mode
     ) internal returns (BalanceDelta delta) {
+        PoolKey memory swapPool = _getSwapPoolKey(poolKey, zeroForOne);
         (bool success, bytes memory returndata) = address(swapActions).delegatecall(
-            abi.encodeCall(RevertHookSwapActions.executeSwap, (poolKey, zeroForOne, amountIn, tokenId, mode))
+            abi.encodeCall(RevertHookSwapActions.executeSwap, (swapPool, zeroForOne, amountIn, tokenId, mode))
         );
         if (!success) {
             assembly ("memory-safe") {
@@ -391,15 +424,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 amount1,
         Mode mode
     ) internal returns (uint256) {
-        PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
         if (lendToken == currency0) {
             if (amount1 > 0) {
-                _executeSwap(swapPool, false, amount1, tokenId, mode);
+                _executeSwap(poolKey, false, amount1, tokenId, mode);
             }
             return currency0.balanceOfSelf();
         } else {
             if (amount0 > 0) {
-                _executeSwap(swapPool, true, amount0, tokenId, mode);
+                _executeSwap(poolKey, true, amount0, tokenId, mode);
             }
             return currency1.balanceOfSelf();
         }

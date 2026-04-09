@@ -3,7 +3,6 @@ pragma solidity ^0.8.30;
 
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
@@ -65,25 +64,13 @@ abstract contract RevertHookViews is RevertHookBase {
         );
     }
 
-    function generalConfigs(uint256 tokenId)
+    function swapProtectionConfigs(uint256 tokenId)
         external
         view
-        returns (
-            uint24 swapPoolFee,
-            int24 swapPoolTickSpacing,
-            IHooks swapPoolHooks,
-            uint128 sqrtPriceMultiplier0,
-            uint128 sqrtPriceMultiplier1
-        )
+        returns (uint128 sqrtPriceMultiplier0, uint128 sqrtPriceMultiplier1)
     {
-        GeneralConfig storage config = _generalConfigs[tokenId];
-        return (
-            config.swapPoolFee,
-            config.swapPoolTickSpacing,
-            config.swapPoolHooks,
-            config.sqrtPriceMultiplier0,
-            config.sqrtPriceMultiplier1
-        );
+        SwapProtectionConfig storage config = _swapProtectionConfigs[tokenId];
+        return (config.sqrtPriceMultiplier0, config.sqrtPriceMultiplier1);
     }
 
     function positionStates(uint256 tokenId)

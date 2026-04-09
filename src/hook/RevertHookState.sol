@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
 
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -51,11 +50,7 @@ abstract contract RevertHookState is RevertHookAccess {
         int24 autoLeverageBaseTick; // Base tick for auto-leverage triggers (triggers at baseTick ± 10 * tickSpacing)
     }
 
-    struct GeneralConfig {
-        // reference pool key data for swaps (can be the same pool or different pool)
-        uint24 swapPoolFee;
-        int24 swapPoolTickSpacing;
-        IHooks swapPoolHooks;
+    struct SwapProtectionConfig {
         // sqrt price multipliers for max price impact (pre-calculated from basis points)
         // For zeroForOne swaps: sqrtPriceLimit = currentSqrtPrice * sqrtPriceMultiplier0 / Q64
         // For oneForZero swaps: sqrtPriceLimit = currentSqrtPrice * sqrtPriceMultiplier1 / Q64
@@ -87,7 +82,7 @@ abstract contract RevertHookState is RevertHookAccess {
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event SetMaxTicksFromOracle(int24 maxTicksFromOracle);
     event SetMinPositionValueNative(uint256 minPositionValueNative);
-    event SetGeneralConfig(uint256 indexed tokenId, GeneralConfig generalConfig);
+    event SetSwapProtectionConfig(uint256 indexed tokenId, SwapProtectionConfig swapProtectionConfig);
     event SetPositionConfig(uint256 indexed tokenId, PositionConfig positionConfig);
 
     // Auto action events
@@ -145,7 +140,7 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // Configuration storage
     mapping(uint256 tokenId => PositionConfig positionConfig) internal _positionConfigs;
-    mapping(uint256 tokenId => GeneralConfig generalConfig) internal _generalConfigs;
+    mapping(uint256 tokenId => SwapProtectionConfig swapProtectionConfig) internal _swapProtectionConfigs;
     mapping(uint256 tokenId => PositionState positionState) internal _positionStates;
 
     // configured vaults for auto lend

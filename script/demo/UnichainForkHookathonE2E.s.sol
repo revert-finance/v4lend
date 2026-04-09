@@ -32,6 +32,7 @@ import {LeverageTransformer} from "src/vault/transformers/LeverageTransformer.so
 import {RevertHook} from "src/RevertHook.sol";
 import {RevertHookState} from "src/hook/RevertHookState.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
@@ -91,6 +92,7 @@ contract UnichainForkHookathonE2E is Script {
         RevertHookPositionActions positionActions;
         RevertHookAutoLeverageActions autoLeverageActions;
         RevertHookAutoLendActions autoLendActions;
+        HookRouteController routeController;
         RevertHook revertHook;
         V4Vault vault;
         FlashloanLiquidator flashloanLiquidator;
@@ -160,10 +162,11 @@ contract UnichainForkHookathonE2E is Script {
 
         uint64 hookSidecarNonce = vm.getNonce(deployer);
         address predictedFeeController = vm.computeCreateAddress(deployer, hookSidecarNonce);
-        address predictedSwapActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 1);
-        address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 2);
-        address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
-        address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
+        address predictedRouteController = vm.computeCreateAddress(deployer, hookSidecarNonce + 1);
+        address predictedSwapActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 2);
+        address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
+        address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
+        address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
@@ -181,17 +184,32 @@ contract UnichainForkHookathonE2E is Script {
         HookFeeController feeController =
             new HookFeeController(expectedHookAddress, deployer, PROTOCOL_FEE_BPS, PROTOCOL_FEE_BPS);
         require(address(feeController) == predictedFeeController, "Demo: fee controller address mismatch");
+        deployment.routeController = new HookRouteController(expectedHookAddress);
+        require(address(deployment.routeController) == predictedRouteController, "Demo: route controller address mismatch");
         RevertHookSwapActions swapActions = new RevertHookSwapActions(deployment.oracle, feeController);
         require(address(swapActions) == predictedSwapActions, "Demo: swap actions address mismatch");
 
         deployment.positionActions = new RevertHookPositionActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), swapActions
+            PERMIT2,
+            deployment.oracle,
+            ILiquidityCalculator(deployment.liquidityCalculator),
+            deployment.routeController,
+            swapActions
         );
         deployment.autoLeverageActions = new RevertHookAutoLeverageActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), swapActions
+            PERMIT2,
+            deployment.oracle,
+            ILiquidityCalculator(deployment.liquidityCalculator),
+            deployment.routeController,
+            swapActions
         );
         deployment.autoLendActions = new RevertHookAutoLendActions(
-            PERMIT2, deployment.oracle, ILiquidityCalculator(deployment.liquidityCalculator), feeController, swapActions
+            PERMIT2,
+            deployment.oracle,
+            ILiquidityCalculator(deployment.liquidityCalculator),
+            feeController,
+            deployment.routeController,
+            swapActions
         );
         deployment.revertHook = new RevertHook{salt: salt}(
             deployer,
@@ -336,7 +354,7 @@ contract UnichainForkHookathonE2E is Script {
         LoanSnapshot memory before = _loanSnapshot(deployment.vault, tokenId);
         uint32 maxPriceImpactBps = uint32(vm.envOr("DEMO_MAX_PRICE_IMPACT_BPS", uint256(10000)));
 
-        hook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), maxPriceImpactBps, maxPriceImpactBps);
+        hook.setSwapProtectionConfig(tokenId, maxPriceImpactBps, maxPriceImpactBps);
 
         int24 spacing = _poolTickSpacing(tokenId);
         int24 upperLimitSpacings = int24(vm.envOr("DEMO_AUTO_RANGE_UPPER_LIMIT_SPACINGS", int256(4)));

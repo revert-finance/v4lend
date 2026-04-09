@@ -4,7 +4,6 @@ pragma solidity ^0.8.30;
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -37,36 +36,25 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         emit SetMinPositionValueNative(newMinPositionValueNative);
     }
 
-    function setGeneralConfig(
-        uint256 tokenId,
-        uint24 swapPoolFee,
-        int24 swapPoolTickSpacing,
-        IHooks swapPoolHooks,
-        uint32 maxPriceImpactBps0,
-        uint32 maxPriceImpactBps1
-    ) external payable {
+    function setSwapProtectionConfig(uint256 tokenId, uint32 maxPriceImpactBps0, uint32 maxPriceImpactBps1)
+        external
+        payable
+    {
         if (_getOwner(tokenId, true) != msg.sender) {
             revert Unauthorized();
         }
 
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        if (swapPoolTickSpacing % poolKey.tickSpacing != 0) {
-            revert InvalidConfig();
-        }
         if (maxPriceImpactBps0 > 10000 || maxPriceImpactBps1 > 10000) {
             revert InvalidConfig();
         }
 
-        GeneralConfig memory generalConfig = GeneralConfig({
-            swapPoolFee: swapPoolFee,
-            swapPoolTickSpacing: swapPoolTickSpacing,
-            swapPoolHooks: swapPoolHooks,
+        SwapProtectionConfig memory swapProtectionConfig = SwapProtectionConfig({
             sqrtPriceMultiplier0: _calculateSqrtPriceMultiplier(maxPriceImpactBps0, true),
             sqrtPriceMultiplier1: _calculateSqrtPriceMultiplier(maxPriceImpactBps1, false)
         });
 
-        _generalConfigs[tokenId] = generalConfig;
-        emit SetGeneralConfig(tokenId, generalConfig);
+        _swapProtectionConfigs[tokenId] = swapProtectionConfig;
+        emit SetSwapProtectionConfig(tokenId, swapProtectionConfig);
     }
 
     function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external payable {

@@ -12,6 +12,7 @@ import {LeverageTransformer} from "src/vault/transformers/LeverageTransformer.so
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {RevertHook} from "src/RevertHook.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
@@ -148,10 +149,11 @@ contract DeployMainnet is Script {
         console.log("Step 3: Deploying RevertHook action contracts...");
         uint64 hookSidecarNonce = vm.getNonce(deployer);
         address predictedFeeController = vm.computeCreateAddress(deployer, hookSidecarNonce);
-        address predictedSwapActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 1);
-        address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 2);
-        address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
-        address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
+        address predictedRouteController = vm.computeCreateAddress(deployer, hookSidecarNonce + 1);
+        address predictedSwapActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 2);
+        address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
+        address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
+        address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
@@ -175,23 +177,32 @@ contract DeployMainnet is Script {
             new HookFeeController(expectedHookAddress, deployer, PROTOCOL_FEE_BPS, PROTOCOL_FEE_BPS);
         require(address(feeController) == predictedFeeController, "Fee controller address mismatch");
         console.log("  HookFeeController deployed at:", address(feeController));
+        HookRouteController routeController = new HookRouteController(expectedHookAddress);
+        require(address(routeController) == predictedRouteController, "Route controller address mismatch");
+        console.log("  HookRouteController deployed at:", address(routeController));
         RevertHookSwapActions swapActions = new RevertHookSwapActions(oracle, feeController);
         require(address(swapActions) == predictedSwapActions, "Swap actions address mismatch");
         console.log("  RevertHookSwapActions deployed at:", address(swapActions));
 
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), swapActions);
+        RevertHookPositionActions positionActions = new RevertHookPositionActions(
+            IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
+        );
         console.log("  RevertHookPositionActions deployed at:", address(positionActions));
 
         RevertHookAutoLeverageActions autoLeverageActions =
             new RevertHookAutoLeverageActions(
-                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), swapActions
+                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
             );
         console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
 
         RevertHookAutoLendActions autoLendActions =
             new RevertHookAutoLendActions(
-                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), feeController, swapActions
+                IPermit2(PERMIT2),
+                oracle,
+                ILiquidityCalculator(liquidityCalculator),
+                feeController,
+                routeController,
+                swapActions
             );
         console.log("  RevertHookAutoLendActions deployed at:", address(autoLendActions));
 

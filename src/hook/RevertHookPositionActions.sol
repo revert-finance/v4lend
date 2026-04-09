@@ -13,6 +13,7 @@ import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoRangeLib} from "../shared/planning/AutoRangeLib.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
+import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
@@ -26,8 +27,9 @@ contract RevertHookPositionActions is RevertHookActionBase {
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
+        IHookRouteController _hookRouteController,
         RevertHookSwapActions _swapActions
-    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _swapActions) {}
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {}
 
     // ==================== Auto Exit ====================
 
@@ -67,8 +69,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
         if (_shouldSwapOnAutoExit(tokenId, isUpperTrigger)) {
             bool swapZeroForOne = !isUpperTrigger;
             uint256 swapAmount = swapZeroForOne ? amount0 : amount1;
-            BalanceDelta swapDelta =
-                _executeSwap(_getSwapPoolKey(tokenId, poolKey), swapZeroForOne, swapAmount, tokenId, Mode.AUTO_EXIT);
+            BalanceDelta swapDelta = _executeSwap(poolKey, swapZeroForOne, swapAmount, tokenId, Mode.AUTO_EXIT);
             (amount0, amount1) = _applyBalanceDelta(swapDelta, amount0, amount1);
         }
 
@@ -113,8 +114,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
             // into the trigger-side token the strategy wants to leave the user with.
             uint256 remainingLend = lendToken.balanceOfSelf();
             if (remainingLend > 0) {
-                PoolKey memory swapPool = _getSwapPoolKey(tokenId, poolKey);
-                _executeSwap(swapPool, lendIsToken0, remainingLend, tokenId, Mode.AUTO_EXIT);
+                _executeSwap(poolKey, lendIsToken0, remainingLend, tokenId, Mode.AUTO_EXIT);
             }
         }
 

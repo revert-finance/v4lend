@@ -31,6 +31,7 @@ import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActi
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
@@ -45,6 +46,8 @@ contract RevertHookTest is BaseTest {
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
 
+    uint256 internal constant Q64_TEST = 2 ** 64;
+
     Currency currency0;
     Currency currency1;
 
@@ -53,6 +56,7 @@ contract RevertHookTest is BaseTest {
 
     RevertHook hook;
     HookFeeController feeController;
+    HookRouteController routeController;
     LiquidityCalculator liquidityCalculator;
     PoolId poolId;
 
@@ -99,15 +103,18 @@ contract RevertHookTest is BaseTest {
         // Deploy LiquidityCalculator
         liquidityCalculator = new LiquidityCalculator();
         feeController = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
+        routeController = new HookRouteController(flags);
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
 
         // Deploy RevertHook action targets
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, swapActions);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, swapActions);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
         RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookAutoLendActions(
+                permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
+            );
 
         bytes memory constructorArgs = abi.encode(
             address(this),
@@ -320,7 +327,7 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-range");
     }
 
-    function testAutoRangeCopiesGeneralConfigOnRemint() public {
+    function testAutoRangeCopiesSwapProtectionConfigOnRemint() public {
         hook.setMaxTicksFromOracle(1000);
 
         hook.setPositionConfig(
@@ -341,16 +348,10 @@ contract RevertHookTest is BaseTest {
                 autoLeverageTargetBps: 0
             })
         );
-        hook.setGeneralConfig(token3Id, 3000, 60, IHooks(hook), 123, 456);
+        _setSwapProtection(token3Id, 123, 456);
         IERC721(address(positionManager)).approve(address(hook), token3Id);
 
-        (
-            uint24 feeBefore,
-            int24 tickSpacingBefore,
-            IHooks hooksBefore,
-            uint128 multiplier0Before,
-            uint128 multiplier1Before
-        ) = hook.generalConfigs(token3Id);
+        (uint128 multiplier0Before, uint128 multiplier1Before) = hook.swapProtectionConfigs(token3Id);
 
         uint256 nextTokenIdBefore = positionManager.nextTokenId();
         swapRouter.swapExactTokensForTokens({
@@ -366,17 +367,7 @@ contract RevertHookTest is BaseTest {
         uint256 newTokenId = nextTokenIdBefore;
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "AUTO_RANGE should mint replacement token");
 
-        (
-            uint24 feeAfter,
-            int24 tickSpacingAfter,
-            IHooks hooksAfter,
-            uint128 multiplier0After,
-            uint128 multiplier1After
-        ) = hook.generalConfigs(newTokenId);
-
-        assertEq(feeAfter, feeBefore, "swapPoolFee should copy on remint");
-        assertEq(tickSpacingAfter, tickSpacingBefore, "swapPoolTickSpacing should copy on remint");
-        assertEq(address(hooksAfter), address(hooksBefore), "swapPoolHooks should copy on remint");
+        (uint128 multiplier0After, uint128 multiplier1After) = hook.swapProtectionConfigs(newTokenId);
         assertEq(multiplier0After, multiplier0Before, "sqrtPriceMultiplier0 should copy on remint");
         assertEq(multiplier1After, multiplier1Before, "sqrtPriceMultiplier1 should copy on remint");
     }
@@ -844,8 +835,10 @@ contract RevertHookTest is BaseTest {
 
     function testAutoRangeRemintFailureRestoresOriginalNonVaultPosition() public {
         hook.setMaxTicksFromOracle(1000);
-        // Configure a non-existent swap pool so swap-to-ratio fails and remint has no usable token1.
-        hook.setGeneralConfig(token3Id, 500, 60, IHooks(address(0)), 0, 0);
+        // Configure a non-existent routed pool so swap-to-ratio fails and remint has no usable token1.
+        _setBidirectionalRoute(
+            PoolKey({currency0: poolKey.currency0, currency1: poolKey.currency1, fee: 500, tickSpacing: 60, hooks: IHooks(address(0))})
+        );
         (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
 
         hook.setPositionConfig(
@@ -1232,7 +1225,7 @@ contract RevertHookTest is BaseTest {
         feeController.setLpFeeBps(0);
         feeController.setPoolOverrideSwapFeeBps(nonHookedPoolKey.toId(), uint8(RevertHookState.Mode.AUTO_RANGE), 500);
 
-        hook.setGeneralConfig(token3Id, 3000, 60, IHooks(address(0)), 0, 0);
+        _setBidirectionalRoute(nonHookedPoolKey);
         hook.setPositionConfig(
             token3Id,
             RevertHookState.PositionConfig({
@@ -1287,7 +1280,7 @@ contract RevertHookTest is BaseTest {
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_EXIT), 500);
 
         uint32 maxPriceImpactBps = 10;
-        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), maxPriceImpactBps, maxPriceImpactBps);
+        _setSwapProtection(token2Id, maxPriceImpactBps, maxPriceImpactBps);
         hook.setPositionConfig(
             token2Id,
             RevertHookState.PositionConfig({
@@ -1592,7 +1585,7 @@ contract RevertHookTest is BaseTest {
     }
 
     function testBasicAutoExit_NonHookedPool() public {
-        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(address(0)), 0, 0);
+        _setBidirectionalRoute(nonHookedPoolKey);
 
         hook.setPositionConfig(
             token2Id,
@@ -2128,7 +2121,7 @@ contract RevertHookTest is BaseTest {
         );
     }
 
-    function testAutoLendWithdrawRemintCopiesGeneralConfig() public {
+    function testAutoLendWithdrawRemintCopiesSwapProtectionConfig() public {
         hook.setMaxTicksFromOracle(1000);
 
         int24 testTickLower = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
@@ -2171,16 +2164,10 @@ contract RevertHookTest is BaseTest {
                 autoLeverageTargetBps: 0
             })
         );
-        hook.setGeneralConfig(autolendTokenId, 3000, 60, IHooks(hook), 123, 456);
+        _setSwapProtection(autolendTokenId, 123, 456);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
 
-        (
-            uint24 feeBefore,
-            int24 tickSpacingBefore,
-            IHooks hooksBefore,
-            uint128 multiplier0Before,
-            uint128 multiplier1Before
-        ) = hook.generalConfigs(autolendTokenId);
+        (uint128 multiplier0Before, uint128 multiplier1Before) = hook.swapProtectionConfigs(autolendTokenId);
 
         uint256 swapAmount = 20e17;
         swapRouter.swapExactTokensForTokens({
@@ -2216,17 +2203,7 @@ contract RevertHookTest is BaseTest {
         );
         uint256 newTokenId = nextTokenIdBeforeWithdraw;
 
-        (
-            uint24 feeAfter,
-            int24 tickSpacingAfter,
-            IHooks hooksAfter,
-            uint128 multiplier0After,
-            uint128 multiplier1After
-        ) = hook.generalConfigs(newTokenId);
-
-        assertEq(feeAfter, feeBefore, "swapPoolFee should copy on auto-lend remint");
-        assertEq(tickSpacingAfter, tickSpacingBefore, "swapPoolTickSpacing should copy on auto-lend remint");
-        assertEq(address(hooksAfter), address(hooksBefore), "swapPoolHooks should copy on auto-lend remint");
+        (uint128 multiplier0After, uint128 multiplier1After) = hook.swapProtectionConfigs(newTokenId);
         assertEq(multiplier0After, multiplier0Before, "sqrtPriceMultiplier0 should copy on auto-lend remint");
         assertEq(multiplier1After, multiplier1Before, "sqrtPriceMultiplier1 should copy on auto-lend remint");
     }
@@ -2333,18 +2310,98 @@ contract RevertHookTest is BaseTest {
         hook.setAutoLendVault(address(0), vault0);
     }
 
-    function testSetGeneralConfig_AllowsAnotherPoolUsingSameHook() public {
-        hook.setGeneralConfig(token3Id, 500, 60, IHooks(hook), 0, 0);
-        (uint24 fee, int24 tickSpacing, IHooks hooksAfter,,) = hook.generalConfigs(token3Id);
-        assertEq(fee, 500, "swapPoolFee should update");
-        assertEq(tickSpacing, 60, "swapPoolTickSpacing should update");
-        assertEq(address(hooksAfter), address(hook), "swapPoolHooks should update");
+    function testRouteController_StoresOrderedRoutes() public {
+        _setRoute(Currency.unwrap(currency0), Currency.unwrap(currency1), 500, 60, IHooks(hook));
+        _setRoute(Currency.unwrap(currency1), Currency.unwrap(currency0), 3000, 120, IHooks(address(0)));
 
-        hook.setGeneralConfig(token3Id, 3000, 120, IHooks(hook), 0, 0);
-        (fee, tickSpacing, hooksAfter,,) = hook.generalConfigs(token3Id);
-        assertEq(fee, 3000, "swapPoolFee should support same-hook alternate pools");
-        assertEq(tickSpacing, 120, "swapPoolTickSpacing should support same-hook alternate pools");
-        assertEq(address(hooksAfter), address(hook), "swapPoolHooks should remain the hook address");
+        (bool hasForwardRoute, uint24 forwardFee, int24 forwardTickSpacing, IHooks forwardHooks) =
+            routeController.route(Currency.unwrap(currency0), Currency.unwrap(currency1));
+        (bool hasReverseRoute, uint24 reverseFee, int24 reverseTickSpacing, IHooks reverseHooks) =
+            routeController.route(Currency.unwrap(currency1), Currency.unwrap(currency0));
+
+        assertTrue(hasForwardRoute, "forward route should be stored");
+        assertEq(forwardFee, 500, "forward fee should match route config");
+        assertEq(forwardTickSpacing, 60, "forward tick spacing should match route config");
+        assertEq(address(forwardHooks), address(hook), "forward hooks should match route config");
+
+        assertTrue(hasReverseRoute, "reverse route should be stored independently");
+        assertEq(reverseFee, 3000, "reverse fee should match route config");
+        assertEq(reverseTickSpacing, 120, "reverse tick spacing should match route config");
+        assertEq(address(reverseHooks), address(0), "reverse hooks should match route config");
+    }
+
+    function testSetSwapProtectionConfig_StoresPriceImpactConfig() public {
+        uint32 maxPriceImpactBps0 = 125;
+        uint32 maxPriceImpactBps1 = 250;
+
+        _setSwapProtection(token3Id, maxPriceImpactBps0, maxPriceImpactBps1);
+
+        (uint128 multiplier0, uint128 multiplier1) = hook.swapProtectionConfigs(token3Id);
+        assertEq(
+            multiplier0,
+            _expectedSqrtPriceMultiplier(maxPriceImpactBps0, true),
+            "sqrtPriceMultiplier0 should match config formula"
+        );
+        assertEq(
+            multiplier1,
+            _expectedSqrtPriceMultiplier(maxPriceImpactBps1, false),
+            "sqrtPriceMultiplier1 should match config formula"
+        );
+    }
+
+    function testSetSwapProtectionConfig_RevertsWhenPriceImpactExceedsMax() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        _setSwapProtection(token3Id, 10001, 0);
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        _setSwapProtection(token3Id, 0, 10001);
+    }
+
+    function testSetPositionConfig_StoresCustomAutoCollectAndRangeConfig() public {
+        RevertHookState.PositionConfig memory config = _buildNonVaultModeConfig(
+            PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_RANGE,
+            true,
+            false,
+            type(int24).min,
+            type(int24).max
+        );
+        config.autoCollectMode = RevertHookState.AutoCollectMode.HARVEST_TOKEN_1;
+
+        hook.setPositionConfig(token3Id, config);
+
+        _assertPositionConfigEq(token3Id, config);
+    }
+
+    function testSetPositionConfig_StoresCustomAutoExitConfig() public {
+        RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: true,
+            autoExitTickLower: -2 * poolKey.tickSpacing,
+            autoExitTickUpper: 2 * poolKey.tickSpacing,
+            autoExitSwapOnLowerTrigger: false,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        hook.setPositionConfig(token3Id, config);
+
+        _assertPositionConfigEq(token3Id, config);
+    }
+
+    function testSetPositionConfig_StoresCustomAutoLendConfig() public {
+        RevertHookState.PositionConfig memory config =
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max);
+        config.autoLendToleranceTick = 2 * poolKey.tickSpacing;
+
+        hook.setPositionConfig(token3Id, config);
+
+        _assertPositionConfigEq(token3Id, config);
     }
 
     function testSetPositionConfig_AutoLendRequiresVaultsForBothPoolTokens() public {
@@ -2357,12 +2414,12 @@ contract RevertHookTest is BaseTest {
         );
     }
 
-    function testSetGeneralConfig_RevertsWhenCallerIsNotOwner() public {
+    function testSetSwapProtectionConfig_RevertsWhenCallerIsNotOwner() public {
         address notOwner = makeAddr("notOwner");
 
         vm.prank(notOwner);
         vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
-        hook.setGeneralConfig(token3Id, 3000, 60, IHooks(address(0)), 0, 0);
+        hook.setSwapProtectionConfig(token3Id, 0, 0);
     }
 
     function testSetPositionConfig_RevertsWhenCallerIsNotOwner() public {
@@ -2696,6 +2753,39 @@ contract RevertHookTest is BaseTest {
         assertEq(autoLeverageTargetBps, expected.autoLeverageTargetBps, "autoLeverageTargetBps mismatch");
     }
 
+    function _expectedSqrtPriceMultiplier(uint32 maxPriceImpactBps, bool zeroForOne)
+        internal
+        pure
+        returns (uint128 multiplier)
+    {
+        if (maxPriceImpactBps == 0) {
+            return 0;
+        }
+
+        uint256 q64Squared = Q64_TEST * Q64_TEST;
+        uint256 numerator = zeroForOne
+            ? (10000 - maxPriceImpactBps) * q64Squared / 10000
+            : (10000 + maxPriceImpactBps) * q64Squared / 10000;
+        multiplier = uint128(Math.sqrt(numerator));
+    }
+
+    function _setSwapProtection(uint256 positionTokenId, uint32 maxPriceImpactBps0, uint32 maxPriceImpactBps1)
+        internal
+    {
+        hook.setSwapProtectionConfig(positionTokenId, maxPriceImpactBps0, maxPriceImpactBps1);
+    }
+
+    function _setRoute(address tokenIn, address tokenOut, uint24 fee, int24 tickSpacing, IHooks hooks) internal {
+        routeController.setRoute(tokenIn, tokenOut, fee, tickSpacing, hooks);
+    }
+
+    function _setBidirectionalRoute(PoolKey memory routePoolKey) internal {
+        address token0 = Currency.unwrap(routePoolKey.currency0);
+        address token1 = Currency.unwrap(routePoolKey.currency1);
+        _setRoute(token0, token1, routePoolKey.fee, routePoolKey.tickSpacing, routePoolKey.hooks);
+        _setRoute(token1, token0, routePoolKey.fee, routePoolKey.tickSpacing, routePoolKey.hooks);
+    }
+
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
         int24 compressed = tick / tickSpacing;
         if (tick < 0 && tick % tickSpacing != 0) compressed--;
@@ -2706,7 +2796,7 @@ contract RevertHookTest is BaseTest {
 
     function testPriceImpactLimit_ZeroMeansNoLimit() public {
         // Configure auto exit with maxPriceImpact = 0 (no limit)
-        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 0, 0);
+        _setSwapProtection(token2Id, 0, 0);
 
         hook.setPositionConfig(
             token2Id,
@@ -2773,7 +2863,7 @@ contract RevertHookTest is BaseTest {
     function testPriceImpactLimit_LimitEnforced() public {
         // Configure auto exit with a very strict price impact limit (10 bps = 0.1%)
         uint32 maxPriceImpactBps = 10;
-        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), maxPriceImpactBps, maxPriceImpactBps);
+        _setSwapProtection(token2Id, maxPriceImpactBps, maxPriceImpactBps);
 
         hook.setPositionConfig(
             token2Id,
@@ -2847,7 +2937,7 @@ contract RevertHookTest is BaseTest {
 
     function testPriceImpactLimit_ModerateLimit() public {
         // Configure auto exit with a moderate price impact limit (100 bps = 1%)
-        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 100, 100);
+        _setSwapProtection(token2Id, 100, 100);
 
         hook.setPositionConfig(
             token2Id,
@@ -2902,7 +2992,7 @@ contract RevertHookTest is BaseTest {
         // Configure different limits for each swap direction
         // maxPriceImpact0: 10 bps (0.1%) - Very strict for token0 -> token1
         // maxPriceImpact1: 1000 bps (10%) - Loose for token1 -> token0
-        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 10, 1000);
+        _setSwapProtection(token2Id, 10, 1000);
 
         hook.setPositionConfig(
             token2Id,
@@ -2961,7 +3051,7 @@ contract RevertHookTest is BaseTest {
 
     function testPriceImpactLimit_AutoRangeWithLimit() public {
         // Configure auto range with a moderate price impact limit (200 bps = 2%)
-        hook.setGeneralConfig(token3Id, 3000, 60, IHooks(hook), 200, 200);
+        _setSwapProtection(token3Id, 200, 200);
 
         hook.setPositionConfig(
             token3Id,
@@ -3020,7 +3110,7 @@ contract RevertHookTest is BaseTest {
 
     function testPriceImpactLimit_AutoCollectWithLimit() public {
         // Configure auto compound with a moderate price impact limit (500 bps = 5%)
-        hook.setGeneralConfig(token2Id, 3000, 60, IHooks(hook), 500, 500);
+        _setSwapProtection(token2Id, 500, 500);
 
         uint128 token2Liquidity = _setupAutoCollectTest(RevertHookState.AutoCollectMode.AUTO_COLLECT);
 

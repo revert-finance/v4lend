@@ -30,6 +30,7 @@ import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActi
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {MockERC4626Vault} from "test/utils/MockERC4626Vault.sol";
@@ -72,6 +73,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
     IWETH9 internal weth;
     RevertHook internal hook;
     HookFeeController internal feeController;
+    HookRouteController internal routeController;
     LiquidityCalculator internal liquidityCalculator;
     MockV4Oracle internal v4Oracle;
     MockERC4626Vault internal wethVault;
@@ -114,14 +116,17 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         v4Oracle = new MockV4Oracle(positionManager);
         liquidityCalculator = new LiquidityCalculator();
         feeController = new HookFeeController(flags, makeAddr("protocolFeeRecipient"), 200, 200);
+        routeController = new HookRouteController(flags);
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
 
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, swapActions);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, swapActions);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
         RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookAutoLendActions(
+                permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
+            );
 
         bytes memory constructorArgs = abi.encode(
             address(this),

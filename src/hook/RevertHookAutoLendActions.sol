@@ -18,6 +18,7 @@ import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoLendLib} from "../shared/planning/AutoLendLib.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
+import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 
@@ -34,8 +35,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         IV4Oracle _v4Oracle,
         ILiquidityCalculator _liquidityCalculator,
         IHookFeeController _hookFeeController,
+        IHookRouteController _hookRouteController,
         RevertHookSwapActions _swapActions
-    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _swapActions) {
+    ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {
         hookFeeController = _hookFeeController;
     }
 

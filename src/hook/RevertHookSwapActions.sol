@@ -43,7 +43,7 @@ contract RevertHookSwapActions is RevertHookLookupBase {
         external
         returns (BalanceDelta delta)
     {
-        GeneralConfig storage config = _generalConfigs[tokenId];
+        SwapProtectionConfig storage config = _swapProtectionConfigs[tokenId];
         uint128 priceMultiplier = zeroForOne ? config.sqrtPriceMultiplier0 : config.sqrtPriceMultiplier1;
 
         uint160 sqrtPriceLimitX96;

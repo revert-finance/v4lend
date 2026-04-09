@@ -25,6 +25,7 @@ import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActi
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -45,6 +46,7 @@ contract V4VaultHookTest is V4ForkTestBase {
     InterestRateModel interestRateModel;
     RevertHook revertHook;
     HookFeeController feeController;
+    HookRouteController routeController;
     LiquidityCalculator liquidityCalculator;
 
     function setUp() public override {
@@ -86,13 +88,16 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         // Deploy RevertHook action targets
         feeController = new HookFeeController(hookFlags, address(this), 200, 200);
+        routeController = new HookRouteController(hookFlags);
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
         RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, swapActions);
+            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, swapActions);
+            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
         RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(permit2, v4Oracle, liquidityCalculator, feeController, swapActions);
+            new RevertHookAutoLendActions(
+                permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
+            );
 
         bytes memory constructorArgs = abi.encode(
             address(this),
@@ -1450,7 +1455,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         vm.recordLogs();
         vm.startPrank(WHALE_ACCOUNT);
         IERC721(address(positionManager)).setApprovalForAll(address(revertHook), true);
-        revertHook.setGeneralConfig(tokenId, 0, 0, IHooks(address(0)), 10000, 10000);
+        revertHook.setSwapProtectionConfig(tokenId, 10000, 10000);
         revertHook.setPositionConfig(
             tokenId,
             RevertHookState.PositionConfig({
@@ -2549,8 +2554,8 @@ contract V4VaultHookTest is V4ForkTestBase {
         _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
         uint128 liquidityBefore = positionManager.getPositionLiquidity(hookedTokenId);
 
-        vm.prank(WHALE_ACCOUNT);
-        revertHook.setGeneralConfig(hookedTokenId, 123, hookedPoolKey.tickSpacing, IHooks(address(0)), 0, 0);
+        routeController.setRoute(address(usdc), address(weth), 123, hookedPoolKey.tickSpacing, IHooks(address(0)));
+        routeController.setRoute(address(weth), address(usdc), 123, hookedPoolKey.tickSpacing, IHooks(address(0)));
 
         _configurePositionForAutoLeverage(hookedTokenId, 5000);
         _alignLoanToTargetBps(hookedTokenId, 3500);

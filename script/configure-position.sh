@@ -47,11 +47,9 @@ AUTO_RANGE_UPPER_DELTA="0"
 AUTO_LEND_TOLERANCE_TICK="0"
 AUTO_LEVERAGE_TARGET_BPS="0"
 
-# ==================== General Configuration ====================
-# GeneralConfig for swap pool settings (optional, set to 0 to use same pool)
-SWAP_POOL_FEE="0"                  # 0 = use same pool
-SWAP_POOL_TICK_SPACING="0"         # 0 = use same pool
-SWAP_POOL_HOOKS="0x0000000000000000000000000000000000000000"
+# ==================== Swap Protection Configuration ====================
+# Swap routes are protocol-managed in HookRouteController and are no longer configured per position.
+# If you are the protocol admin and need to set a route, do that separately on HookRouteController.
 MAX_PRICE_IMPACT_BPS_0="100"       # 1% max slippage for token0->token1 swaps
 MAX_PRICE_IMPACT_BPS_1="100"       # 1% max slippage for token1->token0 swaps
 
@@ -80,27 +78,22 @@ if [ -z "$PRIVATE_KEY" ]; then
     exit 1
 fi
 
-print_header "Step 1: Set General Config (optional)"
+print_header "Step 1: Set Swap Protection Config"
 
-echo "Setting general config for token $TOKEN_ID..."
-echo "  Swap Pool Fee: $SWAP_POOL_FEE"
-echo "  Swap Pool Tick Spacing: $SWAP_POOL_TICK_SPACING"
+echo "Setting swap protection config for token $TOKEN_ID..."
 echo "  Max Price Impact (token0->token1): ${MAX_PRICE_IMPACT_BPS_0} bps"
 echo "  Max Price Impact (token1->token0): ${MAX_PRICE_IMPACT_BPS_1} bps"
 
-# setGeneralConfig(uint256 tokenId, uint24 swapPoolFee, int24 swapPoolTickSpacing, address swapPoolHooks, uint32 maxPriceImpactBps0, uint32 maxPriceImpactBps1)
+# setSwapProtectionConfig(uint256 tokenId, uint32 maxPriceImpactBps0, uint32 maxPriceImpactBps1)
 cast send "$REVERT_HOOK" \
-    "setGeneralConfig(uint256,uint24,int24,address,uint32,uint32)" \
+    "setSwapProtectionConfig(uint256,uint32,uint32)" \
     "$TOKEN_ID" \
-    "$SWAP_POOL_FEE" \
-    "$SWAP_POOL_TICK_SPACING" \
-    "$SWAP_POOL_HOOKS" \
     "$MAX_PRICE_IMPACT_BPS_0" \
     "$MAX_PRICE_IMPACT_BPS_1" \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
-echo "General config set successfully!"
+echo "Swap protection config set successfully!"
 
 print_header "Step 2: Set Position Config"
 
