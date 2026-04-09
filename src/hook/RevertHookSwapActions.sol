@@ -9,34 +9,22 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
-import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
-import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
+import {RevertHookState} from "./RevertHookState.sol";
 
 /// @title RevertHookSwapActions
 /// @notice Delegatecall helper for hook-managed swaps and swap-fee settlement
-contract RevertHookSwapActions is RevertHookLookupBase {
+contract RevertHookSwapActions is RevertHookState {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
-    IPositionManager internal immutable positionManager;
     IPoolManager internal immutable poolManager;
     IHookFeeController internal immutable hookFeeController;
 
-    constructor(IV4Oracle _v4Oracle, IHookFeeController _hookFeeController) {
-        positionManager = _v4Oracle.positionManager();
-        poolManager = _v4Oracle.poolManager();
+    constructor(IPoolManager _poolManager, IHookFeeController _hookFeeController) {
+        poolManager = _poolManager;
         hookFeeController = _hookFeeController;
-    }
-
-    function _positionManagerRef() internal view override returns (IPositionManager) {
-        return positionManager;
-    }
-
-    function _poolManagerRef() internal view override returns (IPoolManager) {
-        return poolManager;
     }
 
     function executeSwap(PoolKey memory poolKey, bool zeroForOne, uint256 amountIn, uint256 tokenId, Mode mode)

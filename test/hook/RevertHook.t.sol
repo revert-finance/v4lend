@@ -32,6 +32,7 @@ import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol"
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
+import {HookOwnedControllerBase} from "src/hook/HookOwnedControllerBase.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
@@ -104,7 +105,7 @@ contract RevertHookTest is BaseTest {
         liquidityCalculator = new LiquidityCalculator();
         feeController = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
         routeController = new HookRouteController(flags);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
 
         // Deploy RevertHook action targets
         RevertHookPositionActions positionActions =
@@ -117,14 +118,7 @@ contract RevertHookTest is BaseTest {
             );
 
         bytes memory constructorArgs = abi.encode(
-            address(this),
-            permit2,
-            v4Oracle,
-            liquidityCalculator,
-            feeController,
-            positionActions,
-            autoLeverageActions,
-            autoLendActions
+            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(payable(flags));
@@ -2457,15 +2451,15 @@ contract RevertHookTest is BaseTest {
         address notOwner = makeAddr("notOwner");
 
         vm.prank(notOwner);
-        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         feeController.setLpFeeBps(123);
 
         vm.prank(notOwner);
-        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         feeController.setAutoLendFeeBps(456);
 
         vm.prank(notOwner);
-        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         feeController.setProtocolFeeRecipient(makeAddr("feeRecipient"));
 
         vm.prank(notOwner);
@@ -2526,7 +2520,7 @@ contract RevertHookTest is BaseTest {
         hook.transferOwnership(newOwner);
         assertEq(hook.owner(), newOwner, "ownership should transfer");
 
-        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         feeController.setLpFeeBps(123);
 
         vm.prank(newOwner);
@@ -2538,7 +2532,7 @@ contract RevertHookTest is BaseTest {
         assertEq(hook.owner(), address(0), "ownership should be cleared");
 
         vm.prank(newOwner);
-        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         feeController.setProtocolFeeRecipient(makeAddr("recipientAfterRenounce"));
     }
 

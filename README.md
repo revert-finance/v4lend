@@ -279,18 +279,25 @@ Relevant admin calls:
 
 ### Hook / automation configuration is required for
 
-- protocol fee parameters,
+- protocol fee controller parameters,
+- protocol-managed swap routes,
 - oracle-distance limits,
 - minimum position value,
 - per-position automation mode settings,
+- per-position swap protection settings,
 - auto-lend token-to-vault routing.
 
 Relevant admin calls:
 
-- `RevertHook.setGeneralConfig(...)`
+- `HookFeeController.setProtocolFeeRecipient(...)`
+- `HookFeeController.setLpFeeBps(...)`
+- `HookFeeController.setAutoLendFeeBps(...)`
+- `HookFeeController.setDefaultSwapFeeBps(...)`
+- `HookFeeController.setPoolOverrideSwapFeeBps(...)`
+- `HookRouteController.setRoute(...)`
+- `HookRouteController.clearRoute(...)`
+- `RevertHook.setSwapProtectionConfig(...)`
 - `RevertHook.setPositionConfig(...)`
-- `RevertHook.setProtocolFeeBps(...)`
-- `RevertHook.setProtocolFeeRecipient(...)`
 - `RevertHook.setMaxTicksFromOracle(...)`
 - `RevertHook.setMinPositionValueNative(...)`
 - `RevertHook.setAutoLendVault(...)`

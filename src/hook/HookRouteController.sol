@@ -4,13 +4,9 @@ pragma solidity ^0.8.30;
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
+import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
 
-interface IRouteHookOwner {
-    function owner() external view returns (address);
-}
-
-contract HookRouteController is IHookRouteController {
-    error Unauthorized();
+contract HookRouteController is HookOwnedControllerBase, IHookRouteController {
     error InvalidConfig();
 
     event SetRoute(address indexed tokenIn, address indexed tokenOut, uint24 fee, int24 tickSpacing, IHooks hooks);
@@ -23,13 +19,9 @@ contract HookRouteController is IHookRouteController {
         bool hasRoute;
     }
 
-    address public immutable hook;
-
     mapping(address tokenIn => mapping(address tokenOut => Route routeConfig)) internal _routes;
 
-    constructor(address hook_) {
-        hook = hook_;
-    }
+    constructor(address hook_) HookOwnedControllerBase(hook_) {}
 
     function route(address tokenIn, address tokenOut)
         external
@@ -58,11 +50,5 @@ contract HookRouteController is IHookRouteController {
 
         delete _routes[tokenIn][tokenOut];
         emit ClearRoute(tokenIn, tokenOut);
-    }
-
-    function _checkOwner() internal view {
-        if (msg.sender != IRouteHookOwner(hook).owner()) {
-            revert Unauthorized();
-        }
     }
 }

@@ -6,6 +6,7 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {RevertHookState} from "src/hook/RevertHookState.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookOwnedControllerBase} from "src/hook/HookOwnedControllerBase.sol";
 
 contract HookOwnerMock {
     address public owner;
@@ -34,7 +35,7 @@ contract HookFeeControllerTest is Test {
     }
 
     function test_OnlyCurrentHookOwnerCanConfigure() public {
-        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         controller.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 100);
 
         vm.prank(OWNER);
@@ -49,7 +50,7 @@ contract HookFeeControllerTest is Test {
         assertEq(controller.lpFeeBps(), 250);
 
         vm.prank(OWNER);
-        vm.expectRevert(HookFeeController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         controller.setLpFeeBps(260);
     }
 

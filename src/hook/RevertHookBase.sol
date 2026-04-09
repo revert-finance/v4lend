@@ -7,11 +7,9 @@ import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockC
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
-import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
@@ -22,11 +20,9 @@ import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 /// @title RevertHookBase
 /// @notice Hook-only shared base for constructor wiring, common lookups, and delegatecall helpers
 abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallback {
-    IPermit2 internal immutable permit2;
     IPositionManager internal immutable positionManager;
     IWETH9 internal immutable weth;
     IV4Oracle internal immutable v4Oracle;
-    ILiquidityCalculator internal immutable liquidityCalculator;
     IHookFeeController internal immutable hookFeeController;
 
     RevertHookPositionActions internal immutable positionActions;
@@ -35,9 +31,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
 
     constructor(
         address owner_,
-        IPermit2 _permit2,
         IV4Oracle _v4Oracle,
-        ILiquidityCalculator _liquidityCalculator,
         IHookFeeController _hookFeeController,
         RevertHookPositionActions _positionActions,
         RevertHookAutoLeverageActions _autoLeverageActions,
@@ -49,12 +43,10 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
 
         _transferOwnership(owner_);
 
-        permit2 = _permit2;
         IPositionManager positionManager_ = _v4Oracle.positionManager();
         positionManager = positionManager_;
         weth = NativeWrapper(payable(address(positionManager_))).WETH9();
         v4Oracle = _v4Oracle;
-        liquidityCalculator = _liquidityCalculator;
         hookFeeController = _hookFeeController;
         positionActions = _positionActions;
         autoLeverageActions = _autoLeverageActions;

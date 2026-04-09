@@ -117,7 +117,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         liquidityCalculator = new LiquidityCalculator();
         feeController = new HookFeeController(flags, makeAddr("protocolFeeRecipient"), 200, 200);
         routeController = new HookRouteController(flags);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
 
         RevertHookPositionActions positionActions =
             new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
@@ -129,14 +129,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
             );
 
         bytes memory constructorArgs = abi.encode(
-            address(this),
-            permit2,
-            v4Oracle,
-            liquidityCalculator,
-            feeController,
-            positionActions,
-            autoLeverageActions,
-            autoLendActions
+            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(payable(flags));

@@ -192,9 +192,7 @@ contract DeployArbitrum is Script {
 
         bytes memory constructorArgs = abi.encode(
             deployer,
-            IPermit2(PERMIT2),
             oracle,
-            ILiquidityCalculator(liquidityCalculator),
             HookFeeController(predictedFeeController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
@@ -215,7 +213,7 @@ contract DeployArbitrum is Script {
         HookRouteController routeController = new HookRouteController(expectedHookAddress);
         require(address(routeController) == predictedRouteController, "Route controller address mismatch");
         console.log("  HookRouteController deployed at:", address(routeController));
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(oracle, feeController);
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(oracle.poolManager(), feeController);
         require(address(swapActions) == predictedSwapActions, "Swap actions address mismatch");
         console.log("  RevertHookSwapActions deployed at:", address(swapActions));
 
@@ -243,9 +241,7 @@ contract DeployArbitrum is Script {
 
         RevertHook revertHook = new RevertHook{salt: salt}(
             deployer,
-            IPermit2(PERMIT2),
             oracle,
-            ILiquidityCalculator(liquidityCalculator),
             feeController,
             positionActions,
             autoLeverageActions,

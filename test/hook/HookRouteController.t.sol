@@ -6,6 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 import {HookRouteController} from "src/hook/HookRouteController.sol";
+import {HookOwnedControllerBase} from "src/hook/HookOwnedControllerBase.sol";
 
 contract RouteHookOwnerMock {
     address public owner;
@@ -34,7 +35,7 @@ contract HookRouteControllerTest is Test {
     }
 
     function test_OnlyCurrentHookOwnerCanConfigure() public {
-        vm.expectRevert(HookRouteController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         controller.setRoute(TOKEN0, TOKEN1, 3000, 60, IHooks(address(0xBEEF)));
 
         vm.prank(OWNER);
@@ -52,7 +53,7 @@ contract HookRouteControllerTest is Test {
         controller.clearRoute(TOKEN0, TOKEN1);
 
         vm.prank(OWNER);
-        vm.expectRevert(HookRouteController.Unauthorized.selector);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         controller.setRoute(TOKEN0, TOKEN1, 3000, 60, IHooks(address(0xBEEF)));
     }
 

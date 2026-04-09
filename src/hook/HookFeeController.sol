@@ -5,13 +5,9 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {RevertHookState} from "./RevertHookState.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
+import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
 
-interface IHookOwner {
-    function owner() external view returns (address);
-}
-
-contract HookFeeController is IHookFeeController {
-    error Unauthorized();
+contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
     error InvalidConfig();
 
     event SetProtocolFeeRecipient(address protocolFeeRecipient);
@@ -26,16 +22,15 @@ contract HookFeeController is IHookFeeController {
         bool hasOverride;
     }
 
-    address public immutable hook;
-
     address internal _protocolFeeRecipient;
     uint16 internal _lpFeeBps;
     uint16 internal _autoLendFeeBps;
     mapping(uint8 mode => uint16 feeBps) internal _defaultSwapFeeBps;
     mapping(PoolId swapPoolId => mapping(uint8 mode => PoolOverride poolOverride)) internal _poolOverrides;
 
-    constructor(address hook_, address protocolFeeRecipient_, uint16 lpFeeBps_, uint16 autoLendFeeBps_) {
-        hook = hook_;
+    constructor(address hook_, address protocolFeeRecipient_, uint16 lpFeeBps_, uint16 autoLendFeeBps_)
+        HookOwnedControllerBase(hook_)
+    {
         _validateBps(lpFeeBps_);
         _validateBps(autoLendFeeBps_);
         _protocolFeeRecipient = protocolFeeRecipient_;
@@ -104,13 +99,6 @@ contract HookFeeController is IHookFeeController {
         delete _poolOverrides[swapPoolId][mode];
         emit ClearPoolOverrideSwapFeeBps(swapPoolId, mode);
     }
-
-    function _checkOwner() internal view {
-        if (msg.sender != IHookOwner(hook).owner()) {
-            revert Unauthorized();
-        }
-    }
-
     function _validateSwapConfig(uint8 mode, uint16 newFeeBps) internal pure {
         _validateSwapMode(mode);
         _validateBps(newFeeBps);

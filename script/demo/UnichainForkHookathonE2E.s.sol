@@ -170,9 +170,7 @@ contract UnichainForkHookathonE2E is Script {
 
         bytes memory constructorArgs = abi.encode(
             deployer,
-            PERMIT2,
             deployment.oracle,
-            ILiquidityCalculator(deployment.liquidityCalculator),
             HookFeeController(predictedFeeController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
@@ -186,7 +184,8 @@ contract UnichainForkHookathonE2E is Script {
         require(address(feeController) == predictedFeeController, "Demo: fee controller address mismatch");
         deployment.routeController = new HookRouteController(expectedHookAddress);
         require(address(deployment.routeController) == predictedRouteController, "Demo: route controller address mismatch");
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(deployment.oracle, feeController);
+        RevertHookSwapActions swapActions =
+            new RevertHookSwapActions(deployment.oracle.poolManager(), feeController);
         require(address(swapActions) == predictedSwapActions, "Demo: swap actions address mismatch");
 
         deployment.positionActions = new RevertHookPositionActions(
@@ -213,9 +212,7 @@ contract UnichainForkHookathonE2E is Script {
         );
         deployment.revertHook = new RevertHook{salt: salt}(
             deployer,
-            PERMIT2,
             deployment.oracle,
-            ILiquidityCalculator(deployment.liquidityCalculator),
             feeController,
             deployment.positionActions,
             deployment.autoLeverageActions,

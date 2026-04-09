@@ -2,6 +2,7 @@
 
 # Configure a position on RevertHook for Unichain
 # Usage: ./script/configure-position.sh
+# For protocol-managed routes, use ./script/configure-route.sh separately.
 
 set -e
 

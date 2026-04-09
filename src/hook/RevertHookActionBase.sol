@@ -86,21 +86,30 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
     // ==================== Pool Key Helpers ====================
 
-    /// @notice Gets the protocol-managed swap pool key for a direction (falls back to the position pool)
-    function _getSwapPoolKey(PoolKey memory poolKey, bool zeroForOne) internal view returns (PoolKey memory) {
+    /// @notice Resolves the protocol-managed swap pool for a direction and reports whether it matches the source pool
+    function _resolveSwapPool(PoolKey memory poolKey, bool zeroForOne)
+        internal
+        view
+        returns (PoolKey memory swapPool, bool isSamePool)
+    {
         address tokenIn = Currency.unwrap(zeroForOne ? poolKey.currency0 : poolKey.currency1);
         address tokenOut = Currency.unwrap(zeroForOne ? poolKey.currency1 : poolKey.currency0);
         (bool hasRoute, uint24 fee, int24 tickSpacing, IHooks hooks) = hookRouteController.route(tokenIn, tokenOut);
         if (!hasRoute) {
-            return poolKey;
+            return (poolKey, true);
         }
-        return PoolKey({
+        swapPool = PoolKey({
             currency0: poolKey.currency0,
             currency1: poolKey.currency1,
             fee: fee,
             tickSpacing: tickSpacing,
             hooks: hooks
         });
+        isSamePool = _isSamePoolConfig(poolKey, swapPool);
+    }
+
+    function _isSamePoolConfig(PoolKey memory lhs, PoolKey memory rhs) internal pure returns (bool) {
+        return lhs.hooks == rhs.hooks && lhs.fee == rhs.fee && lhs.tickSpacing == rhs.tickSpacing;
     }
 
     // ==================== Position Config Helpers ====================
@@ -143,9 +152,9 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
 
         bool zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
-        PoolKey memory swapPool = _getSwapPoolKey(poolKey, zeroForOne);
+        (PoolKey memory swapPool, bool isSamePool) = _resolveSwapPool(poolKey, zeroForOne);
 
-        if (swapPool.hooks == poolKey.hooks && swapPool.fee == poolKey.fee && swapPool.tickSpacing == poolKey.tickSpacing) {
+        if (isSamePool) {
             (swapInput,, zeroForOne,) = liquidityCalculator.calculateSamePool(
                 ILiquidityCalculator.V4PoolInfo({
                     poolMgr: poolManager,
@@ -164,7 +173,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         }
 
         if (swapInput > 0) {
-            return _applyBalanceDelta(_executeSwap(poolKey, zeroForOne, swapInput, tokenId, mode), amount0, amount1);
+            return _applyBalanceDelta(_executeSwapResolved(swapPool, zeroForOne, swapInput, tokenId, mode), amount0, amount1);
         }
         return (amount0, amount1);
     }
@@ -199,7 +208,17 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 tokenId,
         Mode mode
     ) internal returns (BalanceDelta delta) {
-        PoolKey memory swapPool = _getSwapPoolKey(poolKey, zeroForOne);
+        (PoolKey memory swapPool,) = _resolveSwapPool(poolKey, zeroForOne);
+        return _executeSwapResolved(swapPool, zeroForOne, amountIn, tokenId, mode);
+    }
+
+    function _executeSwapResolved(
+        PoolKey memory swapPool,
+        bool zeroForOne,
+        uint256 amountIn,
+        uint256 tokenId,
+        Mode mode
+    ) internal returns (BalanceDelta delta) {
         (bool success, bytes memory returndata) = address(swapActions).delegatecall(
             abi.encodeCall(RevertHookSwapActions.executeSwap, (swapPool, zeroForOne, amountIn, tokenId, mode))
         );

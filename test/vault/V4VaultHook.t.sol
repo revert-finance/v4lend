@@ -89,7 +89,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Deploy RevertHook action targets
         feeController = new HookFeeController(hookFlags, address(this), 200, 200);
         routeController = new HookRouteController(hookFlags);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle, feeController);
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
         RevertHookPositionActions positionActions =
             new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
         RevertHookAutoLeverageActions autoLeverageActions =
@@ -100,14 +100,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             );
 
         bytes memory constructorArgs = abi.encode(
-            address(this),
-            permit2,
-            v4Oracle,
-            liquidityCalculator,
-            feeController,
-            positionActions,
-            autoLeverageActions,
-            autoLendActions
+            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
         revertHook = RevertHook(payable(hookFlags));
