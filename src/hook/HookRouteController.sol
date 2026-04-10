@@ -34,7 +34,7 @@ contract HookRouteController is HookOwnedControllerBase, IHookRouteController {
 
     function setRoute(address tokenIn, address tokenOut, uint24 fee, int24 tickSpacing, IHooks hooks) external {
         _checkOwner();
-        if (tokenIn == tokenOut || tickSpacing == 0) {
+        if (tokenIn == tokenOut || tickSpacing <= 0) {
             revert InvalidConfig();
         }
 

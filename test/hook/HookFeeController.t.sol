@@ -141,6 +141,15 @@ contract HookFeeControllerTest is Test {
         assertEq(controller.autoLendFeeBps(), 456);
     }
 
+    function test_RevertWhenProtocolFeeRecipientIsZero() public {
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        new HookFeeController(address(hook), address(0), 200, 300);
+
+        vm.prank(OWNER);
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setProtocolFeeRecipient(address(0));
+    }
+
     function test_RevertWhenBpsAboveMax() public {
         vm.startPrank(OWNER);
         vm.expectRevert(HookFeeController.InvalidConfig.selector);

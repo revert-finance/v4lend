@@ -59,6 +59,9 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
 
     /// @notice Owner controlled function to set protocol fee recipient
     function setProtocolFeeRecipient(address newProtocolFeeRecipient) public onlyOwner {
+        if (newProtocolFeeRecipient == address(0)) {
+            revert InvalidConfig();
+        }
         emit ProtocolFeeRecipientChanged(newProtocolFeeRecipient);
         _protocolFeeRecipient = newProtocolFeeRecipient;
     }

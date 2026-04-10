@@ -103,6 +103,9 @@ contract HookRouteControllerTest is Test {
         controller.setRoute(TOKEN0, TOKEN1, 3000, 0, IHooks(address(0xBEEF)));
 
         vm.expectRevert(HookRouteController.InvalidConfig.selector);
+        controller.setRoute(TOKEN0, TOKEN1, 3000, -60, IHooks(address(0xBEEF)));
+
+        vm.expectRevert(HookRouteController.InvalidConfig.selector);
         controller.clearRoute(TOKEN1, TOKEN1);
 
         vm.stopPrank();

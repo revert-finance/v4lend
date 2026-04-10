@@ -33,6 +33,7 @@ contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
     {
         _validateBps(lpFeeBps_);
         _validateBps(autoLendFeeBps_);
+        _validateProtocolFeeRecipient(protocolFeeRecipient_);
         _protocolFeeRecipient = protocolFeeRecipient_;
         _lpFeeBps = lpFeeBps_;
         _autoLendFeeBps = autoLendFeeBps_;
@@ -61,6 +62,7 @@ contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
 
     function setProtocolFeeRecipient(address newProtocolFeeRecipient) external {
         _checkOwner();
+        _validateProtocolFeeRecipient(newProtocolFeeRecipient);
         _protocolFeeRecipient = newProtocolFeeRecipient;
         emit SetProtocolFeeRecipient(newProtocolFeeRecipient);
     }
@@ -112,6 +114,12 @@ contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
 
     function _validateBps(uint16 newFeeBps) internal pure {
         if (newFeeBps > 10000) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _validateProtocolFeeRecipient(address newProtocolFeeRecipient) internal pure {
+        if (newProtocolFeeRecipient == address(0)) {
             revert InvalidConfig();
         }
     }

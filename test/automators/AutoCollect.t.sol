@@ -81,6 +81,16 @@ contract AutoCollectTest is AutomatorTestBase {
         assertEq(autoCollect.protocolFeeRecipient(), newRecipient, "protocol fee recipient should update");
     }
 
+    function test_RevertWhenProtocolFeeRecipientIsZero() public {
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        autoCollect.setProtocolFeeRecipient(address(0));
+    }
+
+    function test_RevertWhenConstructorProtocolFeeRecipientIsZero() public {
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        new AutoCollect(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, address(0));
+    }
+
     function test_RevertWhenNonOwnerSetsProtocolFeeRecipient() public {
         vm.prank(makeAddr("notOwner"));
         vm.expectRevert();
