@@ -550,6 +550,43 @@ contract AutoCollectTest is AutomatorTestBase {
         assertGt(protocolFeeRecipient.balance, recipientEthBefore, "recipient should receive ETH protocol fees");
     }
 
+    function test_ProtocolFeesInETHIgnorePreDustedNativeBalance() public {
+        PoolKey memory poolKey = _createEthPool();
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
+
+        _generateFeesEth(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCollect), tokenId);
+
+        uint64 maxReward = type(uint64).max;
+        vm.prank(WHALE_ACCOUNT);
+        autoCollect.configToken(tokenId, _collectConfig(maxReward, 10000, 10000, 0, 0));
+
+        uint256 dustAmount = 0.25 ether;
+        vm.deal(address(autoCollect), dustAmount);
+
+        AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCollect.CollectMode.AUTO_COLLECT,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        uint256 recipientEthBefore = protocolFeeRecipient.balance;
+        vm.prank(operator);
+        autoCollect.execute(params);
+
+        assertEq(address(autoCollect).balance, dustAmount, "pre-dusted ETH should not be attributed to protocol fees");
+        assertEq(usdc.balanceOf(address(autoCollect)), 0, "contract should not retain USDC after native fee send");
+        assertGt(protocolFeeRecipient.balance, recipientEthBefore, "recipient should still receive native protocol fees");
+    }
+
     function test_ProtocolFeesAreSentToRecipientInTokens() public {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
