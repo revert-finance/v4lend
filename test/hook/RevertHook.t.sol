@@ -2017,6 +2017,127 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1");
     }
 
+    function testAutoLend_WithdrawSendsProtocolFeesToRecipient() public {
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+
+        (,,, address autoLendToken, uint256 shares, uint256 autoLendAmount,,) = hook.positionStates(autolendTokenId);
+        assertEq(autoLendToken, Currency.unwrap(currency0), "Position should be parked in vault0 before withdraw");
+        assertGt(shares, 0, "Position should hold auto-lend shares before withdraw");
+
+        uint256 donatedYield = autoLendAmount + 1;
+        IERC20(Currency.unwrap(currency0)).transfer(address(vault0), donatedYield);
+        vault0.simulatePositiveYield(10000);
+
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 20e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, autolendTokenId);
+        assertTrue(feeEvent.found, "withdraw should emit protocol fee event");
+        assertEq(feeEvent.recipient, protocolFeeRecipient, "withdraw protocol fee recipient mismatch");
+        assertGt(feeEvent.amount0, 0, "withdraw should charge token0 auto-lend fee");
+        assertEq(feeEvent.amount1, 0, "withdraw should not charge token1 auto-lend fee");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            feeEvent.amount0,
+            "recipient token0 balance should match the fee event"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            0,
+            "recipient should not receive token1 fees on token0 withdraw"
+        );
+        _verifyNoLeftoverBalances("auto-lend withdraw");
+    }
+
+    function testDirectAutoLendForceExit_SendsProtocolFeesToRecipient() public {
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+
+        (,,, address autoLendToken, uint256 shares, uint256 autoLendAmount,,) = hook.positionStates(autolendTokenId);
+        assertEq(autoLendToken, Currency.unwrap(currency0), "Position should be parked in vault0 before exit");
+        assertGt(shares, 0, "Position should hold auto-lend shares before exit");
+
+        uint256 donatedYield = autoLendAmount + 1;
+        IERC20(Currency.unwrap(currency0)).transfer(address(vault0), donatedYield);
+        vault0.simulatePositiveYield(10000);
+
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+
+        vm.recordLogs();
+        hook.autoLendForceExit(autolendTokenId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, autolendTokenId);
+        assertTrue(feeEvent.found, "force exit should emit protocol fee event");
+        assertEq(feeEvent.recipient, protocolFeeRecipient, "force exit protocol fee recipient mismatch");
+        assertGt(feeEvent.amount0, 0, "force exit should charge token0 auto-lend fee");
+        assertEq(feeEvent.amount1, 0, "force exit should not charge token1 auto-lend fee");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            feeEvent.amount0,
+            "recipient token0 balance should match the force-exit fee event"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            0,
+            "recipient should not receive token1 fees on token0 force exit"
+        );
+        _verifyNoLeftoverBalances("auto-lend force exit");
+    }
+
+    function testAutoLend_Token1WithdrawSendsProtocolFeesToRecipient() public {
+        uint256 autolendTokenId = _createActiveAutoLendPositionToken1();
+
+        (,,, address autoLendToken, uint256 shares, uint256 autoLendAmount,,) = hook.positionStates(autolendTokenId);
+        assertEq(autoLendToken, Currency.unwrap(currency1), "Position should be parked in vault1 before withdraw");
+        assertGt(shares, 0, "Position should hold token1 auto-lend shares before withdraw");
+
+        uint256 donatedYield = autoLendAmount + 1;
+        IERC20(Currency.unwrap(currency1)).transfer(address(vault1), donatedYield);
+        vault1.simulatePositiveYield(10000);
+
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 20e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, autolendTokenId);
+        assertTrue(feeEvent.found, "token1 withdraw should emit protocol fee event");
+        assertEq(feeEvent.recipient, protocolFeeRecipient, "token1 withdraw protocol fee recipient mismatch");
+        assertEq(feeEvent.amount0, 0, "token1 withdraw should not charge token0 auto-lend fee");
+        assertGt(feeEvent.amount1, 0, "token1 withdraw should charge token1 auto-lend fee");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            0,
+            "recipient should not receive token0 fees on token1 withdraw"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            feeEvent.amount1,
+            "recipient token1 balance should match the fee event"
+        );
+        _verifyNoLeftoverBalances("token1 auto-lend withdraw");
+    }
+
     function testDirectAutoExit_RevertsWhenCalledExternally() public {
         vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
         hook.autoExit(poolKey, token3Id, false);
@@ -2717,6 +2838,68 @@ contract RevertHookTest is BaseTest {
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(autolendTokenId);
         assertEq(autoLendToken, Currency.unwrap(currency0), "Position should lend currency0 after setup");
         assertGt(autoLendShares, 0, "Position should hold auto-lend shares after setup");
+    }
+
+    function _createActiveAutoLendPositionToken1() internal returns (uint256 autolendTokenId) {
+        hook.setMaxTicksFromOracle(1000);
+
+        int24 testTickLower = _getTickLower(tickStart, poolKey.tickSpacing) - poolKey.tickSpacing;
+        int24 testTickUpper = _getTickLower(tickStart, poolKey.tickSpacing) + poolKey.tickSpacing;
+        uint128 liquidityAmount = 50e18;
+
+        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
+            Constants.SQRT_PRICE_1_1,
+            TickMath.getSqrtPriceAtTick(testTickLower),
+            TickMath.getSqrtPriceAtTick(testTickUpper),
+            liquidityAmount
+        );
+
+        (autolendTokenId,) = positionManager.mint(
+            poolKey,
+            testTickLower,
+            testTickUpper,
+            liquidityAmount,
+            amount0Expected + 1,
+            amount1Expected + 1,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        hook.setPositionConfig(
+            autolendTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 60,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 20e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(autolendTokenId);
+        assertEq(autoLendToken, Currency.unwrap(currency1), "Position should lend currency1 after setup");
+        assertGt(autoLendShares, 0, "Position should hold token1 auto-lend shares after setup");
     }
 
     function _assertPositionConfigEq(uint256 tokenId_, RevertHookState.PositionConfig memory expected) internal view {

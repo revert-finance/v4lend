@@ -426,6 +426,58 @@ contract AutoRangeTest is AutomatorTestBase {
         assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), WHALE_ACCOUNT);
     }
 
+    function test_RewardSentToProtocolFeeRecipientInETH() public {
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
+
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: maxReward,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
+
+        uint256 recipientEthBefore = protocolFeeRecipient.balance;
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        assertEq(address(autoRange).balance, 0, "contract should not retain native protocol fees");
+        assertEq(usdc.balanceOf(address(autoRange)), 0, "contract should not retain USDC protocol fees");
+        assertGt(protocolFeeRecipient.balance, recipientEthBefore, "recipient should receive native ETH protocol fees");
+        assertEq(usdc.balanceOf(protocolFeeRecipient), recipientUsdcBefore, "recipient should not receive USDC here");
+    }
+
     function test_ExecuteWithVaultETH() public {
         v4Oracle.setMaxPoolPriceDifference(10000);
 

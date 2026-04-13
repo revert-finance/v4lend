@@ -259,6 +259,55 @@ contract AutoExitTest is AutomatorTestBase {
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Position should be empty");
     }
 
+    function test_ProtocolFeesAreSentToRecipientInTokens() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        uint64 maxReward = type(uint64).max;
+
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: maxReward,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoExit), tokenId);
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
+        uint256 recipientWethBefore = weth.balanceOf(protocolFeeRecipient);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoExit.execute(params);
+
+        assertEq(usdc.balanceOf(address(autoExit)), 0, "contract should not retain USDC protocol fees");
+        assertEq(weth.balanceOf(address(autoExit)), 0, "contract should not retain WETH protocol fees");
+        assertGt(usdc.balanceOf(protocolFeeRecipient), recipientUsdcBefore, "recipient should receive USDC protocol fees");
+        assertEq(weth.balanceOf(protocolFeeRecipient), recipientWethBefore, "recipient should not receive WETH here");
+    }
+
     function test_RevertWhenSwapExceedsMaxSlippage() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);

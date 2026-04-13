@@ -414,6 +414,65 @@ contract AutoLeverageTest is AutomatorTestBase {
         assertLt(debtAfter, debtBefore, "Debt should decrease after ETH leverage down");
     }
 
+    function test_RewardSentToProtocolFeeRecipientInETH() public {
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createFullRangePositionEth(poolKey);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 borrowAmount = collateralValue * 70 / 100;
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, borrowAmount);
+
+        _generateFeesEth(poolKey);
+
+        uint64 maxReward = uint64(Q64 * 50 / 100);
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 3000,
+            rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: 10000,
+            maxRewardX64: maxReward
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        uint256 recipientEthBefore = protocolFeeRecipient.balance;
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: false,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        assertEq(address(autoLeverage).balance, 0, "contract should not retain native protocol fees");
+        assertEq(usdc.balanceOf(address(autoLeverage)), 0, "contract should not retain USDC protocol fees");
+        assertGt(protocolFeeRecipient.balance, recipientEthBefore, "recipient should receive native ETH protocol fees");
+    }
+
     // --- Revert Tests ---
 
     function test_RevertWhenNotReady() public {

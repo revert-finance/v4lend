@@ -225,6 +225,30 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         assertEq(weth.balanceOf(address(hook)), 0, "force exit should not strand WETH in the hook");
     }
 
+    function testAutoLend_ForceExitSendsNativeProtocolFeesInEth() public {
+        _swapExactInputSingleEth(poolKey, true, 2e18, 0);
+
+        (,,, address autoLendToken, uint256 autoLendShares, uint256 autoLendAmount,,) = hook.positionStates(tokenId);
+        assertEq(autoLendToken, address(0), "position should be parked in native auto-lend");
+        assertGt(autoLendShares, 0, "position should hold vault shares before force exit");
+
+        NativeFeeRecipientProbe feeRecipient = new NativeFeeRecipientProbe(hook, weth, tokenId);
+        feeController.setProtocolFeeRecipient(address(feeRecipient));
+
+        uint256 donatedYield = autoLendAmount + 1;
+        weth.deposit{value: donatedYield}();
+        IERC20(address(weth)).transfer(address(wethVault), donatedYield);
+        wethVault.simulatePositiveYield(10000);
+
+        hook.autoLendForceExit(tokenId);
+
+        assertGt(address(feeRecipient).balance, 0, "fee recipient should receive native ETH on force exit");
+        assertEq(feeRecipient.wethBalance(), 0, "fee recipient should not receive WETH on force exit");
+        assertEq(
+            feeRecipient.observedAutoLendShares(), 0, "auto-lend shares should already be cleared during force-exit fee callback"
+        );
+    }
+
     function testAutoLend_WithdrawSendsNativeProtocolFeesInEth() public {
         _swapExactInputSingleEth(poolKey, true, 2e18, 0);
 

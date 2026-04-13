@@ -284,6 +284,41 @@ contract AutoLendTest is AutomatorTestBase {
         assertEq(address(autoLend).balance, 0, "no native ETH should remain in contract");
     }
 
+    function test_DepositProtocolFeesAreSentToRecipient() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        uint64 maxReward = type(uint64).max;
+        _configureAndApprove(tokenId, _defaultConfig(maxReward));
+
+        _generateFees(poolKey);
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
+        uint256 recipientWethBefore = weth.balanceOf(protocolFeeRecipient);
+
+        AutoLend.DepositParams memory depositParams = AutoLend.DepositParams({
+            tokenId: tokenId,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: maxReward
+        });
+
+        vm.prank(operator);
+        autoLend.deposit(depositParams);
+
+        assertEq(usdc.balanceOf(address(autoLend)), 0, "contract should not retain USDC protocol fees");
+        assertEq(weth.balanceOf(address(autoLend)), 0, "contract should not retain WETH protocol fees");
+        assertTrue(
+            usdc.balanceOf(protocolFeeRecipient) > recipientUsdcBefore
+                || weth.balanceOf(protocolFeeRecipient) > recipientWethBefore,
+            "recipient should receive deposit protocol fees"
+        );
+    }
+
     function test_NativeProtocolFeeSendClearsLendStateBeforeCallback() public {
         PoolKey memory poolKey = _createEthPool();
         _createFullRangePositionEth(poolKey);
