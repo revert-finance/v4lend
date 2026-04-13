@@ -1215,6 +1215,117 @@ contract RevertHookTest is BaseTest {
         );
     }
 
+    function testSwapRouting_AutoCollectFallsBackToHookedPoolAfterClearingRoute() public {
+        feeController.setLpFeeBps(0);
+        feeController.setPoolOverrideSwapFeeBps(poolId, uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
+
+        _setBidirectionalRoute(nonHookedPoolKey);
+        routeController.clearRoute(Currency.unwrap(currency0), Currency.unwrap(currency1));
+        routeController.clearRoute(Currency.unwrap(currency1), Currency.unwrap(currency0));
+
+        (bool hasForwardRoute,,, ) = routeController.route(Currency.unwrap(currency0), Currency.unwrap(currency1));
+        (bool hasReverseRoute,,, ) = routeController.route(Currency.unwrap(currency1), Currency.unwrap(currency0));
+        assertFalse(hasForwardRoute, "forward route should be cleared before fallback test");
+        assertFalse(hasReverseRoute, "reverse route should be cleared before fallback test");
+
+        uint128 token2Liquidity = _setupAutoCollectTest(RevertHookState.AutoCollectMode.AUTO_COLLECT);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+
+        PoolId nonHookedPoolId = nonHookedPoolKey.toId();
+        (uint160 hookedSqrtPriceBefore, int24 hookedTickBefore,,) = StateLibrary.getSlot0(poolManager, poolId);
+        (uint160 nonHookedSqrtPriceBefore, int24 nonHookedTickBefore,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+
+        vm.recordLogs();
+        hook.autoCollect(params);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, token2Id);
+        assertTrue(feeEvent.found, "fallback swap should charge fees using the hooked pool override");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            feeEvent.amount0,
+            "fallback currency0 fee balance mismatch"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            feeEvent.amount1,
+            "fallback currency1 fee balance mismatch"
+        );
+
+        (uint160 hookedSqrtPriceAfter, int24 hookedTickAfter,,) = StateLibrary.getSlot0(poolManager, poolId);
+        (uint160 nonHookedSqrtPriceAfter, int24 nonHookedTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+
+        assertTrue(
+            hookedSqrtPriceAfter != hookedSqrtPriceBefore || hookedTickAfter != hookedTickBefore,
+            "fallback should execute the rebalance swap in the hooked pool"
+        );
+        assertEq(nonHookedSqrtPriceAfter, nonHookedSqrtPriceBefore, "non-hooked pool price should stay unchanged");
+        assertEq(nonHookedTickAfter, nonHookedTickBefore, "non-hooked pool tick should stay unchanged");
+        assertGt(positionManager.getPositionLiquidity(token2Id), token2Liquidity, "fallback should still compound");
+    }
+
+    function testSwapRouting_AutoCollectConfiguredHookedPoolRouteExecutesSwap() public {
+        feeController.setLpFeeBps(0);
+        feeController.setPoolOverrideSwapFeeBps(poolId, uint8(RevertHookState.Mode.AUTO_COLLECT), 500);
+
+        _setBidirectionalRoute(poolKey);
+
+        (bool hasForwardRoute, uint24 forwardFee, int24 forwardTickSpacing, IHooks forwardHooks) =
+            routeController.route(Currency.unwrap(currency0), Currency.unwrap(currency1));
+        (bool hasReverseRoute, uint24 reverseFee, int24 reverseTickSpacing, IHooks reverseHooks) =
+            routeController.route(Currency.unwrap(currency1), Currency.unwrap(currency0));
+        assertTrue(hasForwardRoute && hasReverseRoute, "same-pool route should be configured for both directions");
+        assertEq(forwardFee, poolKey.fee, "forward route fee should match the hooked pool");
+        assertEq(reverseFee, poolKey.fee, "reverse route fee should match the hooked pool");
+        assertEq(forwardTickSpacing, poolKey.tickSpacing, "forward route spacing should match the hooked pool");
+        assertEq(reverseTickSpacing, poolKey.tickSpacing, "reverse route spacing should match the hooked pool");
+        assertEq(address(forwardHooks), address(hook), "forward route should point to the hooked pool");
+        assertEq(address(reverseHooks), address(hook), "reverse route should point to the hooked pool");
+
+        uint128 token2Liquidity = _setupAutoCollectTest(RevertHookState.AutoCollectMode.AUTO_COLLECT);
+        BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
+
+        PoolId nonHookedPoolId = nonHookedPoolKey.toId();
+        (uint160 hookedSqrtPriceBefore, int24 hookedTickBefore,,) = StateLibrary.getSlot0(poolManager, poolId);
+        (uint160 nonHookedSqrtPriceBefore, int24 nonHookedTickBefore,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+
+        vm.recordLogs();
+        hook.autoCollect(params);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(logs, token2Id);
+        assertTrue(feeEvent.found, "configured same-pool route should still execute the rebalance swap");
+        assertEq(
+            currency0.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance0,
+            feeEvent.amount0,
+            "same-pool route currency0 fee balance mismatch"
+        );
+        assertEq(
+            currency1.balanceOf(protocolFeeRecipient) - before.protocolFeeRecipientBalance1,
+            feeEvent.amount1,
+            "same-pool route currency1 fee balance mismatch"
+        );
+
+        (uint160 hookedSqrtPriceAfter, int24 hookedTickAfter,,) = StateLibrary.getSlot0(poolManager, poolId);
+        (uint160 nonHookedSqrtPriceAfter, int24 nonHookedTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+
+        assertTrue(
+            hookedSqrtPriceAfter != hookedSqrtPriceBefore || hookedTickAfter != hookedTickBefore,
+            "configured same-pool route should swap in the hooked pool"
+        );
+        assertEq(nonHookedSqrtPriceAfter, nonHookedSqrtPriceBefore, "non-hooked pool price should stay unchanged");
+        assertEq(nonHookedTickAfter, nonHookedTickBefore, "non-hooked pool tick should stay unchanged");
+        assertGt(positionManager.getPositionLiquidity(token2Id), token2Liquidity, "same-pool route should still compound");
+    }
+
     function testSwapFees_AutoRangeUsesAlternateSwapPoolOverride() public {
         feeController.setLpFeeBps(0);
         feeController.setPoolOverrideSwapFeeBps(nonHookedPoolKey.toId(), uint8(RevertHookState.Mode.AUTO_RANGE), 500);
