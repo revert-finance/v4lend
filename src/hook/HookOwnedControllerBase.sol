@@ -6,11 +6,15 @@ interface IHookOwner {
 }
 
 abstract contract HookOwnedControllerBase {
+    error InvalidHook();
     error Unauthorized();
 
     address public immutable hook;
 
     constructor(address hook_) {
+        if (hook_ == address(0)) {
+            revert InvalidHook();
+        }
         hook = hook_;
     }
 

@@ -43,10 +43,24 @@ contract AutoLeverage is Automator {
 
     /// @dev Internal struct to avoid stack-too-deep for fee reuse accounting
     struct ExecuteState {
+        uint256 startBalance0;
+        uint256 startBalance1;
+        uint256 startLendBalance;
         uint256 netFee0;
         uint256 netFee1;
         uint256 protocolFee0;
         uint256 protocolFee1;
+    }
+
+    struct ExecuteContext {
+        PoolKey poolKey;
+        PositionInfo positionInfo;
+        Currency token0;
+        Currency token1;
+        Currency lendToken;
+        uint256 currentDebt;
+        uint256 collateralValue;
+        bool isThirdToken;
     }
 
     struct ExecuteParams {
@@ -132,13 +146,21 @@ contract AutoLeverage is Automator {
             revert InvalidConfig();
         }
 
-        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
-        Currency token0 = poolKey.currency0;
-        Currency token1 = poolKey.currency1;
-        Currency lendToken = Currency.wrap(vault.asset());
-        bool isThirdToken = !(lendToken == token0) && !(lendToken == token1);
+        ExecuteContext memory ctx;
+        (ctx.poolKey, ctx.positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
+        ctx.token0 = ctx.poolKey.currency0;
+        ctx.token1 = ctx.poolKey.currency1;
+        ctx.lendToken = Currency.wrap(vault.asset());
+        ctx.currentDebt = currentDebt;
+        ctx.collateralValue = collateralValue;
+        ctx.isThirdToken = !(ctx.lendToken == ctx.token0) && !(ctx.lendToken == ctx.token1);
 
         ExecuteState memory state;
+        state.startBalance0 = ctx.token0.balanceOfSelf();
+        state.startBalance1 = ctx.token1.balanceOfSelf();
+        if (ctx.isThirdToken) {
+            state.startLendBalance = ctx.lendToken.balanceOfSelf();
+        }
 
         // Collect fees first and reserve protocol fees until the end of execution.
         // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively).
@@ -156,42 +178,35 @@ contract AutoLeverage is Automator {
         // Adjust collateral: deduct only the protocol fee value because net fees are reused.
         {
             uint256 postCollateral;
-            (currentDebt,, postCollateral,,) = vault.loanInfo(params.tokenId);
-            collateralValue = postCollateral + (collateralValue - postCollateral) * (Q64 - params.rewardX64) / Q64;
+            (ctx.currentDebt,, postCollateral,,) = vault.loanInfo(params.tokenId);
+            ctx.collateralValue =
+                postCollateral + (ctx.collateralValue - postCollateral) * (Q64 - params.rewardX64) / Q64;
         }
 
         if (params.leverageUp) {
-            _leverageUp(
-                params, vault, poolKey, positionInfo, token0, token1, lendToken, currentDebt, collateralValue, config, state
-            );
+            _leverageUp(params, vault, config, ctx, state);
         } else {
-            _leverageDown(params, vault, token0, token1, lendToken, currentDebt, collateralValue, config, state);
+            _leverageDown(params, vault, config, ctx, state);
         }
 
         // Return residual lend token when it's a third token.
-        if (isThirdToken) {
-            uint256 lendBalance = lendToken.balanceOfSelf();
+        if (ctx.isThirdToken) {
+            uint256 lendBalance = _availableBalance(ctx.lendToken, state.startLendBalance, 0);
             if (lendBalance > 0) {
-                _transferToken(vault.ownerOf(params.tokenId), lendToken, lendBalance);
+                _transferToken(vault.ownerOf(params.tokenId), ctx.lendToken, lendBalance);
             }
         }
-        _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
+        _sendProtocolFees(ctx.token0, ctx.token1, state.protocolFee0, state.protocolFee1);
 
         (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
-        emit AutoLeverageExecuted(params.tokenId, params.leverageUp, currentDebt, newDebt);
+        emit AutoLeverageExecuted(params.tokenId, params.leverageUp, ctx.currentDebt, newDebt);
     }
 
     function _leverageUp(
         ExecuteParams calldata params,
         IVault vault,
-        PoolKey memory poolKey,
-        PositionInfo positionInfo,
-        Currency token0,
-        Currency token1,
-        Currency lendToken,
-        uint256 currentDebt,
-        uint256 collateralValue,
         PositionConfig memory config,
+        ExecuteContext memory ctx,
         ExecuteState memory state
     ) internal {
         uint256 amount0;
@@ -199,91 +214,88 @@ contract AutoLeverage is Automator {
 
         {
             uint256 borrowAmount =
-                AutoLeverageLib.borrowAmountToTarget(currentDebt, collateralValue, config.targetLeverageBps);
+                AutoLeverageLib.borrowAmountToTarget(ctx.currentDebt, ctx.collateralValue, config.targetLeverageBps);
             if (borrowAmount == 0) revert NotReady();
 
             // Borrow from vault
             vault.borrow(params.tokenId, borrowAmount);
 
-            amount0 = _availableBalance(token0, state.protocolFee0);
-            amount1 = _availableBalance(token1, state.protocolFee1);
+            amount0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
+            amount1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
         }
 
         // Swap borrowed lend token to position tokens
         if (params.amountIn0 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(lendToken, token0, params.amountIn0, params.amountOut0Min, params.swapData0),
+                RouterSwapParams(ctx.lendToken, ctx.token0, params.amountIn0, params.amountOut0Min, params.swapData0),
                 config.maxSwapSlippageBps
             );
-            if (lendToken == token1) amount1 -= amountIn;
+            if (ctx.lendToken == ctx.token1) amount1 -= amountIn;
             amount0 += amountOut;
         }
         if (params.amountIn1 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(lendToken, token1, params.amountIn1, params.amountOut1Min, params.swapData1),
+                RouterSwapParams(ctx.lendToken, ctx.token1, params.amountIn1, params.amountOut1Min, params.swapData1),
                 config.maxSwapSlippageBps
             );
-            if (lendToken == token0) amount0 -= amountIn;
+            if (ctx.lendToken == ctx.token0) amount0 -= amountIn;
             amount1 += amountOut;
         }
 
         // Increase liquidity
-        _handleApproval(permit2, token0, amount0);
-        _handleApproval(permit2, token1, amount1);
+        _handleApproval(permit2, ctx.token0, amount0);
+        _handleApproval(permit2, ctx.token1, amount1);
 
         {
             uint128 liquidity = _calculateLiquidity(
-                positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1
+                ctx.positionInfo.tickLower(), ctx.positionInfo.tickUpper(), ctx.poolKey, amount0, amount1
             );
 
             // Track balances before increase to check minimum amounts added
-            uint256 balanceBeforeAdd0 = token0.balanceOfSelf();
-            uint256 balanceBeforeAdd1 = token1.balanceOfSelf();
+            uint256 balanceBeforeAdd0 = ctx.token0.balanceOfSelf();
+            uint256 balanceBeforeAdd1 = ctx.token1.balanceOfSelf();
 
             (bytes memory actions, bytes[] memory paramsArray) =
-                _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
+                _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), ctx.token0, ctx.token1);
             paramsArray[0] = abi.encode(
                 params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.increaseLiquidityHookData
             );
 
-            positionManager.modifyLiquidities{value: _getNativeAmount(token0, token1, amount0, amount1)}(
+            positionManager.modifyLiquidities{value: _getNativeAmount(ctx.token0, ctx.token1, amount0, amount1)}(
                 abi.encode(actions, paramsArray), params.deadline
             );
 
             // Enforce minimum amounts added
-            uint256 added0 = balanceBeforeAdd0 - token0.balanceOfSelf();
-            uint256 added1 = balanceBeforeAdd1 - token1.balanceOfSelf();
+            uint256 added0 = balanceBeforeAdd0 - ctx.token0.balanceOfSelf();
+            uint256 added1 = balanceBeforeAdd1 - ctx.token1.balanceOfSelf();
             if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
                 revert InsufficientAmountAdded();
             }
         }
 
         address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = _availableBalance(token0, state.protocolFee0);
-        uint256 leftover1 = _availableBalance(token1, state.protocolFee1);
-        _transferToken(owner, token0, leftover0);
-        _transferToken(owner, token1, leftover1);
+        uint256 leftover0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
+        uint256 leftover1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
+        _transferToken(owner, ctx.token0, leftover0);
+        _transferToken(owner, ctx.token1, leftover1);
     }
 
     function _leverageDown(
         ExecuteParams calldata params,
         IVault vault,
-        Currency token0,
-        Currency token1,
-        Currency lendToken,
-        uint256 currentDebt,
-        uint256 collateralValue,
         PositionConfig memory config,
+        ExecuteContext memory ctx,
         ExecuteState memory state
     ) internal {
         uint128 liquidityToRemove;
         uint256 netFeeLendValue;
         {
             uint256 repayAmount =
-                AutoLeverageLib.repayAmountToTarget(currentDebt, collateralValue, config.targetLeverageBps);
+                AutoLeverageLib.repayAmountToTarget(ctx.currentDebt, ctx.collateralValue, config.targetLeverageBps);
 
             // Net fees in lend token reduce how much liquidity must be removed
-            netFeeLendValue = (lendToken == token0) ? state.netFee0 : ((lendToken == token1) ? state.netFee1 : 0);
+            netFeeLendValue =
+                (ctx.lendToken == ctx.token0) ? state.netFee0 : ((ctx.lendToken == ctx.token1) ? state.netFee1 : 0);
             repayAmount = repayAmount > netFeeLendValue ? repayAmount - netFeeLendValue : 0;
 
             if (repayAmount > 0) {
@@ -292,7 +304,7 @@ contract AutoLeverage is Automator {
 
                 // Calculate proportional liquidity to remove
                 // Use collateralValue as proxy for total position value
-                liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, collateralValue);
+                liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, ctx.collateralValue);
             }
             if (liquidityToRemove == 0 && netFeeLendValue == 0) revert NotReady();
         }
@@ -309,23 +321,23 @@ contract AutoLeverage is Automator {
                 params.decreaseLiquidityHookData
             );
         }
-        amount0 = _availableBalance(token0, state.protocolFee0);
-        amount1 = _availableBalance(token1, state.protocolFee1);
+        amount0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
+        amount1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
 
         // Swap position tokens to lend token
-        uint256 lendAmount = lendToken == token0 ? amount0 : (lendToken == token1 ? amount1 : 0);
+        uint256 lendAmount = ctx.lendToken == ctx.token0 ? amount0 : (ctx.lendToken == ctx.token1 ? amount1 : 0);
 
-        if (params.amountIn0 > 0 && !(lendToken == token0)) {
+        if (params.amountIn0 > 0 && !(ctx.lendToken == ctx.token0)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(token0, lendToken, params.amountIn0, params.amountOut0Min, params.swapData0),
+                RouterSwapParams(ctx.token0, ctx.lendToken, params.amountIn0, params.amountOut0Min, params.swapData0),
                 config.maxSwapSlippageBps
             );
             amount0 -= amountIn;
             lendAmount += amountOut;
         }
-        if (params.amountIn1 > 0 && !(lendToken == token1)) {
+        if (params.amountIn1 > 0 && !(ctx.lendToken == ctx.token1)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwapWithSlippageCheck(
-                RouterSwapParams(token1, lendToken, params.amountIn1, params.amountOut1Min, params.swapData1),
+                RouterSwapParams(ctx.token1, ctx.lendToken, params.amountIn1, params.amountOut1Min, params.swapData1),
                 config.maxSwapSlippageBps
             );
             amount1 -= amountIn;
@@ -334,16 +346,16 @@ contract AutoLeverage is Automator {
 
         // Repay debt
         if (lendAmount > 0) {
-            if (lendAmount > currentDebt) lendAmount = currentDebt;
-            SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), address(vault), lendAmount);
+            if (lendAmount > ctx.currentDebt) lendAmount = ctx.currentDebt;
+            SafeERC20.forceApprove(IERC20(Currency.unwrap(ctx.lendToken)), address(vault), lendAmount);
             vault.repay(params.tokenId, lendAmount, false);
         }
 
         address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = _availableBalance(token0, state.protocolFee0);
-        uint256 leftover1 = _availableBalance(token1, state.protocolFee1);
-        _transferToken(owner, token0, leftover0);
-        _transferToken(owner, token1, leftover1);
+        uint256 leftover0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
+        uint256 leftover1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
+        _transferToken(owner, ctx.token0, leftover0);
+        _transferToken(owner, ctx.token1, leftover1);
     }
 
     /// @notice Position owner configures auto-leverage

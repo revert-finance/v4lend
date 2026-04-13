@@ -258,6 +258,8 @@ contract AutoLend is Automator {
         }
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
+        uint256 startBalance0 = poolKey.currency0.balanceOfSelf();
+        uint256 startBalance1 = poolKey.currency1.balanceOfSelf();
 
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
@@ -354,8 +356,8 @@ contract AutoLend is Automator {
 
         uint256 protocolFee0 = lendCurrency == poolKey.currency0 ? protocolFee : 0;
         uint256 protocolFee1 = lendCurrency == poolKey.currency1 ? protocolFee : 0;
-        uint256 leftover0 = _availableBalance(poolKey.currency0, protocolFee0);
-        uint256 leftover1 = _availableBalance(poolKey.currency1, protocolFee1);
+        uint256 leftover0 = _availableBalance(poolKey.currency0, startBalance0, protocolFee0);
+        uint256 leftover1 = _availableBalance(poolKey.currency1, startBalance1, protocolFee1);
         _transferToken(posOwner, poolKey.currency0, leftover0);
         _transferToken(posOwner, poolKey.currency1, leftover1);
         _sendProtocolFee(lendCurrency, protocolFee);

@@ -88,9 +88,14 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         return (netAmount0, netAmount1, protocolFee0, protocolFee1);
     }
 
-    function _availableBalance(Currency token, uint256 reservedAmount) internal view returns (uint256) {
+    function _availableBalance(Currency token, uint256 balanceBefore, uint256 reservedAmount) internal view returns (uint256) {
         uint256 balance = token.balanceOfSelf();
-        return balance > reservedAmount ? balance - reservedAmount : 0;
+        if (balance <= balanceBefore) {
+            return 0;
+        }
+
+        uint256 delta = balance - balanceBefore;
+        return delta > reservedAmount ? delta - reservedAmount : 0;
     }
 
     function _sendProtocolFee(Currency token, uint256 protocolFee) internal {

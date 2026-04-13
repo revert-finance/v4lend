@@ -142,6 +142,9 @@ contract HookFeeControllerTest is Test {
     }
 
     function test_RevertWhenProtocolFeeRecipientIsZero() public {
+        vm.expectRevert(HookOwnedControllerBase.InvalidHook.selector);
+        new HookFeeController(address(0), RECIPIENT, 200, 300);
+
         vm.expectRevert(HookFeeController.InvalidConfig.selector);
         new HookFeeController(address(hook), address(0), 200, 300);
 
@@ -151,6 +154,12 @@ contract HookFeeControllerTest is Test {
     }
 
     function test_RevertWhenBpsAboveMax() public {
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        new HookFeeController(address(hook), RECIPIENT, 10001, 300);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        new HookFeeController(address(hook), RECIPIENT, 200, 10001);
+
         vm.startPrank(OWNER);
         vm.expectRevert(HookFeeController.InvalidConfig.selector);
         controller.setLpFeeBps(10001);

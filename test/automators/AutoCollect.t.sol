@@ -372,6 +372,37 @@ contract AutoCollectTest is AutomatorTestBase {
         assertEq(address(autoCollect).balance, contractEthBefore);
     }
 
+    function test_AutoCollectIgnoresDustedBalances() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        _generateFees(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoCollect), tokenId);
+
+        uint256 dustAmount = 12345;
+        deal(address(usdc), address(autoCollect), dustAmount);
+
+        AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCollect.CollectMode.AUTO_COLLECT,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        autoCollect.execute(params);
+
+        assertEq(usdc.balanceOf(address(autoCollect)), dustAmount, "dusted USDC should not be attributed to the run");
+        assertEq(weth.balanceOf(address(autoCollect)), 0, "no extra WETH should remain");
+    }
+
     // --- Native ETH Position Tests ---
 
     function test_AutoCollectETH() public {

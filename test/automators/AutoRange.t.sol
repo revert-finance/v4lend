@@ -163,6 +163,55 @@ contract AutoRangeTest is AutomatorTestBase {
         assertEq(lowerTickLimit, 1, "Config should be copied to new position");
     }
 
+    function test_ExecuteRangeChangeIgnoresDustedBalances() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        AutoRange.PositionConfig memory config = AutoRange.PositionConfig({
+            lowerTickLimit: 1,
+            upperTickLimit: 1,
+            lowerTickDelta: 60,
+            upperTickDelta: 300,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: 0,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoRange.configToken(tokenId, address(0), config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoRange), true);
+
+        uint256 dustAmount = 54321;
+        deal(address(usdc), address(autoRange), dustAmount);
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        AutoRange.ExecuteParams memory params = AutoRange.ExecuteParams({
+            tokenId: tokenId,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            mintHookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        autoRange.execute(params);
+
+        assertEq(usdc.balanceOf(address(autoRange)), dustAmount, "dusted USDC should not be attributed to range change");
+        assertEq(weth.balanceOf(address(autoRange)), 0, "no extra WETH should remain");
+    }
+
     function test_RevertWhenSwapExceedsMaxSlippage() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);

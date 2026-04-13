@@ -88,6 +88,8 @@ contract AutoCollect is Automator {
     }
 
     struct ExecuteState {
+        uint256 startBalance0;
+        uint256 startBalance1;
         uint256 amount0;
         uint256 amount1;
         uint256 protocolFee0;
@@ -116,6 +118,10 @@ contract AutoCollect is Automator {
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
 
+        ExecuteState memory state;
+        state.startBalance0 = token0.balanceOfSelf();
+        state.startBalance1 = token1.balanceOfSelf();
+
         // Collect fees (decrease liquidity by 0)
         (uint256 feeAmount0, uint256 feeAmount1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
@@ -124,7 +130,6 @@ contract AutoCollect is Automator {
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
-        ExecuteState memory state;
         state.amount0 = feeAmount0;
         state.amount1 = feeAmount1;
         (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
@@ -165,10 +170,7 @@ contract AutoCollect is Automator {
                 token0,
                 token1,
                 owner,
-                state.amount0,
-                state.amount1,
-                state.protocolFee0,
-                state.protocolFee1
+                state
             );
         }
 
@@ -183,11 +185,11 @@ contract AutoCollect is Automator {
         Currency token0,
         Currency token1,
         address owner,
-        uint256 amount0,
-        uint256 amount1,
-        uint256 protocolFee0,
-        uint256 protocolFee1
+        ExecuteState memory state
     ) internal returns (uint256 compounded0, uint256 compounded1) {
+        uint256 amount0 = state.amount0;
+        uint256 amount1 = state.amount1;
+
         // Optional swap to rebalance
         if (params.amountIn > 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
@@ -225,8 +227,8 @@ contract AutoCollect is Automator {
                 abi.encode(actions, paramsArray), params.deadline
             );
 
-            uint256 leftover0 = _availableBalance(token0, protocolFee0);
-            uint256 leftover1 = _availableBalance(token1, protocolFee1);
+            uint256 leftover0 = _availableBalance(token0, state.startBalance0, state.protocolFee0);
+            uint256 leftover1 = _availableBalance(token1, state.startBalance1, state.protocolFee1);
             compounded0 = amount0 - leftover0;
             compounded1 = amount1 - leftover1;
 
@@ -236,8 +238,8 @@ contract AutoCollect is Automator {
         }
 
         // Send leftover (slippage diff) to position owner immediately.
-        _transferToken(owner, token0, _availableBalance(token0, protocolFee0));
-        _transferToken(owner, token1, _availableBalance(token1, protocolFee1));
+        _transferToken(owner, token0, _availableBalance(token0, state.startBalance0, state.protocolFee0));
+        _transferToken(owner, token1, _availableBalance(token1, state.startBalance1, state.protocolFee1));
     }
 
     function _executeHarvest(

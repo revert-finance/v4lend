@@ -240,6 +240,30 @@ contract AutoLendTest is AutomatorTestBase {
         assertEq(sharesAfter, 0, "shares should be cleared");
     }
 
+    function test_WithdrawIgnoresDustedBalances() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _defaultConfig(0));
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _pushTickToOrAbove(poolKey, posInfo.tickLower());
+
+        uint256 dustAmount = 777;
+        deal(address(weth), address(autoLend), dustAmount);
+
+        vm.prank(operator);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        assertEq(weth.balanceOf(address(autoLend)), dustAmount, "dusted WETH should not be attributed to withdraw");
+    }
+
     function test_DepositAndWithdrawETHNativePosition() public {
         PoolKey memory poolKey = _createEthPool();
         _createFullRangePositionEth(poolKey);

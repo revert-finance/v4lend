@@ -94,6 +94,9 @@ contract HookRouteControllerTest is Test {
     }
 
     function test_RevertOnInvalidConfig() public {
+        vm.expectRevert(HookOwnedControllerBase.InvalidHook.selector);
+        new HookRouteController(address(0));
+
         vm.startPrank(OWNER);
 
         vm.expectRevert(HookRouteController.InvalidConfig.selector);

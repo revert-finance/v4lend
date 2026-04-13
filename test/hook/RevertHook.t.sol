@@ -1326,6 +1326,63 @@ contract RevertHookTest is BaseTest {
         assertGt(positionManager.getPositionLiquidity(token2Id), token2Liquidity, "same-pool route should still compound");
     }
 
+    function testSwapRouting_AutoCollectUsesAsymmetricRoutesAtRuntime() public {
+        PoolKey memory reversePoolKey = PoolKey({currency0: currency0, currency1: currency1, fee: 0, tickSpacing: 10, hooks: IHooks(address(0))});
+        PoolId reversePoolId = reversePoolKey.toId();
+        poolManager.initialize(reversePoolKey, Constants.SQRT_PRICE_1_1);
+
+        uint128 liquidityAmount = 100e18;
+        positionManager.mint(
+            reversePoolKey,
+            tickLower,
+            tickUpper,
+            liquidityAmount,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        _setRoute(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey.fee, nonHookedPoolKey.tickSpacing, nonHookedPoolKey.hooks);
+        _setRoute(Currency.unwrap(currency1), Currency.unwrap(currency0), reversePoolKey.fee, reversePoolKey.tickSpacing, reversePoolKey.hooks);
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+
+        _setupAutoCollectTest(RevertHookState.AutoCollectMode.HARVEST_TOKEN_1);
+        (uint160 forwardPoolSqrtBefore, int24 forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 reversePoolSqrtBefore, int24 reversePoolTickBefore,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        hook.autoCollect(params);
+
+        (uint160 forwardPoolSqrtAfter, int24 forwardPoolTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 reversePoolSqrtAfter, int24 reversePoolTickAfter,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        assertTrue(
+            forwardPoolSqrtAfter != forwardPoolSqrtBefore || forwardPoolTickAfter != forwardPoolTickBefore,
+            "token0 -> token1 harvest should use the forward route"
+        );
+        assertEq(reversePoolSqrtAfter, reversePoolSqrtBefore, "reverse route pool should stay unchanged on forward swap");
+        assertEq(reversePoolTickAfter, reversePoolTickBefore, "reverse route tick should stay unchanged on forward swap");
+
+        _setupAutoCollectTest(RevertHookState.AutoCollectMode.HARVEST_TOKEN_0);
+        (forwardPoolSqrtBefore, forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (reversePoolSqrtBefore, reversePoolTickBefore,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        hook.autoCollect(params);
+
+        (forwardPoolSqrtAfter, forwardPoolTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (reversePoolSqrtAfter, reversePoolTickAfter,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        assertEq(forwardPoolSqrtAfter, forwardPoolSqrtBefore, "forward route pool should stay unchanged on reverse swap");
+        assertEq(forwardPoolTickAfter, forwardPoolTickBefore, "forward route tick should stay unchanged on reverse swap");
+        assertTrue(
+            reversePoolSqrtAfter != reversePoolSqrtBefore || reversePoolTickAfter != reversePoolTickBefore,
+            "token1 -> token0 harvest should use the reverse route"
+        );
+    }
+
     function testSwapFees_AutoRangeUsesAlternateSwapPoolOverride() public {
         feeController.setLpFeeBps(0);
         feeController.setPoolOverrideSwapFeeBps(nonHookedPoolKey.toId(), uint8(RevertHookState.Mode.AUTO_RANGE), 500);

@@ -296,6 +296,60 @@ contract AutoLeverageTest is AutomatorTestBase {
         assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down");
     }
 
+    function test_LeverageDownIgnoresDustedBalances() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createFullRangePosition(poolKey);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, collateralValue * 70 / 100);
+
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 3000,
+            rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: 10000,
+            maxRewardX64: 0
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        uint256 dustAmount = 111;
+        deal(address(weth), address(autoLeverage), dustAmount);
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: false,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        assertEq(weth.balanceOf(address(autoLeverage)), dustAmount, "dusted WETH should not be attributed to leverage down");
+    }
+
     // --- Native ETH Position Tests ---
 
     function test_LeverageUpETH() public {
