@@ -213,6 +213,29 @@ contract V4VaultTest is V4ForkTestBase {
         vault.create(nft1TokenId, nft1Owner);
     }
 
+    function test_Create_RevertOnZeroRecipient() external {
+        vm.prank(nft1Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vm.prank(nft1Owner);
+        vault.create(nft1TokenId, address(0));
+    }
+
+    function test_OnERC721Received_RevertOnZeroRecipientInData() external {
+        vm.prank(nft1Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vm.prank(nft1Owner);
+        IERC721(address(positionManager)).safeTransferFrom(
+            nft1Owner,
+            address(vault),
+            nft1TokenId,
+            abi.encode(address(0))
+        );
+    }
+
     function testMinLoanSize() external {
         uint256 minLoanSize = 1000000;
 
@@ -1041,6 +1064,47 @@ contract V4VaultTest is V4ForkTestBase {
         // all debt is payed
         assertEq(vault.loans(nft2TokenId), 0);
         assertEq(vault.debtSharesTotal(), 0);
+    }
+
+    function test_Liquidate_ReentrancyOnNativeRecipientFailsWhilePositionManagerIsLocked() external {
+        _deposit(500000000, WHALE_ACCOUNT);
+
+        vm.prank(nft1Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
+        vm.prank(nft1Owner);
+        vault.create(nft1TokenId, nft1Owner);
+
+        vm.prank(nft2Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft2TokenId);
+        vm.prank(nft2Owner);
+        vault.create(nft2TokenId, nft2Owner);
+
+        vm.prank(nft1Owner);
+        vault.borrow(nft1TokenId, 100000000);
+
+        vm.prank(nft2Owner);
+        vault.borrow(nft2TokenId, 20000000);
+
+        assertEq(vault.debtSharesTotal(), 120000000);
+        assertEq(vault.loans(nft1TokenId), 100000000);
+        assertEq(vault.loans(nft2TokenId), 20000000);
+
+        vault.setTokenConfig(address(0), 0, type(uint32).max);
+
+        NativeLiquidationReenter liquidator = new NativeLiquidationReenter(vault, usdc);
+
+        vm.prank(WHALE_ACCOUNT);
+        usdc.transfer(address(liquidator), 40000000);
+
+        liquidator.arm(nft2TokenId);
+        liquidator.attack(nft2TokenId);
+
+        assertTrue(liquidator.reentered(), "Expected reentrant liquidation to be attempted");
+        assertFalse(liquidator.reenterSucceeded(), "Expected reentrant liquidation to fail");
+
+        assertEq(vault.loans(nft2TokenId), 0, "Victim loan should be cleaned up");
+        assertEq(vault.loans(nft1TokenId), 100000000, "Other loan debt shares should be unchanged");
+        assertEq(vault.debtSharesTotal(), 100000000, "Only the victim debt shares should be removed");
     }
 
 
@@ -2114,5 +2178,38 @@ contract DecreaseLiquidityDuringTransformTransformer {
 
     function attemptDecrease(IVault.DecreaseLiquidityAndCollectParams calldata params) external {
         vault.decreaseLiquidityAndCollect(params);
+    }
+}
+
+contract NativeLiquidationReenter {
+    IVault internal immutable vault;
+    IERC20 internal immutable asset;
+
+    bool public reentered;
+    bool public reenterSucceeded;
+    bytes internal reenterCallData;
+
+    constructor(IVault _vault, IERC20 _asset) {
+        vault = _vault;
+        asset = _asset;
+        asset.approve(address(vault), type(uint256).max);
+    }
+
+    function arm(uint256 tokenId) external {
+        reenterCallData = abi.encodeCall(
+            IVault.liquidate,
+            (IVault.LiquidateParams(tokenId, 0, 0, address(this), block.timestamp, ""))
+        );
+    }
+
+    function attack(uint256 tokenId) external {
+        vault.liquidate(IVault.LiquidateParams(tokenId, 0, 0, address(this), block.timestamp, ""));
+    }
+
+    receive() external payable {
+        if (!reentered) {
+            reentered = true;
+            (reenterSucceeded,) = address(vault).call(reenterCallData);
+        }
     }
 }

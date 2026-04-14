@@ -441,6 +441,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @param recipient Address to receive ownership of the position/loan in the vault
     /// @custom:security The hook attached to the position must be in hookAllowList or be address(0)
     function create(uint256 tokenId, address recipient) external override {
+        if (recipient == address(0)) {
+            revert InvalidConfig();
+        }
         IERC721(address(positionManager)).safeTransferFrom(msg.sender, address(this), tokenId, abi.encode(recipient));
     }
 
@@ -485,6 +488,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @param tokenId The token ID received
     /// @param owner The owner address for the new loan
     function _handleErc721Received(uint256 tokenId, address owner) internal {
+        if (owner == address(0)) {
+            revert InvalidConfig();
+        }
+
         (uint256 debtExchangeRateX96, uint256 lendExchangeRateX96) = _updateGlobalInterest();
 
         uint256 oldTokenId = transformedTokenId;
