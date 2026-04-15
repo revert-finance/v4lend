@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
 import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
@@ -34,7 +35,7 @@ contract HookRouteController is HookOwnedControllerBase, IHookRouteController {
 
     function setRoute(address tokenIn, address tokenOut, uint24 fee, int24 tickSpacing, IHooks hooks) external {
         _checkOwner();
-        if (tokenIn == tokenOut || tickSpacing <= 0) {
+        if (tokenIn == tokenOut || tickSpacing <= 0 || fee > LPFeeLibrary.MAX_LP_FEE) {
             revert InvalidConfig();
         }
 

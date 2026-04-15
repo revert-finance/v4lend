@@ -4,6 +4,7 @@ pragma solidity ^0.8.30;
 import {Test} from "forge-std/Test.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
 import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {HookOwnedControllerBase} from "src/hook/HookOwnedControllerBase.sol";
@@ -107,6 +108,9 @@ contract HookRouteControllerTest is Test {
 
         vm.expectRevert(HookRouteController.InvalidConfig.selector);
         controller.setRoute(TOKEN0, TOKEN1, 3000, -60, IHooks(address(0xBEEF)));
+
+        vm.expectRevert(HookRouteController.InvalidConfig.selector);
+        controller.setRoute(TOKEN0, TOKEN1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(address(0xBEEF)));
 
         vm.expectRevert(HookRouteController.InvalidConfig.selector);
         controller.clearRoute(TOKEN1, TOKEN1);

@@ -1327,22 +1327,7 @@ contract RevertHookTest is BaseTest {
     }
 
     function testSwapRouting_AutoCollectUsesAsymmetricRoutesAtRuntime() public {
-        PoolKey memory reversePoolKey = PoolKey({currency0: currency0, currency1: currency1, fee: 0, tickSpacing: 10, hooks: IHooks(address(0))});
-        PoolId reversePoolId = reversePoolKey.toId();
-        poolManager.initialize(reversePoolKey, Constants.SQRT_PRICE_1_1);
-
-        uint128 liquidityAmount = 100e18;
-        positionManager.mint(
-            reversePoolKey,
-            tickLower,
-            tickUpper,
-            liquidityAmount,
-            type(uint256).max,
-            type(uint256).max,
-            address(this),
-            block.timestamp,
-            Constants.ZERO_BYTES
-        );
+        (PoolKey memory reversePoolKey, PoolId reversePoolId) = _createAdditionalRoutePool(0, 10);
 
         _setRoute(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey.fee, nonHookedPoolKey.tickSpacing, nonHookedPoolKey.hooks);
         _setRoute(Currency.unwrap(currency1), Currency.unwrap(currency0), reversePoolKey.fee, reversePoolKey.tickSpacing, reversePoolKey.hooks);
@@ -1381,6 +1366,121 @@ contract RevertHookTest is BaseTest {
             reversePoolSqrtAfter != reversePoolSqrtBefore || reversePoolTickAfter != reversePoolTickBefore,
             "token1 -> token0 harvest should use the reverse route"
         );
+    }
+
+    function testSwapRouting_AutoRangeUsesAsymmetricRoutesAtRuntime() public {
+        int24 spacing = poolKey.tickSpacing;
+        PoolKey memory invalidReverseRoutePoolKey =
+            PoolKey({currency0: currency0, currency1: currency1, fee: 500, tickSpacing: 60, hooks: IHooks(address(0))});
+
+        _setRoute(
+            Currency.unwrap(currency0),
+            Currency.unwrap(currency1),
+            nonHookedPoolKey.fee,
+            nonHookedPoolKey.tickSpacing,
+            nonHookedPoolKey.hooks
+        );
+        _setRoute(
+            Currency.unwrap(currency1),
+            Currency.unwrap(currency0),
+            invalidReverseRoutePoolKey.fee,
+            invalidReverseRoutePoolKey.tickSpacing,
+            invalidReverseRoutePoolKey.hooks
+        );
+
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        (uint160 forwardPoolSqrtBefore, int24 forwardPoolTickBefore,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        (uint160 forwardPoolSqrtAfter, int24 forwardPoolTickAfter,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+
+        assertTrue(
+            forwardPoolSqrtAfter != forwardPoolSqrtBefore || forwardPoolTickAfter != forwardPoolTickBefore,
+            "lower AUTO_RANGE should use the forward route"
+        );
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "original AUTO_RANGE position should be consumed");
+        _verifyNoLeftoverBalances("lower asymmetric auto-range routing");
+
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLower = _getTickLower(currentTick, spacing);
+        uint128 liquidityAmount = 10e18;
+        uint256 upperTokenId;
+        (upperTokenId,) = positionManager.mint(
+            poolKey,
+            currentTickLower - spacing,
+            currentTickLower + spacing,
+            liquidityAmount,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        hook.setPositionConfig(
+            upperTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -spacing,
+                autoRangeUpperDelta: spacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        IERC721(address(positionManager)).approve(address(hook), upperTokenId);
+        uint256 nextTokenIdBeforeUpperFailure = positionManager.nextTokenId();
+
+        vm.recordLogs();
+        _moveTickUpUntil(currentTickLower + spacing, 2e16, 160);
+        Vm.Log[] memory upperLogs = vm.getRecordedLogs();
+
+        assertTrue(
+            _sawHookActionFailed(upperLogs, upperTokenId, RevertHookState.Mode.AUTO_RANGE),
+            "upper AUTO_RANGE should attempt the configured reverse route and fail"
+        );
+        assertEq(
+            positionManager.nextTokenId(),
+            nextTokenIdBeforeUpperFailure,
+            "failed upper AUTO_RANGE should not mint a second replacement"
+        );
+        assertGt(
+            positionManager.getPositionLiquidity(upperTokenId),
+            0,
+            "failed upper AUTO_RANGE should restore the original upper-trigger position"
+        );
+        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(upperTokenId);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "failed upper AUTO_RANGE should keep the upper-trigger config active");
+        _verifyNoLeftoverBalances("asymmetric auto-range routing");
     }
 
     function testSwapFees_AutoRangeUsesAlternateSwapPoolOverride() public {
@@ -1837,6 +1937,92 @@ contract RevertHookTest is BaseTest {
         uint128 nonHookedLiquidity = poolManager.getLiquidity(nonHookedPoolId);
         assertGt(nonHookedLiquidity, 0, "NonHookedPool should have liquidity");
         console.log("NonHookedPool liquidity:", nonHookedLiquidity);
+    }
+
+    function testSwapRouting_AutoExitUsesAsymmetricRoutesAtRuntime() public {
+        (PoolKey memory reversePoolKey, PoolId reversePoolId) = _createAdditionalRoutePool(0, 10);
+
+        _setRoute(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey.fee, nonHookedPoolKey.tickSpacing, nonHookedPoolKey.hooks);
+        _setRoute(Currency.unwrap(currency1), Currency.unwrap(currency0), reversePoolKey.fee, reversePoolKey.tickSpacing, reversePoolKey.hooks);
+
+        RevertHookState.PositionConfig memory lowerExitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+        RevertHookState.PositionConfig memory upperExitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: tickUpper3,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        hook.setPositionConfig(token2Id, lowerExitConfig);
+        hook.setPositionConfig(token3Id, upperExitConfig);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        (uint160 forwardPoolSqrtBefore, int24 forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 reversePoolSqrtBefore, int24 reversePoolTickBefore,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        _moveTickDownUntil(tickLower2 - poolKey.tickSpacing, 2e16, 160);
+
+        (uint160 forwardPoolSqrtAfter, int24 forwardPoolTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 reversePoolSqrtAfter, int24 reversePoolTickAfter,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        assertTrue(
+            forwardPoolSqrtAfter != forwardPoolSqrtBefore || forwardPoolTickAfter != forwardPoolTickBefore,
+            "lower AUTO_EXIT should use the forward route"
+        );
+        assertEq(reversePoolSqrtAfter, reversePoolSqrtBefore, "reverse route pool should stay unchanged on lower AUTO_EXIT");
+        assertEq(reversePoolTickAfter, reversePoolTickBefore, "reverse route tick should stay unchanged on lower AUTO_EXIT");
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "lower AUTO_EXIT position should be consumed");
+        assertGt(positionManager.getPositionLiquidity(token3Id), 0, "upper AUTO_EXIT position should remain active after lower trigger");
+
+        (forwardPoolSqrtBefore, forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (reversePoolSqrtBefore, reversePoolTickBefore,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        _moveTickUpUntil(tickUpper3 + poolKey.tickSpacing, 2e16, 160);
+
+        (uint160 forwardPoolSqrtAfterSecond, int24 forwardPoolTickAfterSecond,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 reversePoolSqrtAfterSecond, int24 reversePoolTickAfterSecond,,) =
+            StateLibrary.getSlot0(poolManager, reversePoolId);
+
+        assertEq(
+            forwardPoolSqrtAfterSecond,
+            forwardPoolSqrtBefore,
+            "forward route pool should stay unchanged on upper AUTO_EXIT"
+        );
+        assertEq(
+            forwardPoolTickAfterSecond,
+            forwardPoolTickBefore,
+            "forward route tick should stay unchanged on upper AUTO_EXIT"
+        );
+        assertTrue(
+            reversePoolSqrtAfterSecond != reversePoolSqrtBefore || reversePoolTickAfterSecond != reversePoolTickBefore,
+            "upper AUTO_EXIT should use the reverse route"
+        );
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "upper AUTO_EXIT position should be consumed");
+        _verifyNoLeftoverBalances("asymmetric auto-exit routing");
     }
 
     function testAutoExit_NotApproved() public {
@@ -3129,6 +3315,33 @@ contract RevertHookTest is BaseTest {
         address token1 = Currency.unwrap(routePoolKey.currency1);
         _setRoute(token0, token1, routePoolKey.fee, routePoolKey.tickSpacing, routePoolKey.hooks);
         _setRoute(token1, token0, routePoolKey.fee, routePoolKey.tickSpacing, routePoolKey.hooks);
+    }
+
+    function _createAdditionalRoutePool(uint24 fee, int24 tickSpacing)
+        internal
+        returns (PoolKey memory routePoolKey, PoolId routePoolId)
+    {
+        routePoolKey = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: fee,
+            tickSpacing: tickSpacing,
+            hooks: IHooks(address(0))
+        });
+        routePoolId = routePoolKey.toId();
+        poolManager.initialize(routePoolKey, Constants.SQRT_PRICE_1_1);
+
+        positionManager.mint(
+            routePoolKey,
+            tickLower,
+            tickUpper,
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
     }
 
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {

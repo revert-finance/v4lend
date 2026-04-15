@@ -164,6 +164,28 @@ contract V4VaultHookTest is V4ForkTestBase {
         }
     }
 
+    function _createAdditionalRoutePool(PoolKey memory referencePoolKey, uint24 fee, int24 tickSpacing)
+        internal
+        returns (PoolKey memory routePoolKey)
+    {
+        routePoolKey = PoolKey({
+            currency0: referencePoolKey.currency0,
+            currency1: referencePoolKey.currency1,
+            fee: fee,
+            tickSpacing: tickSpacing,
+            hooks: IHooks(address(0))
+        });
+
+        (uint160 referenceSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(referencePoolKey));
+        (uint160 routeSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(routePoolKey));
+        if (routeSqrtPriceX96 == 0) {
+            poolManager.initialize(routePoolKey, referenceSqrtPriceX96);
+        }
+
+        _createPositionInHookedPool(routePoolKey);
+        _createPositionInHookedPool(routePoolKey);
+    }
+
     function _createPositionInHookedPool(PoolKey memory hookedPoolKey) internal returns (uint256 hookedTokenId) {
         int24 tickLower = -887220; // Full range lower tick
         int24 tickUpper = 887220; // Full range upper tick
@@ -2663,14 +2685,96 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         uint256 usdcAfterUp = usdc.balanceOf(address(this));
         uint256 wethAfterUp = weth.balanceOf(address(this));
-        assertTrue(
-            usdcAfterUp > usdcBefore || wethAfterUp > wethBefore,
-            "leverage-up should charge a swap fee on the bought token"
-        );
+        assertEq(usdcAfterUp, usdcBefore, "leverage-up should not charge USDC on the WETH-buying swap");
+        assertGt(wethAfterUp, wethBefore, "leverage-up should charge a swap fee on bought WETH");
 
         _movePriceDown(hookedPoolKey);
 
         assertGt(usdc.balanceOf(address(this)), usdcAfterUp, "leverage-down should charge a swap fee on lend token output");
+    }
+
+    function testSwapRouting_AutoLeverageUsesAsymmetricRoutesAtRuntime() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        PoolKey memory validAlternateRoutePoolKey = _createAdditionalRoutePool(hookedPoolKey, 500, 10);
+        PoolKey memory invalidRoutePoolKey = PoolKey({
+            currency0: hookedPoolKey.currency0,
+            currency1: hookedPoolKey.currency1,
+            fee: 123,
+            tickSpacing: hookedPoolKey.tickSpacing,
+            hooks: IHooks(address(0))
+        });
+        _createPositionInHookedPool(hookedPoolKey);
+
+        uint256 leverageUpTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(leverageUpTokenId);
+        _configurePositionForAutoLeverage(leverageUpTokenId, 5000);
+        _alignLoanToTargetBps(leverageUpTokenId, 3500);
+
+        routeController.setRoute(address(usdc), address(weth), invalidRoutePoolKey.fee, invalidRoutePoolKey.tickSpacing, invalidRoutePoolKey.hooks);
+        routeController.setRoute(
+            address(weth),
+            address(usdc),
+            validAlternateRoutePoolKey.fee,
+            validAlternateRoutePoolKey.tickSpacing,
+            validAlternateRoutePoolKey.hooks
+        );
+
+        (uint256 debtBeforeUp,,,,) = vault.loanInfo(leverageUpTokenId);
+        uint128 liquidityBeforeUp = positionManager.getPositionLiquidity(leverageUpTokenId);
+
+        vm.recordLogs();
+        _movePriceUp(hookedPoolKey);
+        Vm.Log[] memory leverageUpLogs = vm.getRecordedLogs();
+
+        (uint256 debtAfterUp,,,,) = vault.loanInfo(leverageUpTokenId);
+        uint128 liquidityAfterUp = positionManager.getPositionLiquidity(leverageUpTokenId);
+        assertTrue(
+            _sawHookActionFailed(leverageUpLogs, leverageUpTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "leverage-up should fail when the forward route is invalid"
+        );
+        assertEq(debtAfterUp, debtBeforeUp, "failed leverage-up should preserve debt");
+        assertEq(liquidityAfterUp, liquidityBeforeUp, "failed leverage-up should preserve liquidity");
+
+        routeController.setRoute(
+            address(usdc),
+            address(weth),
+            validAlternateRoutePoolKey.fee,
+            validAlternateRoutePoolKey.tickSpacing,
+            validAlternateRoutePoolKey.hooks
+        );
+        routeController.setRoute(
+            address(weth),
+            address(usdc),
+            validAlternateRoutePoolKey.fee,
+            validAlternateRoutePoolKey.tickSpacing,
+            validAlternateRoutePoolKey.hooks
+        );
+
+        uint256 leverageDownTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(leverageDownTokenId);
+        _configurePositionForAutoLeverage(leverageDownTokenId, 5000);
+        _alignLoanToTargetBps(leverageDownTokenId, 3500);
+        _movePriceUp(hookedPoolKey);
+
+        routeController.setRoute(
+            address(weth), address(usdc), invalidRoutePoolKey.fee, invalidRoutePoolKey.tickSpacing, invalidRoutePoolKey.hooks
+        );
+
+        (uint256 debtBeforeDown,,,,) = vault.loanInfo(leverageDownTokenId);
+        uint128 liquidityBeforeDown = positionManager.getPositionLiquidity(leverageDownTokenId);
+
+        vm.recordLogs();
+        _movePriceDown(hookedPoolKey);
+        Vm.Log[] memory leverageDownLogs = vm.getRecordedLogs();
+
+        (uint256 debtAfterDown,,,,) = vault.loanInfo(leverageDownTokenId);
+        uint128 liquidityAfterDown = positionManager.getPositionLiquidity(leverageDownTokenId);
+        assertTrue(
+            _sawHookActionFailed(leverageDownLogs, leverageDownTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "leverage-down should fail when the reverse route is invalid"
+        );
+        assertEq(debtAfterDown, debtBeforeDown, "failed leverage-down should preserve debt");
+        assertEq(liquidityAfterDown, liquidityBeforeDown, "failed leverage-down should preserve liquidity");
     }
 
     /// @notice Test that disabling AUTO_LEVERAGE removes triggers
