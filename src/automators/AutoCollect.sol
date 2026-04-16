@@ -88,8 +88,6 @@ contract AutoCollect is Automator {
     }
 
     struct ExecuteState {
-        uint256 startBalance0;
-        uint256 startBalance1;
         uint256 amount0;
         uint256 amount1;
         uint256 protocolFee0;
@@ -113,11 +111,9 @@ contract AutoCollect is Automator {
         Currency token1 = poolKey.currency1;
         PositionConfig memory config = positionConfigs[params.tokenId];
 
-        ExecuteState memory state = _collectNetFees(params, config, token0, token1);
+        ExecuteState memory state = _collectNetFees(params, config);
         address owner = _positionOwner(params.tokenId);
         (uint256 a0, uint256 a1) = _executeMode(params, config, poolKey, positionInfo, token0, token1, owner, state);
-
-        _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
 
         emit AutoCollectExecuted(
             params.tokenId,
@@ -139,18 +135,10 @@ contract AutoCollect is Automator {
         _validateCaller(positionManager, tokenId);
     }
 
-    function _collectNetFees(
-        ExecuteParams calldata params,
-        PositionConfig memory config,
-        Currency token0,
-        Currency token1
-    )
+    function _collectNetFees(ExecuteParams calldata params, PositionConfig memory config)
         internal
         returns (ExecuteState memory state)
     {
-        state.startBalance0 = token0.balanceOfSelf();
-        state.startBalance1 = token1.balanceOfSelf();
-
         (uint256 feeAmount0, uint256 feeAmount1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
 
@@ -187,7 +175,7 @@ contract AutoCollect is Automator {
             );
         }
 
-        return _executeHarvest(params, config, token0, token1, owner, state.amount0, state.amount1);
+        return _executeHarvest(params, config, token0, token1, owner, state.protocolFee0, state.protocolFee1);
     }
 
     function _executeAutoCollect(
@@ -200,8 +188,8 @@ contract AutoCollect is Automator {
         address owner,
         ExecuteState memory state
     ) internal returns (uint256 compounded0, uint256 compounded1) {
-        uint256 amount0 = state.amount0;
-        uint256 amount1 = state.amount1;
+        uint256 amount0 = _netBalanceAfterReserved(token0, state.protocolFee0);
+        uint256 amount1 = _netBalanceAfterReserved(token1, state.protocolFee1);
 
         // Optional swap to rebalance
         if (params.amountIn > 0) {
@@ -240,8 +228,8 @@ contract AutoCollect is Automator {
                 abi.encode(actions, paramsArray), params.deadline
             );
 
-            uint256 leftover0 = _availableBalance(token0, state.startBalance0, state.protocolFee0);
-            uint256 leftover1 = _availableBalance(token1, state.startBalance1, state.protocolFee1);
+            uint256 leftover0 = _netBalanceAfterReserved(token0, state.protocolFee0);
+            uint256 leftover1 = _netBalanceAfterReserved(token1, state.protocolFee1);
             compounded0 = amount0 - leftover0;
             compounded1 = amount1 - leftover1;
 
@@ -250,7 +238,8 @@ contract AutoCollect is Automator {
             }
         }
 
-        _sendAvailableBalances(owner, token0, token1, state.startBalance0, state.startBalance1, state.protocolFee0, state.protocolFee1);
+        _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
+        _sendRemainingBalances(owner, token0, token1);
     }
 
     function _executeHarvest(
@@ -259,9 +248,12 @@ contract AutoCollect is Automator {
         Currency token0,
         Currency token1,
         address owner,
-        uint256 amount0,
-        uint256 amount1
+        uint256 protocolFee0,
+        uint256 protocolFee1
     ) internal returns (uint256, uint256) {
+        uint256 amount0 = _netBalanceAfterReserved(token0, protocolFee0);
+        uint256 amount1 = _netBalanceAfterReserved(token1, protocolFee1);
+
         // Perform swap based on harvest mode
         if (params.mode == CollectMode.HARVEST_TOKEN_0 && amount1 > 0) {
             (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
@@ -284,24 +276,8 @@ contract AutoCollect is Automator {
             revert AmountError();
         }
 
-        // Send tokens to owner
-        _transferToken(owner, token0, amount0);
-        _transferToken(owner, token1, amount1);
-
-        return (amount0, amount1);
-    }
-
-    function _sendAvailableBalances(
-        address owner,
-        Currency token0,
-        Currency token1,
-        uint256 startBalance0,
-        uint256 startBalance1,
-        uint256 protocolFee0,
-        uint256 protocolFee1
-    ) internal {
-        _transferToken(owner, token0, _availableBalance(token0, startBalance0, protocolFee0));
-        _transferToken(owner, token1, _availableBalance(token1, startBalance1, protocolFee1));
+        _sendProtocolFees(token0, token1, protocolFee0, protocolFee1);
+        return _sendRemainingBalances(owner, token0, token1);
     }
 
     /// @notice Configure fee parameters for a position

@@ -88,14 +88,12 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         return (netAmount0, netAmount1, protocolFee0, protocolFee1);
     }
 
-    function _availableBalance(Currency token, uint256 balanceBefore, uint256 reservedAmount) internal view returns (uint256) {
+    /// @notice Returns the whole current token balance net of any still-reserved protocol fee.
+    /// @dev Automators intentionally sweep their entire post-execution balances instead of
+    ///      tracking per-call deltas. Successful executions are expected to finish flat.
+    function _netBalanceAfterReserved(Currency token, uint256 reservedAmount) internal view returns (uint256) {
         uint256 balance = token.balanceOfSelf();
-        if (balance <= balanceBefore) {
-            return 0;
-        }
-
-        uint256 delta = balance - balanceBefore;
-        return delta > reservedAmount ? delta - reservedAmount : 0;
+        return balance > reservedAmount ? balance - reservedAmount : 0;
     }
 
     function _sendProtocolFee(Currency token, uint256 protocolFee) internal {
@@ -105,6 +103,21 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     function _sendProtocolFees(Currency token0, Currency token1, uint256 protocolFee0, uint256 protocolFee1) internal {
         _sendProtocolFee(token0, protocolFee0);
         _sendProtocolFee(token1, protocolFee1);
+    }
+
+    function _sendRemainingBalance(address recipient, Currency token) internal returns (uint256 amount) {
+        amount = token.balanceOfSelf();
+        _transferToken(recipient, token, amount);
+    }
+
+    function _sendRemainingBalances(address recipient, Currency token0, Currency token1)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
+        amount0 = token0.balanceOfSelf();
+        amount1 = token1.balanceOfSelf();
+        _transferToken(recipient, token0, amount0);
+        _transferToken(recipient, token1, amount1);
     }
 
     function _calculateProtocolFee(uint256 totalAmount, uint256 feeBase, uint64 rewardX64)

@@ -687,6 +687,9 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint256 amount1,
         uint256 newTokenId
     ) internal {
+        // Whole-balance accounting is intentional here: the transformer is expected to finish
+        // successful executions without retaining position tokens, so the remaining balances are
+        // treated as the full leftovers owed back to the recipient.
         // Calculate amounts added
         uint256 added0 = amount0 - params.token0.balanceOfSelf();
         uint256 added1 = amount1 - params.token1.balanceOfSelf();

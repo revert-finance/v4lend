@@ -179,12 +179,12 @@ contract AutoLend is Automator {
         uint256 protocolFee1;
         (amount0, amount1, protocolFee0, protocolFee1) =
             _quoteProtocolFees(feeAmount0, feeAmount1, amount0, amount1, true, params.rewardX64);
+        amount0 = _netBalanceAfterReserved(poolKey.currency0, protocolFee0);
+        amount1 = _netBalanceAfterReserved(poolKey.currency1, protocolFee1);
 
         // Determine idle token (token0 if tick below range, token1 if above)
         Currency idleToken = isAbove ? poolKey.currency1 : poolKey.currency0;
-        Currency activeToken = isAbove ? poolKey.currency0 : poolKey.currency1;
         uint256 idleAmount = isAbove ? amount1 : amount0;
-        uint256 activeAmount = isAbove ? amount0 : amount1;
 
         address idleTokenAddr = Currency.unwrap(idleToken);
         IERC4626 lendVault = _resolveAutoLendVault(idleToken);
@@ -210,9 +210,8 @@ contract AutoLend is Automator {
         });
         vaultPositionCount[address(lendVault)]++;
 
-        // Send active token after lend state is finalized.
-        _transferToken(posOwner, activeToken, activeAmount);
         _sendProtocolFees(poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1);
+        _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
 
         emit AutoLendDeposit(params.tokenId, idleTokenAddr, idleAmount, shares);
     }
@@ -234,9 +233,6 @@ contract AutoLend is Automator {
         address posOwner = _requireNonVaultPosition(params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
-        uint256 startBalance0 = poolKey.currency0.balanceOfSelf();
-        uint256 startBalance1 = poolKey.currency1.balanceOfSelf();
-
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
         (uint160 sqrtPriceX96, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
@@ -314,12 +310,8 @@ contract AutoLend is Automator {
             IERC721(address(positionManager)).transferFrom(address(this), posOwner, newTokenId);
         }
 
-        uint256 protocolFee0 = lendCurrency == poolKey.currency0 ? protocolFee : 0;
-        uint256 protocolFee1 = lendCurrency == poolKey.currency1 ? protocolFee : 0;
-        _sendAvailableBalances(
-            posOwner, poolKey.currency0, poolKey.currency1, startBalance0, startBalance1, protocolFee0, protocolFee1
-        );
         _sendProtocolFee(lendCurrency, protocolFee);
+        _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
 
         emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
     }
@@ -379,19 +371,6 @@ contract AutoLend is Automator {
     {
         normalizedLower = tickLower < TickMath.MIN_TICK ? TickMath.minUsableTick(tickSpacing) : tickLower;
         normalizedUpper = tickUpper > TickMath.MAX_TICK ? TickMath.maxUsableTick(tickSpacing) : tickUpper;
-    }
-
-    function _sendAvailableBalances(
-        address recipient,
-        Currency currency0,
-        Currency currency1,
-        uint256 startBalance0,
-        uint256 startBalance1,
-        uint256 protocolFee0,
-        uint256 protocolFee1
-    ) internal {
-        _transferToken(recipient, currency0, _availableBalance(currency0, startBalance0, protocolFee0));
-        _transferToken(recipient, currency1, _availableBalance(currency1, startBalance1, protocolFee1));
     }
 
     function _increaseLiquidityOnExisting(

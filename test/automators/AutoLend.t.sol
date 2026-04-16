@@ -35,6 +35,18 @@ contract AutoLendTest is AutomatorTestBase {
         autoLend.setVault(address(vault));
     }
 
+    function _deposit(address caller, AutoLend.DepositParams memory params) internal {
+        vm.prank(caller);
+        autoLend.deposit(params);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+    }
+
+    function _withdraw(address caller, AutoLend.WithdrawParams memory params) internal {
+        vm.prank(caller);
+        autoLend.withdraw(params);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+    }
+
     function _defaultConfig(uint64 maxRewardX64) internal pure returns (AutoLend.PositionConfig memory) {
         return AutoLend.PositionConfig({
             isActive: true,
@@ -221,8 +233,7 @@ contract AutoLendTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLend.deposit(depositParams);
+        _deposit(operator, depositParams);
 
         (, uint256 shares,,) = autoLend.lendStates(tokenId);
         assertGt(shares, 0, "should have shares after deposit");
@@ -233,14 +244,13 @@ contract AutoLendTest is AutomatorTestBase {
         AutoLend.WithdrawParams memory withdrawParams =
             AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes(""), rewardX64: 0});
 
-        vm.prank(operator);
-        autoLend.withdraw(withdrawParams);
+        _withdraw(operator, withdrawParams);
 
         (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
         assertEq(sharesAfter, 0, "shares should be cleared");
     }
 
-    function test_WithdrawIgnoresDustedBalances() public {
+    function test_WithdrawSweepsDustedBalances() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createNarrowPosition(poolKey);
@@ -249,19 +259,19 @@ contract AutoLendTest is AutomatorTestBase {
 
         _swapExactInputSingle(poolKey, true, 10000e6, 0);
 
-        vm.prank(operator);
-        autoLend.deposit(_depositParams(tokenId));
+        _deposit(operator, _depositParams(tokenId));
 
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _pushTickToOrAbove(poolKey, posInfo.tickLower());
 
         uint256 dustAmount = 777;
         deal(address(weth), address(autoLend), dustAmount);
+        uint256 ownerWethBefore = weth.balanceOf(WHALE_ACCOUNT);
 
-        vm.prank(operator);
-        autoLend.withdraw(_withdrawParams(tokenId));
+        _withdraw(operator, _withdrawParams(tokenId));
 
-        assertEq(weth.balanceOf(address(autoLend)), dustAmount, "dusted WETH should not be attributed to withdraw");
+        assertEq(weth.balanceOf(address(autoLend)), 0, "dusted WETH should be swept out by withdraw");
+        assertGe(weth.balanceOf(WHALE_ACCOUNT) - ownerWethBefore, dustAmount, "owner should receive the dusted WETH");
     }
 
     function test_DepositAndWithdrawETHNativePosition() public {
@@ -285,8 +295,7 @@ contract AutoLendTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLend.deposit(depositParams);
+        _deposit(operator, depositParams);
 
         (address lentToken, uint256 shares,, address lendVault) = autoLend.lendStates(tokenId);
         assertEq(lentToken, address(0), "expected native ETH lend side");
@@ -300,8 +309,7 @@ contract AutoLendTest is AutomatorTestBase {
         AutoLend.WithdrawParams memory withdrawParams =
             AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes(""), rewardX64: 0});
 
-        vm.prank(operator);
-        autoLend.withdraw(withdrawParams);
+        _withdraw(operator, withdrawParams);
 
         (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
         assertEq(sharesAfter, 0, "shares should be cleared");
@@ -331,8 +339,7 @@ contract AutoLendTest is AutomatorTestBase {
             rewardX64: maxReward
         });
 
-        vm.prank(operator);
-        autoLend.deposit(depositParams);
+        _deposit(operator, depositParams);
 
         assertEq(usdc.balanceOf(address(autoLend)), 0, "contract should not retain USDC protocol fees");
         assertEq(weth.balanceOf(address(autoLend)), 0, "contract should not retain WETH protocol fees");
@@ -353,8 +360,7 @@ contract AutoLendTest is AutomatorTestBase {
 
         _swapExactInputSingleEth(poolKey, true, 10e18, 0);
 
-        vm.prank(operator);
-        autoLend.deposit(_depositParams(tokenId));
+        _deposit(operator, _depositParams(tokenId));
 
         (, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
         assertGt(shares, 0, "position should be lent");
@@ -381,8 +387,7 @@ contract AutoLendTest is AutomatorTestBase {
         probe.configure(address(autoLend), abi.encodeWithSignature("lendStates(uint256)", tokenId), 1);
         probe.setReentry(address(autoLend), abi.encodeCall(autoLend.withdraw, (withdrawParams)));
 
-        vm.prank(address(probe));
-        autoLend.withdraw(withdrawParams);
+        _withdraw(address(probe), withdrawParams);
 
         assertGt(probe.totalNativeReceived(), 0, "probe should receive native protocol fees");
         assertTrue(probe.attemptedReentry(), "probe should attempt reentry");
@@ -400,16 +405,14 @@ contract AutoLendTest is AutomatorTestBase {
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _pushTickBelow(poolKey, posInfo.tickLower());
 
-        vm.prank(operator);
-        autoLend.deposit(_depositParams(tokenId));
+        _deposit(operator, _depositParams(tokenId));
 
         (, uint256 shares,,) = autoLend.lendStates(tokenId);
         assertGt(shares, 0, "deposit should create vault shares");
 
         uint256 nextTokenBefore = positionManager.nextTokenId();
 
-        vm.prank(operator);
-        autoLend.withdraw(_withdrawParams(tokenId));
+        _withdraw(operator, _withdrawParams(tokenId));
 
         assertEq(positionManager.nextTokenId(), nextTokenBefore, "withdraw should reuse the existing position");
         (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
@@ -427,15 +430,13 @@ contract AutoLendTest is AutomatorTestBase {
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _pushTickBelow(poolKey, posInfo.tickLower());
 
-        vm.prank(operator);
-        autoLend.deposit(_depositParams(tokenId));
+        _deposit(operator, _depositParams(tokenId));
 
         _pushTickToOrAbove(poolKey, posInfo.tickLower());
 
         uint256 nextTokenBefore = positionManager.nextTokenId();
 
-        vm.prank(operator);
-        autoLend.withdraw(_withdrawParams(tokenId));
+        _withdraw(operator, _withdrawParams(tokenId));
 
         uint256 nextTokenAfter = positionManager.nextTokenId();
         assertGt(nextTokenAfter, nextTokenBefore, "withdraw should mint a shifted replacement");
@@ -457,8 +458,7 @@ contract AutoLendTest is AutomatorTestBase {
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _pushTickToOrAbove(poolKey, posInfo.tickUpper());
 
-        vm.prank(operator);
-        autoLend.deposit(_depositParams(tokenId));
+        _deposit(operator, _depositParams(tokenId));
 
         (, uint256 shares,,) = autoLend.lendStates(tokenId);
         assertGt(shares, 0, "deposit should create vault shares");
@@ -474,8 +474,7 @@ contract AutoLendTest is AutomatorTestBase {
 
         uint256 nextTokenBefore = positionManager.nextTokenId();
 
-        vm.prank(operator);
-        autoLend.withdraw(_withdrawParams(tokenId));
+        _withdraw(operator, _withdrawParams(tokenId));
 
         assertEq(positionManager.nextTokenId(), nextTokenBefore, "withdraw should reuse the existing position");
         (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
@@ -493,15 +492,13 @@ contract AutoLendTest is AutomatorTestBase {
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _pushTickToOrAbove(poolKey, posInfo.tickUpper());
 
-        vm.prank(operator);
-        autoLend.deposit(_depositParams(tokenId));
+        _deposit(operator, _depositParams(tokenId));
 
         _pushTickBelow(poolKey, posInfo.tickUpper());
 
         uint256 nextTokenBefore = positionManager.nextTokenId();
 
-        vm.prank(operator);
-        autoLend.withdraw(_withdrawParams(tokenId));
+        _withdraw(operator, _withdrawParams(tokenId));
 
         uint256 nextTokenAfter = positionManager.nextTokenId();
         assertGt(nextTokenAfter, nextTokenBefore, "withdraw should mint a shifted replacement");
@@ -538,8 +535,7 @@ contract AutoLendTest is AutomatorTestBase {
             rewardX64: maxReward
         });
 
-        vm.prank(operator);
-        autoLend.deposit(depositParams);
+        _deposit(operator, depositParams);
 
         uint256 usdcAfter = usdc.balanceOf(address(autoLend));
         uint256 wethAfter = weth.balanceOf(address(autoLend));
@@ -568,8 +564,7 @@ contract AutoLendTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLend.deposit(depositParams);
+        _deposit(operator, depositParams);
 
         (address lentToken,, uint256 principal, address lendVault) = autoLend.lendStates(tokenId);
         assertEq(lentToken, address(usdc), "expected USDC lend side");
@@ -595,8 +590,7 @@ contract AutoLendTest is AutomatorTestBase {
             rewardX64: maxReward
         });
 
-        vm.prank(operator);
-        autoLend.withdraw(withdrawParams);
+        _withdraw(operator, withdrawParams);
 
         assertGt(
             usdc.balanceOf(protocolFeeRecipient),
@@ -631,8 +625,7 @@ contract AutoLendTest is AutomatorTestBase {
             hookData: bytes(""),
             rewardX64: 0
         });
-        vm.prank(operator);
-        autoLend.deposit(depositParams);
+        _deposit(operator, depositParams);
 
         // Push tick high enough to force the replacement mint path on withdraw
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -643,8 +636,7 @@ contract AutoLendTest is AutomatorTestBase {
 
         AutoLend.WithdrawParams memory withdrawParams =
             AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes(""), rewardX64: 0});
-        vm.prank(operator);
-        autoLend.withdraw(withdrawParams);
+        _withdraw(operator, withdrawParams);
 
         uint256 nextTokenAfter = positionManager.nextTokenId();
         assertGt(nextTokenAfter, nextTokenBefore, "withdraw should mint a replacement position");
@@ -681,8 +673,7 @@ contract AutoLendTest is AutomatorTestBase {
             hookData: bytes(""),
             rewardX64: 0
         });
-        vm.prank(operator);
-        autoLend.deposit(depositParams);
+        _deposit(operator, depositParams);
 
         (, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
         assertGt(shares, 0, "position should be lent");
@@ -701,8 +692,7 @@ contract AutoLendTest is AutomatorTestBase {
             hookData: bytes(""),
             rewardX64: maxReward
         });
-        vm.prank(operator);
-        autoLend.withdraw(withdrawParams);
+        _withdraw(operator, withdrawParams);
 
         assertEq(usdc.balanceOf(address(autoLend)), 0, "contract should not retain protocol fees");
         assertGt(usdc.balanceOf(protocolFeeRecipient), 0, "recipient should receive protocol fees");

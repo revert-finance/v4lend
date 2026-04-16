@@ -73,6 +73,15 @@ contract AutomatorTestBase is Test {
     address public operator;
     address public protocolFeeRecipient;
 
+    function _assertNoAutomatorDust(address account, string memory context) internal view {
+        assertEq(usdc.balanceOf(account), 0, string(abi.encodePacked(context, ": leftover USDC")));
+        assertEq(weth.balanceOf(account), 0, string(abi.encodePacked(context, ": leftover WETH")));
+        assertEq(dai.balanceOf(account), 0, string(abi.encodePacked(context, ": leftover DAI")));
+        assertEq(usdt.balanceOf(account), 0, string(abi.encodePacked(context, ": leftover USDT")));
+        assertEq(wbtc.balanceOf(account), 0, string(abi.encodePacked(context, ": leftover WBTC")));
+        assertEq(account.balance, 0, string(abi.encodePacked(context, ": leftover ETH")));
+    }
+
     function setUp() public virtual {
         // Fork mainnet
         vm.createSelectFork("https://eth-mainnet.g.alchemy.com/v2/gwRYWylWRij2jXTnPXR90v-YqXh96PDX", MAINNET_FORK_BLOCK);

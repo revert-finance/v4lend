@@ -25,6 +25,18 @@ contract AutoCollectTest is AutomatorTestBase {
         vault.setTransformer(address(autoCollect), true);
     }
 
+    function _execute(AutoCollect.ExecuteParams memory params) internal {
+        vm.prank(operator);
+        autoCollect.execute(params);
+        _assertNoAutomatorDust(address(autoCollect), "AutoCollect");
+    }
+
+    function _executeWithVault(AutoCollect.ExecuteParams memory params) internal {
+        vm.prank(operator);
+        autoCollect.executeWithVault(params, address(vault));
+        _assertNoAutomatorDust(address(autoCollect), "AutoCollect");
+    }
+
     function _collectConfig(
         uint64 maxRewardX64,
         uint16 token0SlippageBps,
@@ -125,8 +137,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
         assertGt(liquidityAfter, liquidityBefore, "Liquidity should increase after auto-compound");
@@ -191,8 +202,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.executeWithVault(params, address(vault));
+        _executeWithVault(params);
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
         assertGt(liquidityAfter, liquidityBefore, "Liquidity should increase after vault auto-compound");
@@ -230,8 +240,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         uint256 usdcAfter = usdc.balanceOf(WHALE_ACCOUNT);
         uint256 wethAfter = weth.balanceOf(WHALE_ACCOUNT);
@@ -296,8 +305,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         uint256 usdcAfter = usdc.balanceOf(WHALE_ACCOUNT);
         assertGt(usdcAfter, usdcBefore, "Owner should receive token0 (USDC)");
@@ -327,8 +335,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         uint256 wethAfter = weth.balanceOf(WHALE_ACCOUNT);
         uint256 ethAfter = WHALE_ACCOUNT.balance;
@@ -363,8 +370,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         // With zero protocol fee, the contract should not keep position leftovers.
         assertEq(usdc.balanceOf(address(autoCollect)), contractUsdcBefore);
@@ -372,7 +378,7 @@ contract AutoCollectTest is AutomatorTestBase {
         assertEq(address(autoCollect).balance, contractEthBefore);
     }
 
-    function test_AutoCollectIgnoresDustedBalances() public {
+    function test_AutoCollectSweepsDustedBalances() public {
         PoolKey memory poolKey = _createPool();
         uint256 tokenId = _createFullRangePosition(poolKey);
 
@@ -396,10 +402,9 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
-        assertEq(usdc.balanceOf(address(autoCollect)), dustAmount, "dusted USDC should not be attributed to the run");
+        assertEq(usdc.balanceOf(address(autoCollect)), 0, "dusted USDC should be swept out by the run");
         assertEq(weth.balanceOf(address(autoCollect)), 0, "no extra WETH should remain");
     }
 
@@ -431,8 +436,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
         assertGt(liquidityAfter, liquidityBefore, "Liquidity should increase after ETH auto-compound");
@@ -471,8 +475,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.executeWithVault(params, address(vault));
+        _executeWithVault(params);
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
         assertGt(liquidityAfter, liquidityBefore, "Liquidity should increase after ETH vault auto-compound");
@@ -505,8 +508,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         // With zero protocol fee, the contract should not keep position leftovers.
         assertEq(usdc.balanceOf(address(autoCollect)), contractUsdcBefore);
@@ -543,14 +545,13 @@ contract AutoCollectTest is AutomatorTestBase {
         });
 
         uint256 recipientEthBefore = protocolFeeRecipient.balance;
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         assertEq(address(autoCollect).balance, 0, "contract should not retain ETH protocol fees");
         assertGt(protocolFeeRecipient.balance, recipientEthBefore, "recipient should receive ETH protocol fees");
     }
 
-    function test_ProtocolFeesInETHIgnorePreDustedNativeBalance() public {
+    function test_ProtocolFeesInETHSweepPreDustedNativeBalance() public {
         PoolKey memory poolKey = _createEthPool();
         uint256 tokenId = _createFullRangePositionEth(poolKey);
 
@@ -579,10 +580,9 @@ contract AutoCollectTest is AutomatorTestBase {
         });
 
         uint256 recipientEthBefore = protocolFeeRecipient.balance;
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
-        assertEq(address(autoCollect).balance, dustAmount, "pre-dusted ETH should not be attributed to protocol fees");
+        assertEq(address(autoCollect).balance, 0, "pre-dusted ETH should be swept out by the run");
         assertEq(usdc.balanceOf(address(autoCollect)), 0, "contract should not retain USDC after native fee send");
         assertGt(protocolFeeRecipient.balance, recipientEthBefore, "recipient should still receive native protocol fees");
     }
@@ -614,8 +614,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: type(uint64).max
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         assertEq(usdc.balanceOf(address(autoCollect)), 0, "contract should not retain USDC protocol fees");
         assertEq(weth.balanceOf(address(autoCollect)), 0, "contract should not retain WETH protocol fees");
@@ -650,8 +649,7 @@ contract AutoCollectTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoCollect.execute(params);
+        _execute(params);
 
         uint256 ethAfter = WHALE_ACCOUNT.balance;
         uint256 usdcAfter = usdc.balanceOf(WHALE_ACCOUNT);

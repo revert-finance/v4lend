@@ -372,6 +372,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     }
 
     /// @notice Decreases liquidity from a position (optionally only fees)
+    /// @dev Hook action accounting intentionally works on whole self-balances after TAKE_PAIR.
+    ///      Successful flows are expected to drain the hook back to zero, so the returned amounts
+    ///      represent all balances currently attributable to the action. If unsolicited balances
+    ///      are present, they will be swept by the next execution by design.
     function _decreaseLiquidity(
         PoolKey memory poolKey,
         uint256 tokenId,
@@ -432,6 +436,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     // ==================== Token Transfer Helpers ====================
 
     /// @notice Sends leftover tokens to the recipient
+    /// @dev Intentionally sweeps the entire remaining balance for each pool token. The hook's
+    ///      accounting model assumes successful executions leave no residual balances behind.
     function _sendLeftoverTokens(uint256 tokenId, Currency currency0, Currency currency1, address recipient) internal {
         uint256 amount0 = currency0.balanceOfSelf();
         uint256 amount1 = currency1.balanceOfSelf();
@@ -453,6 +459,9 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     }
 
     /// @notice Swaps tokens to the lend token
+    /// @dev Returns the full lend-token balance after the swap. This is intentional so later
+    ///      repayment/leftover handling operates on the hook's complete transient balance for
+    ///      the position rather than tracking per-step deltas inside the action flow.
     function _swapToLendToken(
         uint256 tokenId,
         PoolKey memory poolKey,

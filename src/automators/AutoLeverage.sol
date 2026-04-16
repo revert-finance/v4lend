@@ -44,9 +44,6 @@ contract AutoLeverage is Automator {
 
     /// @dev Internal struct to avoid stack-too-deep for fee reuse accounting
     struct ExecuteState {
-        uint256 startBalance0;
-        uint256 startBalance1;
-        uint256 startLendBalance;
         uint256 netFee0;
         uint256 netFee1;
         uint256 protocolFee0;
@@ -157,11 +154,6 @@ contract AutoLeverage is Automator {
         ctx.isThirdToken = !(ctx.lendToken == ctx.token0) && !(ctx.lendToken == ctx.token1);
 
         ExecuteState memory state;
-        state.startBalance0 = ctx.token0.balanceOfSelf();
-        state.startBalance1 = ctx.token1.balanceOfSelf();
-        if (ctx.isThirdToken) {
-            state.startLendBalance = ctx.lendToken.balanceOfSelf();
-        }
 
         // Collect fees first and reserve protocol fees until the end of execution.
         // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively).
@@ -190,14 +182,12 @@ contract AutoLeverage is Automator {
             _leverageDown(params, vault, config, ctx, state);
         }
 
-        // Return residual lend token when it's a third token.
-        if (ctx.isThirdToken) {
-            uint256 lendBalance = _availableBalance(ctx.lendToken, state.startLendBalance, 0);
-            if (lendBalance > 0) {
-                _transferToken(vault.ownerOf(params.tokenId), ctx.lendToken, lendBalance);
-            }
-        }
+        address owner = vault.ownerOf(params.tokenId);
         _sendProtocolFees(ctx.token0, ctx.token1, state.protocolFee0, state.protocolFee1);
+        if (ctx.isThirdToken) {
+            _sendRemainingBalance(owner, ctx.lendToken);
+        }
+        _sendRemainingBalances(owner, ctx.token0, ctx.token1);
 
         (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
         emit AutoLeverageExecuted(params.tokenId, params.leverageUp, ctx.currentDebt, newDebt);
@@ -221,8 +211,8 @@ contract AutoLeverage is Automator {
             // Borrow from vault
             vault.borrow(params.tokenId, borrowAmount);
 
-            amount0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
-            amount1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
+            amount0 = _netBalanceAfterReserved(ctx.token0, state.protocolFee0);
+            amount1 = _netBalanceAfterReserved(ctx.token1, state.protocolFee1);
         }
 
         // Swap borrowed lend token to position tokens
@@ -274,11 +264,6 @@ contract AutoLeverage is Automator {
             }
         }
 
-        address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
-        uint256 leftover1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
-        _transferToken(owner, ctx.token0, leftover0);
-        _transferToken(owner, ctx.token1, leftover1);
     }
 
     function _leverageDown(
@@ -323,8 +308,8 @@ contract AutoLeverage is Automator {
                 params.decreaseLiquidityHookData
             );
         }
-        amount0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
-        amount1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
+        amount0 = _netBalanceAfterReserved(ctx.token0, state.protocolFee0);
+        amount1 = _netBalanceAfterReserved(ctx.token1, state.protocolFee1);
 
         // Swap position tokens to lend token
         uint256 lendAmount = ctx.lendToken == ctx.token0 ? amount0 : (ctx.lendToken == ctx.token1 ? amount1 : 0);
@@ -353,11 +338,6 @@ contract AutoLeverage is Automator {
             vault.repay(params.tokenId, lendAmount, false);
         }
 
-        address owner = vault.ownerOf(params.tokenId);
-        uint256 leftover0 = _availableBalance(ctx.token0, state.startBalance0, state.protocolFee0);
-        uint256 leftover1 = _availableBalance(ctx.token1, state.startBalance1, state.protocolFee1);
-        _transferToken(owner, ctx.token0, leftover0);
-        _transferToken(owner, ctx.token1, leftover1);
     }
 
     function _quoteConservativeLendValue(

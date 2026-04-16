@@ -671,6 +671,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             address(this), params.recipientNFT, tokenId, params.returnData
         );
 
+        // Whole-balance accounting is intentional here: these helpers are expected to end each
+        // successful call with no retained token balances, so final balances represent the
+        // complete leftover amounts to return to the caller.
         // Calculate consumption and return leftovers
         uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();
         uint256 finalBalance1 = poolKey.currency1.balanceOfSelf();
@@ -761,6 +764,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             abi.encode(actions, paramsArray), params.deadline
         );
 
+        // Whole-balance accounting is intentional here: these helpers are expected to end each
+        // successful call with no retained token balances, so final balances represent the
+        // complete leftover amounts to return to the caller.
         // Calculate consumption and return leftovers
         {
             uint256 finalBalance0 = poolKey.currency0.balanceOfSelf();

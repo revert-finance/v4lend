@@ -23,6 +23,18 @@ contract AutoRangeTest is AutomatorTestBase {
         vault.setTransformer(address(autoRange), true);
     }
 
+    function _execute(AutoRange.ExecuteParams memory params) internal {
+        vm.prank(operator);
+        autoRange.execute(params);
+        _assertNoAutomatorDust(address(autoRange), "AutoRange");
+    }
+
+    function _executeWithVault(AutoRange.ExecuteParams memory params) internal {
+        vm.prank(operator);
+        autoRange.executeWithVault(params, address(vault));
+        _assertNoAutomatorDust(address(autoRange), "AutoRange");
+    }
+
     // --- Access Control ---
 
     function test_RevertWhenNonOperatorCallsExecute() public {
@@ -141,8 +153,7 @@ contract AutoRangeTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoRange.execute(params);
+        _execute(params);
 
         // Verify original position has 0 liquidity
         uint128 oldLiquidity = positionManager.getPositionLiquidity(tokenId);
@@ -163,7 +174,7 @@ contract AutoRangeTest is AutomatorTestBase {
         assertEq(lowerTickLimit, 1, "Config should be copied to new position");
     }
 
-    function test_ExecuteRangeChangeIgnoresDustedBalances() public {
+    function test_ExecuteRangeChangeSweepsDustedBalances() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createNarrowPosition(poolKey);
@@ -205,10 +216,9 @@ contract AutoRangeTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoRange.execute(params);
+        _execute(params);
 
-        assertEq(usdc.balanceOf(address(autoRange)), dustAmount, "dusted USDC should not be attributed to range change");
+        assertEq(usdc.balanceOf(address(autoRange)), 0, "dusted USDC should be swept out by range change");
         assertEq(weth.balanceOf(address(autoRange)), 0, "no extra WETH should remain");
     }
 
@@ -458,8 +468,7 @@ contract AutoRangeTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoRange.execute(params);
+        _execute(params);
 
         // Verify original position has 0 liquidity
         uint128 oldLiquidity = positionManager.getPositionLiquidity(tokenId);
@@ -518,8 +527,7 @@ contract AutoRangeTest is AutomatorTestBase {
             rewardX64: maxReward
         });
 
-        vm.prank(operator);
-        autoRange.execute(params);
+        _execute(params);
 
         assertEq(address(autoRange).balance, 0, "contract should not retain native protocol fees");
         assertEq(usdc.balanceOf(address(autoRange)), 0, "contract should not retain USDC protocol fees");
@@ -574,8 +582,7 @@ contract AutoRangeTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoRange.executeWithVault(params, address(vault));
+        _executeWithVault(params);
 
         // Old position should have 0 liquidity
         assertEq(positionManager.getPositionLiquidity(tokenId), 0);
@@ -635,8 +642,7 @@ contract AutoRangeTest is AutomatorTestBase {
             rewardX64: maxReward
         });
 
-        vm.prank(operator);
-        autoRange.execute(params);
+        _execute(params);
 
         uint256 contractUsdcAfter = usdc.balanceOf(address(autoRange));
         uint256 contractWethAfter = weth.balanceOf(address(autoRange));
@@ -701,8 +707,7 @@ contract AutoRangeTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoRange.executeWithVault(params, address(vault));
+        _executeWithVault(params);
 
         // Old position should have 0 liquidity
         assertEq(positionManager.getPositionLiquidity(tokenId), 0);

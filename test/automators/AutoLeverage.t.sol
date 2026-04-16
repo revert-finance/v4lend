@@ -33,6 +33,12 @@ contract AutoLeverageTest is AutomatorTestBase {
         v4Oracle.setMaxPoolPriceDifference(10000);
     }
 
+    function _execute(AutoLeverage.ExecuteParams memory params) internal {
+        vm.prank(operator);
+        autoLeverage.execute(params);
+        _assertNoAutomatorDust(address(autoLeverage), "AutoLeverage");
+    }
+
     // --- Access Control ---
 
     function test_RevertWhenNonOperatorCallsExecute() public {
@@ -232,8 +238,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         // Debt should have increased
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
@@ -295,14 +300,13 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
         assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down");
     }
 
-    function test_LeverageDownIgnoresDustedBalances() public {
+    function test_LeverageDownSweepsDustedBalances() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createFullRangePosition(poolKey);
@@ -329,6 +333,7 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         uint256 dustAmount = 111;
         deal(address(weth), address(autoLeverage), dustAmount);
+        uint256 ownerWethBefore = weth.balanceOf(WHALE_ACCOUNT);
 
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
@@ -350,10 +355,10 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
-        assertEq(weth.balanceOf(address(autoLeverage)), dustAmount, "dusted WETH should not be attributed to leverage down");
+        assertEq(weth.balanceOf(address(autoLeverage)), 0, "dusted WETH should be swept out by leverage down");
+        assertGe(weth.balanceOf(WHALE_ACCOUNT) - ownerWethBefore, dustAmount, "owner should receive the dusted WETH");
     }
 
     function test_LeverageDownThirdTokenFeesReduceLiquidityRemoval() public {
@@ -423,8 +428,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
         (uint256 debtAfter, uint256 debtSharesAfter, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
@@ -489,8 +493,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
         assertGt(debtAfter, debtBefore, "Debt should increase after ETH leverage up");
@@ -547,8 +550,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
         assertLt(debtAfter, debtBefore, "Debt should decrease after ETH leverage down");
@@ -605,8 +607,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: maxReward
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         assertEq(address(autoLeverage).balance, 0, "contract should not retain native protocol fees");
         assertEq(usdc.balanceOf(address(autoLeverage)), 0, "contract should not retain USDC protocol fees");
@@ -718,8 +719,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
         assertGt(debtAfter, debtBefore, "exact lower threshold boundary should still rebalance up");
@@ -776,8 +776,7 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoLeverage.execute(params);
+        _execute(params);
 
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
         assertLt(debtAfter, debtBefore, "exact upper threshold boundary should still rebalance down");

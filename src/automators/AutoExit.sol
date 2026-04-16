@@ -161,6 +161,8 @@ contract AutoExit is Automator {
         }
         (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
             _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, config.onlyFees, params.rewardX64);
+        state.amount0 = _netBalanceAfterReserved(token0, state.protocolFee0);
+        state.amount1 = _netBalanceAfterReserved(token1, state.protocolFee1);
 
         // Resolve owner; for vault positions, repay debt before swap
         if (isVaultCall) {
@@ -223,9 +225,8 @@ contract AutoExit is Automator {
         emit PositionConfigured(params.tokenId, false, false, false, 0, 0, 0, 0, 0, false);
 
         // Send remaining tokens after state is finalized.
-        _transferToken(state.owner, token0, state.amount0);
-        _transferToken(state.owner, token1, state.amount1);
         _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
+        (state.amount0, state.amount1) = _sendRemainingBalances(state.owner, token0, token1);
 
         emit AutoExitExecuted(
             params.tokenId,

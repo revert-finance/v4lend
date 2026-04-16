@@ -66,8 +66,6 @@ contract AutoRange is Automator {
 
     struct ExecuteState {
         uint160 sqrtPriceX96;
-        uint256 startBalance0;
-        uint256 startBalance1;
         uint256 amount0;
         uint256 amount1;
         uint256 protocolFee0;
@@ -141,8 +139,6 @@ contract AutoRange is Automator {
 
         // Reuse the current slot0 for both planning and liquidity math.
         ExecuteState memory state;
-        state.startBalance0 = token0.balanceOfSelf();
-        state.startBalance1 = token1.balanceOfSelf();
         int24 currentTick;
         (state.sqrtPriceX96, currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
         int24 tickLower = positionInfo.tickLower();
@@ -176,7 +172,7 @@ contract AutoRange is Automator {
             revert SameRange();
         }
 
-        _collectNetAmounts(params, config, state);
+        _collectNetAmounts(params, config, token0, token1, state);
 
         // Swap to rebalance for new range
         if (params.amountIn > 0) {
@@ -211,9 +207,7 @@ contract AutoRange is Automator {
             state.amount1,
             state.protocolFee0,
             state.protocolFee1,
-            state.sqrtPriceX96,
-            state.startBalance0,
-            state.startBalance1
+            state.sqrtPriceX96
         );
 
         _finalizeRangeChange(
@@ -222,9 +216,7 @@ contract AutoRange is Automator {
             token0,
             token1,
             state.protocolFee0,
-            state.protocolFee1,
-            state.startBalance0,
-            state.startBalance1
+            state.protocolFee1
         );
 
         emit AutoRangeExecuted(params.tokenId, newTokenId);
@@ -236,9 +228,7 @@ contract AutoRange is Automator {
         Currency token0,
         Currency token1,
         uint256 protocolFee0,
-        uint256 protocolFee1,
-        uint256 startBalance0,
-        uint256 startBalance1
+        uint256 protocolFee1
     ) internal {
         address owner;
         if (vaults[msg.sender]) {
@@ -254,13 +244,15 @@ contract AutoRange is Automator {
         positionConfigs[newTokenId] = positionConfigs[oldTokenId];
         delete positionConfigs[oldTokenId];
 
-        _sendAvailableBalances(owner, token0, token1, startBalance0, startBalance1, protocolFee0, protocolFee1);
         _sendProtocolFees(token0, token1, protocolFee0, protocolFee1);
+        _sendRemainingBalances(owner, token0, token1);
     }
 
     function _collectNetAmounts(
         ExecuteParams calldata params,
         PositionConfig memory config,
+        Currency token0,
+        Currency token1,
         ExecuteState memory state
     ) internal {
         uint128 liquidity = positionManager.getPositionLiquidity(params.tokenId);
@@ -285,6 +277,8 @@ contract AutoRange is Automator {
         }
         (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
             _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, config.onlyFees, params.rewardX64);
+        state.amount0 = _netBalanceAfterReserved(token0, state.protocolFee0);
+        state.amount1 = _netBalanceAfterReserved(token1, state.protocolFee1);
     }
 
     function _mintNewPosition(
@@ -298,9 +292,7 @@ contract AutoRange is Automator {
         uint256 amount1,
         uint256 protocolFee0,
         uint256 protocolFee1,
-        uint160 sqrtPriceX96,
-        uint256 startBalance0,
-        uint256 startBalance1
+        uint160 sqrtPriceX96
     ) internal returns (uint256 newTokenId) {
         uint128 liquidity = _calculateLiquidity(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
         if (liquidity == 0) {
@@ -323,24 +315,11 @@ contract AutoRange is Automator {
         newTokenId = positionManager.nextTokenId() - 1;
 
         // Check minimum amounts added
-        uint256 added0 = amount0 - _availableBalance(token0, startBalance0, protocolFee0);
-        uint256 added1 = amount1 - _availableBalance(token1, startBalance1, protocolFee1);
+        uint256 added0 = amount0 - _netBalanceAfterReserved(token0, protocolFee0);
+        uint256 added1 = amount1 - _netBalanceAfterReserved(token1, protocolFee1);
         if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
             revert InsufficientAmountAdded();
         }
-    }
-
-    function _sendAvailableBalances(
-        address owner,
-        Currency token0,
-        Currency token1,
-        uint256 startBalance0,
-        uint256 startBalance1,
-        uint256 protocolFee0,
-        uint256 protocolFee1
-    ) internal {
-        _transferToken(owner, token0, _availableBalance(token0, startBalance0, protocolFee0));
-        _transferToken(owner, token1, _availableBalance(token1, startBalance1, protocolFee1));
     }
 
     /// @notice Configure a token for auto-range

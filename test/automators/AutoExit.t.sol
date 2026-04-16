@@ -24,6 +24,18 @@ contract AutoExitTest is AutomatorTestBase {
         vault.setTransformer(address(autoExit), true);
     }
 
+    function _execute(address caller, AutoExit.ExecuteParams memory params) internal {
+        vm.prank(caller);
+        autoExit.execute(params);
+        _assertNoAutomatorDust(address(autoExit), "AutoExit");
+    }
+
+    function _executeWithVault(AutoExit.ExecuteParams memory params) internal {
+        vm.prank(operator);
+        autoExit.executeWithVault(params, address(vault));
+        _assertNoAutomatorDust(address(autoExit), "AutoExit");
+    }
+
     // --- Access Control ---
 
     function test_RevertWhenNonOperatorCallsExecute() public {
@@ -158,8 +170,7 @@ contract AutoExitTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoExit.execute(params);
+        _execute(operator, params);
 
         // Position should have 0 liquidity
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
@@ -253,8 +264,7 @@ contract AutoExitTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoExit.execute(params);
+        _execute(operator, params);
 
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Position should be empty");
     }
@@ -299,8 +309,7 @@ contract AutoExitTest is AutomatorTestBase {
             rewardX64: maxReward
         });
 
-        vm.prank(operator);
-        autoExit.execute(params);
+        _execute(operator, params);
 
         assertEq(usdc.balanceOf(address(autoExit)), 0, "contract should not retain USDC protocol fees");
         assertEq(weth.balanceOf(address(autoExit)), 0, "contract should not retain WETH protocol fees");
@@ -404,8 +413,7 @@ contract AutoExitTest is AutomatorTestBase {
         uint256 ethBefore = WHALE_ACCOUNT.balance;
         uint256 usdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
 
-        vm.prank(operator);
-        autoExit.execute(params);
+        _execute(operator, params);
 
         // Position should have 0 liquidity
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
@@ -462,8 +470,7 @@ contract AutoExitTest is AutomatorTestBase {
         probe.configure(address(autoExit), abi.encodeWithSignature("positionConfigs(uint256)", tokenId), 0);
         probe.setReentry(address(autoExit), abi.encodeCall(autoExit.execute, (params)));
 
-        vm.prank(address(probe));
-        autoExit.execute(params);
+        _execute(address(probe), params);
 
         assertGt(probe.totalNativeReceived(), 0, "probe should receive native protocol fees");
         assertTrue(probe.attemptedReentry(), "probe should attempt reentry");
@@ -515,8 +522,7 @@ contract AutoExitTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoExit.executeWithVault(params, address(vault));
+        _executeWithVault(params);
 
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
         assertEq(liquidityAfter, 0, "Position should have 0 liquidity after ETH vault exit");
@@ -573,8 +579,7 @@ contract AutoExitTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        vm.prank(operator);
-        autoExit.executeWithVault(params, address(vault));
+        _executeWithVault(params);
 
         // Position should have 0 liquidity
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
