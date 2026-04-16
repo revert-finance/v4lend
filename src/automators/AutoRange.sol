@@ -104,19 +104,7 @@ contract AutoRange is Automator {
 
     /// @notice Execute range change
     function execute(ExecuteParams calldata params) external nonReentrant {
-        bool isVaultCall = vaults[msg.sender];
-        if (!operators[msg.sender] && !isVaultCall) {
-            revert Unauthorized();
-        }
-        if (isVaultCall) {
-            _validateCaller(positionManager, params.tokenId);
-        } else {
-            // Vault-owned positions must use executeWithVault to ensure proper handling
-            address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
-            if (vaults[posOwner]) {
-                revert Unauthorized();
-            }
-        }
+        _validateExecuteCaller(params.tokenId);
 
         PositionConfig memory config = positionConfigs[params.tokenId];
         if (config.lowerTickDelta == 0 && config.upperTickDelta == 0) {
@@ -126,6 +114,20 @@ contract AutoRange is Automator {
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
 
         _executeRangeChange(params, config, poolKey, positionInfo);
+    }
+
+    function _validateExecuteCaller(uint256 tokenId) internal view {
+        if (operators[msg.sender]) {
+            address posOwner = IERC721(address(positionManager)).ownerOf(tokenId);
+            if (vaults[posOwner]) {
+                revert Unauthorized();
+            }
+            return;
+        }
+        if (!vaults[msg.sender]) {
+            revert Unauthorized();
+        }
+        _validateCaller(positionManager, tokenId);
     }
 
     function _executeRangeChange(
@@ -174,32 +176,7 @@ contract AutoRange is Automator {
             revert SameRange();
         }
 
-        // Get full liquidity
-        uint128 liquidity = positionManager.getPositionLiquidity(params.tokenId);
-
-        // Step 1: Collect fees only (0 liquidity decrease)
-        (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
-            params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData
-        );
-
-        // Step 2: Remove all liquidity (fees already collected above)
-        (uint256 liquidityAmount0, uint256 liquidityAmount1) = _decreaseLiquidity(
-            params.tokenId,
-            liquidity,
-            params.amountRemoveMin0,
-            params.amountRemoveMin1,
-            params.deadline,
-            params.decreaseLiquidityHookData
-        );
-
-        state.amount0 = feeAmount0 + liquidityAmount0;
-        state.amount1 = feeAmount1 + liquidityAmount1;
-
-        if (params.rewardX64 > config.maxRewardX64) {
-            revert ExceedsMaxReward();
-        }
-        (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
-            _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, config.onlyFees, params.rewardX64);
+        _collectNetAmounts(params, config, state);
 
         // Swap to rebalance for new range
         if (params.amountIn > 0) {
@@ -277,9 +254,37 @@ contract AutoRange is Automator {
         positionConfigs[newTokenId] = positionConfigs[oldTokenId];
         delete positionConfigs[oldTokenId];
 
-        _transferToken(owner, token0, _availableBalance(token0, startBalance0, protocolFee0));
-        _transferToken(owner, token1, _availableBalance(token1, startBalance1, protocolFee1));
+        _sendAvailableBalances(owner, token0, token1, startBalance0, startBalance1, protocolFee0, protocolFee1);
         _sendProtocolFees(token0, token1, protocolFee0, protocolFee1);
+    }
+
+    function _collectNetAmounts(
+        ExecuteParams calldata params,
+        PositionConfig memory config,
+        ExecuteState memory state
+    ) internal {
+        uint128 liquidity = positionManager.getPositionLiquidity(params.tokenId);
+
+        (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
+            params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData
+        );
+        (uint256 liquidityAmount0, uint256 liquidityAmount1) = _decreaseLiquidity(
+            params.tokenId,
+            liquidity,
+            params.amountRemoveMin0,
+            params.amountRemoveMin1,
+            params.deadline,
+            params.decreaseLiquidityHookData
+        );
+
+        state.amount0 = feeAmount0 + liquidityAmount0;
+        state.amount1 = feeAmount1 + liquidityAmount1;
+
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
+        (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
+            _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, config.onlyFees, params.rewardX64);
     }
 
     function _mintNewPosition(
@@ -323,6 +328,19 @@ contract AutoRange is Automator {
         if (added0 < params.amountAddMin0 || added1 < params.amountAddMin1) {
             revert InsufficientAmountAdded();
         }
+    }
+
+    function _sendAvailableBalances(
+        address owner,
+        Currency token0,
+        Currency token1,
+        uint256 startBalance0,
+        uint256 startBalance1,
+        uint256 protocolFee0,
+        uint256 protocolFee1
+    ) internal {
+        _transferToken(owner, token0, _availableBalance(token0, startBalance0, protocolFee0));
+        _transferToken(owner, token1, _availableBalance(token1, startBalance1, protocolFee1));
     }
 
     /// @notice Configure a token for auto-range

@@ -37,6 +37,12 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
 
+    struct SwapPlan {
+        PoolKey poolKey;
+        bool zeroForOne;
+        uint256 amountIn;
+    }
+
     IPermit2 internal immutable permit2;
     IPositionManager internal immutable positionManager;
     IWETH9 internal immutable weth;
@@ -148,14 +154,32 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 amount1,
         Mode mode
     ) internal returns (uint256, uint256) {
-        uint256 swapInput;
+        SwapPlan memory swapPlan = _buildSwapPlan(poolKey, tickLower, tickUpper, amount0, amount1);
+        if (swapPlan.amountIn > 0) {
+            return _applyBalanceDelta(
+                _executeSwapResolved(swapPlan.poolKey, swapPlan.zeroForOne, swapPlan.amountIn, tokenId, mode),
+                amount0,
+                amount1
+            );
+        }
+        return (amount0, amount1);
+    }
+
+    function _buildSwapPlan(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0,
+        uint256 amount1
+    ) internal view returns (SwapPlan memory plan) {
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
 
-        bool zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
-        (PoolKey memory swapPool, bool isSamePool) = _resolveSwapPool(poolKey, zeroForOne);
+        plan.zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
+        bool isSamePool;
+        (plan.poolKey, isSamePool) = _resolveSwapPool(poolKey, plan.zeroForOne);
 
         if (isSamePool) {
-            (swapInput,, zeroForOne,) = liquidityCalculator.calculateSamePool(
+            (plan.amountIn,, plan.zeroForOne,) = liquidityCalculator.calculateSamePool(
                 ILiquidityCalculator.V4PoolInfo({
                     poolMgr: poolManager,
                     poolIdentifier: poolKey.toId(),
@@ -166,16 +190,12 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
                 amount0,
                 amount1
             );
-        } else {
-            (swapInput,, zeroForOne) = liquidityCalculator.calculateSimple(
-                sqrtPriceX96, tickLower, tickUpper, amount0, amount1, swapPool.fee
-            );
+            return plan;
         }
 
-        if (swapInput > 0) {
-            return _applyBalanceDelta(_executeSwapResolved(swapPool, zeroForOne, swapInput, tokenId, mode), amount0, amount1);
-        }
-        return (amount0, amount1);
+        (plan.amountIn,, plan.zeroForOne) = liquidityCalculator.calculateSimple(
+            sqrtPriceX96, tickLower, tickUpper, amount0, amount1, plan.poolKey.fee
+        );
     }
 
     function _determineSwapDirection(

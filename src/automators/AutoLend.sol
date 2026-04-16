@@ -143,25 +143,12 @@ contract AutoLend is Automator {
             revert InvalidConfig();
         }
 
-        // Non-vault positions only
-        address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
-        if (vaults[posOwner]) {
-            revert Unauthorized();
-        }
+        address posOwner = _requireNonVaultPosition(params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
-        int24 tickLower = positionInfo.tickLower();
-        int24 tickUpper = positionInfo.tickUpper();
-
-        // Get current tick
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
 
-        // Verify out-of-range zone condition
-        bool isAbove = currentTick >= tickUpper + config.upperTickZone;
-        bool isBelow = currentTick < tickLower - config.lowerTickZone;
-        if (!isAbove && !isBelow) {
-            revert NotReady();
-        }
+        bool isAbove = _validateDepositTrigger(config, positionInfo.tickLower(), positionInfo.tickUpper(), currentTick);
 
         // Get full liquidity
         uint128 liquidity = positionManager.getPositionLiquidity(params.tokenId);
@@ -200,14 +187,7 @@ contract AutoLend is Automator {
         uint256 activeAmount = isAbove ? amount0 : amount1;
 
         address idleTokenAddr = Currency.unwrap(idleToken);
-        IERC4626 lendVault = autoLendVaults[idleTokenAddr];
-        // Backward-compatible fallback for native token configuration keyed by WETH.
-        if (address(lendVault) == address(0) && idleToken.isAddressZero()) {
-            lendVault = autoLendVaults[address(weth)];
-        }
-        if (address(lendVault) == address(0)) {
-            revert NotConfigured();
-        }
+        IERC4626 lendVault = _resolveAutoLendVault(idleToken);
 
         // Deposit into ERC4626 vault (wrap native ETH to WETH first if needed)
         address depositTokenAddr = idleTokenAddr;
@@ -251,11 +231,7 @@ contract AutoLend is Automator {
 
         PositionConfig memory config = positionConfigs[params.tokenId];
 
-        // Non-vault positions only
-        address posOwner = IERC721(address(positionManager)).ownerOf(params.tokenId);
-        if (vaults[posOwner]) {
-            revert Unauthorized();
-        }
+        address posOwner = _requireNonVaultPosition(params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         uint256 startBalance0 = poolKey.currency0.balanceOfSelf();
@@ -265,19 +241,8 @@ contract AutoLend is Automator {
         int24 tickUpper = positionInfo.tickUpper();
         (uint160 sqrtPriceX96, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
 
-        // Check withdrawal trigger zones
-        bool isToken0Lent = state.lentToken == Currency.unwrap(poolKey.currency0);
-        if (isToken0Lent) {
-            // Token0 lent when price was below range; withdraw when it comes back up near range
-            if (currentTick < tickLower - config.lowerTickZoneWithdraw) {
-                revert NotReady();
-            }
-        } else {
-            // Token1 lent when price was above range; withdraw when it comes back down near range
-            if (currentTick >= tickUpper + config.upperTickZoneWithdraw) {
-                revert NotReady();
-            }
-        }
+        bool isToken0Lent =
+            _validateWithdrawTrigger(config, poolKey.currency0, state.lentToken, tickLower, tickUpper, currentTick);
 
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
 
@@ -320,12 +285,7 @@ contract AutoLend is Automator {
                 params.hookData
             );
         } else {
-            if (newUpper > TickMath.MAX_TICK) {
-                newUpper = TickMath.maxUsableTick(poolKey.tickSpacing);
-            }
-            if (newLower < TickMath.MIN_TICK) {
-                newLower = TickMath.minUsableTick(poolKey.tickSpacing);
-            }
+            (newLower, newUpper) = _normalizeRange(newLower, newUpper, poolKey.tickSpacing);
             if (newLower >= newUpper) {
                 revert InvalidConfig();
             }
@@ -356,13 +316,82 @@ contract AutoLend is Automator {
 
         uint256 protocolFee0 = lendCurrency == poolKey.currency0 ? protocolFee : 0;
         uint256 protocolFee1 = lendCurrency == poolKey.currency1 ? protocolFee : 0;
-        uint256 leftover0 = _availableBalance(poolKey.currency0, startBalance0, protocolFee0);
-        uint256 leftover1 = _availableBalance(poolKey.currency1, startBalance1, protocolFee1);
-        _transferToken(posOwner, poolKey.currency0, leftover0);
-        _transferToken(posOwner, poolKey.currency1, leftover1);
+        _sendAvailableBalances(
+            posOwner, poolKey.currency0, poolKey.currency1, startBalance0, startBalance1, protocolFee0, protocolFee1
+        );
         _sendProtocolFee(lendCurrency, protocolFee);
 
         emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
+    }
+
+    function _requireNonVaultPosition(uint256 tokenId) internal view returns (address posOwner) {
+        posOwner = IERC721(address(positionManager)).ownerOf(tokenId);
+        if (vaults[posOwner]) {
+            revert Unauthorized();
+        }
+    }
+
+    function _validateDepositTrigger(
+        PositionConfig memory config,
+        int24 tickLower,
+        int24 tickUpper,
+        int24 currentTick
+    ) internal pure returns (bool isAbove) {
+        isAbove = currentTick >= tickUpper + config.upperTickZone;
+        bool isBelow = currentTick < tickLower - config.lowerTickZone;
+        if (!isAbove && !isBelow) {
+            revert NotReady();
+        }
+    }
+
+    function _validateWithdrawTrigger(
+        PositionConfig memory config,
+        Currency currency0,
+        address lentToken,
+        int24 tickLower,
+        int24 tickUpper,
+        int24 currentTick
+    ) internal pure returns (bool isToken0Lent) {
+        isToken0Lent = lentToken == Currency.unwrap(currency0);
+        if (isToken0Lent) {
+            if (currentTick < tickLower - config.lowerTickZoneWithdraw) {
+                revert NotReady();
+            }
+        } else if (currentTick >= tickUpper + config.upperTickZoneWithdraw) {
+            revert NotReady();
+        }
+    }
+
+    function _resolveAutoLendVault(Currency idleToken) internal view returns (IERC4626 lendVault) {
+        lendVault = autoLendVaults[Currency.unwrap(idleToken)];
+        if (address(lendVault) == address(0) && idleToken.isAddressZero()) {
+            lendVault = autoLendVaults[address(weth)];
+        }
+        if (address(lendVault) == address(0)) {
+            revert NotConfigured();
+        }
+    }
+
+    function _normalizeRange(int24 tickLower, int24 tickUpper, int24 tickSpacing)
+        internal
+        pure
+        returns (int24 normalizedLower, int24 normalizedUpper)
+    {
+        normalizedLower = tickLower < TickMath.MIN_TICK ? TickMath.minUsableTick(tickSpacing) : tickLower;
+        normalizedUpper = tickUpper > TickMath.MAX_TICK ? TickMath.maxUsableTick(tickSpacing) : tickUpper;
+    }
+
+    function _sendAvailableBalances(
+        address recipient,
+        Currency currency0,
+        Currency currency1,
+        uint256 startBalance0,
+        uint256 startBalance1,
+        uint256 protocolFee0,
+        uint256 protocolFee1
+    ) internal {
+        _transferToken(recipient, currency0, _availableBalance(currency0, startBalance0, protocolFee0));
+        _transferToken(recipient, currency1, _availableBalance(currency1, startBalance1, protocolFee1));
     }
 
     function _increaseLiquidityOnExisting(

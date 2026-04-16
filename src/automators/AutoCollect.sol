@@ -106,37 +106,15 @@ contract AutoCollect is Automator {
 
     /// @notice Adjust token directly or via vault transform
     function execute(ExecuteParams calldata params) external nonReentrant {
-        if (!operators[msg.sender]) {
-            if (vaults[msg.sender]) {
-                _validateCaller(positionManager, params.tokenId);
-            } else {
-                revert Unauthorized();
-            }
-        }
+        _validateExecuteCaller(params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
-
-        ExecuteState memory state;
-        state.startBalance0 = token0.balanceOfSelf();
-        state.startBalance1 = token1.balanceOfSelf();
-
-        // Collect fees (decrease liquidity by 0)
-        (uint256 feeAmount0, uint256 feeAmount1) =
-            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
-
         PositionConfig memory config = positionConfigs[params.tokenId];
-        if (params.rewardX64 > config.maxRewardX64) {
-            revert ExceedsMaxReward();
-        }
-        state.amount0 = feeAmount0;
-        state.amount1 = feeAmount1;
-        (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
-            _quoteProtocolFees(feeAmount0, feeAmount1, state.amount0, state.amount1, true, params.rewardX64);
 
+        ExecuteState memory state = _collectNetFees(params, config, token0, token1);
         address owner = _positionOwner(params.tokenId);
-
         (uint256 a0, uint256 a1) = _executeMode(params, config, poolKey, positionInfo, token0, token1, owner, state);
 
         _sendProtocolFees(token0, token1, state.protocolFee0, state.protocolFee1);
@@ -149,6 +127,41 @@ contract AutoCollect is Automator {
             Currency.unwrap(token1),
             params.mode != CollectMode.AUTO_COLLECT
         );
+    }
+
+    function _validateExecuteCaller(uint256 tokenId) internal view {
+        if (operators[msg.sender]) {
+            return;
+        }
+        if (!vaults[msg.sender]) {
+            revert Unauthorized();
+        }
+        _validateCaller(positionManager, tokenId);
+    }
+
+    function _collectNetFees(
+        ExecuteParams calldata params,
+        PositionConfig memory config,
+        Currency token0,
+        Currency token1
+    )
+        internal
+        returns (ExecuteState memory state)
+    {
+        state.startBalance0 = token0.balanceOfSelf();
+        state.startBalance1 = token1.balanceOfSelf();
+
+        (uint256 feeAmount0, uint256 feeAmount1) =
+            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.hookData);
+
+        if (params.rewardX64 > config.maxRewardX64) {
+            revert ExceedsMaxReward();
+        }
+
+        state.amount0 = feeAmount0;
+        state.amount1 = feeAmount1;
+        (state.amount0, state.amount1, state.protocolFee0, state.protocolFee1) =
+            _quoteProtocolFees(feeAmount0, feeAmount1, feeAmount0, feeAmount1, true, params.rewardX64);
     }
 
     function _executeMode(
@@ -237,9 +250,7 @@ contract AutoCollect is Automator {
             }
         }
 
-        // Send leftover (slippage diff) to position owner immediately.
-        _transferToken(owner, token0, _availableBalance(token0, state.startBalance0, state.protocolFee0));
-        _transferToken(owner, token1, _availableBalance(token1, state.startBalance1, state.protocolFee1));
+        _sendAvailableBalances(owner, token0, token1, state.startBalance0, state.startBalance1, state.protocolFee0, state.protocolFee1);
     }
 
     function _executeHarvest(
@@ -278,6 +289,19 @@ contract AutoCollect is Automator {
         _transferToken(owner, token1, amount1);
 
         return (amount0, amount1);
+    }
+
+    function _sendAvailableBalances(
+        address owner,
+        Currency token0,
+        Currency token1,
+        uint256 startBalance0,
+        uint256 startBalance1,
+        uint256 protocolFee0,
+        uint256 protocolFee1
+    ) internal {
+        _transferToken(owner, token0, _availableBalance(token0, startBalance0, protocolFee0));
+        _transferToken(owner, token1, _availableBalance(token1, startBalance1, protocolFee1));
     }
 
     /// @notice Configure fee parameters for a position
