@@ -4,12 +4,18 @@ pragma solidity ^0.8.0;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {AutoLeverage} from "../../src/automators/AutoLeverage.sol";
 import {Constants} from "src/shared/Constants.sol";
+import {Swapper} from "src/shared/swap/Swapper.sol";
+import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
+import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
 
 contract AutoLeverageTest is AutomatorTestBase {
@@ -348,6 +354,86 @@ contract AutoLeverageTest is AutomatorTestBase {
         autoLeverage.execute(params);
 
         assertEq(weth.balanceOf(address(autoLeverage)), dustAmount, "dusted WETH should not be attributed to leverage down");
+    }
+
+    function test_LeverageDownThirdTokenFeesReduceLiquidityRemoval() public {
+        // Enable DAI collateral for this vault-backed scenario.
+        vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), type(uint32).max);
+
+        PoolKey memory poolKey = _createDaiWethPool();
+        _createFullRangePositionDaiWeth(poolKey);
+        uint256 tokenId = _createFullRangePositionDaiWeth(poolKey);
+        v4Oracle.setMaxPoolPriceDifference(type(uint16).max);
+
+        _generateFeesDaiWeth(poolKey);
+        (, uint128 fee0, uint128 fee1) = v4Oracle.getLiquidityAndFees(tokenId);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        uint16 maxSwapSlippageBps = 100;
+        uint256 conservativeFeeRepayCapacity =
+            _quoteTokenToUsdcWithHaircut(address(dai), fee0, maxSwapSlippageBps)
+            + _quoteTokenToUsdcWithHaircut(address(weth), fee1, maxSwapSlippageBps);
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 repayAmountTarget = conservativeFeeRepayCapacity * 9 / 10;
+        uint256 borrowAmount = (3000 * collateralValue + repayAmountTarget * (10000 - 3000)) / 10000;
+
+        assertGt(fee0, 0, "expected DAI fees");
+        assertGt(fee1, 0, "expected WETH fees");
+        assertGt(conservativeFeeRepayCapacity, repayAmountTarget, "fees should cover deleverage target");
+        assertGt(borrowAmount, conservativeFeeRepayCapacity, "position should remain leveraged after fee-only deleverage");
+
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, borrowAmount);
+
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 3000,
+            rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: maxSwapSlippageBps,
+            maxRewardX64: 0
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: false,
+            amountIn0: fee0,
+            amountOut0Min: 0,
+            swapData0: _createSwapDataWithFee(fee0, 0, address(dai), address(usdc), 500, address(autoLeverage)),
+            amountIn1: fee1,
+            amountOut1Min: 0,
+            swapData1: _createSwapDataWithFee(fee1, 0, address(weth), address(usdc), 500, address(autoLeverage)),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        autoLeverage.execute(params);
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
+        (uint256 debtAfter, uint256 debtSharesAfter, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
+
+        assertEq(liquidityAfter, liquidityBefore, "fees alone should avoid liquidity removal");
+        assertLt(debtAfter, debtBefore, "fees should still repay debt");
+        assertEq(usdc.balanceOf(address(autoLeverage)), 0, "automator should not retain lend token leftovers");
+        assertGt(debtSharesAfter, 0, "position should remain leveraged after fee-only deleverage");
+        assertGt(collateralAfter, 0, "position should remain open after fee-only deleverage");
     }
 
     // --- Native ETH Position Tests ---
@@ -804,5 +890,105 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         (bool isActiveAfter,,,,) = autoLeverage.positionConfigs(tokenId);
         assertFalse(isActiveAfter);
+    }
+
+    function _createDaiWethPool() internal returns (PoolKey memory poolKey) {
+        poolKey = PoolKey({
+            currency0: Currency.wrap(address(dai)),
+            currency1: Currency.wrap(address(weth)),
+            fee: 7778,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+
+        poolManager.initialize(poolKey, v4Oracle.getPoolSqrtPriceX96(address(dai), address(weth)));
+    }
+
+    function _approveWhaleDaiAndWeth() internal {
+        deal(address(dai), WHALE_ACCOUNT, 1_000_000e18);
+        deal(address(weth), WHALE_ACCOUNT, 1_000e18);
+
+        vm.prank(WHALE_ACCOUNT);
+        dai.approve(address(permit2), type(uint256).max);
+        vm.prank(WHALE_ACCOUNT);
+        weth.approve(address(permit2), type(uint256).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(dai), address(positionManager), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(positionManager), type(uint160).max, type(uint48).max);
+    }
+
+    function _createFullRangePositionDaiWeth(PoolKey memory poolKey) internal returns (uint256 tokenId) {
+        _approveWhaleDaiAndWeth();
+        tokenId = _mintPosition(poolKey, -887220, 887220, 1e16);
+    }
+
+    function _swapExactInputSingleDaiWeth(PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 minAmountOut) internal {
+        _approveWhaleDaiAndWeth();
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(dai), address(swapRouter), type(uint160).max, type(uint48).max);
+        vm.prank(WHALE_ACCOUNT);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        bytes memory commands = hex"10";
+        bytes[] memory inputs = new bytes[](1);
+        bytes memory actions = abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(
+            IV4Router.ExactInputSingleParams({
+                poolKey: key,
+                zeroForOne: zeroForOne,
+                amountIn: amountIn,
+                amountOutMinimum: minAmountOut,
+                hookData: bytes("")
+            })
+        );
+        params[1] = abi.encode(zeroForOne ? key.currency0 : key.currency1, amountIn);
+        params[2] = abi.encode(zeroForOne ? key.currency1 : key.currency0, minAmountOut);
+        inputs[0] = abi.encode(actions, params);
+
+        vm.prank(WHALE_ACCOUNT);
+        IUniversalRouter(address(swapRouter)).execute(commands, inputs, block.timestamp);
+    }
+
+    function _generateFeesDaiWeth(PoolKey memory poolKey) internal {
+        _swapExactInputSingleDaiWeth(poolKey, true, 200e18, 0);
+        _swapExactInputSingleDaiWeth(poolKey, false, 5e16, 0);
+        _swapExactInputSingleDaiWeth(poolKey, true, 200e18, 0);
+        _swapExactInputSingleDaiWeth(poolKey, false, 5e16, 0);
+    }
+
+    function _createSwapDataWithFee(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address tokenIn,
+        address tokenOut,
+        uint24 fee,
+        address recipient
+    ) internal view returns (bytes memory swapData) {
+        bytes[] memory inputs = new bytes[](2);
+        inputs[0] = abi.encode(recipient, amountIn, amountOutMin, abi.encodePacked(tokenIn, fee, tokenOut), false);
+        inputs[1] = abi.encode(tokenIn, recipient, 0);
+        swapData = abi.encode(
+            address(swapRouter), abi.encode(Swapper.UniversalRouterData(hex"0004", inputs, block.timestamp))
+        );
+    }
+
+    function _quoteTokenToUsdcWithHaircut(address tokenIn, uint256 amountIn, uint16 maxSwapSlippageBps)
+        internal
+        view
+        returns (uint256 amountOut)
+    {
+        if (amountIn == 0) {
+            return 0;
+        }
+        if (tokenIn == address(usdc)) {
+            return amountIn;
+        }
+
+        uint160 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(tokenIn, address(usdc));
+        uint256 oraclePriceX96 = FullMath.mulDiv(uint256(oracleSqrtPriceX96), uint256(oracleSqrtPriceX96), Q96);
+        uint256 oracleOut = FullMath.mulDiv(amountIn, oraclePriceX96, Q96);
+        amountOut = FullMath.mulDiv(oracleOut, 10000 - uint256(maxSwapSlippageBps), 10000);
     }
 }
