@@ -5732,6 +5732,60 @@ contract RevertHookTest is BaseTest {
             "Auto-lend upper equality tick must allow an aligned tolerance"
         );
     }
+
+    // Regression test for H-01: the protocol-fee proration expression used to evaluate
+    // `10000 * int32(feeTime)` as int32 arithmetic and overflow once feeTime exceeded
+    // ~2.485 days (10000 * 214749 > int32.max). The fix widens the arithmetic to int256.
+    // This test exercises two consecutive modifyLiquidity calls separated by 3 days on a
+    // configured-and-activated position with lpFeeBps > 0, which is the exact pre-conditions
+    // the bug required. Pre-fix this would revert with arithmetic overflow/underflow.
+    function testH01_FeeProrationSurvivesThreeDaysIdle() public {
+        // Baseline: feeController.lpFeeBps is 200 (set in setUp), position gets activated by config,
+        // so _takeProtocolFees will take the arithmetic path that previously overflowed.
+        assertGt(feeController.lpFeeBps(), 0, "lpFeeBps must be > 0 to reach the overflowing code path");
+
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        // First modifyLiquidity seeds state.lastCollect; feeTime is still 0 on this call
+        // so the expression short-circuits before the arithmetic.
+        uint128 step = positionManager.getPositionLiquidity(token2Id) / 20;
+        if (step == 0) step = 1;
+        positionManager.increaseLiquidity(
+            token2Id, step, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
+        );
+
+        // Warp well past the old 214_748-second threshold.
+        vm.warp(block.timestamp + 3 days);
+
+        // Second modifyLiquidity: _takeProtocolFees now evaluates the fee-proration expression
+        // with feeTime ≈ 259_200. Pre-fix this reverted; post-fix it must succeed.
+        positionManager.increaseLiquidity(
+            token2Id, step, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
+        );
+
+        // Sanity: a much longer idle period (7 days) also stays within int256 bounds.
+        vm.warp(block.timestamp + 7 days);
+        positionManager.increaseLiquidity(
+            token2Id, step, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
+        );
+    }
 }
 
 contract RevertingERC4626Vault is MockERC4626Vault {

@@ -3,6 +3,8 @@ pragma solidity ^0.8.30;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -231,12 +233,19 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return BalanceDeltaLibrary.ZERO_DELTA;
         }
 
-        int128 protocolFee0 =
-            // forge-lint: disable-next-line(unsafe-typecast)
-            int32(accumulatedActiveTime) * feeDelta.amount0() * int16(lpFeeBps) / (10000 * int32(feeTime));
-        int128 protocolFee1 =
-            // forge-lint: disable-next-line(unsafe-typecast)
-            int32(accumulatedActiveTime) * feeDelta.amount1() * int16(lpFeeBps) / (10000 * int32(feeTime));
+        // Widen arithmetic to int256 so intermediate products cannot overflow once
+        // `feeTime` exceeds ~2.485 days (where `10000 * int32(feeTime)` exceeds int32.max).
+        int256 activeTimeSigned = int256(uint256(accumulatedActiveTime));
+        int256 feeTimeSigned = int256(uint256(feeTime));
+        int256 lpFeeBpsSigned = int256(uint256(lpFeeBps));
+        int256 denominator = int256(10000) * feeTimeSigned;
+
+        int128 protocolFee0 = SafeCast.toInt128(
+            activeTimeSigned * int256(feeDelta.amount0()) * lpFeeBpsSigned / denominator
+        );
+        int128 protocolFee1 = SafeCast.toInt128(
+            activeTimeSigned * int256(feeDelta.amount1()) * lpFeeBpsSigned / denominator
+        );
 
         if (protocolFee0 == 0 && protocolFee1 == 0) {
             return BalanceDeltaLibrary.ZERO_DELTA;
