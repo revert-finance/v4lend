@@ -32,6 +32,7 @@ import {V4TestBase} from "test/vault/support/V4TestBase.sol";
 contract V4ForkTestBase is V4TestBase {
     // Mainnet fork configuration
     uint256 constant MAINNET_FORK_BLOCK = 23248232; 
+    string constant DEFAULT_MAINNET_RPC_URL = "https://ethereum-rpc.publicnode.com";
     
     // Mainnet addresses
     address constant WETH_ADDRESS = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2; // Real WETH
@@ -75,8 +76,8 @@ contract V4ForkTestBase is V4TestBase {
     function setUp() public virtual override {
 
         // Fork mainnet at specified block
-        // Note: Replace with your own RPC URL (Alchemy, Infura, etc.)
-        mainnetFork = vm.createFork("https://eth-mainnet.g.alchemy.com/v2/gwRYWylWRij2jXTnPXR90v-YqXh96PDX", MAINNET_FORK_BLOCK);
+        string memory mainnetRpcUrl = vm.envOr("MAINNET_RPC_URL", DEFAULT_MAINNET_RPC_URL);
+        mainnetFork = vm.createFork(mainnetRpcUrl, MAINNET_FORK_BLOCK);
         vm.selectFork(mainnetFork);
 
         // Use deployed Uniswap V4 contracts from mainnet

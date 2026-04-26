@@ -461,7 +461,7 @@ contract RevertHookTest is BaseTest {
             "Final AUTO_RANGE remint should hold the active liquidity"
         );
         _assertPositionConfigEq(remintedTokenId2, rangeConfig);
-        (uint8 intermediateRangeModeFlags,,,,,,,,,,) = hook.positionConfigs(remintedTokenId);
+        (uint8 intermediateRangeModeFlags,,,,,,,,,,,,) = hook.positionConfigs(remintedTokenId);
         assertEq(
             intermediateRangeModeFlags,
             PositionModeFlags.MODE_NONE,
@@ -480,7 +480,7 @@ contract RevertHookTest is BaseTest {
         assertGt(autoLendShares, 0, "AUTO_LEND should mint lending shares");
 
         assertEq(positionManager.getPositionLiquidity(token4Id), 0, "AUTO_EXIT should remove all liquidity");
-        (uint8 exitedModeFlags,,,,,,,,,,) = hook.positionConfigs(token4Id);
+        (uint8 exitedModeFlags,,,,,,,,,,,,) = hook.positionConfigs(token4Id);
         assertEq(exitedModeFlags, PositionModeFlags.MODE_NONE, "AUTO_EXIT token should be disabled");
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -658,12 +658,12 @@ contract RevertHookTest is BaseTest {
             if (i < batchCap) {
                 assertTrue(executedFirst[i], "Processed batch should emit one AUTO_EXIT");
                 assertEq(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Processed token should be fully exited");
-                (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+                (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
                 assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Processed token should be disabled");
             } else {
                 assertFalse(executedFirst[i], "Deferred batch must not execute before the next swap");
                 assertGt(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Deferred token should keep liquidity");
-                (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+                (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
                 assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "Deferred token should remain armed");
             }
         }
@@ -720,7 +720,7 @@ contract RevertHookTest is BaseTest {
                 assertTrue(executedSecond[i], "Deferred token should execute on the later swap");
             }
             assertEq(positionManager.getPositionLiquidity(tokenIds[i]), 0, "All staged tokens should be fully exited");
-            (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+            (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
             assertEq(modeFlags, PositionModeFlags.MODE_NONE, "All staged tokens should be disabled after drain");
         }
 
@@ -881,7 +881,7 @@ contract RevertHookTest is BaseTest {
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Remint failure should not create a new token");
         assertGt(positionManager.getPositionLiquidity(token3Id), 0, "Original position should be restored");
 
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "Position config should remain active after fallback");
         (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
         assertEq(lowerAfter, lowerInitial, "Failed AUTO_RANGE should consume the fired lower trigger");
@@ -1478,7 +1478,7 @@ contract RevertHookTest is BaseTest {
             0,
             "failed upper AUTO_RANGE should restore the original upper-trigger position"
         );
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(upperTokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(upperTokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "failed upper AUTO_RANGE should keep the upper-trigger config active");
         _verifyNoLeftoverBalances("asymmetric auto-range routing");
     }
@@ -2530,7 +2530,7 @@ contract RevertHookTest is BaseTest {
 
         hook.autoLendForceExit(autolendTokenId);
 
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(autolendTokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(autolendTokenId);
         (,,, address autoLendTokenAfter, uint256 sharesAfter,,,) = hook.positionStates(autolendTokenId);
 
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Force exit should disable the position");
@@ -2695,7 +2695,7 @@ contract RevertHookTest is BaseTest {
                 token3Id, _buildNonVaultModeConfig(mode, false, false, type(int24).min, type(int24).max)
             );
 
-            (uint8 storedMode, RevertHookState.AutoCollectMode storedAutoCollectMode,,,,,,,,,) =
+            (uint8 storedMode, RevertHookState.AutoCollectMode storedAutoCollectMode,,,,,,,,,,,) =
                 hook.positionConfigs(token3Id);
             assertEq(storedMode, mode, "Stored mode flags mismatch");
 
@@ -2765,7 +2765,7 @@ contract RevertHookTest is BaseTest {
         config.autoRangeUpperDelta = 0;
         hook.setPositionConfig(token3Id, config);
 
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "Valid AUTO_RANGE config should be accepted");
     }
 
@@ -3261,6 +3261,8 @@ contract RevertHookTest is BaseTest {
             uint8 modeFlags,
             RevertHookState.AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
+            bool autoExitSwapOnLowerTrigger,
+            bool autoExitSwapOnUpperTrigger,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
             int24 autoRangeLowerLimit,
@@ -3274,6 +3276,16 @@ contract RevertHookTest is BaseTest {
         assertEq(modeFlags, expected.modeFlags, "modeFlags mismatch");
         assertEq(uint8(autoCollectMode), uint8(expected.autoCollectMode), "autoCollectMode mismatch");
         assertEq(autoExitIsRelative, expected.autoExitIsRelative, "autoExitIsRelative mismatch");
+        assertEq(
+            autoExitSwapOnLowerTrigger,
+            expected.autoExitSwapOnLowerTrigger,
+            "autoExitSwapOnLowerTrigger mismatch"
+        );
+        assertEq(
+            autoExitSwapOnUpperTrigger,
+            expected.autoExitSwapOnUpperTrigger,
+            "autoExitSwapOnUpperTrigger mismatch"
+        );
         assertEq(autoExitTickLower, expected.autoExitTickLower, "autoExitTickLower mismatch");
         assertEq(autoExitTickUpper, expected.autoExitTickUpper, "autoExitTickUpper mismatch");
         assertEq(autoRangeLowerLimit, expected.autoRangeLowerLimit, "autoRangeLowerLimit mismatch");
@@ -3738,7 +3750,7 @@ contract RevertHookTest is BaseTest {
         );
 
         // Verify position is configured and activated
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_COLLECT, "Position should be configured");
 
         // Verify position is activated (lastActivated > 0)
@@ -3914,7 +3926,7 @@ contract RevertHookTest is BaseTest {
         );
 
         // Verify position is configured
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_COLLECT, "Position should be configured");
     }
 
@@ -3966,7 +3978,7 @@ contract RevertHookTest is BaseTest {
         );
 
         // Verify position is disabled
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled");
 
         // Verify position is deactivated
@@ -4002,7 +4014,7 @@ contract RevertHookTest is BaseTest {
         );
 
         // Verify position is configured
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(tokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_COLLECT, "Position should be configured with 0 minimum");
     }
 
@@ -4066,7 +4078,7 @@ contract RevertHookTest is BaseTest {
         assertEq(liquidityAfter, 0, "token2Id should have 0 liquidity after immediate auto-exit");
 
         // Verify the position config is disabled
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after auto-exit");
 
         // Verify hook has no leftover balances
@@ -4269,7 +4281,7 @@ contract RevertHookTest is BaseTest {
         assertEq(liquidityAfter, liquidityBefore, "token3Id should still have same liquidity - no immediate execution");
 
         // Verify position is still configured (not disabled)
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "Position should still be configured for auto-exit");
     }
 
@@ -4305,7 +4317,7 @@ contract RevertHookTest is BaseTest {
 
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Immediate lower-side setup should exit old token");
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Exit should win over range and avoid remint");
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Exit should disable the position");
         _verifyNoLeftoverBalances("immediate lower E|R priority");
     }
@@ -4342,7 +4354,7 @@ contract RevertHookTest is BaseTest {
 
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Immediate upper-side setup should exit old token");
         assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "Exit should win over range and avoid remint");
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Exit should disable the position");
         _verifyNoLeftoverBalances("immediate upper E|R priority");
     }
@@ -4378,7 +4390,7 @@ contract RevertHookTest is BaseTest {
         assertEq(
             positionManager.getPositionLiquidity(token2Id), 0, "Exact lower-tick AUTO_EXIT should execute immediately"
         );
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after exact-boundary exit");
     }
 
@@ -4483,7 +4495,7 @@ contract RevertHookTest is BaseTest {
         assertEq(
             positionManager.getPositionLiquidity(token2Id), 0, "Exact upper-tick AUTO_EXIT should execute immediately"
         );
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Position should be disabled after exact upper-bound exit");
     }
 
@@ -4697,7 +4709,7 @@ contract RevertHookTest is BaseTest {
         assertEq(
             positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Missing vault must not strip LP liquidity"
         );
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Missing vault must not disable config");
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
         assertEq(autoLendShares, 0, "Missing vault must not mint shares");
@@ -4740,7 +4752,7 @@ contract RevertHookTest is BaseTest {
         assertGe(
             positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Failed deposit must restore liquidity"
         );
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Failed deposit must keep config active");
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
         assertEq(autoLendShares, 0, "Failed deposit must not leave lending shares");
@@ -4786,7 +4798,7 @@ contract RevertHookTest is BaseTest {
             liquidityBefore,
             "Immediate failure must leave LP liquidity in place"
         );
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Immediate failure must keep config active");
         (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
         assertEq(autoLendShares, 0, "Immediate failure must not mint shares");
@@ -4899,7 +4911,7 @@ contract RevertHookTest is BaseTest {
             positionManager.nextTokenId(), nextTokenIdBefore, "Failed re-entry should not mint a replacement token"
         );
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Failed re-entry must leave the old token empty");
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Empty position must be disabled after failed re-entry");
         (,,, address autoLendTokenAfter, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
         assertEq(sharesAfter, 0, "Failed re-entry must clear lending shares");
@@ -4956,6 +4968,51 @@ contract RevertHookTest is BaseTest {
         assertEq(upperAfter, upperInitial, "Triggered lower exit should remove stale upper node");
     }
 
+    function testAfterSwap_FailsOpenWhenOracleUnavailable() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        RevertHookState.PositionConfig memory exitConfig = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: tickLower2 - poolKey.tickSpacing,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+
+        hook.setPositionConfig(token2Id, exitConfig);
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+
+        v4Oracle.setRevertPoolPrice(true);
+        _moveTickDownUntil(exitConfig.autoExitTickLower, 2e16, 160);
+
+        assertGt(positionManager.getPositionLiquidity(token2Id), 0, "Oracle outage should leave LP liquidity intact");
+        (uint8 modeDuringOutage,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(modeDuringOutage, PositionModeFlags.MODE_AUTO_EXIT, "Oracle outage should leave config pending");
+
+        v4Oracle.setRevertPoolPrice(false);
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 2e16,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "Recovered oracle should process pending exit");
+        (uint8 modeAfterRecovery,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(modeAfterRecovery, PositionModeFlags.MODE_NONE, "Recovered oracle should clear executed config");
+    }
+
     function testAutoExitLowerWithSwap_OneSidedToken1() public {
         _assertImmediateNonVaultAutoExitCase(false, true);
     }
@@ -5007,7 +5064,7 @@ contract RevertHookTest is BaseTest {
         assertEq(
             positionManager.getPositionLiquidity(token2Id), 0, "Immediate lower AUTO_EXIT should remove all liquidity"
         );
-        (uint8 modeAfter,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        (uint8 modeAfter,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeAfter, PositionModeFlags.MODE_NONE, "Immediate AUTO_EXIT should disable the position");
 
         uint256 balance0After = IERC20(Currency.unwrap(currency0)).balanceOf(address(this));
@@ -5146,7 +5203,7 @@ contract RevertHookTest is BaseTest {
             0,
             "Reminted position should exit at new relative trigger"
         );
-        (uint8 modeFlags,,,,,,,,,,) = hook.positionConfigs(remintedTokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(remintedTokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Config should clear after reminted relative auto-exit");
     }
 

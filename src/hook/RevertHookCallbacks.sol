@@ -74,7 +74,11 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             int24 tickEnd = liveTick;
             if (increasing) {
                 if (!hasCachedUpperOracleMaxEndTick) {
-                    upperOracleMaxEndTick = _getOracleMaxEndTick(key, true);
+                    try this.getOracleMaxEndTick(key, true) returns (int24 maxEndTick) {
+                        upperOracleMaxEndTick = maxEndTick;
+                    } catch {
+                        return (this.afterSwap.selector, 0);
+                    }
                     hasCachedUpperOracleMaxEndTick = true;
                 }
                 if (upperOracleMaxEndTick < tickEnd) {
@@ -82,7 +86,11 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 }
             } else {
                 if (!hasCachedLowerOracleMaxEndTick) {
-                    lowerOracleMaxEndTick = _getOracleMaxEndTick(key, false);
+                    try this.getOracleMaxEndTick(key, false) returns (int24 maxEndTick) {
+                        lowerOracleMaxEndTick = maxEndTick;
+                    } catch {
+                        return (this.afterSwap.selector, 0);
+                    }
                     hasCachedLowerOracleMaxEndTick = true;
                 }
                 if (lowerOracleMaxEndTick > tickEnd) {

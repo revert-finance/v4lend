@@ -192,6 +192,12 @@ forge build
 
 A large part of the suite runs against a mainnet fork.
 
+Fork tests read `MAINNET_RPC_URL` and fall back to `https://ethereum-rpc.publicnode.com`:
+
+```sh
+MAINNET_RPC_URL=<your archive RPC URL> forge test
+```
+
 Run the full suite:
 
 ```sh

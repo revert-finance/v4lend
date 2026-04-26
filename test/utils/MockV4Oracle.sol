@@ -19,6 +19,8 @@ import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 contract MockV4Oracle is IV4Oracle {
     using PoolIdLibrary for PoolKey;
 
+    error MockPoolPriceUnavailable();
+
     IPoolManager public immutable poolManager;
     IPositionManager public immutable positionManager;
 
@@ -27,6 +29,7 @@ contract MockV4Oracle is IV4Oracle {
 
     // Mock value returned for getValue
     uint256 public mockPositionValue = 1 ether;
+    bool public revertPoolPrice;
 
     /// @notice Constructor
     /// @param _positionManager The PositionManager instance
@@ -39,6 +42,10 @@ contract MockV4Oracle is IV4Oracle {
     /// @param value The mock value to return
     function setMockPositionValue(uint256 value) external {
         mockPositionValue = value;
+    }
+
+    function setRevertPoolPrice(bool shouldRevert) external {
+        revertPoolPrice = shouldRevert;
     }
 
     /// @notice Sets the pool key for a token pair
@@ -56,6 +63,9 @@ contract MockV4Oracle is IV4Oracle {
     /// @param token1 Second token address
     /// @return sqrtPriceX96 Current pool sqrt price in X96 format (token0/token1)
     function getPoolSqrtPriceX96(address token0, address token1) external view returns (uint160 sqrtPriceX96) {
+        if (revertPoolPrice) {
+            revert MockPoolPriceUnavailable();
+        }
         if (token0 == token1) {
             return uint160(FixedPoint96.Q96); // Price of 1:1
         }

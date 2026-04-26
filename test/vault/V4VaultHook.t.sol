@@ -677,7 +677,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
             (
                 uint8 storedMode,
-                RevertHookState.AutoCollectMode storedAutoCollectMode,,,,,,,,,
+                RevertHookState.AutoCollectMode storedAutoCollectMode,,,,,,,,,,,
                 uint16 storedLeverageTargetBps
             ) = revertHook.positionConfigs(hookedTokenId);
 
@@ -809,7 +809,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         assertEq(positionManager.getPositionLiquidity(nearTokenId), 0, "Near trigger should execute under clamp");
         assertGt(positionManager.getPositionLiquidity(farTokenId), 0, "Far trigger should remain pending under clamp");
-        (uint8 farModeBefore,,,,,,,,,,) = revertHook.positionConfigs(farTokenId);
+        (uint8 farModeBefore,,,,,,,,,,,,) = revertHook.positionConfigs(farTokenId);
         assertEq(farModeBefore, PositionModeFlags.MODE_AUTO_EXIT, "Deferred trigger config should remain active");
 
         // Remove clamp and continue down: deferred trigger must still execute.
@@ -819,7 +819,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(
             positionManager.getPositionLiquidity(farTokenId), 0, "Deferred trigger should execute once clamp is relaxed"
         );
-        (uint8 farModeAfter,,,,,,,,,,) = revertHook.positionConfigs(farTokenId);
+        (uint8 farModeAfter,,,,,,,,,,,,) = revertHook.positionConfigs(farTokenId);
         assertEq(farModeAfter, PositionModeFlags.MODE_NONE, "Config should clear after deferred trigger execution");
     }
 
@@ -1048,7 +1048,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         // E: exit should fully unwind the active token.
         assertEq(positionManager.getPositionLiquidity(rangedTokenId), 0, "AUTO_EXIT should remove all liquidity");
-        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(rangedTokenId);
+        (uint8 modeAfterExit,,,,,,,,,,,,) = revertHook.positionConfigs(rangedTokenId);
         assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Position config should be disabled after AUTO_EXIT");
     }
 
@@ -1175,7 +1175,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             positionManager.nextTokenId(), nextTokenIdBefore, "Immediate exit should not remint a replacement token"
         );
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "Immediate exit should fully unwind liquidity");
-        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
+        (uint8 modeAfterExit,,,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
         assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Immediate exit should disable the position");
         _assertOldPositionFullyCleaned(tokenId);
         _assertHookHasNoTokenDust();
@@ -1275,7 +1275,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(
             positionManager.getPositionLiquidity(exitTokenId), 0, "Opposite-side AUTO_EXIT should remove liquidity"
         );
-        (uint8 exitModeFlags,,,,,,,,,,) = revertHook.positionConfigs(exitTokenId);
+        (uint8 exitModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(exitTokenId);
         assertEq(exitModeFlags, PositionModeFlags.MODE_NONE, "Opposite-side AUTO_EXIT token should be disabled");
 
         (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(leverageTokenId);
@@ -1378,8 +1378,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             lowerExitLiquidity2Before,
             "Deferred shared-tick exit should keep its liquidity"
         );
-        (uint8 lowerModeFlags1,,,,,,,,,,) = revertHook.positionConfigs(lowerExitTokenId1);
-        (uint8 lowerModeFlags2,,,,,,,,,,) = revertHook.positionConfigs(lowerExitTokenId2);
+        (uint8 lowerModeFlags1,,,,,,,,,,,,) = revertHook.positionConfigs(lowerExitTokenId1);
+        (uint8 lowerModeFlags2,,,,,,,,,,,,) = revertHook.positionConfigs(lowerExitTokenId2);
         assertEq(lowerModeFlags1, PositionModeFlags.MODE_AUTO_EXIT, "Deferred shared-tick exit should remain armed");
         assertEq(lowerModeFlags2, PositionModeFlags.MODE_AUTO_EXIT, "Deferred shared-tick exit should remain armed");
         assertGt(
@@ -1509,7 +1509,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "AUTO_EXIT should remove all liquidity");
-        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
+        (uint8 modeAfterExit,,,,,,,,,,,,) = revertHook.positionConfigs(tokenId);
         assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "AUTO_EXIT should disable the position");
 
         (uint256 debtAfter, uint256 fullValueAfter, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
@@ -1780,7 +1780,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _moveTickDownUntil(hookedPoolKey, exitLowerFirst, 20e6, 40);
 
         assertEq(positionManager.getPositionLiquidity(activeTokenId), 0, "Exit should fully remove position liquidity");
-        (uint8 modeAfterExit,,,,,,,,,,) = revertHook.positionConfigs(activeTokenId);
+        (uint8 modeAfterExit,,,,,,,,,,,,) = revertHook.positionConfigs(activeTokenId);
         assertEq(modeAfterExit, PositionModeFlags.MODE_NONE, "Exit should disable position config");
         _assertOldPositionFullyCleaned(activeTokenId);
         _assertHookHasNoTokenDust();
@@ -1853,6 +1853,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             uint8 modeFlags,
             RevertHookState.AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
+            bool autoExitSwapOnLowerTrigger,
+            bool autoExitSwapOnUpperTrigger,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
             int24 autoRangeLowerLimit,
@@ -1866,6 +1868,16 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(modeFlags, expected.modeFlags, "modeFlags mismatch");
         assertEq(uint8(autoCollectMode), uint8(expected.autoCollectMode), "autoCollectMode mismatch");
         assertEq(autoExitIsRelative, expected.autoExitIsRelative, "autoExitIsRelative mismatch");
+        assertEq(
+            autoExitSwapOnLowerTrigger,
+            expected.autoExitSwapOnLowerTrigger,
+            "autoExitSwapOnLowerTrigger mismatch"
+        );
+        assertEq(
+            autoExitSwapOnUpperTrigger,
+            expected.autoExitSwapOnUpperTrigger,
+            "autoExitSwapOnUpperTrigger mismatch"
+        );
         assertEq(autoExitTickLower, expected.autoExitTickLower, "autoExitTickLower mismatch");
         assertEq(autoExitTickUpper, expected.autoExitTickUpper, "autoExitTickUpper mismatch");
         assertEq(autoRangeLowerLimit, expected.autoRangeLowerLimit, "autoRangeLowerLimit mismatch");
@@ -2028,7 +2040,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify config is still correctly set
-        (uint8 modeFlags,,,,,,,,,, uint16 storedTargetBps) = revertHook.positionConfigs(hookedTokenId);
+        (uint8 modeFlags,,,,,,,,,,,, uint16 storedTargetBps) = revertHook.positionConfigs(hookedTokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEVERAGE, "Mode should still be AUTO_LEVERAGE");
         assertEq(storedTargetBps, targetBps, "Target bps should still be set");
 
@@ -2218,7 +2230,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify config was set
-        (uint8 modeFlags,,,,,,,,,, uint16 autoLeverageTargetBps) = revertHook.positionConfigs(hookedTokenId);
+        (uint8 modeFlags,,,,,,,,,,,, uint16 autoLeverageTargetBps) = revertHook.positionConfigs(hookedTokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEVERAGE, "Mode should be AUTO_LEVERAGE");
         assertEq(autoLeverageTargetBps, targetBps, "Target bps should match");
     }
@@ -2437,7 +2449,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify config was set successfully
-        (uint8 modeFlags,,,,,,,,,, uint16 targetBps) = revertHook.positionConfigs(hookedTokenId);
+        (uint8 modeFlags,,,,,,,,,,,, uint16 targetBps) = revertHook.positionConfigs(hookedTokenId);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEVERAGE, "Mode should be AUTO_LEVERAGE");
         assertEq(targetBps, 5000, "Target should be 5000 bps");
     }
@@ -2792,7 +2804,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _configurePositionForAutoLeverage(hookedTokenId, targetBps);
 
         // Verify mode is set
-        (uint8 modeFlagsBefore,,,,,,,,,, uint16 targetBpsBefore) = revertHook.positionConfigs(hookedTokenId);
+        (uint8 modeFlagsBefore,,,,,,,,,,,, uint16 targetBpsBefore) = revertHook.positionConfigs(hookedTokenId);
         assertEq(modeFlagsBefore, PositionModeFlags.MODE_AUTO_LEVERAGE, "Mode should be AUTO_LEVERAGE");
         assertEq(targetBpsBefore, targetBps, "Target should be set");
 
@@ -2818,7 +2830,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         );
 
         // Verify mode is disabled
-        (uint8 modeFlagsAfter,,,,,,,,,, uint16 targetBpsAfter) = revertHook.positionConfigs(hookedTokenId);
+        (uint8 modeFlagsAfter,,,,,,,,,,,, uint16 targetBpsAfter) = revertHook.positionConfigs(hookedTokenId);
         assertEq(modeFlagsAfter, PositionModeFlags.MODE_NONE, "Mode should be NONE");
         assertEq(targetBpsAfter, 0, "Target should be reset");
 

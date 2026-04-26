@@ -560,7 +560,7 @@ contract UnichainForkHookathonE2E is Script {
         require(exitedTokenIdFromEvent == tokenId, "Demo: unexpected AutoExit token");
 
         LoanSnapshot memory afterExit = _loanSnapshot(deployment.vault, tokenId);
-        (uint8 modeFlags,,,,,,,,,,) = deployment.revertHook.positionConfigs(tokenId);
+        (uint8 modeFlags,,,,,,,,,,,,) = deployment.revertHook.positionConfigs(tokenId);
 
         require(POSITION_MANAGER.getPositionLiquidity(tokenId) == 0, "Demo: exited position should have no liquidity");
         require(modeFlags == PositionModeFlags.MODE_NONE, "Demo: AUTO_EXIT should disable the position");
@@ -647,6 +647,8 @@ contract UnichainForkHookathonE2E is Script {
             uint8 modeFlags,
             RevertHookState.AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
+            bool autoExitSwapOnLowerTrigger,
+            bool autoExitSwapOnUpperTrigger,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
             int24 autoRangeLowerLimit,
@@ -660,6 +662,8 @@ contract UnichainForkHookathonE2E is Script {
         modeFlags;
         autoCollectMode;
         autoExitIsRelative;
+        autoExitSwapOnLowerTrigger;
+        autoExitSwapOnUpperTrigger;
         autoExitTickLower;
         autoExitTickUpper;
         autoRangeLowerLimit;
@@ -768,6 +772,8 @@ contract UnichainForkHookathonE2E is Script {
             uint8 modeFlags,
             RevertHookState.AutoCollectMode autoCollectMode,
             bool autoExitIsRelative,
+            bool autoExitSwapOnLowerTrigger,
+            bool autoExitSwapOnUpperTrigger,
             int24 autoExitTickLower,
             int24 autoExitTickUpper,
             int24 autoRangeLowerLimit,
@@ -781,6 +787,14 @@ contract UnichainForkHookathonE2E is Script {
         require(modeFlags == expected.modeFlags, "Demo: mode flags mismatch");
         require(uint8(autoCollectMode) == uint8(expected.autoCollectMode), "Demo: auto compound mode mismatch");
         require(autoExitIsRelative == expected.autoExitIsRelative, "Demo: auto exit mode mismatch");
+        require(
+            autoExitSwapOnLowerTrigger == expected.autoExitSwapOnLowerTrigger,
+            "Demo: lower exit swap flag mismatch"
+        );
+        require(
+            autoExitSwapOnUpperTrigger == expected.autoExitSwapOnUpperTrigger,
+            "Demo: upper exit swap flag mismatch"
+        );
         require(autoExitTickLower == expected.autoExitTickLower, "Demo: auto exit lower mismatch");
         require(autoExitTickUpper == expected.autoExitTickUpper, "Demo: auto exit upper mismatch");
         require(autoRangeLowerLimit == expected.autoRangeLowerLimit, "Demo: auto range lower limit mismatch");

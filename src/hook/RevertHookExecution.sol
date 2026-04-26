@@ -285,6 +285,10 @@ abstract contract RevertHookExecution is RevertHookConfig {
         }
     }
 
+    function getOracleMaxEndTick(PoolKey calldata poolKey, bool up) external view returns (int24 maxEndTick) {
+        return _getOracleMaxEndTick(poolKey, up);
+    }
+
     function _hasDirectionReversed(int24 previousLiveTick, int24 currentLiveTick, bool increasing)
         internal
         pure

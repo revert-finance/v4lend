@@ -39,6 +39,7 @@ contract AutomatorTestBase is Test {
     uint256 constant Q96 = 2 ** 96;
 
     uint256 constant MAINNET_FORK_BLOCK = 23248232;
+    string constant DEFAULT_MAINNET_RPC_URL = "https://ethereum-rpc.publicnode.com";
 
     address constant WETH_ADDRESS = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address constant USDC_ADDRESS = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
@@ -84,7 +85,8 @@ contract AutomatorTestBase is Test {
 
     function setUp() public virtual {
         // Fork mainnet
-        vm.createSelectFork("https://eth-mainnet.g.alchemy.com/v2/gwRYWylWRij2jXTnPXR90v-YqXh96PDX", MAINNET_FORK_BLOCK);
+        string memory mainnetRpcUrl = vm.envOr("MAINNET_RPC_URL", DEFAULT_MAINNET_RPC_URL);
+        vm.createSelectFork(mainnetRpcUrl, MAINNET_FORK_BLOCK);
 
         // Use deployed contracts
         poolManager = IPoolManager(0x000000000004444c5dc75cB358380D2e3dE08A90);
