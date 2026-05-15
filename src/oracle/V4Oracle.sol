@@ -85,6 +85,9 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         address _referenceToken,
         address _chainlinkReferenceToken
     ) Ownable(msg.sender) {
+        if (_chainlinkReferenceToken == address(0)) {
+            revert InvalidConfig();
+        }
         poolManager = _positionManager.poolManager();
         positionManager = _positionManager;
         referenceToken = _referenceToken;

@@ -1101,6 +1101,7 @@ contract V4VaultTest is V4ForkTestBase {
 
         assertTrue(liquidator.reentered(), "Expected reentrant liquidation to be attempted");
         assertFalse(liquidator.reenterSucceeded(), "Expected reentrant liquidation to fail");
+        assertEq(liquidator.debtSharesDuringReentry(), 0, "Loan debt should be cleaned before recipient callback");
 
         assertEq(vault.loans(nft2TokenId), 0, "Victim loan should be cleaned up");
         assertEq(vault.loans(nft1TokenId), 100000000, "Other loan debt shares should be unchanged");
@@ -2187,7 +2188,9 @@ contract NativeLiquidationReenter {
 
     bool public reentered;
     bool public reenterSucceeded;
+    uint256 public debtSharesDuringReentry;
     bytes internal reenterCallData;
+    uint256 internal armedTokenId;
 
     constructor(IVault _vault, IERC20 _asset) {
         vault = _vault;
@@ -2196,6 +2199,7 @@ contract NativeLiquidationReenter {
     }
 
     function arm(uint256 tokenId) external {
+        armedTokenId = tokenId;
         reenterCallData = abi.encodeCall(
             IVault.liquidate,
             (IVault.LiquidateParams(tokenId, 0, 0, address(this), block.timestamp, ""))
@@ -2209,6 +2213,7 @@ contract NativeLiquidationReenter {
     receive() external payable {
         if (!reentered) {
             reentered = true;
+            debtSharesDuringReentry = vault.loans(armedTokenId);
             (reenterSucceeded,) = address(vault).call(reenterCallData);
         }
     }

@@ -54,6 +54,7 @@ contract DeployArbitrum is Script {
     address constant ETH = address(0);
     address constant WBTC = 0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f;
     address constant ARB = 0x912CE59144191C1204E64559FE8253a0e49E6548;
+    address constant USD_REFERENCE = 0x000000000000000000000000000000000000dEaD;
 
     // ==================== Arbitrum Oracle Feed Addresses ====================
     // Token feed set copied from lend-v3 Arbitrum deployment.
@@ -162,7 +163,7 @@ contract DeployArbitrum is Script {
         console.log("  LiquidityCalculator deployed at:", address(liquidityCalculator));
 
         console.log("Step 2: Deploying V4Oracle...");
-        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, address(0));
+        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, USD_REFERENCE);
         console.log("  V4Oracle deployed at:", address(oracle));
 
         oracle.setMaxPoolPriceDifference(MAX_POOL_PRICE_DIFFERENCE);

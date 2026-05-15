@@ -49,6 +49,7 @@ contract DeployBase is Script {
     address constant WETH = 0x4200000000000000000000000000000000000006; // OP Stack standard WETH
     address constant ETH = address(0);
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913; // Native USDC on Base
+    address constant USD_REFERENCE = 0x000000000000000000000000000000000000dEaD;
 
     // ==================== Chainlink Oracle Feed Addresses on Base ====================
     // Source: https://docs.chain.link/data-feeds/price-feeds/addresses?network=base
@@ -173,8 +174,8 @@ contract DeployBase is Script {
 
         console.log("Step 2: Deploying V4Oracle...");
 
-        // Deploy V4Oracle with WETH as reference token and USD (address(0)) as chainlink reference
-        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, address(0));
+        // Deploy V4Oracle with WETH as reference token and a non-token USD sentinel as Chainlink reference
+        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, USD_REFERENCE);
         console.log("  V4Oracle deployed at:", address(oracle));
 
         // Configure oracle settings

@@ -21,6 +21,11 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
  */
 contract V4OracleTest is V4ForkTestBase {
     uint256 constant Q96 = 2 ** 96;
+
+    function testConstructorRejectsNativeChainlinkReferenceToken() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        new V4Oracle(positionManager, USDC_ADDRESS, address(0));
+    }
     
     function testGetValue() public {
         // Test with the two preconfigured NFT positions from V4ForkTestBase

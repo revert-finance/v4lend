@@ -49,6 +49,7 @@ contract DeployUnichain is Script {
 
     address constant WETH = 0x4200000000000000000000000000000000000006; // Standard OP Stack WETH
     address constant ETH = address(0);
+    address constant USD_REFERENCE = 0x000000000000000000000000000000000000dEaD;
 
     // Stablecoins
     address constant USDC = 0x078D782b760474a361dDA0AF3839290b0EF57AD6;
@@ -184,8 +185,8 @@ contract DeployUnichain is Script {
 
         console.log("Step 2: Deploying V4Oracle...");
 
-        // Deploy V4Oracle with WETH as reference token and USD (address(0)) as chainlink reference
-        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, address(0));
+        // Deploy V4Oracle with WETH as reference token and a non-token USD sentinel as Chainlink reference
+        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, USD_REFERENCE);
         console.log("  V4Oracle deployed at:", address(oracle));
 
         // Configure oracle settings

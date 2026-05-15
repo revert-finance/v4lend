@@ -168,6 +168,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     mapping(uint256 => address) private tokenOwner; // Mapping from token ID to owner
 
     uint256 public override transformedTokenId; // stores currently transformed token (is always reset to 0 after tx)
+    uint256 private liquidatingTokenId; // stores currently liquidated token during collateral payout callbacks
 
     mapping(address => bool) public transformerAllowList; // contracts allowed to transform positions (selected audited contracts e.g. V4Utils)
     mapping(address => mapping(uint256 => mapping(address => bool))) public transformApprovals; // owners permissions for other addresses to call transform on owners behalf (e.g. AutoRange contract)
@@ -548,6 +549,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @param tokenId The token ID of the loan to transfer
     /// @param newOwner The address of the new owner
     function transferLoan(uint256 tokenId, address newOwner) external override {
+        _checkNotLiquidating(tokenId);
 
         // transferLoan is not allowed during transformer mode
         if (transformedTokenId != 0) {
@@ -583,6 +585,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         override
         returns (uint256 newTokenId)
     {
+        _checkNotLiquidating(tokenId);
+
         if (tokenId == 0 || !transformerAllowList[transformer]) {
             revert TransformNotAllowed();
         }
@@ -641,6 +645,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @custom:security Validates sufficient collateralization after borrow
     /// @custom:security In transform mode, health check is deferred to end of transform()
     function borrow(uint256 tokenId, uint256 assets) external override {
+        _checkNotLiquidating(tokenId);
 
         bool isTransformMode = tokenId != 0 && transformedTokenId == tokenId && transformerAllowList[msg.sender];
 
@@ -705,6 +710,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         override
         returns (uint256 amount0, uint256 amount1)
     {
+        _checkNotLiquidating(params.tokenId);
+
         // this method is not allowed during transform - can be called directly on positionManager if needed from transform contract
         if (transformedTokenId != 0) {
             revert TransformNotAllowed();
@@ -745,6 +752,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         override
         returns (uint256 assets, uint256 shares)
     {
+        _checkNotLiquidating(tokenId);
         (assets, shares) = _repay(tokenId, amount, isShare);
     }
 
@@ -777,6 +785,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         if (transformedTokenId != 0) {
             revert TransformNotAllowed();
         }
+        if (liquidatingTokenId != 0 && liquidatingTokenId == params.tokenId) {
+            revert Reentrancy();
+        }
 
         LiquidateState memory state;
 
@@ -803,6 +814,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 _handleReserveLiquidation(state.reserveCost, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
         }
 
+        liquidatingTokenId = params.tokenId;
+
         if (state.liquidatorCost > 0) {
             // take value from liquidator
             SafeERC20.safeTransferFrom(IERC20(asset), msg.sender, address(this), state.liquidatorCost);
@@ -812,17 +825,19 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         dailyDebtIncreaseLimitLeft = dailyDebtIncreaseLimitLeft + state.debt;
 
+        // remove debt from loan before external collateral payout callbacks
+        _cleanupLoan(params.tokenId, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
+
         // send promised collateral tokens to liquidator
         (amount0, amount1) = _sendPositionValue(
             params, state.liquidationValue, state.fullValue, state.feeValue
         );
 
+        liquidatingTokenId = 0;
+
         if (amount0 < params.amount0Min || amount1 < params.amount1Min) {
             revert SlippageError();
         }
-
-        // remove debt from loan
-        _cleanupLoan(params.tokenId, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
 
         emit Liquidate(
             params.tokenId,
@@ -842,6 +857,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @param recipient Address to recieve NFT
     /// @param data Optional data to send to reciever
     function remove(uint256 tokenId, address recipient, bytes calldata data) external {
+        _checkNotLiquidating(tokenId);
+
         address owner = tokenOwner[tokenId];
         if (owner != msg.sender) {
             revert Unauthorized();
@@ -1258,6 +1275,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     function _cleanupLoan(uint256 tokenId, uint256 debtExchangeRateX96, uint256 lendExchangeRateX96) internal {
         _updateAndCheckCollateral(tokenId, debtExchangeRateX96, lendExchangeRateX96, loans[tokenId].debtShares, 0);
         delete loans[tokenId];
+    }
+
+    function _checkNotLiquidating(uint256 tokenId) internal view {
+        if (liquidatingTokenId != 0 && liquidatingTokenId == tokenId) {
+            revert Reentrancy();
+        }
     }
 
     // calculates amount which needs to be payed to liquidate position

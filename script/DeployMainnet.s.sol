@@ -43,6 +43,7 @@ contract DeployMainnet is Script {
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address constant ETH = address(0);
+    address constant USD_REFERENCE = 0x000000000000000000000000000000000000dEaD;
 
     // ==================== Mainnet Chainlink Feeds ====================
 
@@ -136,7 +137,7 @@ contract DeployMainnet is Script {
         console.log("  LiquidityCalculator deployed at:", address(liquidityCalculator));
 
         console.log("Step 2: Deploying V4Oracle...");
-        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, address(0));
+        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, USD_REFERENCE);
         console.log("  V4Oracle deployed at:", address(oracle));
 
         oracle.setMaxPoolPriceDifference(MAX_POOL_PRICE_DIFFERENCE);

@@ -43,6 +43,8 @@ import {DemoERC20} from "./support/DemoERC20.sol";
 import {MockAggregatorV3} from "./support/MockAggregatorV3.sol";
 
 contract UnichainForkHookathonE2E is Script {
+    address constant USD_REFERENCE = 0x000000000000000000000000000000000000dEaD;
+
     using PoolIdLibrary for PoolKey;
 
     uint256 internal constant Q32 = 2 ** 32;
@@ -154,7 +156,7 @@ contract UnichainForkHookathonE2E is Script {
             new InterestRateModel(BASE_RATE_PER_YEAR, MULTIPLIER_PER_YEAR, JUMP_MULTIPLIER_PER_YEAR, KINK);
         deployment.liquidityCalculator = new LiquidityCalculator();
 
-        deployment.oracle = new V4Oracle(POSITION_MANAGER, address(deployment.demoEth), address(0));
+        deployment.oracle = new V4Oracle(POSITION_MANAGER, address(deployment.demoEth), USD_REFERENCE);
         deployment.oracle.setMaxPoolPriceDifference(MAX_POOL_PRICE_DIFFERENCE);
         deployment.oracle.setTokenConfig(address(deployment.demoUsd), deployment.usdFeed, MAX_FEED_AGE);
         deployment.oracle.setTokenConfig(address(deployment.demoEth), deployment.ethFeed, MAX_FEED_AGE);
