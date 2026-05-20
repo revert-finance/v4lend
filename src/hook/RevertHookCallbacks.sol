@@ -231,9 +231,13 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         uint32 lastCollect = state.lastCollect;
         uint32 feeTime = lastCollect == 0 ? 0 : currentTime - lastCollect;
         state.lastCollect = currentTime;
+        state.accumulatedActiveTime = 0;
 
         if (feeTime == 0 || accumulatedActiveTime == 0) {
             return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+        if (accumulatedActiveTime > feeTime) {
+            accumulatedActiveTime = feeTime;
         }
 
         uint16 lpFeeBps = hookFeeController.lpFeeBps();

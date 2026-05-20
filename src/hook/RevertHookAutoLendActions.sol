@@ -103,6 +103,20 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
 
         SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), lendAmount);
         try lendVault.deposit(lendAmount, address(this)) returns (uint256 shares) {
+            if (shares == 0) {
+                SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), 0);
+                if (IERC20(depositToken).balanceOf(address(this)) < lendAmount) {
+                    revert InvalidConfig();
+                }
+                NativeAssetLib.unwrapIfNative(weth, lendCurrency, lendAmount);
+                _restoreAutoLendPosition(
+                    tokenId, poolKey, positionInfo, currency0, currency1, amount0, amount1, owner, isUpperTrigger
+                );
+                emit HookAutoLendFailed(address(lendVault), lendCurrency, abi.encodeWithSignature("InvalidConfig()"));
+                emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+                return;
+            }
+
             PositionState storage state = _positionStates[tokenId];
             state.autoLendShares = shares;
             state.autoLendToken = tokenAddress;

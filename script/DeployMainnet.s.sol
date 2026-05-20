@@ -52,7 +52,7 @@ contract DeployMainnet is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 86400;
+    uint32 constant MAX_FEED_AGE = 1 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200;
 
     uint256 constant BASE_RATE_PER_YEAR = 0;

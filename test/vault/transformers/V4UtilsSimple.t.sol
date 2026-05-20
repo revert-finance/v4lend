@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {console} from "forge-std/console.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -158,7 +159,33 @@ contract V4UtilsSimpleTest is V4TestBase {
         console.log("New tick lower:", newPositionInfo.tickLower());
         console.log("New tick upper:", newPositionInfo.tickUpper());
     }
-    
+
+    function testExecuteRejectsReentrantExecuteDuringMintedNftCallback() public {
+        uint256 tokenId = _createTestPosition(user1);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+
+        ReenteringV4UtilsReceiver receiver = new ReenteringV4UtilsReceiver(v4Utils);
+
+        V4Utils.Instructions memory nestedInstructions =
+            _createInstructions(V4Utils.WhatToDo.COMPOUND_FEES, address(token0), 0, block.timestamp, user1);
+        receiver.arm(tokenId, nestedInstructions);
+
+        V4Utils.Instructions memory instructions =
+            _createInstructions(V4Utils.WhatToDo.CHANGE_RANGE, address(0), liquidity, block.timestamp, user1);
+        instructions.tickLower = -100020;
+        instructions.tickUpper = 100020;
+        instructions.recipientNFT = address(receiver);
+
+        _executeInstructions(tokenId, instructions, user1);
+
+        assertTrue(receiver.reentered(), "Receiver should attempt reentrant execute");
+        assertFalse(receiver.reenterSucceeded(), "Reentrant execute should fail");
+        bytes memory revertData = receiver.revertData();
+        assertEq(bytes4(revertData), Constants.Reentrancy.selector, "Reentrant execute should hit mutex");
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId), user1, "Original NFT should be returned");
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId + 1), address(receiver), "Minted NFT should transfer");
+    }
+
     function testExecuteWithdrawAndCollectAndSwap() public {
         console.log("=== Testing WITHDRAW_AND_COLLECT_AND_SWAP ===");
         
@@ -1169,5 +1196,38 @@ contract V4UtilsSimpleTest is V4TestBase {
         v4Utils.swapAndIncreaseLiquidity{value: 1 ether}(params);
         
         console.log("InsufficientAmountAdded error correctly thrown for swapAndIncreaseLiquidity with ETH");
+    }
+}
+
+contract ReenteringV4UtilsReceiver is IERC721Receiver {
+    V4Utils internal immutable v4Utils;
+
+    uint256 internal tokenId;
+    V4Utils.Instructions internal instructions;
+
+    bool public reentered;
+    bool public reenterSucceeded;
+    bytes public revertData;
+
+    constructor(V4Utils _v4Utils) {
+        v4Utils = _v4Utils;
+    }
+
+    function arm(uint256 _tokenId, V4Utils.Instructions memory _instructions) external {
+        tokenId = _tokenId;
+        instructions = _instructions;
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external override returns (bytes4) {
+        if (!reentered) {
+            reentered = true;
+            try v4Utils.execute(tokenId, instructions) returns (uint256) {
+                reenterSucceeded = true;
+            } catch (bytes memory reason) {
+                revertData = reason;
+            }
+        }
+
+        return IERC721Receiver.onERC721Received.selector;
     }
 }

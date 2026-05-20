@@ -76,7 +76,7 @@ contract DeployUnichain is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 86400; // 24 hours max feed age
+    uint32 constant MAX_FEED_AGE = 1 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
 
     // Interest rate model parameters (similar to Compound V2)
@@ -158,6 +158,11 @@ contract DeployUnichain is Script {
         address deployer = msg.sender;
         address zeroXAllowanceHolder = vm.envOr("ZEROX_ALLOWANCE_HOLDER", ZEROX_ALLOWANCE_HOLDER);
         address sequencerUptimeFeed = vm.envOr("SEQUENCER_UPTIME_FEED", SEQUENCER_UPTIME_FEED);
+        bool allowMissingSequencerFeed = vm.envOr("ALLOW_MISSING_SEQUENCER_FEED", false);
+
+        if (sequencerUptimeFeed == address(0) && !allowMissingSequencerFeed) {
+            revert("DeployUnichain: missing SEQUENCER_UPTIME_FEED");
+        }
 
         vm.startBroadcast();
 

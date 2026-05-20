@@ -324,6 +324,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @inheritdoc IERC4626
     function maxDeposit(address) external view override returns (uint256) {
         (, uint256 lendExchangeRateX96) = _calculateGlobalInterest();
+        if (lendExchangeRateX96 == 0) {
+            return 0;
+        }
         uint256 value = _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Ceil);
         if (value >= globalLendLimit) {
             return 0;
@@ -340,6 +343,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @inheritdoc IERC4626
     function maxMint(address) external view override returns (uint256) {
         (, uint256 lendExchangeRateX96) = _calculateGlobalInterest();
+        if (lendExchangeRateX96 == 0) {
+            return 0;
+        }
         uint256 value = _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Ceil);
         if (value >= globalLendLimit) {
             return 0;
@@ -371,6 +377,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @inheritdoc IERC4626
     function maxRedeem(address owner) external view override returns (uint256) {
         (uint256 debtExchangeRateX96, uint256 lendExchangeRateX96) = _calculateGlobalInterest();
+        if (lendExchangeRateX96 == 0) {
+            return 0;
+        }
 
         uint256 ownerShareBalance = balanceOf(owner);
 
@@ -393,6 +402,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @inheritdoc IERC4626
     function previewMint(uint256 shares) public view override returns (uint256) {
         (, uint256 lendExchangeRateX96) = _calculateGlobalInterest();
+        if (shares > 0 && lendExchangeRateX96 == 0) {
+            revert InvalidConfig();
+        }
         return _convertToAssets(shares, lendExchangeRateX96, Math.Rounding.Ceil);
     }
 
@@ -1017,6 +1029,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     {
         (, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
 
+        if (newLendExchangeRateX96 == 0) {
+            revert InvalidConfig();
+        }
+
         _resetDailyLendIncreaseLimit(newLendExchangeRateX96, false);
 
         if (isShare) {
@@ -1025,6 +1041,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         } else {
             assets = amount;
             shares = _convertToShares(assets, newLendExchangeRateX96, Math.Rounding.Floor);
+        }
+
+        if (shares == 0 || assets == 0) {
+            revert AmountError();
         }
 
         uint256 newTotalAssets = _convertToAssets(totalSupply() + shares, newLendExchangeRateX96, Math.Rounding.Ceil);
@@ -1500,6 +1520,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         pure
         returns (uint256)
     {
+        if (amount == 0) {
+            return 0;
+        }
+        if (exchangeRateX96 == 0) {
+            revert InvalidConfig();
+        }
         return amount.mulDiv(Q96, exchangeRateX96, rounding);
     }
 

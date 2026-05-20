@@ -39,6 +39,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     /// @notice Permit2 contract
     IPermit2 public immutable permit2;
 
+    /// @dev Prevents callbacks from re-entering execute() while this contract has temporary NFT custody.
+    bool private executing;
+
     // events
     event CompoundFees(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
     event ChangeRange(uint256 indexed tokenId, uint256 newTokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
@@ -198,6 +201,17 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     function execute(uint256 tokenId, Instructions memory instructions) public returns (uint256 newTokenId) {
         _validateCaller(positionManager, tokenId);
 
+        if (executing) {
+            revert Reentrancy();
+        }
+        executing = true;
+
+        newTokenId = _execute(tokenId, instructions);
+
+        executing = false;
+    }
+
+    function _execute(uint256 tokenId, Instructions memory instructions) internal returns (uint256 newTokenId) {
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
 

@@ -8,12 +8,25 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {V4ForkTestBase} from "test/vault/support/V4ForkTestBase.sol";
 import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
 import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+
+contract V4OracleHarness is V4Oracle {
+    constructor(IPositionManager _positionManager, address _referenceToken, address _chainlinkReferenceToken)
+        V4Oracle(_positionManager, _referenceToken, _chainlinkReferenceToken)
+    {}
+
+    function exposedPriceX96FromSqrtPriceX96(uint160 sqrtPriceX96) external pure returns (uint256) {
+        return _priceX96FromSqrtPriceX96(sqrtPriceX96);
+    }
+}
 
 /**
  * @title V4OracleTest
@@ -26,7 +39,47 @@ contract V4OracleTest is V4ForkTestBase {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
         new V4Oracle(positionManager, USDC_ADDRESS, address(0));
     }
-    
+
+    function testChainlinkValidationRejectsInvalidRoundData() public {
+        uint256 freshTime = block.timestamp - 10;
+
+        _expectEthFeedPriceError(0, 2500e8, freshTime, freshTime, 0);
+        _expectEthFeedPriceError(2, 2500e8, freshTime, freshTime, 1);
+        _expectEthFeedPriceError(1, 2500e8, 0, freshTime, 1);
+        _expectEthFeedPriceError(1, 2500e8, freshTime, 0, 1);
+        _expectEthFeedPriceError(1, 2500e8, freshTime, block.timestamp + 1, 1);
+        _expectEthFeedPriceError(1, 2500e8, block.timestamp - 31 days, block.timestamp - 31 days, 1);
+        _expectEthFeedPriceError(1, 0, freshTime, freshTime, 1);
+        _expectEthFeedPriceError(1, -1, freshTime, freshTime, 1);
+    }
+
+    function testPoolPriceFromSqrtUsesFullPrecision() public {
+        V4OracleHarness oracleHarness =
+            new V4OracleHarness(positionManager, USDC_ADDRESS, 0x000000000000000000000000000000000000dEaD);
+        uint160 sqrtPriceX96 = TickMath.MAX_SQRT_PRICE - 1;
+
+        uint256 priceX96 = oracleHarness.exposedPriceX96FromSqrtPriceX96(sqrtPriceX96);
+
+        assertGt(uint256(sqrtPriceX96), type(uint128).max, "raw square would overflow uint256");
+        assertEq(priceX96, FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96));
+    }
+
+    function _expectEthFeedPriceError(
+        uint80 roundId,
+        int256 answer,
+        uint256 startedAt,
+        uint256 updatedAt,
+        uint80 answeredInRound
+    ) internal {
+        vm.mockCall(
+            CHAINLINK_ETH_USD,
+            abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
+            abi.encode(roundId, answer, startedAt, updatedAt, answeredInRound)
+        );
+        vm.expectRevert(abi.encodeWithSignature("ChainlinkPriceError()"));
+        v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS);
+    }
+
     function testGetValue() public {
         // Test with the two preconfigured NFT positions from V4ForkTestBase
         uint256[] memory testTokenIds = new uint256[](2);

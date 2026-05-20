@@ -300,7 +300,9 @@ contract V4VaultTest is V4ForkTestBase {
         uint256 lendLimit = vault.globalLendLimit();
         uint256 dailyDepositLimit = vault.dailyLendIncreaseLimitMin();
 
-        if (amount > lendLimit) {
+        if (amount == 0) {
+            vm.expectRevert(Constants.AmountError.selector);
+        } else if (amount > lendLimit) {
             vm.expectRevert(Constants.GlobalLendLimit.selector);
         } else if (amount > dailyDepositLimit) {
             vm.expectRevert(Constants.DailyLendIncreaseLimit.selector);
@@ -839,7 +841,7 @@ contract V4VaultTest is V4ForkTestBase {
             vm.mockCall(
                 CHAINLINK_USDC_USD,
                 abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
-                abi.encode(uint80(0), int256(200000000), block.timestamp, block.timestamp, uint80(0))
+                abi.encode(uint80(1), int256(200000000), block.timestamp, block.timestamp, uint80(1))
             );
         } else {
             vault.setTokenConfig(address(usdc), uint32(Q32 * 2 / 10), type(uint32).max); // 20% collateral factor
@@ -925,13 +927,13 @@ contract V4VaultTest is V4ForkTestBase {
         vm.mockCall(
             CHAINLINK_BTC_USD,
             abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
-            abi.encode(uint80(0), int256(1), block.timestamp, block.timestamp, uint80(0))
+            abi.encode(uint80(1), int256(1), block.timestamp, block.timestamp, uint80(1))
         );
 
         vm.mockCall(
             CHAINLINK_ETH_USD,
             abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
-            abi.encode(uint80(0), int256(1), block.timestamp, block.timestamp, uint80(0))
+            abi.encode(uint80(1), int256(1), block.timestamp, block.timestamp, uint80(1))
         );
 
         (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft7TokenId);
@@ -948,6 +950,30 @@ contract V4VaultTest is V4ForkTestBase {
         assertEq(vault.loans(nft7TokenId), 0);
         assertEq(vault.debtSharesTotal(), 0);
         assertEq(vault.lastLendExchangeRateX96(), 0);
+
+        assertEq(vault.maxDeposit(WHALE_ACCOUNT), 0);
+        assertEq(vault.maxMint(WHALE_ACCOUNT), 0);
+        assertEq(vault.maxRedeem(WHALE_ACCOUNT), 0);
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.previewDeposit(1);
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.previewMint(1);
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.convertToShares(1);
+
+        vm.prank(WHALE_ACCOUNT);
+        usdc.approve(address(vault), 1);
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vm.prank(WHALE_ACCOUNT);
+        vault.deposit(1, WHALE_ACCOUNT);
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vm.prank(WHALE_ACCOUNT);
+        vault.mint(1, WHALE_ACCOUNT);
     }
 
     function testLiquidationWithZeroCollateralFactor() external {
@@ -1356,16 +1382,24 @@ contract V4VaultTest is V4ForkTestBase {
 
         uint256 whaleBalance = usdc.balanceOf(WHALE_ACCOUNT);
 
-        if (lent > globalLendLimit) {
+        bool expectDepositRevert;
+        if (lent == 0) {
+            expectDepositRevert = true;
+            vm.expectRevert(Constants.AmountError.selector);
+        } else if (lent > globalLendLimit) {
+            expectDepositRevert = true;
             vm.expectRevert(Constants.GlobalLendLimit.selector);
         } else if (lent > dailyLendIncreaseLimitMin) {
+            expectDepositRevert = true;
             vm.expectRevert(Constants.DailyLendIncreaseLimit.selector);
         } else if (whaleBalance < lent) {
+            expectDepositRevert = true;
             vm.expectRevert("ERC20: transfer amount exceeds balance");
         }
 
         vm.prank(WHALE_ACCOUNT);
         vault.deposit(lent, WHALE_ACCOUNT);
+        if (expectDepositRevert) return;
 
         // add collateral
         vm.prank(nft1Owner);

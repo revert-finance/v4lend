@@ -288,7 +288,13 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
         // Sequencer check on chains where needed
         if (sequencerUptimeFeed != address(0)) {
-            (, int256 sequencerAnswer, uint256 startedAt,,) =
+            (
+                uint80 sequencerRoundId,
+                int256 sequencerAnswer,
+                uint256 sequencerStartedAt,
+                uint256 sequencerUpdatedAt,
+                uint80 sequencerAnsweredInRound
+            ) =
                 AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
 
             // Answer == 0: Sequencer is up
@@ -298,12 +304,19 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             }
 
             // Feed result must be valid
-            if (startedAt == 0) {
+            if (
+                sequencerRoundId == 0
+                    || sequencerAnsweredInRound < sequencerRoundId
+                    || sequencerStartedAt == 0
+                    || sequencerUpdatedAt == 0
+                    || sequencerUpdatedAt > block.timestamp
+                    || sequencerAnswer != 0
+            ) {
                 revert SequencerUptimeFeedInvalid();
             }
 
             // Make sure grace period has passed since sequencer is back up
-            uint256 timeSinceUp = block.timestamp - startedAt;
+            uint256 timeSinceUp = block.timestamp - sequencerStartedAt;
             if (timeSinceUp <= SEQUENCER_GRACE_PERIOD_TIME) {
                 revert SequencerGracePeriodNotOver();
             }
@@ -317,10 +330,19 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
 
         // Get latest round data from Chainlink
-        (, int256 answer,, uint256 updatedAt,) = feedConfig.feed.latestRoundData();
+        (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound) =
+            feedConfig.feed.latestRoundData();
         
         // Check for stale data or invalid price
-        if (updatedAt + feedConfig.maxFeedAge < block.timestamp || answer <= 0) {
+        if (
+            roundId == 0
+                || answeredInRound < roundId
+                || startedAt == 0
+                || updatedAt == 0
+                || updatedAt > block.timestamp
+                || block.timestamp - updatedAt > feedConfig.maxFeedAge
+                || answer <= 0
+        ) {
             revert ChainlinkPriceError();
         }
 
@@ -403,7 +425,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint256 derivedPoolPriceX96 = FullMath.mulDiv(state.price0X96, Q96, state.price1X96);
         
         // Current pool price
-        uint256 priceX96 = (uint256(state.sqrtPriceX96) * uint256(state.sqrtPriceX96)) / Q96;
+        uint256 priceX96 = _priceX96FromSqrtPriceX96(state.sqrtPriceX96);
         _requireMaxDifference(priceX96, derivedPoolPriceX96, maxPoolPriceDifference);
 
         // Calculate derived sqrt price
@@ -418,6 +440,10 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             state.tickUpper, 
             bytes32(tokenId)
         );
+    }
+
+    function _priceX96FromSqrtPriceX96(uint160 sqrtPriceX96) internal pure returns (uint256) {
+        return FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96);
     }
 
     /// @notice Calculates token amounts of a position based on oracle-derived price

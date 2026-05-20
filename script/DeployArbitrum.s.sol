@@ -70,7 +70,7 @@ contract DeployArbitrum is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 86400; // 24 hours max feed age
+    uint32 constant MAX_FEED_AGE = 1 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
 
     uint256 constant BASE_RATE_PER_YEAR = 0; // 0% base rate

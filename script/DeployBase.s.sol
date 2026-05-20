@@ -62,7 +62,7 @@ contract DeployBase is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 86400; // 24 hours max feed age
+    uint32 constant MAX_FEED_AGE = 1 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
 
     // Interest rate model parameters (similar to Compound V2)

@@ -4774,6 +4774,50 @@ contract RevertHookTest is BaseTest {
         );
     }
 
+    function testAutoLendZeroShareDeposit_RestoresLiquidityAndConsumesTriggeredTick() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        ZeroShareERC4626Vault zeroShareVault =
+            new ZeroShareERC4626Vault(IERC20(Currency.unwrap(currency0)), "Zero Share Vault", "ZERO");
+        hook.setAutoLendVault(Currency.unwrap(currency0), zeroShareVault);
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+        uint256 zeroShareVaultAssetsBefore = zeroShareVault.totalAssets();
+
+        vm.recordLogs();
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+
+        assertGe(
+            positionManager.getPositionLiquidity(token3Id), liquidityBefore, "Zero-share deposit must restore liquidity"
+        );
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEND, "Zero-share deposit must keep config active");
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendShares, 0, "Zero-share deposit must not leave lending shares");
+        assertEq(autoLendToken, address(0), "Zero-share deposit must not keep lend token state");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore - 1, "Zero-share deposit must consume the fired lower trigger");
+        assertEq(upperAfter, upperBefore, "Zero-share deposit must keep the unfired upper trigger");
+        assertEq(zeroShareVault.totalAssets(), zeroShareVaultAssetsBefore, "Zero-share vault must not keep assets");
+        _verifyNoLeftoverBalances("zero-share auto-lend deposit");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(
+            _sawEventTopic(logs, keccak256("HookAutoLendFailed(address,address,bytes)")),
+            "Zero-share deposit should emit HookAutoLendFailed"
+        );
+        assertTrue(
+            _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "Zero-share deposit should emit HookActionFailed"
+        );
+    }
+
     function testImmediateExecution_AutoLendFailureConsumesImmediateTrigger() public {
         hook.setMaxTicksFromOracle(1000);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
@@ -5843,6 +5887,51 @@ contract RevertHookTest is BaseTest {
             token2Id, step, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
         );
     }
+
+    function testProtocolFeeCollectionConsumesInactiveActiveTime() public {
+        assertGt(feeController.lpFeeBps(), 0, "lpFeeBps must be > 0 to reach protocol fee accounting");
+
+        hook.setPositionConfig(
+            token2Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_COLLECT, false, false, type(int24).min, type(int24).max)
+        );
+
+        uint128 step = positionManager.getPositionLiquidity(token2Id) / 20;
+        if (step == 0) step = 1;
+
+        positionManager.increaseLiquidity(
+            token2Id, step, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
+        );
+
+        vm.warp(block.timestamp + 1 days);
+        hook.setPositionConfig(
+            token2Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_NONE, false, false, type(int24).min, type(int24).max)
+        );
+
+        (, uint32 accumulatedBefore, uint32 lastActivatedBefore,,,,,) = hook.positionStates(token2Id);
+        assertGt(accumulatedBefore, 0, "Disabling should accumulate active time");
+        assertEq(lastActivatedBefore, 0, "Disabled position should be inactive");
+
+        positionManager.increaseLiquidity(
+            token2Id, step, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
+        );
+
+        (, uint32 accumulatedAfterFirstCollect, uint32 lastActivatedAfterFirstCollect,,,,,) =
+            hook.positionStates(token2Id);
+        assertEq(accumulatedAfterFirstCollect, 0, "Protocol fee collection should consume inactive active time");
+        assertEq(lastActivatedAfterFirstCollect, 0, "Inactive fee collection should not reactivate the position");
+
+        vm.warp(block.timestamp + 1 hours);
+        positionManager.increaseLiquidity(
+            token2Id, step, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
+        );
+
+        (, uint32 accumulatedAfterSecondCollect, uint32 lastActivatedAfterSecondCollect,,,,,) =
+            hook.positionStates(token2Id);
+        assertEq(accumulatedAfterSecondCollect, 0, "Second inactive collection must not reuse consumed active time");
+        assertEq(lastActivatedAfterSecondCollect, 0, "Second inactive collection should keep position inactive");
+    }
 }
 
 contract RevertingERC4626Vault is MockERC4626Vault {
@@ -5850,6 +5939,14 @@ contract RevertingERC4626Vault is MockERC4626Vault {
 
     function deposit(uint256, address) public pure override returns (uint256) {
         revert("deposit failed");
+    }
+}
+
+contract ZeroShareERC4626Vault is MockERC4626Vault {
+    constructor(IERC20 asset_, string memory name_, string memory symbol_) MockERC4626Vault(asset_, name_, symbol_) {}
+
+    function deposit(uint256, address) public pure override returns (uint256) {
+        return 0;
     }
 }
 
