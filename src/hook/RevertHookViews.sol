@@ -19,8 +19,8 @@ abstract contract RevertHookViews is RevertHookBase {
         return _LEVERAGE_TICK_OFFSET_MULTIPLIER;
     }
 
-    function MAX_TRIGGER_BATCHES_PER_SWAP() external pure returns (uint256) {
-        return _MAX_TRIGGER_BATCHES_PER_SWAP;
+    function MAX_EXECUTIONS_PER_SWAP() external pure returns (uint256) {
+        return _MAX_EXECUTIONS_PER_SWAP;
     }
 
     function owner() external view returns (address) {

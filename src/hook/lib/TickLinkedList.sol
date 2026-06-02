@@ -10,7 +10,8 @@ library TickLinkedList {
         bool increasing; // true for ascending order, false for descending order
         uint32 size; // number of initialized ticks
         int24 head; // First element in the list (n/a if size is 0)
-        mapping(int24 => int24) next; // Next initialized tick in order 
+        mapping(int24 => int24) next; // Next initialized tick in order
+        mapping(int24 => uint256) tokenIdStart; // First active token ID index for each tick
         mapping(int24 => uint256[]) tokenIds; // Token IDs for each tick
     }
 
@@ -72,7 +73,6 @@ library TickLinkedList {
      * @return int24 The next tick value, or 0 if none exists.
      */
     function getNext(List storage self, int24 tick) internal view returns (bool, int24) {
-
         int24 nextTick = self.next[tick];
         bool increasing = self.increasing;
 
@@ -95,8 +95,7 @@ library TickLinkedList {
      * @return bool True if success, false if tick already exists.
      */
     function insert(List storage self, int24 _tick, uint256 _tokenId) internal returns (bool) {
-
-        bool added = _addToTickMapping(self.tokenIds[_tick], _tokenId);
+        bool added = _addToTickMapping(self.tokenIds[_tick], self.tokenIdStart[_tick], _tokenId);
         if (!added) {
             return false;
         }
@@ -121,7 +120,7 @@ library TickLinkedList {
         // Find the correct position to insert (maintain sorted order based on increasing)
         int24 insertAfter;
         uint32 count = self.size;
-    
+
         // Traverse to find insertion point
         if (self.increasing) {
             // Ascending order: find first tick >= _tick
@@ -166,13 +165,15 @@ library TickLinkedList {
 
         bool removed;
         bool empty;
-        (removed, empty) = _removeFromTickMapping(self.tokenIds[_tick], _tokenId);
+        (removed, empty) = _removeFromTickMapping(self.tokenIds[_tick], self.tokenIdStart[_tick], _tokenId);
         if (!removed) {
             return false;
         }
 
         // If no more tokenIds at this tick, remove the tick node from the linked list.
         if (empty) {
+            delete self.tokenIds[_tick];
+            delete self.tokenIdStart[_tick];
             return _unlinkTick(self, _tick);
         }
 
@@ -191,20 +192,72 @@ library TickLinkedList {
         }
 
         delete self.tokenIds[_tick];
+        delete self.tokenIdStart[_tick];
         return _unlinkTick(self, _tick);
+    }
+
+    /**
+     * @dev Pops up to maxCount tokenIds from a tick without copying the full tick array.
+     * @param self Stored linked list from contract.
+     * @param _tick The tick value.
+     * @param maxCount Maximum number of tokenIds to pop.
+     * @return tokenIds Popped tokenIds.
+     * @return tickDrained True if no tokenIds remain at the tick.
+     */
+    function popTokenIds(List storage self, int24 _tick, uint256 maxCount)
+        internal
+        returns (uint256[] memory tokenIds, bool tickDrained)
+    {
+        uint256 startIndex = self.tokenIdStart[_tick];
+        uint256 length = self.tokenIds[_tick].length;
+        uint256 activeLength = length > startIndex ? length - startIndex : 0;
+        if (activeLength == 0 || maxCount == 0) {
+            tickDrained = activeLength == 0;
+            if (tickDrained) {
+                delete self.tokenIds[_tick];
+                delete self.tokenIdStart[_tick];
+                _unlinkTick(self, _tick);
+            }
+            return (new uint256[](0), tickDrained);
+        }
+
+        uint256 count = activeLength < maxCount ? activeLength : maxCount;
+        tokenIds = new uint256[](count);
+        for (uint256 i; i < count;) {
+            tokenIds[i] = self.tokenIds[_tick][startIndex + i];
+            unchecked {
+                ++i;
+            }
+        }
+
+        startIndex += count;
+        tickDrained = startIndex == length;
+        if (tickDrained) {
+            delete self.tokenIds[_tick];
+            delete self.tokenIdStart[_tick];
+            _unlinkTick(self, _tick);
+        } else {
+            self.tokenIdStart[_tick] = startIndex;
+        }
     }
 
     /// @notice Adds a tokenId to a tick mapping array if not already present
     /// @param tickPositions The storage array reference
+    /// @param startIndex First active index in tickPositions
     /// @param tokenId The tokenId to add
     /// @return bool True if tokenId was added, false if it was already present
-    function _addToTickMapping(uint256[] storage tickPositions, uint256 tokenId) internal returns (bool) {
+    function _addToTickMapping(uint256[] storage tickPositions, uint256 startIndex, uint256 tokenId)
+        internal
+        returns (bool)
+    {
         uint256 length = tickPositions.length;
-        for (uint256 i; i < length;) {
+        for (uint256 i = startIndex; i < length;) {
             if (tickPositions[i] == tokenId) {
                 return false; // Already present
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         // Add to array
         tickPositions.push(tokenId);
@@ -213,21 +266,31 @@ library TickLinkedList {
 
     /// @notice Removes a tokenId from a tick mapping array
     /// @param tickPositions The storage array reference
+    /// @param startIndex First active index in tickPositions
     /// @param tokenId The tokenId to remove
     /// @return removed True if tokenId was removed, false if it was not present
     /// @return empty True if the array is empty after removal, false otherwise
-    function _removeFromTickMapping(uint256[] storage tickPositions, uint256 tokenId) internal returns (bool removed, bool empty) {
+    function _removeFromTickMapping(uint256[] storage tickPositions, uint256 startIndex, uint256 tokenId)
+        internal
+        returns (bool removed, bool empty)
+    {
         uint256 length = tickPositions.length;
-        for (uint256 i; i < length;) {
+        if (length <= startIndex) {
+            return (false, true);
+        }
+
+        for (uint256 i = startIndex; i < length;) {
             if (tickPositions[i] == tokenId) {
                 // Swap with last element and pop
                 tickPositions[i] = tickPositions[length - 1];
                 tickPositions.pop();
-                return (true, length == 1);
+                return (true, length - 1 == startIndex);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
-        return (false, length == 0);
+        return (false, length <= startIndex);
     }
 
     /// @notice Removes a tick node from the linked list

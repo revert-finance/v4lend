@@ -154,9 +154,9 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // oracle price validation
     int24 internal _maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
-    // Bound trigger processing for one external swap. If the cap is hit, remaining trigger batches stay registered
+    // Bound automation processing for one external swap. If the cap is hit, remaining executions stay registered
     // and can be picked up by a later external swap; they are not guaranteed to run on the immediately following swap.
-    uint256 internal constant _MAX_TRIGGER_BATCHES_PER_SWAP = 32;
+    uint256 internal constant _MAX_EXECUTIONS_PER_SWAP = 32;
 
     // minimum position value in native token (address(0)) to be configurable
     uint256 internal _minPositionValueNative = 0.01 ether;

@@ -546,12 +546,12 @@ contract RevertHookTest is BaseTest {
         );
     }
 
-    function testAfterSwap_MaxTriggerBatchCapDefersRemainingTriggers() public {
+    function testAfterSwap_MaxExecutionCapDefersRemainingDistinctTriggers() public {
         hook.setMaxTicksFromOracle(5000);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
 
-        uint256 batchCap = hook.MAX_TRIGGER_BATCHES_PER_SWAP();
-        uint256 totalPositions = batchCap + 2;
+        uint256 executionCap = hook.MAX_EXECUTIONS_PER_SWAP();
+        uint256 totalPositions = executionCap + 2;
         uint256[] memory tokenIds = new uint256[](totalPositions);
         int24[] memory triggerTicks = new int24[](totalPositions);
         int24 spacing = poolKey.tickSpacing;
@@ -596,7 +596,7 @@ contract RevertHookTest is BaseTest {
         }
 
         (, uint32 upperConfigured,) = hook.upperTriggerAfterSwap(poolId);
-        assertEq(upperConfigured, totalPositions, "Distinct AUTO_EXIT upper ticks should register one batch each");
+        assertEq(upperConfigured, totalPositions, "Distinct AUTO_EXIT upper ticks should register one node each");
 
         bytes32 autoExitTopic = keccak256("AutoExit(uint256,address,address,uint256,uint256)");
         bytes32 hookActionFailedTopic = keccak256("HookActionFailed(uint256,uint8)");
@@ -640,10 +640,12 @@ contract RevertHookTest is BaseTest {
             }
         }
 
-        assertEq(firstExecutionCount, batchCap, "First swap should stop at the configured batch cap");
+        assertEq(firstExecutionCount, executionCap, "First swap should stop at the configured execution cap");
         assertEq(firstFailureCount, 0, "Capped processing should not emit HookActionFailed");
         assertEq(
-            hook.tickLowerLasts(poolId), triggerTicks[batchCap - 1], "Cursor should stop at the last processed trigger"
+            hook.tickLowerLasts(poolId),
+            triggerTicks[executionCap - 1],
+            "Cursor should stop at the last processed trigger"
         );
 
         (, int24 currentTickAfterFirst,,) = StateLibrary.getSlot0(poolManager, poolId);
@@ -655,13 +657,13 @@ contract RevertHookTest is BaseTest {
         );
 
         for (uint256 i; i < totalPositions; ++i) {
-            if (i < batchCap) {
-                assertTrue(executedFirst[i], "Processed batch should emit one AUTO_EXIT");
+            if (i < executionCap) {
+                assertTrue(executedFirst[i], "Processed action should emit one AUTO_EXIT");
                 assertEq(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Processed token should be fully exited");
                 (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
                 assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Processed token should be disabled");
             } else {
-                assertFalse(executedFirst[i], "Deferred batch must not execute before the next swap");
+                assertFalse(executedFirst[i], "Deferred action must not execute before the next swap");
                 assertGt(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Deferred token should keep liquidity");
                 (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
                 assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "Deferred token should remain armed");
@@ -669,8 +671,8 @@ contract RevertHookTest is BaseTest {
         }
 
         (, uint32 upperAfterFirst, int24 upperHeadAfterFirst) = hook.upperTriggerAfterSwap(poolId);
-        assertEq(upperAfterFirst, totalPositions - batchCap, "Deferred upper triggers should stay registered");
-        assertEq(upperHeadAfterFirst, triggerTicks[batchCap], "Head should advance to the first deferred trigger");
+        assertEq(upperAfterFirst, totalPositions - executionCap, "Deferred upper triggers should stay registered");
+        assertEq(upperHeadAfterFirst, triggerTicks[executionCap], "Head should advance to the first deferred trigger");
 
         vm.recordLogs();
         swapRouter.swapExactTokensForTokens({
@@ -711,10 +713,12 @@ contract RevertHookTest is BaseTest {
             }
         }
 
-        assertEq(secondExecutionCount, totalPositions - batchCap, "Next swap should resume and drain deferred triggers");
+        assertEq(
+            secondExecutionCount, totalPositions - executionCap, "Next swap should resume and drain deferred triggers"
+        );
         assertEq(secondFailureCount, 0, "Deferred processing should complete without HookActionFailed");
         for (uint256 i; i < totalPositions; ++i) {
-            if (i < batchCap) {
+            if (i < executionCap) {
                 assertFalse(executedSecond[i], "Already processed tokens must not execute again");
             } else {
                 assertTrue(executedSecond[i], "Deferred token should execute on the later swap");
@@ -727,7 +731,190 @@ contract RevertHookTest is BaseTest {
         (, uint32 upperAfterSecond, int24 upperHeadAfterSecond) = hook.upperTriggerAfterSwap(poolId);
         assertEq(upperAfterSecond, 0, "Later swap should drain the deferred upper triggers");
         assertEq(upperHeadAfterSecond, 0, "Drained upper trigger list should return to empty head");
-        _verifyNoLeftoverBalances("batch-cap deferred trigger processing");
+        _verifyNoLeftoverBalances("execution-cap deferred trigger processing");
+    }
+
+    function testAfterSwap_MaxExecutionCapDefersRemainingPositionsAtSameTrigger() public {
+        hook.setMaxTicksFromOracle(5000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        uint256 executionCap = hook.MAX_EXECUTIONS_PER_SWAP();
+        uint256 totalPositions = executionCap + 2;
+        uint256[] memory tokenIds = new uint256[](totalPositions);
+        int24 spacing = poolKey.tickSpacing;
+        int24 sharedUpperTrigger = _getTickLower(tickStart, spacing) + spacing;
+        int24 initialCursor = hook.tickLowerLasts(poolId);
+        uint128 exitLiquidity = 1e18;
+
+        for (uint256 i; i < totalPositions; ++i) {
+            (uint256 stagedTokenId,) = positionManager.mint(
+                poolKey,
+                tickLower2,
+                tickUpper2,
+                exitLiquidity,
+                type(uint256).max,
+                type(uint256).max,
+                address(this),
+                block.timestamp,
+                Constants.ZERO_BYTES
+            );
+            tokenIds[i] = stagedTokenId;
+
+            hook.setPositionConfig(
+                stagedTokenId,
+                RevertHookState.PositionConfig({
+                    modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                    autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                    autoExitIsRelative: false,
+                    autoExitTickLower: type(int24).min,
+                    autoExitTickUpper: sharedUpperTrigger,
+                    autoExitSwapOnLowerTrigger: true,
+                    autoExitSwapOnUpperTrigger: true,
+                    autoRangeLowerLimit: type(int24).min,
+                    autoRangeUpperLimit: type(int24).max,
+                    autoRangeLowerDelta: 0,
+                    autoRangeUpperDelta: 0,
+                    autoLendToleranceTick: 0,
+                    autoLeverageTargetBps: 0
+                })
+            );
+        }
+
+        (, uint32 upperConfigured, int24 upperHead) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperConfigured, 1, "All positions should share one upper trigger tick");
+        assertEq(upperHead, sharedUpperTrigger, "Shared trigger should be the upper list head");
+
+        bytes32 autoExitTopic = keccak256("AutoExit(uint256,address,address,uint256,uint256)");
+        bytes32 hookActionFailedTopic = keccak256("HookActionFailed(uint256,uint8)");
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 15e18,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory firstLogs = vm.getRecordedLogs();
+        bool[] memory executedFirst = new bool[](totalPositions);
+        uint256 firstExecutionCount;
+        uint256 firstFailureCount;
+        for (uint256 i; i < firstLogs.length; ++i) {
+            if (firstLogs[i].emitter != address(hook) || firstLogs[i].topics.length == 0) {
+                continue;
+            }
+            if (firstLogs[i].topics[0] == hookActionFailedTopic) {
+                ++firstFailureCount;
+                continue;
+            }
+            if (firstLogs[i].topics[0] != autoExitTopic || firstLogs[i].topics.length < 2) {
+                continue;
+            }
+
+            uint256 exitedTokenId = uint256(firstLogs[i].topics[1]);
+            for (uint256 j; j < totalPositions; ++j) {
+                if (tokenIds[j] != exitedTokenId || executedFirst[j]) {
+                    continue;
+                }
+                executedFirst[j] = true;
+                ++firstExecutionCount;
+                break;
+            }
+        }
+
+        assertEq(firstExecutionCount, executionCap, "First swap should stop at the configured execution cap");
+        assertEq(firstFailureCount, 0, "Capped same-tick processing should not emit HookActionFailed");
+        assertEq(hook.tickLowerLasts(poolId), initialCursor, "Cursor should stay before the partially drained tick");
+
+        (, int24 currentTickAfterFirst,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 currentTickLowerAfterFirst = _getTickLower(currentTickAfterFirst, spacing);
+        assertGe(
+            currentTickLowerAfterFirst,
+            sharedUpperTrigger,
+            "First swap must cross the shared trigger so deferral comes from the cap"
+        );
+
+        uint256 deferredCount;
+        for (uint256 i; i < totalPositions; ++i) {
+            if (executedFirst[i]) {
+                assertEq(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Processed token should be fully exited");
+                (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+                assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Processed token should be disabled");
+            } else {
+                ++deferredCount;
+                assertGt(positionManager.getPositionLiquidity(tokenIds[i]), 0, "Deferred token should keep liquidity");
+                (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+                assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "Deferred token should remain armed");
+            }
+        }
+        assertEq(deferredCount, totalPositions - executionCap, "Only leftover same-tick positions should be deferred");
+
+        (, uint32 upperAfterFirst, int24 upperHeadAfterFirst) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperAfterFirst, 1, "Partially drained shared tick should stay registered");
+        assertEq(upperHeadAfterFirst, sharedUpperTrigger, "Shared trigger should remain the upper list head");
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1e16,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        Vm.Log[] memory secondLogs = vm.getRecordedLogs();
+        bool[] memory executedSecond = new bool[](totalPositions);
+        uint256 secondExecutionCount;
+        uint256 secondFailureCount;
+        for (uint256 i; i < secondLogs.length; ++i) {
+            if (secondLogs[i].emitter != address(hook) || secondLogs[i].topics.length == 0) {
+                continue;
+            }
+            if (secondLogs[i].topics[0] == hookActionFailedTopic) {
+                ++secondFailureCount;
+                continue;
+            }
+            if (secondLogs[i].topics[0] != autoExitTopic || secondLogs[i].topics.length < 2) {
+                continue;
+            }
+
+            uint256 exitedTokenId = uint256(secondLogs[i].topics[1]);
+            for (uint256 j; j < totalPositions; ++j) {
+                if (tokenIds[j] != exitedTokenId || executedSecond[j]) {
+                    continue;
+                }
+                executedSecond[j] = true;
+                ++secondExecutionCount;
+                break;
+            }
+        }
+
+        assertEq(
+            secondExecutionCount, totalPositions - executionCap, "Next swap should drain deferred same-tick positions"
+        );
+        assertEq(secondFailureCount, 0, "Deferred same-tick processing should complete without HookActionFailed");
+        for (uint256 i; i < totalPositions; ++i) {
+            if (executedFirst[i]) {
+                assertFalse(executedSecond[i], "Already processed tokens must not execute again");
+            } else {
+                assertTrue(executedSecond[i], "Deferred token should execute on the later swap");
+            }
+            assertEq(
+                positionManager.getPositionLiquidity(tokenIds[i]), 0, "All same-tick tokens should be fully exited"
+            );
+            (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(tokenIds[i]);
+            assertEq(modeFlags, PositionModeFlags.MODE_NONE, "All same-tick tokens should be disabled after drain");
+        }
+
+        (, uint32 upperAfterSecond, int24 upperHeadAfterSecond) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperAfterSecond, 0, "Later swap should drain the shared upper trigger");
+        assertEq(upperHeadAfterSecond, 0, "Drained shared trigger list should return to empty head");
+        _verifyNoLeftoverBalances("execution-cap same-tick deferred trigger processing");
     }
 
     function testAutoExit_MultiplePositionsOnSameTriggerExecuteOnceEach() public {
@@ -831,7 +1018,13 @@ contract RevertHookTest is BaseTest {
         hook.setMaxTicksFromOracle(1000);
         // Configure a non-existent routed pool so swap-to-ratio fails and remint has no usable token1.
         _setBidirectionalRoute(
-            PoolKey({currency0: poolKey.currency0, currency1: poolKey.currency1, fee: 500, tickSpacing: 60, hooks: IHooks(address(0))})
+            PoolKey({
+                currency0: poolKey.currency0,
+                currency1: poolKey.currency1,
+                fee: 500,
+                tickSpacing: 60,
+                hooks: IHooks(address(0))
+            })
         );
         (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
 
@@ -1223,8 +1416,8 @@ contract RevertHookTest is BaseTest {
         routeController.clearRoute(Currency.unwrap(currency0), Currency.unwrap(currency1));
         routeController.clearRoute(Currency.unwrap(currency1), Currency.unwrap(currency0));
 
-        (bool hasForwardRoute,,, ) = routeController.route(Currency.unwrap(currency0), Currency.unwrap(currency1));
-        (bool hasReverseRoute,,, ) = routeController.route(Currency.unwrap(currency1), Currency.unwrap(currency0));
+        (bool hasForwardRoute,,,) = routeController.route(Currency.unwrap(currency0), Currency.unwrap(currency1));
+        (bool hasReverseRoute,,,) = routeController.route(Currency.unwrap(currency1), Currency.unwrap(currency0));
         assertFalse(hasForwardRoute, "forward route should be cleared before fallback test");
         assertFalse(hasReverseRoute, "reverse route should be cleared before fallback test");
 
@@ -1257,7 +1450,8 @@ contract RevertHookTest is BaseTest {
         );
 
         (uint160 hookedSqrtPriceAfter, int24 hookedTickAfter,,) = StateLibrary.getSlot0(poolManager, poolId);
-        (uint160 nonHookedSqrtPriceAfter, int24 nonHookedTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+        (uint160 nonHookedSqrtPriceAfter, int24 nonHookedTickAfter,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolId);
 
         assertTrue(
             hookedSqrtPriceAfter != hookedSqrtPriceBefore || hookedTickAfter != hookedTickBefore,
@@ -1315,7 +1509,8 @@ contract RevertHookTest is BaseTest {
         );
 
         (uint160 hookedSqrtPriceAfter, int24 hookedTickAfter,,) = StateLibrary.getSlot0(poolManager, poolId);
-        (uint160 nonHookedSqrtPriceAfter, int24 nonHookedTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolId);
+        (uint160 nonHookedSqrtPriceAfter, int24 nonHookedTickAfter,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolId);
 
         assertTrue(
             hookedSqrtPriceAfter != hookedSqrtPriceBefore || hookedTickAfter != hookedTickBefore,
@@ -1323,33 +1518,54 @@ contract RevertHookTest is BaseTest {
         );
         assertEq(nonHookedSqrtPriceAfter, nonHookedSqrtPriceBefore, "non-hooked pool price should stay unchanged");
         assertEq(nonHookedTickAfter, nonHookedTickBefore, "non-hooked pool tick should stay unchanged");
-        assertGt(positionManager.getPositionLiquidity(token2Id), token2Liquidity, "same-pool route should still compound");
+        assertGt(
+            positionManager.getPositionLiquidity(token2Id), token2Liquidity, "same-pool route should still compound"
+        );
     }
 
     function testSwapRouting_AutoCollectUsesAsymmetricRoutesAtRuntime() public {
         (PoolKey memory reversePoolKey, PoolId reversePoolId) = _createAdditionalRoutePool(0, 10);
 
-        _setRoute(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey.fee, nonHookedPoolKey.tickSpacing, nonHookedPoolKey.hooks);
-        _setRoute(Currency.unwrap(currency1), Currency.unwrap(currency0), reversePoolKey.fee, reversePoolKey.tickSpacing, reversePoolKey.hooks);
+        _setRoute(
+            Currency.unwrap(currency0),
+            Currency.unwrap(currency1),
+            nonHookedPoolKey.fee,
+            nonHookedPoolKey.tickSpacing,
+            nonHookedPoolKey.hooks
+        );
+        _setRoute(
+            Currency.unwrap(currency1),
+            Currency.unwrap(currency0),
+            reversePoolKey.fee,
+            reversePoolKey.tickSpacing,
+            reversePoolKey.hooks
+        );
 
         uint256[] memory params = new uint256[](1);
         params[0] = token2Id;
 
         _setupAutoCollectTest(RevertHookState.AutoCollectMode.HARVEST_TOKEN_1);
-        (uint160 forwardPoolSqrtBefore, int24 forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
-        (uint160 reversePoolSqrtBefore, int24 reversePoolTickBefore,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+        (uint160 forwardPoolSqrtBefore, int24 forwardPoolTickBefore,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 reversePoolSqrtBefore, int24 reversePoolTickBefore,,) =
+            StateLibrary.getSlot0(poolManager, reversePoolId);
 
         hook.autoCollect(params);
 
-        (uint160 forwardPoolSqrtAfter, int24 forwardPoolTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 forwardPoolSqrtAfter, int24 forwardPoolTickAfter,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
         (uint160 reversePoolSqrtAfter, int24 reversePoolTickAfter,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
 
         assertTrue(
             forwardPoolSqrtAfter != forwardPoolSqrtBefore || forwardPoolTickAfter != forwardPoolTickBefore,
             "token0 -> token1 harvest should use the forward route"
         );
-        assertEq(reversePoolSqrtAfter, reversePoolSqrtBefore, "reverse route pool should stay unchanged on forward swap");
-        assertEq(reversePoolTickAfter, reversePoolTickBefore, "reverse route tick should stay unchanged on forward swap");
+        assertEq(
+            reversePoolSqrtAfter, reversePoolSqrtBefore, "reverse route pool should stay unchanged on forward swap"
+        );
+        assertEq(
+            reversePoolTickAfter, reversePoolTickBefore, "reverse route tick should stay unchanged on forward swap"
+        );
 
         _setupAutoCollectTest(RevertHookState.AutoCollectMode.HARVEST_TOKEN_0);
         (forwardPoolSqrtBefore, forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
@@ -1360,8 +1576,12 @@ contract RevertHookTest is BaseTest {
         (forwardPoolSqrtAfter, forwardPoolTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
         (reversePoolSqrtAfter, reversePoolTickAfter,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
 
-        assertEq(forwardPoolSqrtAfter, forwardPoolSqrtBefore, "forward route pool should stay unchanged on reverse swap");
-        assertEq(forwardPoolTickAfter, forwardPoolTickBefore, "forward route tick should stay unchanged on reverse swap");
+        assertEq(
+            forwardPoolSqrtAfter, forwardPoolSqrtBefore, "forward route pool should stay unchanged on reverse swap"
+        );
+        assertEq(
+            forwardPoolTickAfter, forwardPoolTickBefore, "forward route tick should stay unchanged on reverse swap"
+        );
         assertTrue(
             reversePoolSqrtAfter != reversePoolSqrtBefore || reversePoolTickAfter != reversePoolTickBefore,
             "token1 -> token0 harvest should use the reverse route"
@@ -1479,7 +1699,11 @@ contract RevertHookTest is BaseTest {
             "failed upper AUTO_RANGE should restore the original upper-trigger position"
         );
         (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(upperTokenId);
-        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "failed upper AUTO_RANGE should keep the upper-trigger config active");
+        assertEq(
+            modeFlags,
+            PositionModeFlags.MODE_AUTO_RANGE,
+            "failed upper AUTO_RANGE should keep the upper-trigger config active"
+        );
         _verifyNoLeftoverBalances("asymmetric auto-range routing");
     }
 
@@ -1942,8 +2166,20 @@ contract RevertHookTest is BaseTest {
     function testSwapRouting_AutoExitUsesAsymmetricRoutesAtRuntime() public {
         (PoolKey memory reversePoolKey, PoolId reversePoolId) = _createAdditionalRoutePool(0, 10);
 
-        _setRoute(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey.fee, nonHookedPoolKey.tickSpacing, nonHookedPoolKey.hooks);
-        _setRoute(Currency.unwrap(currency1), Currency.unwrap(currency0), reversePoolKey.fee, reversePoolKey.tickSpacing, reversePoolKey.hooks);
+        _setRoute(
+            Currency.unwrap(currency0),
+            Currency.unwrap(currency1),
+            nonHookedPoolKey.fee,
+            nonHookedPoolKey.tickSpacing,
+            nonHookedPoolKey.hooks
+        );
+        _setRoute(
+            Currency.unwrap(currency1),
+            Currency.unwrap(currency0),
+            reversePoolKey.fee,
+            reversePoolKey.tickSpacing,
+            reversePoolKey.hooks
+        );
 
         RevertHookState.PositionConfig memory lowerExitConfig = RevertHookState.PositionConfig({
             modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
@@ -1980,22 +2216,33 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token3Id, upperExitConfig);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
 
-        (uint160 forwardPoolSqrtBefore, int24 forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
-        (uint160 reversePoolSqrtBefore, int24 reversePoolTickBefore,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
+        (uint160 forwardPoolSqrtBefore, int24 forwardPoolTickBefore,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 reversePoolSqrtBefore, int24 reversePoolTickBefore,,) =
+            StateLibrary.getSlot0(poolManager, reversePoolId);
 
         _moveTickDownUntil(tickLower2 - poolKey.tickSpacing, 2e16, 160);
 
-        (uint160 forwardPoolSqrtAfter, int24 forwardPoolTickAfter,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
+        (uint160 forwardPoolSqrtAfter, int24 forwardPoolTickAfter,,) =
+            StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
         (uint160 reversePoolSqrtAfter, int24 reversePoolTickAfter,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
 
         assertTrue(
             forwardPoolSqrtAfter != forwardPoolSqrtBefore || forwardPoolTickAfter != forwardPoolTickBefore,
             "lower AUTO_EXIT should use the forward route"
         );
-        assertEq(reversePoolSqrtAfter, reversePoolSqrtBefore, "reverse route pool should stay unchanged on lower AUTO_EXIT");
-        assertEq(reversePoolTickAfter, reversePoolTickBefore, "reverse route tick should stay unchanged on lower AUTO_EXIT");
+        assertEq(
+            reversePoolSqrtAfter, reversePoolSqrtBefore, "reverse route pool should stay unchanged on lower AUTO_EXIT"
+        );
+        assertEq(
+            reversePoolTickAfter, reversePoolTickBefore, "reverse route tick should stay unchanged on lower AUTO_EXIT"
+        );
         assertEq(positionManager.getPositionLiquidity(token2Id), 0, "lower AUTO_EXIT position should be consumed");
-        assertGt(positionManager.getPositionLiquidity(token3Id), 0, "upper AUTO_EXIT position should remain active after lower trigger");
+        assertGt(
+            positionManager.getPositionLiquidity(token3Id),
+            0,
+            "upper AUTO_EXIT position should remain active after lower trigger"
+        );
 
         (forwardPoolSqrtBefore, forwardPoolTickBefore,,) = StateLibrary.getSlot0(poolManager, nonHookedPoolKey.toId());
         (reversePoolSqrtBefore, reversePoolTickBefore,,) = StateLibrary.getSlot0(poolManager, reversePoolId);
@@ -2102,7 +2349,8 @@ contract RevertHookTest is BaseTest {
 
     function testSwapAllLiquidityNarrowRange() public {
         // Create a new pool with a different fee to ensure it's separate
-        PoolKey memory newPoolKey = PoolKey({ currency0: currency0, currency1: currency1, fee: 0, tickSpacing: 10, hooks: IHooks(address(0)) });
+        PoolKey memory newPoolKey =
+            PoolKey({currency0: currency0, currency1: currency1, fee: 0, tickSpacing: 10, hooks: IHooks(address(0))});
         PoolId newPoolId = newPoolKey.toId();
 
         // Initialize the new pool
@@ -3276,16 +3524,8 @@ contract RevertHookTest is BaseTest {
         assertEq(modeFlags, expected.modeFlags, "modeFlags mismatch");
         assertEq(uint8(autoCollectMode), uint8(expected.autoCollectMode), "autoCollectMode mismatch");
         assertEq(autoExitIsRelative, expected.autoExitIsRelative, "autoExitIsRelative mismatch");
-        assertEq(
-            autoExitSwapOnLowerTrigger,
-            expected.autoExitSwapOnLowerTrigger,
-            "autoExitSwapOnLowerTrigger mismatch"
-        );
-        assertEq(
-            autoExitSwapOnUpperTrigger,
-            expected.autoExitSwapOnUpperTrigger,
-            "autoExitSwapOnUpperTrigger mismatch"
-        );
+        assertEq(autoExitSwapOnLowerTrigger, expected.autoExitSwapOnLowerTrigger, "autoExitSwapOnLowerTrigger mismatch");
+        assertEq(autoExitSwapOnUpperTrigger, expected.autoExitSwapOnUpperTrigger, "autoExitSwapOnUpperTrigger mismatch");
         assertEq(autoExitTickLower, expected.autoExitTickLower, "autoExitTickLower mismatch");
         assertEq(autoExitTickUpper, expected.autoExitTickUpper, "autoExitTickUpper mismatch");
         assertEq(autoRangeLowerLimit, expected.autoRangeLowerLimit, "autoRangeLowerLimit mismatch");
@@ -3334,11 +3574,7 @@ contract RevertHookTest is BaseTest {
         returns (PoolKey memory routePoolKey, PoolId routePoolId)
     {
         routePoolKey = PoolKey({
-            currency0: currency0,
-            currency1: currency1,
-            fee: fee,
-            tickSpacing: tickSpacing,
-            hooks: IHooks(address(0))
+            currency0: currency0, currency1: currency1, fee: fee, tickSpacing: tickSpacing, hooks: IHooks(address(0))
         });
         routePoolId = routePoolKey.toId();
         poolManager.initialize(routePoolKey, Constants.SQRT_PRICE_1_1);
@@ -5698,7 +5934,7 @@ contract RevertHookTest is BaseTest {
             }
 
             feeEvent.found = true;
-            (, , feeEvent.amount0, feeEvent.amount1, feeEvent.recipient) =
+            (,, feeEvent.amount0, feeEvent.amount1, feeEvent.recipient) =
                 abi.decode(logs[i].data, (address, address, uint256, uint256, address));
             if (feeEvent.amount0 == 0 && feeEvent.amount1 == 0) {
                 feeEvent.found = false;
@@ -5893,7 +6129,9 @@ contract RevertHookTest is BaseTest {
 
         hook.setPositionConfig(
             token2Id,
-            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_COLLECT, false, false, type(int24).min, type(int24).max)
+            _buildNonVaultModeConfig(
+                PositionModeFlags.MODE_AUTO_COLLECT, false, false, type(int24).min, type(int24).max
+            )
         );
 
         uint128 step = positionManager.getPositionLiquidity(token2Id) / 20;

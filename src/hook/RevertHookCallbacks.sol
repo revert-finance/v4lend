@@ -63,8 +63,8 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         bool hasCachedLowerOracleMaxEndTick;
         int24 upperOracleMaxEndTick;
         int24 lowerOracleMaxEndTick;
-        uint256 processedTickBatches;
-        while (processedTickBatches < _MAX_TRIGGER_BATCHES_PER_SWAP) {
+        uint256 executedActions;
+        while (executedActions < _MAX_EXECUTIONS_PER_SWAP) {
             liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
             if (cursor == liveTick) {
                 break;
@@ -110,11 +110,12 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 continue;
             }
 
-            uint256[] memory tokenIdsAtTick = list.tokenIds[tick];
-            list.clearTick(tick);
+            (uint256[] memory tokenIdsAtTick, bool tickDrained) =
+                list.popTokenIds(tick, _MAX_EXECUTIONS_PER_SWAP - executedActions);
 
             uint256 length = tokenIdsAtTick.length;
             int24 previousLiveTick = liveTick;
+            bool directionReversed;
             for (uint256 i; i < length;) {
                 PositionConfig storage config = _positionConfigs[tokenIdsAtTick[i]];
                 _dispatchAutomationAction(
@@ -127,23 +128,26 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                     config.autoExitTickLower,
                     config.autoExitTickUpper
                 );
+                unchecked {
+                    ++executedActions;
+                    ++i;
+                }
 
                 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
                 if (_hasDirectionReversed(previousLiveTick, liveTick, increasing)) {
-                    if (i + 1 < length) {
-                        _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i + 1);
+                    if (i < length) {
+                        _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i);
                     }
+                    directionReversed = true;
                     break;
                 }
                 previousLiveTick = liveTick;
-                unchecked {
-                    ++i;
-                }
             }
 
-            cursor = tick;
-            unchecked {
-                ++processedTickBatches;
+            if (directionReversed || tickDrained) {
+                cursor = tick;
+            } else {
+                break;
             }
         }
 
