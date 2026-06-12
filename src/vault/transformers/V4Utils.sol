@@ -253,21 +253,29 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         uint128 liquidity;
         (
             Currency swapSource,
-            uint256 amountIn0, uint256 amountOut0Min, bytes memory swapData0,
-            uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
+            uint256 amountIn0,
+            uint256 amountOut0Min,
+            bytes memory swapData0,
+            uint256 amountIn1,
+            uint256 amountOut1Min,
+            bytes memory swapData1
         ) = _getSwapParams(poolKey, instructions);
 
         SwapAndIncreaseLiquidityParams memory increaseParams = _buildSwapAndIncreaseParams(
-            tokenId, instructions, amount0, amount1,
-            swapSource, amountIn0, amountOut0Min, swapData0,
-            amountIn1, amountOut1Min, swapData1
+            tokenId,
+            instructions,
+            amount0,
+            amount1,
+            swapSource,
+            amountIn0,
+            amountOut0Min,
+            swapData0,
+            amountIn1,
+            amountOut1Min,
+            swapData1
         );
 
-        (liquidity, amount0, amount1) = _swapAndIncrease(
-            increaseParams,
-            poolKey.currency0,
-            poolKey.currency1
-        );
+        (liquidity, amount0, amount1) = _swapAndIncrease(increaseParams, poolKey.currency0, poolKey.currency1);
 
         emit CompoundFees(tokenId, liquidity, amount0, amount1);
     }
@@ -315,14 +323,26 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         uint128 liquidity;
         (
             Currency swapSource,
-            uint256 amountIn0, uint256 amountOut0Min, bytes memory swapData0,
-            uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
+            uint256 amountIn0,
+            uint256 amountOut0Min,
+            bytes memory swapData0,
+            uint256 amountIn1,
+            uint256 amountOut1Min,
+            bytes memory swapData1
         ) = _getSwapParams(poolKey, instructions);
 
         SwapAndMintParams memory mintParams = _buildSwapAndMintParams(
-            poolKey, instructions, amount0, amount1,
-            swapSource, amountIn0, amountOut0Min, swapData0,
-            amountIn1, amountOut1Min, swapData1
+            poolKey,
+            instructions,
+            amount0,
+            amount1,
+            swapSource,
+            amountIn0,
+            amountOut0Min,
+            swapData0,
+            amountIn1,
+            amountOut1Min,
+            swapData1
         );
 
         (newTokenId, liquidity, amount0, amount1) = _swapAndMint(mintParams);
@@ -410,8 +430,12 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         pure
         returns (
             Currency swapSource,
-            uint256 amountIn0, uint256 amountOut0Min, bytes memory swapData0,
-            uint256 amountIn1, uint256 amountOut1Min, bytes memory swapData1
+            uint256 amountIn0,
+            uint256 amountOut0Min,
+            bytes memory swapData0,
+            uint256 amountIn1,
+            uint256 amountOut1Min,
+            bytes memory swapData1
         )
     {
         Currency targetToken = instructions.targetToken;
@@ -504,7 +528,13 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     /// @param tokenId The token ID being transferred
     /// @param data Encoded Instructions struct containing operation parameters
     /// @return The function selector to confirm successful receipt
-    function onERC721Received(address, /*operator*/ address from, uint256 tokenId, bytes calldata data)
+    function onERC721Received(
+        address,
+        /*operator*/
+        address from,
+        uint256 tokenId,
+        bytes calldata data
+    )
         external
         override
         returns (bytes4)
@@ -640,7 +670,10 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             _prepareAddApprovedToken(otherToken, amountOther);
         }
         // if msg.value > 0, then one of the tokens must be ether with amount > 0
-        if (msg.value > 0 && !(token0.isAddressZero() && amount0 > 0) && !(token1.isAddressZero() && amount1 > 0) && !(otherToken.isAddressZero() && amountOther > 0)) {
+        if (
+            msg.value > 0 && !(token0.isAddressZero() && amount0 > 0) && !(token1.isAddressZero() && amount1 > 0)
+                && !(otherToken.isAddressZero() && amountOther > 0)
+        ) {
             revert NoEtherToken();
         }
     }
@@ -673,17 +706,14 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             hooks: IHooks(params.hook) // Use hook from params
         });
 
-        (tokenId, liquidity) = _mintPosition(
-            poolKey,
-            params,
-            total0,
-            total1
-        );
+        (tokenId, liquidity) = _mintPosition(poolKey, params, total0, total1);
 
         // Transfer NFT to recipient (with optional return data)
-        IERC721(address(positionManager)).safeTransferFrom(
-            address(this), params.recipientNFT, tokenId, params.returnData
-        );
+        // @custom:accepted-risk AUDIT-ACCEPTED-SAFE-TRANSFER-BEFORE-REFUND
+        // The ERC721 callback happens before leftover accounting. These public helpers
+        // intentionally use whole-balance accounting and are expected to finish empty.
+        IERC721(address(positionManager))
+            .safeTransferFrom(address(this), params.recipientNFT, tokenId, params.returnData);
 
         // Whole-balance accounting is intentional here: these helpers are expected to end each
         // successful call with no retained token balances, so final balances represent the
@@ -722,12 +752,10 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     /// @param total1 The amount of token1 to add
     /// @return tokenId The ID of the newly minted position
     /// @return liquidity The amount of liquidity added
-    function _mintPosition(
-        PoolKey memory poolKey,
-        SwapAndMintParams memory params,
-        uint256 total0,
-        uint256 total1
-    ) internal returns (uint256 tokenId, uint128 liquidity) {
+    function _mintPosition(PoolKey memory poolKey, SwapAndMintParams memory params, uint256 total0, uint256 total1)
+        internal
+        returns (uint256 tokenId, uint128 liquidity)
+    {
         (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), params.token0, params.token1);
 
@@ -811,10 +839,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     }
 
     // swaps available tokens and prepares max amounts to be added to positionManager
-    function _swapAndPrepareAmounts(SwapAndMintParams memory params)
-        internal
-        returns (uint256 total0, uint256 total1)
-    {
+    function _swapAndPrepareAmounts(SwapAndMintParams memory params) internal returns (uint256 total0, uint256 total1) {
         Currency swapSource = params.swapSourceToken;
         if (swapSource == params.token0) {
             if (params.amount0 < params.amountIn1) {

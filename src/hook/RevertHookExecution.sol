@@ -31,11 +31,7 @@ abstract contract RevertHookExecution is RevertHookConfig {
     ) internal override {
         if (PositionModeFlags.hasAutoExit(modeFlags)) {
             int24 exitTick = _calculateExitTick(
-                tokenId,
-                isUpperTrigger,
-                autoExitIsRelative,
-                autoExitTickLower,
-                autoExitTickUpper
+                tokenId, isUpperTrigger, autoExitIsRelative, autoExitTickLower, autoExitTickUpper
             );
             if (tick == exitTick) {
                 _handleAutoExit(poolKey, tokenId, isUpperTrigger);
@@ -76,13 +72,11 @@ abstract contract RevertHookExecution is RevertHookConfig {
         if (autoExitIsRelative) {
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
             if (isUpperTrigger) {
-                exitTick = autoExitTickUpper != type(int24).max
-                    ? posInfo.tickUpper() + autoExitTickUpper
-                    : type(int24).max;
+                exitTick =
+                    autoExitTickUpper != type(int24).max ? posInfo.tickUpper() + autoExitTickUpper : type(int24).max;
             } else {
-                exitTick = autoExitTickLower != type(int24).min
-                    ? posInfo.tickLower() - autoExitTickLower
-                    : type(int24).min;
+                exitTick =
+                    autoExitTickLower != type(int24).min ? posInfo.tickLower() - autoExitTickLower : type(int24).min;
             }
         } else {
             exitTick = isUpperTrigger ? autoExitTickUpper : autoExitTickLower;
@@ -90,17 +84,18 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function _handleAutoExit(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
+        // @custom:accepted-risk AUDIT-ACCEPTED-HOOK-TRIGGER-CONSUME
+        // Triggers are consumed before action execution. Failed actions emit recovery
+        // events rather than automatically re-arming the fired trigger.
         _removePositionTriggersWithConfig(tokenId, poolKey, _positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
-        if (
-            !_executePositionAction(
+        if (!_executePositionAction(
                 owner,
                 tokenId,
                 abi.encodeCall(this.autoExit, (poolKey, tokenId, isUpperTrigger)),
                 abi.encodeCall(positionActions.autoExit, (poolKey, tokenId, isUpperTrigger))
-            )
-        ) {
+            )) {
             _emitActionFailed(tokenId, Mode.AUTO_EXIT);
         }
     }
@@ -120,17 +115,18 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function _handleAutoRange(PoolKey memory poolKey, uint256 tokenId) internal {
+        // @custom:accepted-risk AUDIT-ACCEPTED-HOOK-TRIGGER-CONSUME
+        // Triggers are consumed before action execution. Failed actions emit recovery
+        // events rather than automatically re-arming the fired trigger.
         _removePositionTriggersWithConfig(tokenId, poolKey, _positionConfigs[tokenId]);
         address owner = _getOwner(tokenId, false);
 
-        if (
-            !_executePositionAction(
+        if (!_executePositionAction(
                 owner,
                 tokenId,
                 abi.encodeCall(this.autoRange, (poolKey, tokenId)),
                 abi.encodeCall(positionActions.autoRange, (poolKey, tokenId))
-            )
-        ) {
+            )) {
             _emitActionFailed(tokenId, Mode.AUTO_RANGE);
         }
     }
@@ -141,33 +137,22 @@ abstract contract RevertHookExecution is RevertHookConfig {
             return;
         }
 
-        try IVault(owner).transform(
-            tokenId,
-            address(this),
-            abi.encodeCall(this.autoLeverage, (poolKey, tokenId, isUpperTrigger))
-        ) {} catch {
+        try IVault(owner)
+            .transform(tokenId, address(this), abi.encodeCall(this.autoLeverage, (poolKey, tokenId, isUpperTrigger))) {}
+        catch {
             _emitActionFailed(tokenId, Mode.AUTO_LEVERAGE);
         }
     }
 
-    function _handleAutoRangeOrLeverage(
-        PoolKey memory poolKey,
-        uint256 tokenId,
-        bool isUpperTrigger
-    ) internal {
+    function _handleAutoRangeOrLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
         PositionConfig storage config = _positionConfigs[tokenId];
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
-            posInfo.tickLower(),
-            posInfo.tickUpper(),
-            config.autoRangeLowerLimit,
-            config.autoRangeUpperLimit
+            posInfo.tickLower(), posInfo.tickUpper(), config.autoRangeLowerLimit, config.autoRangeUpperLimit
         );
-        (int24 leverageLower, int24 leverageUpper) = _calculateLeverageTriggerTicks(
-            _positionStates[tokenId].autoLeverageBaseTick,
-            poolKey.tickSpacing
-        );
+        (int24 leverageLower, int24 leverageUpper) =
+            _calculateLeverageTriggerTicks(_positionStates[tokenId].autoLeverageBaseTick, poolKey.tickSpacing);
 
         if (isUpperTrigger) {
             if (rangeUpper <= leverageUpper) {
@@ -185,15 +170,11 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function autoExit(PoolKey calldata poolKey, uint256 tokenId, bool isUpper) external payable {
-        _delegatecallPositionActionsPassthrough(
-            abi.encodeCall(positionActions.autoExit, (poolKey, tokenId, isUpper))
-        );
+        _delegatecallPositionActionsPassthrough(abi.encodeCall(positionActions.autoExit, (poolKey, tokenId, isUpper)));
     }
 
     function autoRange(PoolKey calldata poolKey, uint256 tokenId) external payable {
-        _delegatecallPositionActionsPassthrough(
-            abi.encodeCall(positionActions.autoRange, (poolKey, tokenId))
-        );
+        _delegatecallPositionActionsPassthrough(abi.encodeCall(positionActions.autoRange, (poolKey, tokenId)));
     }
 
     function autoLeverage(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external payable {
@@ -203,10 +184,7 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function autoLendForceExit(uint256 tokenId) external payable {
-        _delegatecallPassthrough(
-            address(autoLendActions),
-            abi.encodeCall(autoLendActions.autoLendForceExit, (tokenId))
-        );
+        _delegatecallPassthrough(address(autoLendActions), abi.encodeCall(autoLendActions.autoLendForceExit, (tokenId)));
     }
 
     function autoCollect(uint256[] calldata tokenIds) external payable {
@@ -246,11 +224,7 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function _executeAutoCollect(uint256 tokenId, address caller) internal {
-        if (
-            !_tryDelegatecallPositionActions(
-                abi.encodeCall(positionActions.executeAutoCollect, (tokenId, caller))
-            )
-        ) {
+        if (!_tryDelegatecallPositionActions(abi.encodeCall(positionActions.executeAutoCollect, (tokenId, caller)))) {
             _emitActionFailed(tokenId, Mode.AUTO_COLLECT);
         }
     }
@@ -259,10 +233,12 @@ abstract contract RevertHookExecution is RevertHookConfig {
         emit HookActionFailed(tokenId, mode);
     }
 
-    function _executePositionAction(address owner, uint256 tokenId, bytes memory transformData, bytes memory delegateData)
-        internal
-        returns (bool)
-    {
+    function _executePositionAction(
+        address owner,
+        uint256 tokenId,
+        bytes memory transformData,
+        bytes memory delegateData
+    ) internal returns (bool) {
         if (_vaults[owner]) {
             try IVault(owner).transform(tokenId, address(this), transformData) {
                 return true;

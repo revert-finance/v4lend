@@ -50,15 +50,9 @@ contract V4VaultTest is V4ForkTestBase {
         interestRateModel = new InterestRateModel(0, Q64 * 5 / 100, Q64 * 109 / 100, Q64 * 80 / 100);
 
         vault = new V4Vault(
-            "Revert Lend usdc", 
-            "rlusdc", 
-            address(usdc), 
-            positionManager, 
-            interestRateModel, 
-            v4Oracle,
-            weth
+            "Revert Lend usdc", "rlusdc", address(usdc), positionManager, interestRateModel, v4Oracle, weth
         );
-        
+
         vault.setTokenConfig(address(usdc), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
         vault.setTokenConfig(address(weth), uint32(Q32 * 9 / 10), type(uint32).max); // 90% collateral factor / max 100% collateral value
@@ -77,7 +71,6 @@ contract V4VaultTest is V4ForkTestBase {
         vault.setTransformer(address(v4Utils), true);
         v4Utils.setVault(address(vault));
     }
-
 
     function _setupBasicLoan(bool borrowMax) internal {
         // lend 200 usdc
@@ -166,13 +159,8 @@ contract V4VaultTest is V4ForkTestBase {
         uint256 swapAmountIn = 12707757619098052 / 2;
         uint256 swapAmountMinOut = 1000000;
 
-        bytes memory swapData = _createSwapData(
-            swapAmountIn,
-            swapAmountMinOut,
-            address(weth),
-            address(usdc),
-            address(v4Utils)
-        );
+        bytes memory swapData =
+            _createSwapData(swapAmountIn, swapAmountMinOut, address(weth), address(usdc), address(v4Utils));
 
         return V4Utils.Instructions(
             V4Utils.WhatToDo.CHANGE_RANGE,
@@ -228,12 +216,8 @@ contract V4VaultTest is V4ForkTestBase {
 
         vm.expectRevert(Constants.InvalidConfig.selector);
         vm.prank(nft1Owner);
-        IERC721(address(positionManager)).safeTransferFrom(
-            nft1Owner,
-            address(vault),
-            nft1TokenId,
-            abi.encode(address(0))
-        );
+        IERC721(address(positionManager))
+            .safeTransferFrom(nft1Owner, address(vault), nft1TokenId, abi.encode(address(0)));
     }
 
     function testMinLoanSize() external {
@@ -268,9 +252,7 @@ contract V4VaultTest is V4ForkTestBase {
         vault.repay(nft1TokenId, minLoanSize, false);
     }
 
-
     function testERC20() external {
-
         _setupBasicLoan(false);
 
         uint256 assets = vault.balanceOf(WHALE_ACCOUNT);
@@ -286,8 +268,6 @@ contract V4VaultTest is V4ForkTestBase {
         assertEq(vault.balanceOf(nft1Owner), assets);
         assertEq(vault.lendInfo(nft1Owner), assets);
     }
-
-
 
     // fuzz testing deposit amount
     function testDeposit(uint256 amount) external {
@@ -316,7 +296,6 @@ contract V4VaultTest is V4ForkTestBase {
 
     // fuzz testing withdraw amount
     function testWithdraw(uint256 amount) external {
-
         // 0 borrow loan
         _setupBasicLoan(false);
 
@@ -358,7 +337,6 @@ contract V4VaultTest is V4ForkTestBase {
         vault.redeem(ownerShares + 1, WHALE_ACCOUNT, WHALE_ACCOUNT);
     }
 
-
     // fuzz testing borrow amount
     function testBorrow(uint256 amount) external {
         // 0 borrow loan
@@ -383,8 +361,7 @@ contract V4VaultTest is V4ForkTestBase {
         vault.borrow(nft1TokenId, amount);
     }
 
-
-   // fuzz testing borrow amount
+    // fuzz testing borrow amount
     function testBorrowETH(uint256 amount) external {
         // 0 borrow loan
         _setupBasicLoanWithETH(false);
@@ -496,7 +473,7 @@ contract V4VaultTest is V4ForkTestBase {
         uint128 initialLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
         uint256 initialOwnerBalance0 = usdc.balanceOf(nft1Owner);
         uint256 initialOwnerBalance1 = weth.balanceOf(nft1Owner);
-        
+
         console.log("Initial debt:", initialDebt);
         console.log("Initial full value:", initialFullValue);
         console.log("Initial collateral value:", initialCollateralValue);
@@ -516,7 +493,7 @@ contract V4VaultTest is V4ForkTestBase {
         uint128 finalLiquidity = positionManager.getPositionLiquidity(nft1TokenId);
         uint256 finalOwnerBalance0 = usdc.balanceOf(nft1Owner);
         uint256 finalOwnerBalance1 = weth.balanceOf(nft1Owner);
-        
+
         console.log("Final debt:", finalDebt);
         console.log("Final full value:", finalFullValue);
         console.log("Final collateral value:", finalCollateralValue);
@@ -534,7 +511,7 @@ contract V4VaultTest is V4ForkTestBase {
 
         // 3. Position should still exist but may have changed
         assertGt(finalLiquidity, 0, "Position should still have liquidity");
-        
+
         // 4. Collateral and full values should be reasonable
         assertGt(finalCollateralValue, 0, "Collateral value should be positive");
         assertGt(finalFullValue, 0, "Full value should be positive");
@@ -548,7 +525,7 @@ contract V4VaultTest is V4ForkTestBase {
         // 6. Verify the transform operation completed successfully
         // (If it failed, the transaction would have reverted)
         console.log("Transform operation completed successfully");
-        
+
         // 7. Verify vault state is still consistent
         assertEq(vault.loanCount(nft1Owner), 1, "User should still have 1 loan");
         assertEq(vault.loanAtIndex(nft1Owner, 0), nft1TokenId, "Loan should still be the same NFT");
@@ -592,7 +569,7 @@ contract V4VaultTest is V4ForkTestBase {
         uint128 initialLiquidity = positionManager.getPositionLiquidity(nft2TokenId);
         uint256 initialOwnerBalance0 = usdc.balanceOf(nft2Owner);
         uint256 initialOwnerBalance1 = weth.balanceOf(nft2Owner);
-        
+
         console.log("Initial debt:", initialDebt);
         console.log("Initial full value:", initialFullValue);
         console.log("Initial collateral value:", initialCollateralValue);
@@ -612,7 +589,7 @@ contract V4VaultTest is V4ForkTestBase {
         uint128 finalLiquidity = positionManager.getPositionLiquidity(nft2TokenId);
         uint256 finalOwnerBalance0 = usdc.balanceOf(nft2Owner);
         uint256 finalOwnerBalance1 = weth.balanceOf(nft2Owner);
-        
+
         console.log("Final debt:", finalDebt);
         console.log("Final full value:", finalFullValue);
         console.log("Final collateral value:", finalCollateralValue);
@@ -630,7 +607,7 @@ contract V4VaultTest is V4ForkTestBase {
 
         // 3. Position should still exist but may have changed
         assertGt(finalLiquidity, 0, "Position should still have liquidity");
-        
+
         // 4. Collateral and full values should be reasonable
         assertGt(finalCollateralValue, 0, "Collateral value should be positive");
         assertGt(finalFullValue, 0, "Full value should be positive");
@@ -644,13 +621,13 @@ contract V4VaultTest is V4ForkTestBase {
         // 6. Verify the transform operation completed successfully
         // (If it failed, the transaction would have reverted)
         console.log("Transform operation completed successfully");
-        
+
         // 7. Verify vault state is still consistent
         assertEq(vault.loanCount(nft2Owner), 1, "User should still have 1 loan");
         assertEq(vault.loanAtIndex(nft2Owner, 0), nft2TokenId, "Loan should still be the same NFT");
     }
 
-     function testMainScenario() external {
+    function testMainScenario() external {
         assertEq(vault.totalSupply(), 0);
         assertEq(vault.debtSharesTotal(), 0);
         assertEq(vault.loanCount(nft1Owner), 0);
@@ -671,7 +648,7 @@ contract V4VaultTest is V4ForkTestBase {
 
         // borrowing 1 usdc
 
-        uint balance = usdc.balanceOf(nft1Owner);
+        uint256 balance = usdc.balanceOf(nft1Owner);
         _createAndBorrow(nft1TokenId, nft1Owner, 1000000);
         assertEq(usdc.balanceOf(nft1Owner) - balance, 1000000);
 
@@ -728,7 +705,6 @@ contract V4VaultTest is V4ForkTestBase {
         assertEq(vault.ownerOf(nft1TokenId), address(0));
     }
 
-
     function testTransformChangeRange() external {
         _setupBasicLoan(true);
 
@@ -739,7 +715,8 @@ contract V4VaultTest is V4ForkTestBase {
         uint256 swapAmountIn = 12707757619098052 / 2;
         uint256 swapAmountMinOut = 1000000;
 
-        bytes memory swapData = _createSwapData(swapAmountIn, swapAmountMinOut, address(weth), address(usdc), address(v4Utils));
+        bytes memory swapData =
+            _createSwapData(swapAmountIn, swapAmountMinOut, address(weth), address(usdc), address(v4Utils));
 
         // test transforming with v4utils - changing range
         V4Utils.Instructions memory inst = V4Utils.Instructions(
@@ -748,7 +725,7 @@ contract V4VaultTest is V4ForkTestBase {
             0,
             0,
             0,
-            0, 
+            0,
             "",
             swapAmountIn,
             swapAmountMinOut,
@@ -773,7 +750,8 @@ contract V4VaultTest is V4ForkTestBase {
         (uint256 oldDebt,,,,) = vault.loanInfo(nft1TokenId);
 
         vm.prank(nft1Owner);
-        uint256 tokenId = vault.transform(nft1TokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (nft1TokenId, inst)));
+        uint256 tokenId =
+            vault.transform(nft1TokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (nft1TokenId, inst)));
 
         assertGt(tokenId, nft1TokenId);
 
@@ -852,7 +830,9 @@ contract V4VaultTest is V4ForkTestBase {
             vm.expectRevert(Constants.PriceDifferenceExceeded.selector);
             (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft1TokenId);
 
-            // ignore difference - now it will work
+            // Deliberate emergency override for this test's mocked feed incident.
+            v4Oracle.setOracleMode(address(weth), V4Oracle.Mode.CHAINLINK);
+            // ignore pool difference - now it will work
             v4Oracle.setMaxPoolPriceDifference(type(uint16).max);
         }
 
@@ -885,7 +865,10 @@ contract V4VaultTest is V4ForkTestBase {
 
         // weth and usdc were sent to liquidator
         console.log("weth balance change:", int256(weth.balanceOf(WHALE_ACCOUNT)) - int256(wethBalance));
-        console.log("usdc balance change:", int256(usdc.balanceOf(WHALE_ACCOUNT)) + int256(liquidationCost) - int256(usdcBalance));
+        console.log(
+            "usdc balance change:",
+            int256(usdc.balanceOf(WHALE_ACCOUNT)) + int256(liquidationCost) - int256(usdcBalance)
+        );
 
         // all debt is payed
         assertEq(vault.debtSharesTotal(), 0);
@@ -896,7 +879,6 @@ contract V4VaultTest is V4ForkTestBase {
         console.log("Vault lent:", lent);
         console.log("Vault balance:", balance);
     }
-
 
     function testFreeLiquidation() external {
         // lend 10 usdc
@@ -935,6 +917,9 @@ contract V4VaultTest is V4ForkTestBase {
             abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
             abi.encode(uint80(1), int256(1), block.timestamp, block.timestamp, uint80(1))
         );
+        v4Oracle.setOracleMode(address(weth), V4Oracle.Mode.CHAINLINK);
+        v4Oracle.setOracleMode(address(wbtc), V4Oracle.Mode.CHAINLINK);
+        v4Oracle.setOracleMode(address(0), V4Oracle.Mode.CHAINLINK);
 
         (debt, fullValue, collateralValue, liquidationCost, liquidationValue) = vault.loanInfo(nft7TokenId);
         assertEq(debt, 20000000);
@@ -1082,7 +1067,7 @@ contract V4VaultTest is V4ForkTestBase {
         // For USDC/ETH position, liquidator should receive native ETH and USDC (not WETH)
         assertEq(wethBalanceChange, 0, "Liquidator should not receive WETH for USDC/ETH position");
         assertGt(ethBalanceChange, 0, "Liquidator should receive native ETH");
-        
+
         // USDC balance change should account for the liquidation cost paid
         // The net USDC received should be positive (liquidation value > liquidation cost)
         assertGt(usdcBalanceChange, 0, "Liquidator should receive net USDC");
@@ -1134,7 +1119,6 @@ contract V4VaultTest is V4ForkTestBase {
         assertEq(vault.debtSharesTotal(), 100000000, "Only the victim debt shares should be removed");
     }
 
-
     function testLiquidationWithFlashloan() external {
         _setupBasicLoan(true);
 
@@ -1175,13 +1159,31 @@ contract V4VaultTest is V4ForkTestBase {
         vm.expectRevert(Constants.NotEnoughReward.selector);
         liquidator.liquidate(
             FlashloanLiquidator.LiquidateParams(
-                nft1TokenId, vault, IUniswapV3Pool(v3PoolAddress), 0, "", amount1, swapData1, 129699012, block.timestamp, ""
+                nft1TokenId,
+                vault,
+                IUniswapV3Pool(v3PoolAddress),
+                0,
+                "",
+                amount1,
+                swapData1,
+                129699012,
+                block.timestamp,
+                ""
             )
         );
 
         liquidator.liquidate(
             FlashloanLiquidator.LiquidateParams(
-                nft1TokenId, vault, IUniswapV3Pool(v3PoolAddress), 0, "", amount1, swapData1, 3160994, block.timestamp, ""
+                nft1TokenId,
+                vault,
+                IUniswapV3Pool(v3PoolAddress),
+                0,
+                "",
+                amount1,
+                swapData1,
+                3160994,
+                block.timestamp,
+                ""
             )
         );
 
@@ -1207,7 +1209,6 @@ contract V4VaultTest is V4ForkTestBase {
         //  NFT was returned to owner
         assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), nft1Owner);
     }
-
 
     function testCollateralValueLimit() external {
         _setupBasicLoan(false);
@@ -1250,10 +1251,7 @@ contract V4VaultTest is V4ForkTestBase {
         assertEq(totalDebtShares, 0);
     }
 
-
     function testMultiLendLoan() external {
-
-
         _deposit(2000000, WHALE_ACCOUNT);
         _deposit(1000000, nft2Owner);
 
@@ -1455,7 +1453,8 @@ contract V4VaultTest is V4ForkTestBase {
 
     // leverage tests
     function test_LeverageDown() public {
-        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        LeverageTransformer leverageTransformer =
+            new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
         vault.setTransformer(address(leverageTransformer), true);
         leverageTransformer.setVault(address(vault));
 
@@ -1486,7 +1485,7 @@ contract V4VaultTest is V4ForkTestBase {
         // Record state after borrowing
         uint256 debtSharesAfterBorrow = vault.loans(nft1TokenId);
         (uint256 debtAfterBorrow,,,,) = vault.loanInfo(nft1TokenId);
-        
+
         console.log("Debt shares after borrow:", debtSharesAfterBorrow);
         console.log("Debt amount after borrow:", debtAfterBorrow);
 
@@ -1523,15 +1522,19 @@ contract V4VaultTest is V4ForkTestBase {
 
         // Assertions
         // 1. Position ownership should remain with vault
-        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault), "Position should still be owned by vault");
-        
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(nft1TokenId),
+            address(vault),
+            "Position should still be owned by vault"
+        );
+
         // 2. Debt should be reduced (leverage down means reducing debt)
         assertLt(finalDebtShares, debtSharesAfterBorrow, "Debt shares should decrease after leverage down");
         assertLt(finalDebt, debtAfterBorrow, "Debt amount should decrease after leverage down");
-        
+
         // 3. Position liquidity should be reduced
         assertLt(finalLiquidity, initialLiquidity, "Position liquidity should decrease after leverage down");
-        
+
         // 4. Loan should still be healthy
         (uint256 debtCheck, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
         assertTrue(collateralValue > debtCheck, "Loan should remain healthy after leverage down");
@@ -1542,7 +1545,8 @@ contract V4VaultTest is V4ForkTestBase {
 
     // leverage tests
     function test_LeverageUp() public {
-        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        LeverageTransformer leverageTransformer =
+            new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
         vault.setTransformer(address(leverageTransformer), true);
         leverageTransformer.setVault(address(vault));
 
@@ -1574,7 +1578,7 @@ contract V4VaultTest is V4ForkTestBase {
         uint256 debtSharesAfterBorrow = vault.loans(nft1TokenId);
         (uint256 debtAfterBorrow,,,,) = vault.loanInfo(nft1TokenId);
         uint128 liquidityAfterBorrow = positionManager.getPositionLiquidity(nft1TokenId);
-        
+
         console.log("Debt shares after initial borrow:", debtSharesAfterBorrow);
         console.log("Debt amount after initial borrow:", debtAfterBorrow);
         console.log("Liquidity after initial borrow:", liquidityAfterBorrow);
@@ -1615,22 +1619,28 @@ contract V4VaultTest is V4ForkTestBase {
 
         // Assertions
         // 1. Position ownership should remain with vault
-        assertEq(IERC721(address(positionManager)).ownerOf(nft1TokenId), address(vault), "Position should still be owned by vault");
-        
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(nft1TokenId),
+            address(vault),
+            "Position should still be owned by vault"
+        );
+
         // 2. Debt should increase (leverage up means increasing debt)
         assertGt(finalDebtShares, debtSharesAfterBorrow, "Debt shares should increase after leverage up");
         assertGt(finalDebt, debtAfterBorrow, "Debt amount should increase after leverage up");
-        
+
         // 3. Position liquidity should increase (more tokens added to position)
         assertGt(finalLiquidity, liquidityAfterBorrow, "Position liquidity should increase after leverage up");
-        
+
         // 4. Loan should still be healthy
         (uint256 debtCheck, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(nft1TokenId);
         assertTrue(collateralValue > debtCheck, "Loan should remain healthy after leverage up");
-        
+
         // 5. Total debt increase should be approximately the borrow amount
-        assertApproxEqRel(finalDebt - debtAfterBorrow, 1000000, 0.01e18, "Debt increase should be approximately the borrow amount");
-        
+        assertApproxEqRel(
+            finalDebt - debtAfterBorrow, 1000000, 0.01e18, "Debt increase should be approximately the borrow amount"
+        );
+
         // 6. Liquidity increase should be significant (more tokens added to position)
         assertGt(finalLiquidity - liquidityAfterBorrow, 0, "Liquidity should increase significantly");
 
@@ -1639,7 +1649,8 @@ contract V4VaultTest is V4ForkTestBase {
 
     // leverage in tests
     function test_LeverageIn() public {
-        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        LeverageTransformer leverageTransformer =
+            new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
         vault.setTransformer(address(leverageTransformer), true);
         leverageTransformer.setVault(address(vault));
 
@@ -1647,7 +1658,7 @@ contract V4VaultTest is V4ForkTestBase {
         _deposit(100000000, WHALE_ACCOUNT); // 100 USDC
 
         // Get pool info from existing position to reuse pool key parameters
-        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(nft1TokenId);
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(nft1TokenId);
 
         // User starts with WETH and wants to create a leveraged position
         address user = address(0x1234567890123456789012345678901234567890);
@@ -1676,7 +1687,8 @@ contract V4VaultTest is V4ForkTestBase {
         // Create swap data to swap some borrowed USDC to WETH
         uint256 borrowAmount = 10000000; // 10 USDC
         uint256 swapAmount = 5000000; // 5 USDC to swap to WETH
-        bytes memory swapData = _createSwapData(swapAmount, 1, address(usdc), address(weth), address(leverageTransformer));
+        bytes memory swapData =
+            _createSwapData(swapAmount, 1, address(usdc), address(weth), address(leverageTransformer));
 
         LeverageTransformer.LeverageInParams memory params = LeverageTransformer.LeverageInParams({
             vault: address(vault),
@@ -1708,7 +1720,9 @@ contract V4VaultTest is V4ForkTestBase {
         console.log("New token ID:", newTokenId);
 
         // Verify the position was created and is owned by the vault
-        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault"
+        );
 
         // Verify the loan owner is the user
         assertEq(vault.ownerOf(newTokenId), user, "Loan should be owned by user");
@@ -1735,7 +1749,8 @@ contract V4VaultTest is V4ForkTestBase {
 
     // Test leverageIn with pool where token0 is the lend token (USDC)
     function test_LeverageIn_Token0IsLendToken() public {
-        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        LeverageTransformer leverageTransformer =
+            new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
         vault.setTransformer(address(leverageTransformer), true);
         leverageTransformer.setVault(address(vault));
 
@@ -1743,7 +1758,7 @@ contract V4VaultTest is V4ForkTestBase {
         _deposit(100000000, WHALE_ACCOUNT); // 100 USDC
 
         // Get pool info from existing position
-        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(nft1TokenId);
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(nft1TokenId);
 
         // Verify USDC is token0 in this pool
         assertEq(Currency.unwrap(poolKey.currency0), address(usdc), "USDC should be token0");
@@ -1766,7 +1781,8 @@ contract V4VaultTest is V4ForkTestBase {
 
         uint256 borrowAmount = 10000000; // 10 USDC
         uint256 swapAmount = 5000000; // 5 USDC to swap to WETH
-        bytes memory swapData = _createSwapData(swapAmount, 1, address(usdc), address(weth), address(leverageTransformer));
+        bytes memory swapData =
+            _createSwapData(swapAmount, 1, address(usdc), address(weth), address(leverageTransformer));
 
         LeverageTransformer.LeverageInParams memory params = LeverageTransformer.LeverageInParams({
             vault: address(vault),
@@ -1795,7 +1811,9 @@ contract V4VaultTest is V4ForkTestBase {
         uint256 newTokenId = leverageTransformer.leverageIn(params);
 
         // Verify position and loan
-        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault"
+        );
         assertEq(vault.ownerOf(newTokenId), user, "Loan should be owned by user");
 
         (uint256 debt,, uint256 collateralValue,,) = vault.loanInfo(newTokenId);
@@ -1806,7 +1824,8 @@ contract V4VaultTest is V4ForkTestBase {
 
     // Test that leverageIn reverts when neither token is the lend token
     function test_LeverageIn_InvalidToken() public {
-        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        LeverageTransformer leverageTransformer =
+            new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
         vault.setTransformer(address(leverageTransformer), true);
         leverageTransformer.setVault(address(vault));
 
@@ -1847,7 +1866,8 @@ contract V4VaultTest is V4ForkTestBase {
 
     // Test leverageIn with full range position
     function test_LeverageIn_FullRange() public {
-        LeverageTransformer leverageTransformer = new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        LeverageTransformer leverageTransformer =
+            new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
         vault.setTransformer(address(leverageTransformer), true);
         leverageTransformer.setVault(address(vault));
 
@@ -1859,7 +1879,7 @@ contract V4VaultTest is V4ForkTestBase {
         _deposit(5000000000, WHALE_ACCOUNT); // 5000 USDC
 
         // Get pool info from existing position to reuse pool key parameters
-        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(nft1TokenId);
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(nft1TokenId);
 
         // User starts with WETH and wants to create a full range leveraged position
         address user = address(0x1234567890123456789012345678901234567890);
@@ -1884,7 +1904,7 @@ contract V4VaultTest is V4ForkTestBase {
         // TickMath.MIN_TICK = -887272, TickMath.MAX_TICK = 887272
         // For tickSpacing = 10, we need to round to nearest multiple of 10
         int24 tickLower = -887270; // -887272 rounded up to multiple of 10
-        int24 tickUpper = 887270;  // 887272 rounded down to multiple of 10
+        int24 tickUpper = 887270; // 887272 rounded down to multiple of 10
 
         // For full range positions, borrow USDC equivalent in value to the initial WETH (~$4318)
         // No swapping needed - both tokens go directly into the position
@@ -1920,7 +1940,9 @@ contract V4VaultTest is V4ForkTestBase {
         console.log("New token ID:", newTokenId);
 
         // Verify the position was created and is owned by the vault
-        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(newTokenId), address(vault), "Position should be owned by vault"
+        );
 
         // Verify the loan owner is the user
         assertEq(vault.ownerOf(newTokenId), user, "Loan should be owned by user");
@@ -2201,7 +2223,6 @@ contract V4VaultTest is V4ForkTestBase {
             abi.encodeCall(DecreaseLiquidityDuringTransformTransformer.attemptDecrease, (params))
         );
     }
-
 }
 
 contract DecreaseLiquidityDuringTransformTransformer {
@@ -2235,8 +2256,7 @@ contract NativeLiquidationReenter {
     function arm(uint256 tokenId) external {
         armedTokenId = tokenId;
         reenterCallData = abi.encodeCall(
-            IVault.liquidate,
-            (IVault.LiquidateParams(tokenId, 0, 0, address(this), block.timestamp, ""))
+            IVault.liquidate, (IVault.LiquidateParams(tokenId, 0, 0, address(this), block.timestamp, ""))
         );
     }
 

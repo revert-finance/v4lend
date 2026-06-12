@@ -23,7 +23,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
-import {V4Oracle} from "src/oracle/V4Oracle.sol";
+import {V4Oracle, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 import {V4Vault} from "src/vault/V4Vault.sol";
 import {FlashloanLiquidator} from "src/vault/liquidation/FlashloanLiquidator.sol";
@@ -66,6 +66,8 @@ contract UnichainForkHookathonE2E is Script {
 
     uint32 internal constant MAX_FEED_AGE = 7 days;
     uint16 internal constant MAX_POOL_PRICE_DIFFERENCE = 200;
+    uint32 internal constant ORACLE_TWAP_SECONDS = 30 minutes;
+    uint16 internal constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
 
     uint32 internal constant CF_DEMO = uint32(Q32 * 850 / 1000);
 
@@ -158,9 +160,39 @@ contract UnichainForkHookathonE2E is Script {
 
         deployment.oracle = new V4Oracle(POSITION_MANAGER, address(deployment.demoEth), USD_REFERENCE);
         deployment.oracle.setMaxPoolPriceDifference(MAX_POOL_PRICE_DIFFERENCE);
-        deployment.oracle.setTokenConfig(address(deployment.demoUsd), deployment.usdFeed, MAX_FEED_AGE);
-        deployment.oracle.setTokenConfig(address(deployment.demoEth), deployment.ethFeed, MAX_FEED_AGE);
-        deployment.oracle.setTokenConfig(address(0), deployment.ethFeed, MAX_FEED_AGE);
+        deployment.oracle
+            .setTokenConfig(
+                address(deployment.demoUsd),
+                deployment.usdFeed,
+                MAX_FEED_AGE,
+                IUniswapV3Pool(address(0)),
+                address(deployment.demoUsd),
+                ORACLE_TWAP_SECONDS,
+                V4Oracle.Mode.CHAINLINK,
+                MAX_ORACLE_SOURCE_DIFFERENCE
+            );
+        deployment.oracle
+            .setTokenConfig(
+                address(deployment.demoEth),
+                deployment.ethFeed,
+                MAX_FEED_AGE,
+                IUniswapV3Pool(address(0)),
+                address(deployment.demoEth),
+                ORACLE_TWAP_SECONDS,
+                V4Oracle.Mode.CHAINLINK,
+                MAX_ORACLE_SOURCE_DIFFERENCE
+            );
+        deployment.oracle
+            .setTokenConfig(
+                address(0),
+                deployment.ethFeed,
+                MAX_FEED_AGE,
+                IUniswapV3Pool(address(0)),
+                address(deployment.demoEth),
+                ORACLE_TWAP_SECONDS,
+                V4Oracle.Mode.CHAINLINK,
+                MAX_ORACLE_SOURCE_DIFFERENCE
+            );
 
         uint64 hookSidecarNonce = vm.getNonce(deployer);
         address predictedFeeController = vm.computeCreateAddress(deployer, hookSidecarNonce);
@@ -185,9 +217,10 @@ contract UnichainForkHookathonE2E is Script {
             new HookFeeController(expectedHookAddress, deployer, PROTOCOL_FEE_BPS, PROTOCOL_FEE_BPS);
         require(address(feeController) == predictedFeeController, "Demo: fee controller address mismatch");
         deployment.routeController = new HookRouteController(expectedHookAddress);
-        require(address(deployment.routeController) == predictedRouteController, "Demo: route controller address mismatch");
-        RevertHookSwapActions swapActions =
-            new RevertHookSwapActions(deployment.oracle.poolManager(), feeController);
+        require(
+            address(deployment.routeController) == predictedRouteController, "Demo: route controller address mismatch"
+        );
+        RevertHookSwapActions swapActions = new RevertHookSwapActions(deployment.oracle.poolManager(), feeController);
         require(address(swapActions) == predictedSwapActions, "Demo: swap actions address mismatch");
 
         deployment.positionActions = new RevertHookPositionActions(
@@ -790,12 +823,10 @@ contract UnichainForkHookathonE2E is Script {
         require(uint8(autoCollectMode) == uint8(expected.autoCollectMode), "Demo: auto compound mode mismatch");
         require(autoExitIsRelative == expected.autoExitIsRelative, "Demo: auto exit mode mismatch");
         require(
-            autoExitSwapOnLowerTrigger == expected.autoExitSwapOnLowerTrigger,
-            "Demo: lower exit swap flag mismatch"
+            autoExitSwapOnLowerTrigger == expected.autoExitSwapOnLowerTrigger, "Demo: lower exit swap flag mismatch"
         );
         require(
-            autoExitSwapOnUpperTrigger == expected.autoExitSwapOnUpperTrigger,
-            "Demo: upper exit swap flag mismatch"
+            autoExitSwapOnUpperTrigger == expected.autoExitSwapOnUpperTrigger, "Demo: upper exit swap flag mismatch"
         );
         require(autoExitTickLower == expected.autoExitTickLower, "Demo: auto exit lower mismatch");
         require(autoExitTickUpper == expected.autoExitTickUpper, "Demo: auto exit upper mismatch");

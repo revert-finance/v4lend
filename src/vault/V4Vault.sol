@@ -67,7 +67,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     /// @notice oracle implementation
     IV4Oracle public immutable oracle;
- 
+
     /// @notice wrapped native token address
     IWETH9 public immutable weth;
 
@@ -466,7 +466,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @param recipient Address to receive ownership of the position/loan
     /// @custom:security Only callable from transformer contracts during active transform to prevent unauthorized position injection
     function notifyERC721Received(uint256 tokenId, address recipient) external override {
-
         // must be called from a transformer contract, be in transform mode and the token must not be owned by anyone else
         if (!transformerAllowList[msg.sender] || transformedTokenId == 0 || tokenOwner[tokenId] != address(0)) {
             revert Unauthorized();
@@ -477,7 +476,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     /// @notice Whenever a token is recieved it either creates a new loan, or modifies an existing one when in transform mode.
     /// @inheritdoc IERC721Receiver
-    function onERC721Received(address, /*operator*/ address from, uint256 tokenId, bytes calldata data)
+    function onERC721Received(
+        address,
+        /*operator*/
+        address from,
+        uint256 tokenId,
+        bytes calldata data
+    )
         external
         override
         returns (bytes4)
@@ -518,7 +523,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         } else {
             // if in transform mode - and a new position is sent - current position is replaced and returned
             if (tokenId != oldTokenId) {
-
                 address owner_ = tokenOwner[oldTokenId];
 
                 // set transformed token to new one
@@ -537,9 +541,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 _cleanupLoan(oldTokenId, debtExchangeRateX96, lendExchangeRateX96);
 
                 // sets data of new loan
-                _updateAndCheckCollateral(
-                    tokenId, debtExchangeRateX96, lendExchangeRateX96, 0, debtShares
-                );
+                _updateAndCheckCollateral(tokenId, debtExchangeRateX96, lendExchangeRateX96, 0, debtShares);
             }
         }
     }
@@ -811,6 +813,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         state.debt = _convertToAssets(debtShares, state.newDebtExchangeRateX96, Math.Rounding.Ceil);
 
+        // @custom:accepted-risk AUDIT-ACCEPTED-ORACLE-LIQUIDATION-LIVENESS
+        // Liquidation intentionally depends on live oracle data. Stale or missing
+        // feeds revert here until governance refreshes feed configuration.
         (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue) =
             _checkLoanIsHealthy(params.tokenId, state.debt);
         if (state.isHealthy) {
@@ -822,8 +827,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         // calculate reserve (before transfering liquidation money - otherwise calculation is off)
         if (state.reserveCost > 0) {
-            state.missing =
-                _handleReserveLiquidation(state.reserveCost, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
+            state.missing = _handleReserveLiquidation(
+                state.reserveCost, state.newDebtExchangeRateX96, state.newLendExchangeRateX96
+            );
         }
 
         liquidatingTokenId = params.tokenId;
@@ -841,9 +847,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         _cleanupLoan(params.tokenId, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
 
         // send promised collateral tokens to liquidator
-        (amount0, amount1) = _sendPositionValue(
-            params, state.liquidationValue, state.fullValue, state.feeValue
-        );
+        (amount0, amount1) = _sendPositionValue(params, state.liquidationValue, state.fullValue, state.feeValue);
 
         liquidatingTokenId = 0;
 
@@ -896,8 +900,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     function withdrawReserves(uint256 amount, address receiver) external onlyOwner {
         (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
 
-        uint256 protected =
-            _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil) * reserveProtectionFactorX32 / Q32;
+        uint256 protected = _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil)
+            * reserveProtectionFactorX32 / Q32;
         (uint256 balance, uint256 reserves) = _getBalanceAndReserves(newDebtExchangeRateX96, newLendExchangeRateX96);
         uint256 unprotected = reserves > protected ? reserves - protected : 0;
         uint256 available = balance > unprotected ? unprotected : balance;
@@ -1001,7 +1005,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert CollateralFactorExceedsMax();
         }
         TokenConfig storage config = tokenConfigs[token];
-        config.collateralFactorX32 = collateralFactorX32; 
+        config.collateralFactorX32 = collateralFactorX32;
         config.collateralValueLimitFactorX32 = collateralValueLimitFactorX32;
         emit SetTokenConfig(token, collateralFactorX32, collateralValueLimitFactorX32);
     }
@@ -1100,10 +1104,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
     }
 
-    function _repay(uint256 tokenId, uint256 amount, bool isShare)
-        internal
-        returns (uint256 assets, uint256 shares)
-    {
+    function _repay(uint256 tokenId, uint256 amount, bool isShare) internal returns (uint256 assets, uint256 shares) {
         (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
         _resetDailyDebtIncreaseLimit(newLendExchangeRateX96, false);
 
@@ -1251,7 +1252,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     // decreases liquidity from uniswap v4 position
     function _decreaseLiquidity(
         uint256 tokenId,
-        uint128 liquidityRemove, 
+        uint128 liquidityRemove,
         uint256 amount0Min,
         uint256 amount1Min,
         uint256 deadline,
@@ -1260,11 +1261,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     ) internal returns (uint256 amount0, uint256 amount1) {
         // Get position info to determine currencies for TAKE_PAIR
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        
+
         // Cache currencies to save gas
         Currency currency0 = poolKey.currency0;
         Currency currency1 = poolKey.currency1;
-        
+
         // check balance before decreasing liquidity
         amount0 = currency0.balanceOf(recipient);
         amount1 = currency1.balanceOf(recipient);
@@ -1273,13 +1274,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
         bytes[] memory paramsArray = new bytes[](2);
-        paramsArray[0] = abi.encode(
-            tokenId,
-            liquidityRemove,
-            amount0Min,
-            amount1Min,
-            decreaseLiquidityHookData
-        );
+        paramsArray[0] = abi.encode(tokenId, liquidityRemove, amount0Min, amount1Min, decreaseLiquidityHookData);
         paramsArray[1] = abi.encode(currency0, currency1, recipient);
 
         positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
@@ -1362,7 +1357,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
             uint256 totalLent = _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil);
 
-            // If liquidation losses wipe all lender principal, the lender exchange rate collapses to zero.
+            // @custom:accepted-risk AUDIT-ACCEPTED-TOTAL-INSOLVENCY-REDEPLOY
+            // If liquidation losses wipe all lender principal, the lender exchange rate
+            // collapses to zero and this vault is treated as redeploy-only afterward.
             if (totalLent == 0 || missing >= totalLent) {
                 newLendExchangeRateX96 = 0;
             } else {
@@ -1382,10 +1379,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         return factor0X32 > factor1X32 ? factor1X32 : factor0X32;
     }
 
-    function _updateGlobalInterest()
-        internal
-        returns (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96)
-    {
+    function _updateGlobalInterest() internal returns (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) {
         // only needs to be updated once per block (when needed)
         if (block.timestamp > lastExchangeRateUpdate) {
             (newDebtExchangeRateX96, newLendExchangeRateX96) = _calculateGlobalInterest();
@@ -1412,7 +1406,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 timeElapsed = (block.timestamp - lastRateUpdate);
 
         if (timeElapsed > 0 && lastRateUpdate != 0) {
-
             (uint256 balance,) = _getBalanceAndReserves(oldDebtExchangeRateX96, oldLendExchangeRateX96);
             uint256 debt = _convertToAssets(debtSharesTotal, oldDebtExchangeRateX96, Math.Rounding.Ceil);
             (uint256 borrowRateX64, uint256 supplyRateX64) = interestRateModel.getRatesPerSecondX64(balance, debt);
@@ -1462,16 +1455,18 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 uint256 collateralValueLimitFactorX32 = tokenConfigs[token0].collateralValueLimitFactorX32;
                 if (
                     collateralValueLimitFactorX32 < type(uint32).max
-                        && _convertToAssets(tokenConfigs[token0].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil)
-                            > lentAssets * collateralValueLimitFactorX32 / Q32
+                        && _convertToAssets(
+                                tokenConfigs[token0].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil
+                            ) > lentAssets * collateralValueLimitFactorX32 / Q32
                 ) {
                     revert CollateralValueLimit();
                 }
                 collateralValueLimitFactorX32 = tokenConfigs[token1].collateralValueLimitFactorX32;
                 if (
                     collateralValueLimitFactorX32 < type(uint32).max
-                        && _convertToAssets(tokenConfigs[token1].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil)
-                            > lentAssets * collateralValueLimitFactorX32 / Q32
+                        && _convertToAssets(
+                                tokenConfigs[token1].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil
+                            ) > lentAssets * collateralValueLimitFactorX32 / Q32
                 ) {
                     revert CollateralValueLimit();
                 }
@@ -1482,7 +1477,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     function _resetDailyLendIncreaseLimit(uint256 newLendExchangeRateX96, bool force) internal {
         uint32 time = uint32(block.timestamp / 1 days);
         if (force || time > dailyLendIncreaseLimitLastReset) {
-            dailyLendIncreaseLimitLeft = _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
+            dailyLendIncreaseLimitLeft =
+                _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
             dailyLendIncreaseLimitLastReset = time;
         }
     }
@@ -1490,17 +1486,19 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     function _resetDailyDebtIncreaseLimit(uint256 newLendExchangeRateX96, bool force) internal {
         uint32 time = uint32(block.timestamp / 1 days);
         if (force || time > dailyDebtIncreaseLimitLastReset) {
-            dailyDebtIncreaseLimitLeft = _calculateDailyLimit(newLendExchangeRateX96, dailyDebtIncreaseLimitMin, MAX_DAILY_DEBT_INCREASE_X32);
+            dailyDebtIncreaseLimitLeft =
+                _calculateDailyLimit(newLendExchangeRateX96, dailyDebtIncreaseLimitMin, MAX_DAILY_DEBT_INCREASE_X32);
             dailyDebtIncreaseLimitLastReset = time;
         }
     }
 
-    function _calculateDailyLimit(
-        uint256 newLendExchangeRateX96,
-        uint256 limitMin,
-        uint32 maxFactorX32
-    ) internal view returns (uint256) {
-        uint256 increaseLimit = _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil) * maxFactorX32 / Q32;
+    function _calculateDailyLimit(uint256 newLendExchangeRateX96, uint256 limitMin, uint32 maxFactorX32)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256 increaseLimit =
+            _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil) * maxFactorX32 / Q32;
         return limitMin > increaseLimit ? limitMin : increaseLimit;
     }
 
@@ -1571,6 +1569,5 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     // recieves ETH from fees or when decreasing liquidity
-    receive() external payable {
-    }
+    receive() external payable {}
 }

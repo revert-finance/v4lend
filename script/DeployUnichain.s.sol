@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 import {Script, console} from "forge-std/Script.sol";
 
 import {V4Utils} from "src/vault/transformers/V4Utils.sol";
-import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
+import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {V4Vault} from "src/vault/V4Vault.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 import {FlashloanLiquidator} from "src/vault/liquidation/FlashloanLiquidator.sol";
@@ -36,7 +36,6 @@ contract DeployUnichain is Script {
     IPositionManager constant POSITION_MANAGER = IPositionManager(0x4529A01c7A0410167c5740C487A8DE60232617bf);
     address constant UNIVERSAL_ROUTER = 0xEf740bf23aCaE26f6492B10de645D6B98dC8Eaf3;
     address constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
-
 
     // CREATE2 Deployer Proxy used by Forge for CREATE2 deployments
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
@@ -71,6 +70,21 @@ contract DeployUnichain is Script {
     address constant REDSTONE_DAI_USD = 0xE94c9f9A1893f23be38A5C0394E46Ac05e8a5f8C;
     address constant REDSTONE_UNI_USD = 0xf1454949C6dEdfb500ae63Aa6c784Aa1Dde08A6c;
 
+    // ==================== Unichain Uniswap v3 TWAP Pools ====================
+    // Unichain's deepest v3 oracle routes for this USDC vault are USDC-referenced.
+    // Pool choices were checked against the Unichain v3 factory at
+    // 0x1f98400000000000000000000000000000000003.
+
+    address constant ORACLE_REFERENCE_TOKEN = USDC;
+    address constant UNISWAP_V3_WETH_USDC = 0x8927058918e3CFf6F55EfE45A58db1be1F069E49; // 0.30% pool
+    address constant UNISWAP_V3_USDT_USDC = 0xe92c7cc875245A86fAf088fEbE4614E1E318BeF5; // 0.05% pool
+    address constant UNISWAP_V3_DAI_USDC = 0x1Db0BcA1D1a09E5A86213D349fA4fe33F8FE7Fe2; // 0.01% pool, thin
+    address constant UNISWAP_V3_UNI_USDC = 0xff3D4aF6AEd14F62c202D55871f75C37951409c3; // 0.30% pool
+
+    // No production-grade WBTC/USDC v3 pool exists on Unichain at the time this config was prepared.
+    // Keep WBTC out of production collateral until a nonzero-liquidity, TWAP-ready pool is available.
+    address constant UNISWAP_V3_WBTC_USDC = address(0);
+
     // L2 Sequencer Uptime Feed (for L2 oracle safety)
     address constant SEQUENCER_UPTIME_FEED = address(0); // TODO: Update if RedStone provides sequencer feed
 
@@ -78,6 +92,8 @@ contract DeployUnichain is Script {
 
     uint32 constant MAX_FEED_AGE = 1 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
+    uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
+    uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
 
     // Interest rate model parameters (similar to Compound V2)
     uint256 constant BASE_RATE_PER_YEAR = 0; // 0% base rate
@@ -121,7 +137,11 @@ contract DeployUnichain is Script {
     /// @dev Uses CREATE2 address computation to mine for valid hook addresses
     /// @param deployer The address that will deploy the hook (msg.sender in broadcast context)
     /// @param creationCodeWithArgs The creation code with constructor args appended
-    function findHookSalt(address deployer, bytes memory creationCodeWithArgs) internal view returns (address hookAddress, bytes32 salt) {
+    function findHookSalt(address deployer, bytes memory creationCodeWithArgs)
+        internal
+        view
+        returns (address hookAddress, bytes32 salt)
+    {
         uint160 flags = getHookFlags();
         uint160 flagMask = Hooks.ALL_HOOK_MASK;
         flags = flags & flagMask;
@@ -147,10 +167,46 @@ contract DeployUnichain is Script {
         returns (address)
     {
         return address(
-            uint160(
-                uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(creationCodeWithArgs))))
-            )
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(creationCodeWithArgs)))))
         );
+    }
+
+    function _configureOracleToken(
+        V4Oracle oracle,
+        address token,
+        AggregatorV3Interface feed,
+        address twapPool,
+        address twapTokenAlias,
+        bool allowSingleSourceOracle
+    ) internal {
+        V4Oracle.Mode mode;
+        IUniswapV3Pool pool;
+
+        if (twapTokenAlias == ORACLE_REFERENCE_TOKEN) {
+            mode = V4Oracle.Mode.CHAINLINK_TWAP_VERIFY;
+            pool = IUniswapV3Pool(address(0));
+        } else if (twapPool != address(0)) {
+            mode = V4Oracle.Mode.CHAINLINK_TWAP_VERIFY;
+            pool = IUniswapV3Pool(twapPool);
+        } else if (allowSingleSourceOracle) {
+            mode = V4Oracle.Mode.CHAINLINK;
+            pool = IUniswapV3Pool(address(0));
+        } else {
+            revert("DeployUnichain: missing TWAP pool");
+        }
+
+        oracle.setTokenConfig(
+            token, feed, MAX_FEED_AGE, pool, twapTokenAlias, ORACLE_TWAP_SECONDS, mode, MAX_ORACLE_SOURCE_DIFFERENCE
+        );
+    }
+
+    function _requireProductionTWAPPools() internal pure {
+        if (
+            UNISWAP_V3_WETH_USDC == address(0) || UNISWAP_V3_USDT_USDC == address(0)
+                || UNISWAP_V3_DAI_USDC == address(0) || UNISWAP_V3_UNI_USDC == address(0)
+        ) {
+            revert("DeployUnichain: missing production TWAP pools");
+        }
     }
 
     function run() external {
@@ -159,9 +215,13 @@ contract DeployUnichain is Script {
         address zeroXAllowanceHolder = vm.envOr("ZEROX_ALLOWANCE_HOLDER", ZEROX_ALLOWANCE_HOLDER);
         address sequencerUptimeFeed = vm.envOr("SEQUENCER_UPTIME_FEED", SEQUENCER_UPTIME_FEED);
         bool allowMissingSequencerFeed = vm.envOr("ALLOW_MISSING_SEQUENCER_FEED", false);
+        bool allowSingleSourceOracle = vm.envOr("ALLOW_SINGLE_SOURCE_ORACLE", false);
 
         if (sequencerUptimeFeed == address(0) && !allowMissingSequencerFeed) {
             revert("DeployUnichain: missing SEQUENCER_UPTIME_FEED");
+        }
+        if (!allowSingleSourceOracle) {
+            _requireProductionTWAPPools();
         }
 
         vm.startBroadcast();
@@ -172,6 +232,7 @@ contract DeployUnichain is Script {
         console.log("Deployer:", deployer);
         console.log("0x AllowanceHolder:", zeroXAllowanceHolder);
         console.log("Sequencer Uptime Feed:", sequencerUptimeFeed);
+        console.log("Single-source oracle allowed:", allowSingleSourceOracle);
         console.log("");
 
         // ==================== Step 1: Deploy Core Infrastructure ====================
@@ -190,8 +251,8 @@ contract DeployUnichain is Script {
 
         console.log("Step 2: Deploying V4Oracle...");
 
-        // Deploy V4Oracle with WETH as reference token and a non-token USD sentinel as Chainlink reference
-        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, WETH, USD_REFERENCE);
+        // Deploy V4Oracle with USDC as reference token and a non-token USD sentinel as Chainlink reference.
+        V4Oracle oracle = new V4Oracle(POSITION_MANAGER, ORACLE_REFERENCE_TOKEN, USD_REFERENCE);
         console.log("  V4Oracle deployed at:", address(oracle));
 
         // Configure oracle settings
@@ -202,40 +263,79 @@ contract DeployUnichain is Script {
         }
 
         // Configure token feeds (RedStone feeds implement AggregatorV3Interface)
+        // USDC/USD
+        if (REDSTONE_USDC_USD != address(0) && USDC != address(0)) {
+            _configureOracleToken(
+                oracle, USDC, AggregatorV3Interface(REDSTONE_USDC_USD), address(0), USDC, allowSingleSourceOracle
+            );
+            console.log("  Configured USDC/USD feed");
+        }
+
         // ETH/USD
         if (REDSTONE_ETH_USD != address(0)) {
-            oracle.setTokenConfig(WETH, AggregatorV3Interface(REDSTONE_ETH_USD), MAX_FEED_AGE);
-            oracle.setTokenConfig(ETH, AggregatorV3Interface(REDSTONE_ETH_USD), MAX_FEED_AGE);
+            _configureOracleToken(
+                oracle,
+                WETH,
+                AggregatorV3Interface(REDSTONE_ETH_USD),
+                UNISWAP_V3_WETH_USDC,
+                WETH,
+                allowSingleSourceOracle
+            );
+            _configureOracleToken(
+                oracle,
+                ETH,
+                AggregatorV3Interface(REDSTONE_ETH_USD),
+                UNISWAP_V3_WETH_USDC,
+                WETH,
+                allowSingleSourceOracle
+            );
             console.log("  Configured ETH/USD feed");
         }
 
         // BTC/USD
-        if (REDSTONE_BTC_USD != address(0) && WBTC != address(0)) {
-            oracle.setTokenConfig(WBTC, AggregatorV3Interface(REDSTONE_BTC_USD), MAX_FEED_AGE);
+        if (
+            REDSTONE_BTC_USD != address(0) && WBTC != address(0)
+                && (UNISWAP_V3_WBTC_USDC != address(0) || allowSingleSourceOracle)
+        ) {
+            _configureOracleToken(
+                oracle,
+                WBTC,
+                AggregatorV3Interface(REDSTONE_BTC_USD),
+                UNISWAP_V3_WBTC_USDC,
+                WBTC,
+                allowSingleSourceOracle
+            );
             console.log("  Configured BTC/USD feed");
-        }
-
-        // USDC/USD
-        if (REDSTONE_USDC_USD != address(0) && USDC != address(0)) {
-            oracle.setTokenConfig(USDC, AggregatorV3Interface(REDSTONE_USDC_USD), MAX_FEED_AGE);
-            console.log("  Configured USDC/USD feed");
+        } else if (WBTC != address(0)) {
+            console.log("  Skipped BTC/USD feed: missing production TWAP pool");
         }
 
         // USDT/USD
         if (REDSTONE_USDT_USD != address(0) && USDT != address(0)) {
-            oracle.setTokenConfig(USDT, AggregatorV3Interface(REDSTONE_USDT_USD), MAX_FEED_AGE);
+            _configureOracleToken(
+                oracle,
+                USDT,
+                AggregatorV3Interface(REDSTONE_USDT_USD),
+                UNISWAP_V3_USDT_USDC,
+                USDT,
+                allowSingleSourceOracle
+            );
             console.log("  Configured USDT/USD feed");
         }
 
         // DAI/USD
         if (REDSTONE_DAI_USD != address(0) && DAI != address(0)) {
-            oracle.setTokenConfig(DAI, AggregatorV3Interface(REDSTONE_DAI_USD), MAX_FEED_AGE);
+            _configureOracleToken(
+                oracle, DAI, AggregatorV3Interface(REDSTONE_DAI_USD), UNISWAP_V3_DAI_USDC, DAI, allowSingleSourceOracle
+            );
             console.log("  Configured DAI/USD feed");
         }
 
         // UNI/USD
         if (REDSTONE_UNI_USD != address(0) && UNI != address(0)) {
-            oracle.setTokenConfig(UNI, AggregatorV3Interface(REDSTONE_UNI_USD), MAX_FEED_AGE);
+            _configureOracleToken(
+                oracle, UNI, AggregatorV3Interface(REDSTONE_UNI_USD), UNISWAP_V3_UNI_USDC, UNI, allowSingleSourceOracle
+            );
             console.log("  Configured UNI/USD feed");
         }
 
@@ -284,21 +384,13 @@ contract DeployUnichain is Script {
 
         // Deploy RevertHookPositionActions separately to avoid initcode size limit
         RevertHookPositionActions positionActions = new RevertHookPositionActions(
-            IPermit2(PERMIT2),
-            oracle,
-            ILiquidityCalculator(liquidityCalculator),
-            routeController,
-            swapActions
+            IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
         );
         console.log("  RevertHookPositionActions deployed at:", address(positionActions));
 
         // Deploy RevertHookAutoLeverageActions separately to avoid initcode size limit
         RevertHookAutoLeverageActions autoLeverageActions = new RevertHookAutoLeverageActions(
-            IPermit2(PERMIT2),
-            oracle,
-            ILiquidityCalculator(liquidityCalculator),
-            routeController,
-            swapActions
+            IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
         );
         console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
 
@@ -340,8 +432,10 @@ contract DeployUnichain is Script {
         vault.setTokenConfig(USDC, CF_STABLECOIN, type(uint32).max);
         vault.setTokenConfig(WETH, CF_ETH, type(uint32).max);
         vault.setTokenConfig(ETH, CF_ETH, type(uint32).max);
-        if (WBTC != address(0)) {
+        if (WBTC != address(0) && (UNISWAP_V3_WBTC_USDC != address(0) || allowSingleSourceOracle)) {
             vault.setTokenConfig(WBTC, CF_BTC, type(uint32).max);
+        } else {
+            console.log("  Skipped WBTC collateral: missing production TWAP pool");
         }
         if (USDT != address(0)) {
             vault.setTokenConfig(USDT, CF_STABLECOIN, type(uint32).max);

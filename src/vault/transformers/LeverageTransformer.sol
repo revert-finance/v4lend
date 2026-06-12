@@ -39,7 +39,6 @@ import {Transformer} from "./Transformer.sol";
 ///   - V4Vault verifies collateral health after transform completes
 ///   - Leverage operations fail if resulting position would be undercollateralized
 contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
-
     /// @notice Permit2 contract
     IPermit2 public immutable permit2;
 
@@ -48,9 +47,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         address _universalRouter,
         address _zeroxAllowanceHolder,
         IPermit2 _permit2
-    )
-        Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) Ownable(msg.sender)
-    {
+    ) Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder) Ownable(msg.sender) {
         permit2 = _permit2;
     }
 
@@ -89,7 +86,8 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         _validateCaller(positionManager, params.tokenId);
 
         // collect fees before
-        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
+        (uint256 amount0, uint256 amount1) =
+            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
 
         IVault(msg.sender).borrow(params.tokenId, params.borrowAmount);
 
@@ -108,22 +106,18 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         _handleApproval(permit2, token0, amount0);
         _handleApproval(permit2, token1, amount1);
 
-        uint128 liquidity = _calculateLiquidity(positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1);
+        uint128 liquidity =
+            _calculateLiquidity(positionInfo.tickLower(), positionInfo.tickUpper(), poolKey, amount0, amount1);
 
-        (bytes memory actions, bytes[] memory paramsArray) = _buildActionsForIncreasingLiquidity(
-            uint8(Actions.INCREASE_LIQUIDITY),
-            token0,
-            token1
-        );
+        (bytes memory actions, bytes[] memory paramsArray) =
+            _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), token0, token1);
         paramsArray[0] = abi.encode(
-            params.tokenId,
-            liquidity,
-            type(uint128).max,
-            type(uint128).max,
-            params.increaseLiquidityHookData
+            params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.increaseLiquidityHookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(abi.encode(actions, paramsArray), params.deadline);
+        positionManager.modifyLiquidities{value: address(this).balance}(
+            abi.encode(actions, paramsArray), params.deadline
+        );
 
         _leverageUpFinalize(params, token, token0, token1, amount0, amount1);
     }
@@ -139,9 +133,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     ) internal returns (uint256, uint256) {
         if (params.amountIn0 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
-                Swapper.RouterSwapParams(
-                    token, token0, params.amountIn0, params.amountOut0Min, params.swapData0
-                )
+                Swapper.RouterSwapParams(token, token0, params.amountIn0, params.amountOut0Min, params.swapData0)
             );
             if (token == token1) {
                 amount1 -= amountIn;
@@ -150,9 +142,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         }
         if (params.amountIn1 > 0) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
-                Swapper.RouterSwapParams(
-                    token, token1, params.amountIn1, params.amountOut1Min, params.swapData1
-                )
+                Swapper.RouterSwapParams(token, token1, params.amountIn1, params.amountOut1Min, params.swapData1)
             );
             if (token == token0) {
                 amount0 -= amountIn;
@@ -238,6 +228,9 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
         bytes[] memory paramsArray = new bytes[](2);
+        // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
+        // Uniswap v4 encodes amount minima as uint128. Transformer callers are trusted
+        // to pass uint128-sized slippage minima; larger values intentionally narrow.
         paramsArray[0] = abi.encode(
             params.tokenId,
             uint256(params.liquidity),
@@ -257,18 +250,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
         if (params.amountIn0 > 0 && !(token == token0)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
-                Swapper.RouterSwapParams(
-                    token0, token, params.amountIn0, params.amountOut0Min, params.swapData0
-                )
+                Swapper.RouterSwapParams(token0, token, params.amountIn0, params.amountOut0Min, params.swapData0)
             );
             amount0 -= amountIn;
             amount += amountOut;
         }
         if (params.amountIn1 > 0 && !(token == token1)) {
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
-                Swapper.RouterSwapParams(
-                    token1, token, params.amountIn1, params.amountOut1Min, params.swapData1
-                )
+                Swapper.RouterSwapParams(token1, token, params.amountIn1, params.amountOut1Min, params.swapData1)
             );
             amount1 -= amountIn;
             amount += amountOut;
@@ -394,14 +383,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     }
 
     /// @dev Helper function to create the dummy position
-    function _createDummyPosition(LeverageInParams calldata params, Currency otherToken) internal returns (uint256 tokenId) {
+    function _createDummyPosition(LeverageInParams calldata params, Currency otherToken)
+        internal
+        returns (uint256 tokenId)
+    {
         // Transfer initial token from user (must be the non-lend token)
         if (!otherToken.isAddressZero()) {
             SafeERC20.safeTransferFrom(
-                IERC20(Currency.unwrap(otherToken)),
-                msg.sender,
-                address(this),
-                params.initialAmount
+                IERC20(Currency.unwrap(otherToken)), msg.sender, address(this), params.initialAmount
             );
         }
 
@@ -444,12 +433,11 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
     /// @dev Helper function to get dummy tick range for one-sided position
     /// @dev Uses a wide tick range to ensure all initial tokens can be deposited
-    function _getDummyTickRange(
-        PoolKey memory poolKey,
-        Currency otherToken,
-        int24 tickSpacing,
-        int24 currentTick
-    ) internal pure returns (int24 dummyTickLower, int24 dummyTickUpper) {
+    function _getDummyTickRange(PoolKey memory poolKey, Currency otherToken, int24 tickSpacing, int24 currentTick)
+        internal
+        pure
+        returns (int24 dummyTickLower, int24 dummyTickUpper)
+    {
         // Round current tick to tick spacing
         // forge-lint: disable-next-line(divide-before-multiply)
         int24 roundedTick = (currentTick / tickSpacing) * tickSpacing;
@@ -481,9 +469,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         LeverageInParams calldata params
     ) internal {
         (bytes memory actions, bytes[] memory mintParams) = _buildActionsForIncreasingLiquidity(
-            uint8(Actions.MINT_POSITION),
-            poolKey.currency0,
-            poolKey.currency1
+            uint8(Actions.MINT_POSITION), poolKey.currency0, poolKey.currency1
         );
 
         mintParams[0] = abi.encode(
@@ -498,8 +484,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         );
 
         positionManager.modifyLiquidities{value: address(this).balance}(
-            abi.encode(actions, mintParams),
-            params.deadline
+            abi.encode(actions, mintParams), params.deadline
         );
     }
 
@@ -509,19 +494,17 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         LeverageInTransformParams memory transformParams = _buildTransformParams(params, tokenId);
 
         // Call transform on the vault to create the final leveraged position
-        bytes memory transformData = abi.encodeWithSelector(
-            this.leverageInTransform.selector,
-            transformParams
-        );
+        bytes memory transformData = abi.encodeWithSelector(this.leverageInTransform.selector, transformParams);
 
         return IVault(params.vault).transform(tokenId, address(this), transformData);
     }
 
     /// @dev Helper to build LeverageInTransformParams - extracted to reduce stack depth
-    function _buildTransformParams(
-        LeverageInParams calldata params,
-        uint256 tokenId
-    ) internal pure returns (LeverageInTransformParams memory transformParams) {
+    function _buildTransformParams(LeverageInParams calldata params, uint256 tokenId)
+        internal
+        pure
+        returns (LeverageInTransformParams memory transformParams)
+    {
         transformParams.tokenId = tokenId;
         transformParams.token0 = params.token0;
         transformParams.token1 = params.token1;
@@ -562,10 +545,10 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     }
 
     /// @dev Helper function to remove dummy position, borrow, and swap
-    function _removeBorrowAndSwap(
-        LeverageInTransformParams calldata params,
-        Currency lendToken
-    ) internal returns (uint256 amount0, uint256 amount1) {
+    function _removeBorrowAndSwap(LeverageInTransformParams calldata params, Currency lendToken)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
         // Determine which token is the other (non-lend) token
         Currency otherToken = lendToken == params.token0 ? params.token1 : params.token0;
 
@@ -573,14 +556,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint128 dummyLiquidity = positionManager.getPositionLiquidity(params.tokenId);
 
         // Remove all liquidity from the dummy position (and collect any fees)
-        _decreaseLiquidity(
-            params.tokenId,
-            dummyLiquidity,
-            0,
-            0,
-            params.deadline,
-            params.decreaseLiquidityHookData
-        );
+        _decreaseLiquidity(params.tokenId, dummyLiquidity, 0, 0, params.deadline, params.decreaseLiquidityHookData);
 
         // Get the current token balances which include:
         // - Leftover tokens from the initial deposit that weren't used by the dummy position
@@ -632,11 +608,10 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     }
 
     /// @dev Helper function to mint the new position
-    function _mintNewPosition(
-        LeverageInTransformParams calldata params,
-        uint256 amount0,
-        uint256 amount1
-    ) internal returns (uint256 newTokenId) {
+    function _mintNewPosition(LeverageInTransformParams calldata params, uint256 amount0, uint256 amount1)
+        internal
+        returns (uint256 newTokenId)
+    {
         // Approve tokens for position manager
         _handleApproval(permit2, params.token0, amount0);
         _handleApproval(permit2, params.token1, amount1);
@@ -654,11 +629,8 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint128 newLiquidity = _calculateLiquidity(params.tickLower, params.tickUpper, poolKey, amount0, amount1);
 
         // Mint the new position with desired ticks
-        (bytes memory actions, bytes[] memory mintParams) = _buildActionsForIncreasingLiquidity(
-            uint8(Actions.MINT_POSITION),
-            params.token0,
-            params.token1
-        );
+        (bytes memory actions, bytes[] memory mintParams) =
+            _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), params.token0, params.token1);
 
         mintParams[0] = abi.encode(
             poolKey,
@@ -672,8 +644,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         );
 
         positionManager.modifyLiquidities{value: address(this).balance}(
-            abi.encode(actions, mintParams),
-            params.deadline
+            abi.encode(actions, mintParams), params.deadline
         );
 
         // Get the newly minted token ID
@@ -720,12 +691,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
     /// @notice Callback for receiving ERC721 tokens
     /// @dev Required for receiving NFTs from the position manager
-    function onERC721Received(address, address, uint256, bytes calldata)
-        external
-        pure
-        override
-        returns (bytes4)
-    {
+    function onERC721Received(address, address, uint256, bytes calldata) external pure override returns (bytes4) {
         return IERC721Receiver.onERC721Received.selector;
     }
 }

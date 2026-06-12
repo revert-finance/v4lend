@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 import {Script, console} from "forge-std/Script.sol";
 
 import {V4Utils} from "src/vault/transformers/V4Utils.sol";
-import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
+import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {V4Vault} from "src/vault/V4Vault.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 import {FlashloanLiquidator} from "src/vault/liquidation/FlashloanLiquidator.sol";
@@ -57,6 +57,10 @@ contract DeployBase is Script {
     address constant CHAINLINK_ETH_USD = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
     address constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
 
+    // ==================== Base Uniswap v3 TWAP Pools ====================
+
+    address constant UNISWAP_V3_USDC_WETH = 0xd0b53D9277642d899DF5C87A3966A349A798F224; // 0.05% pool
+
     // L2 Sequencer Uptime Feed for Base (Optimism-based L2)
     address constant SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
 
@@ -64,6 +68,8 @@ contract DeployBase is Script {
 
     uint32 constant MAX_FEED_AGE = 1 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
+    uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
+    uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
 
     // Interest rate model parameters (similar to Compound V2)
     uint256 constant BASE_RATE_PER_YEAR = 0; // 0% base rate
@@ -135,9 +141,7 @@ contract DeployBase is Script {
         returns (address)
     {
         return address(
-            uint160(
-                uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(creationCodeWithArgs))))
-            )
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(creationCodeWithArgs)))))
         );
     }
 
@@ -186,12 +190,39 @@ contract DeployBase is Script {
         }
 
         // Configure ETH/USD feed (for WETH and native ETH)
-        oracle.setTokenConfig(WETH, AggregatorV3Interface(CHAINLINK_ETH_USD), MAX_FEED_AGE);
-        oracle.setTokenConfig(ETH, AggregatorV3Interface(CHAINLINK_ETH_USD), MAX_FEED_AGE);
+        oracle.setTokenConfig(
+            WETH,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            MAX_FEED_AGE,
+            IUniswapV3Pool(address(0)),
+            WETH,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
+        oracle.setTokenConfig(
+            ETH,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            MAX_FEED_AGE,
+            IUniswapV3Pool(address(0)),
+            WETH,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
         console.log("  Configured ETH/USD feed");
 
         // Configure USDC/USD feed
-        oracle.setTokenConfig(USDC, AggregatorV3Interface(CHAINLINK_USDC_USD), MAX_FEED_AGE);
+        oracle.setTokenConfig(
+            USDC,
+            AggregatorV3Interface(CHAINLINK_USDC_USD),
+            MAX_FEED_AGE,
+            IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
+            USDC,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
         console.log("  Configured USDC/USD feed");
 
         // ==================== Step 3: Deploy RevertHook action contracts ====================
@@ -241,21 +272,19 @@ contract DeployBase is Script {
         console.log("  RevertHookPositionActions deployed at:", address(positionActions));
 
         // Deploy RevertHookAutoLeverageActions (delegatecall target 2)
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(
-                IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
-            );
+        RevertHookAutoLeverageActions autoLeverageActions = new RevertHookAutoLeverageActions(
+            IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
+        );
         console.log("  RevertHookAutoLeverageActions deployed at:", address(autoLeverageActions));
 
-        RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(
-                IPermit2(PERMIT2),
-                oracle,
-                ILiquidityCalculator(liquidityCalculator),
-                feeController,
-                routeController,
-                swapActions
-            );
+        RevertHookAutoLendActions autoLendActions = new RevertHookAutoLendActions(
+            IPermit2(PERMIT2),
+            oracle,
+            ILiquidityCalculator(liquidityCalculator),
+            feeController,
+            routeController,
+            swapActions
+        );
         console.log("  RevertHookAutoLendActions deployed at:", address(autoLendActions));
 
         // Deploy RevertHook using CREATE2

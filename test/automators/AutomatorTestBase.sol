@@ -17,7 +17,7 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {V4Vault} from "src/vault/V4Vault.sol";
-import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
+import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {Swapper} from "src/shared/swap/Swapper.sol";
@@ -51,6 +51,13 @@ contract AutomatorTestBase is Test {
     address constant CHAINLINK_DAI_USD = 0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9;
     address constant CHAINLINK_ETH_USD = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
     address constant CHAINLINK_BTC_USD = 0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c;
+
+    address constant UNISWAP_V3_USDC_WETH = 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640; // 0.05% pool
+    address constant UNISWAP_V3_DAI_USDC = 0x5777d92f208679DB4b9778590Fa3CAB3aC9e2168; // 0.01% pool
+    address constant UNISWAP_V3_WBTC_USDC = 0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35; // 0.3% pool
+
+    uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
+    uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
 
     address constant EX0x = 0x0000000000001fF3684f28c67538d4D072C22734;
 
@@ -104,15 +111,68 @@ contract AutomatorTestBase is Test {
         // Deploy oracle
         v4Oracle = new V4Oracle(positionManager, USDC_ADDRESS, address(0xdead));
         v4Oracle.setMaxPoolPriceDifference(1000);
-        v4Oracle.setTokenConfig(USDC_ADDRESS, AggregatorV3Interface(CHAINLINK_USDC_USD), 3600 * 24 * 30);
-        v4Oracle.setTokenConfig(DAI_ADDRESS, AggregatorV3Interface(CHAINLINK_DAI_USD), 3600 * 24 * 30);
-        v4Oracle.setTokenConfig(WETH_ADDRESS, AggregatorV3Interface(CHAINLINK_ETH_USD), 3600 * 24 * 30);
-        v4Oracle.setTokenConfig(WBTC_ADDRESS, AggregatorV3Interface(CHAINLINK_BTC_USD), 3600 * 24 * 30);
-        v4Oracle.setTokenConfig(address(0), AggregatorV3Interface(CHAINLINK_ETH_USD), 3600 * 24 * 30);
+        v4Oracle.setTokenConfig(
+            USDC_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_USDC_USD),
+            3600 * 24 * 30,
+            IUniswapV3Pool(address(0)),
+            USDC_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
+        v4Oracle.setTokenConfig(
+            DAI_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_DAI_USD),
+            3600 * 24 * 30,
+            IUniswapV3Pool(UNISWAP_V3_DAI_USDC),
+            DAI_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
+        v4Oracle.setTokenConfig(
+            WETH_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30,
+            IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
+            WETH_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
+        v4Oracle.setTokenConfig(
+            WBTC_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_BTC_USD),
+            3600 * 24 * 30,
+            IUniswapV3Pool(UNISWAP_V3_WBTC_USDC),
+            WBTC_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
+        v4Oracle.setTokenConfig(
+            address(0),
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30,
+            IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
+            WETH_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
 
         // Deploy interest rate model and vault
         interestRateModel = new InterestRateModel(0, Q64 * 5 / 100, Q64 * 109 / 100, Q64 * 80 / 100);
-        vault = new V4Vault("Revert Lend usdc", "rlusdc", USDC_ADDRESS, positionManager, interestRateModel, v4Oracle, IWETH9(WETH_ADDRESS));
+        vault = new V4Vault(
+            "Revert Lend usdc",
+            "rlusdc",
+            USDC_ADDRESS,
+            positionManager,
+            interestRateModel,
+            v4Oracle,
+            IWETH9(WETH_ADDRESS)
+        );
         // forge-lint: disable-next-line(unsafe-typecast)
         vault.setTokenConfig(USDC_ADDRESS, uint32(Q32 * 9 / 10), type(uint32).max);
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -331,7 +391,8 @@ contract AutomatorTestBase is Test {
         returns (uint256 tokenId)
     {
         // For native ETH, need SETTLE_PAIR + SWEEP to handle excess ETH
-        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
+        bytes memory actions =
+            abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
         bytes[] memory paramsArray = new bytes[](3);
         paramsArray[0] = abi.encode(
             poolKey, tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max, WHALE_ACCOUNT, bytes("")
@@ -359,11 +420,8 @@ contract AutomatorTestBase is Test {
 
         if (zeroForOne) {
             // ETH → USDC: need SETTLE for ETH (native), TAKE_ALL for USDC
-            actions = abi.encodePacked(
-                uint8(Actions.SWAP_EXACT_IN_SINGLE),
-                uint8(Actions.SETTLE),
-                uint8(Actions.TAKE_ALL)
-            );
+            actions =
+                abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE), uint8(Actions.TAKE_ALL));
             params = new bytes[](3);
             params[0] = abi.encode(
                 IV4Router.ExactInputSingleParams({
@@ -379,9 +437,7 @@ contract AutomatorTestBase is Test {
         } else {
             // USDC → ETH: need SETTLE_ALL for USDC, TAKE_ALL for ETH
             actions = abi.encodePacked(
-                uint8(Actions.SWAP_EXACT_IN_SINGLE),
-                uint8(Actions.SETTLE_ALL),
-                uint8(Actions.TAKE_ALL)
+                uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL)
             );
             params = new bytes[](3);
             params[0] = abi.encode(

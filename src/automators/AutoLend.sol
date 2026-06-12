@@ -26,9 +26,7 @@ import {Automator} from "./Automator.sol";
 contract AutoLend is Automator {
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event AutoLendDeposit(uint256 indexed tokenId, address token, uint256 amount, uint256 shares);
-    event AutoLendWithdraw(
-        uint256 indexed tokenId, uint256 newTokenId, address token, uint256 amount, uint256 shares
-    );
+    event AutoLendWithdraw(uint256 indexed tokenId, uint256 newTokenId, address token, uint256 amount, uint256 shares);
     event PositionConfigured(
         uint256 indexed tokenId,
         bool isActive,
@@ -202,12 +200,8 @@ contract AutoLend is Automator {
             revert InvalidConfig();
         }
 
-        lendStates[params.tokenId] = LendState({
-            lentToken: idleTokenAddr,
-            shares: shares,
-            amount: idleAmount,
-            vault: address(lendVault)
-        });
+        lendStates[params.tokenId] =
+            LendState({lentToken: idleTokenAddr, shares: shares, amount: idleAmount, vault: address(lendVault)});
         vaultPositionCount[address(lendVault)]++;
 
         _sendProtocolFees(poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1);
@@ -240,6 +234,9 @@ contract AutoLend is Automator {
         bool isToken0Lent =
             _validateWithdrawTrigger(config, poolKey.currency0, state.lentToken, tickLower, tickUpper, currentTick);
 
+        // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
+        // Standalone AutoLend withdraw accepts current ERC4626 redeem value without a
+        // minimum-assets guard; operator/vault selection is trusted for this path.
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
 
         if (params.rewardX64 > config.maxRewardX64) {
@@ -260,13 +257,8 @@ contract AutoLend is Automator {
         }
 
         uint256 newTokenId;
-        (bool addToExisting, int24 newLower, int24 newUpper) = AutoLendLib.planOneSidedReentry(
-            currentTick,
-            poolKey.tickSpacing,
-            tickLower,
-            tickUpper,
-            isToken0Lent
-        );
+        (bool addToExisting, int24 newLower, int24 newUpper) =
+            AutoLendLib.planOneSidedReentry(currentTick, poolKey.tickSpacing, tickLower, tickUpper, isToken0Lent);
 
         if (addToExisting) {
             _handleApproval(permit2, isToken0Lent ? poolKey.currency0 : poolKey.currency1, redeemedAmount);
@@ -323,12 +315,11 @@ contract AutoLend is Automator {
         }
     }
 
-    function _validateDepositTrigger(
-        PositionConfig memory config,
-        int24 tickLower,
-        int24 tickUpper,
-        int24 currentTick
-    ) internal pure returns (bool isAbove) {
+    function _validateDepositTrigger(PositionConfig memory config, int24 tickLower, int24 tickUpper, int24 currentTick)
+        internal
+        pure
+        returns (bool isAbove)
+    {
         isAbove = currentTick >= tickUpper + config.upperTickZone;
         bool isBelow = currentTick < tickLower - config.lowerTickZone;
         if (!isAbove && !isBelow) {
@@ -383,14 +374,17 @@ contract AutoLend is Automator {
         uint256 deadline,
         bytes calldata hookData
     ) internal {
-        uint128 liquidity =
-            _calculateLiquidity(sqrtPriceX96, positionInfo.tickLower(), positionInfo.tickUpper(), amount0, amount1);
+        uint128 liquidity = _calculateLiquidity(
+            sqrtPriceX96, positionInfo.tickLower(), positionInfo.tickUpper(), amount0, amount1
+        );
 
         (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.INCREASE_LIQUIDITY), poolKey.currency0, poolKey.currency1);
         paramsArray[0] = abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, hookData);
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)}(
+        positionManager.modifyLiquidities{
+            value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)
+        }(
             abi.encode(actions, paramsArray), deadline
         );
     }
@@ -410,17 +404,12 @@ contract AutoLend is Automator {
         (bytes memory actions, bytes[] memory paramsArray) =
             _buildActionsForIncreasingLiquidity(uint8(Actions.MINT_POSITION), poolKey.currency0, poolKey.currency1);
         paramsArray[0] = abi.encode(
-            poolKey,
-            tickLower,
-            tickUpper,
-            liquidity,
-            type(uint128).max,
-            type(uint128).max,
-            address(this),
-            hookData
+            poolKey, tickLower, tickUpper, liquidity, type(uint128).max, type(uint128).max, address(this), hookData
         );
 
-        positionManager.modifyLiquidities{value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)}(
+        positionManager.modifyLiquidities{
+            value: _getNativeAmount(poolKey.currency0, poolKey.currency1, amount0, amount1)
+        }(
             abi.encode(actions, paramsArray), deadline
         );
 

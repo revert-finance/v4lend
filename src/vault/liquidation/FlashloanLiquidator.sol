@@ -11,25 +11,15 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-
 // Uniswap V3 interfaces
 interface IUniswapV3Pool {
-    function flash(
-        address recipient,
-        uint256 amount0,
-        uint256 amount1,
-        bytes calldata data
-    ) external;
+    function flash(address recipient, uint256 amount0, uint256 amount1, bytes calldata data) external;
 
     function token0() external view returns (address);
 }
 
 interface IUniswapV3FlashCallback {
-    function uniswapV3FlashCallback(
-        uint256 fee0,
-        uint256 fee1,
-        bytes calldata data
-    ) external;
+    function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external;
 }
 
 /// @title Helper contract which allows atomic liquidation and needed swaps by using UniV3 Flashloan
@@ -47,11 +37,7 @@ contract FlashloanLiquidator is Swapper, IUniswapV3FlashCallback {
         bytes decreaseLiquidityHookData; // hook data for all operations which decrease liquidity (optional)
     }
 
-    constructor(
-        IPositionManager _positionManager,
-        address _universalRouter,
-        address _zeroxAllowanceHolder
-    )
+    constructor(IPositionManager _positionManager, address _universalRouter, address _zeroxAllowanceHolder)
         Swapper(_positionManager, _universalRouter, _zeroxAllowanceHolder)
     {}
 
@@ -99,22 +85,26 @@ contract FlashloanLiquidator is Swapper, IUniswapV3FlashCallback {
     }
 
     function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata callbackData) external override {
-        // no origin check is needed - because the contract doesn't hold any funds - there is no benefit in calling uniswapV3FlashCallback() from another context
+        // @custom:accepted-risk AUDIT-ACCEPTED-FLASH-CALLBACK-ORIGIN
+        // The helper is designed to be stateless and not retain funds, so callback
+        // origin is intentionally not checked. Stray balances are accepted as recoverable
+        // by whoever successfully completes a callback.
 
         FlashCallbackData memory data = abi.decode(callbackData, (FlashCallbackData));
 
         // liquidate the loan
         SafeERC20.forceApprove(IERC20(Currency.unwrap(data.asset)), address(data.vault), data.liquidationCost);
-        data.vault.liquidate(
-            IVault.LiquidateParams(
-                data.tokenId, 
-                data.swap0.amountIn, 
-                data.swap1.amountIn, 
-                address(this), 
-                data.deadline,
-                data.decreaseLiquidityHookData
-            )
-        );
+        data.vault
+            .liquidate(
+                IVault.LiquidateParams(
+                    data.tokenId,
+                    data.swap0.amountIn,
+                    data.swap1.amountIn,
+                    address(this),
+                    data.deadline,
+                    data.decreaseLiquidityHookData
+                )
+            );
         SafeERC20.forceApprove(IERC20(Currency.unwrap(data.asset)), address(data.vault), 0);
 
         // do swaps

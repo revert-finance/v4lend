@@ -22,7 +22,6 @@ import {IUniversalRouter} from "./IUniversalRouter.sol";
 import {Constants} from "../Constants.sol";
 import {NativeAssetLib} from "../NativeAssetLib.sol";
 
-
 // base functionality to do swaps with different routing protocols
 abstract contract Swapper is Constants {
     event Swap(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
@@ -49,18 +48,13 @@ abstract contract Swapper is Constants {
     /// @param _positionManager Uniswap v4 position manager
     /// @param _universalRouter Uniswap Universal Router
     /// @param _zeroxAllowanceHolder 0x Protocol AllowanceHolder contract
-    constructor(
-        IPositionManager _positionManager,
-        address _universalRouter,
-        address _zeroxAllowanceHolder
-    ) {
+    constructor(IPositionManager _positionManager, address _universalRouter, address _zeroxAllowanceHolder) {
         weth = NativeWrapper(payable(address(_positionManager))).WETH9();
         positionManager = _positionManager;
         poolManager = IPoolManager(_positionManager.poolManager());
         universalRouter = _universalRouter;
         zeroxAllowanceHolder = _zeroxAllowanceHolder;
     }
-
 
     // swap data for uni - must include sweep for input token
     struct UniversalRouterData {
@@ -109,7 +103,10 @@ abstract contract Swapper is Constants {
                     if (!params.tokenIn.isAddressZero()) {
                         params.tokenIn.transfer(universalRouter, params.amountIn);
                     }
-                    IUniversalRouter(universalRouter).execute{value: params.tokenIn.isAddressZero() ? params.amountIn : 0}(data.commands, data.inputs, data.deadline);
+                    IUniversalRouter(universalRouter)
+                    .execute{value: params.tokenIn.isAddressZero() ? params.amountIn : 0}(
+                        data.commands, data.inputs, data.deadline
+                    );
                 } else {
                     if (!params.tokenIn.isAddressZero()) {
                         IERC20 tokenIn = IERC20(Currency.unwrap(params.tokenIn));
@@ -150,11 +147,11 @@ abstract contract Swapper is Constants {
         }
     }
 
-    function _buildActionsForIncreasingLiquidity(
-        uint8 baseAction,
-        Currency token0, 
-        Currency token1
-    ) internal view returns (bytes memory actions, bytes[] memory paramsArray) {
+    function _buildActionsForIncreasingLiquidity(uint8 baseAction, Currency token0, Currency token1)
+        internal
+        view
+        returns (bytes memory actions, bytes[] memory paramsArray)
+    {
         if (token0.isAddressZero() || token1.isAddressZero()) {
             // Include SWEEP action for native ETH
             actions = abi.encodePacked(baseAction, uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
@@ -168,10 +165,11 @@ abstract contract Swapper is Constants {
         paramsArray[1] = abi.encode(token0, token1);
     }
 
-
     /// @dev Returns the ETH value to send for native token settlement
     function _getNativeAmount(Currency token0, Currency token1, uint256 amount0, uint256 amount1)
-        internal pure returns (uint256)
+        internal
+        pure
+        returns (uint256)
     {
         return NativeAssetLib.nativeValue(token0, token1, amount0, amount1);
     }
@@ -207,7 +205,7 @@ abstract contract Swapper is Constants {
     // decreases liquidity from uniswap v4 position
     function _decreaseLiquidity(
         uint256 tokenId,
-        uint128 liquidityRemove, 
+        uint128 liquidityRemove,
         uint256 amount0Min,
         uint256 amount1Min,
         uint256 deadline,
@@ -215,11 +213,11 @@ abstract contract Swapper is Constants {
     ) internal returns (uint256 amount0, uint256 amount1) {
         // Get position info to determine currencies for TAKE_PAIR
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-        
+
         // Cache currencies to save gas
         Currency currency0 = poolKey.currency0;
         Currency currency1 = poolKey.currency1;
-        
+
         // check balance before decreasing liquidity
         amount0 = currency0.balanceOfSelf();
         amount1 = currency1.balanceOfSelf();
@@ -228,6 +226,9 @@ abstract contract Swapper is Constants {
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
         bytes[] memory paramsArray = new bytes[](2);
+        // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
+        // Uniswap v4 encodes amount minima as uint128. Callers/operators are trusted
+        // to pass uint128-sized slippage minima; larger values intentionally narrow.
         paramsArray[0] = abi.encode(
             tokenId,
             uint256(liquidityRemove),
@@ -240,13 +241,12 @@ abstract contract Swapper is Constants {
         paramsArray[1] = abi.encode(currency0, currency1, address(this));
 
         positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
-        
+
         // calculate delta
         amount0 = currency0.balanceOfSelf() - amount0;
         amount1 = currency1.balanceOfSelf() - amount1;
     }
 
     // recieves ETH from swaps
-    receive() external payable {
-    }
+    receive() external payable {}
 }

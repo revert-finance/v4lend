@@ -62,6 +62,9 @@ contract RevertHookSwapActions is RevertHookState {
                 emit HookSwapPartial(tokenId, zeroForOne, amountIn, actualSwapped);
             }
         } catch (bytes memory reason) {
+            // @custom:accepted-risk AUDIT-ACCEPTED-HOOK-SWAP-FAIL-OPEN
+            // Hook-managed swaps fail open and return zero delta; later balance checks
+            // and events are the intended recovery surface.
             emit HookSwapFailed(poolKey, params, reason);
         }
     }
@@ -111,7 +114,9 @@ contract RevertHookSwapActions is RevertHookState {
         }
 
         if (protocolFee0 > 0 || protocolFee1 > 0) {
-            emit SendProtocolFee(tokenId, poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1, protocolFeeRecipient);
+            emit SendProtocolFee(
+                tokenId, poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1, protocolFeeRecipient
+            );
         }
 
         adjustedDelta = toBalanceDelta(delta0, delta1);

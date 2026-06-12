@@ -6,7 +6,7 @@ import {console} from "forge-std/console.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {V4ForkTestBase} from "test/vault/support/V4ForkTestBase.sol";
-import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
+import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -17,6 +17,7 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {MockUniswapV3Pool} from "test/utils/MockUniswapV3Pool.sol";
 
 contract V4OracleHarness is V4Oracle {
     constructor(IPositionManager _positionManager, address _referenceToken, address _chainlinkReferenceToken)
@@ -53,6 +54,133 @@ contract V4OracleTest is V4ForkTestBase {
         _expectEthFeedPriceError(1, -1, freshTime, freshTime, 1);
     }
 
+    function testEmergencyAdminCanUpdateOracleMode() public {
+        address emergencyAdmin = address(0xA11CE);
+
+        v4Oracle.setEmergencyAdmin(emergencyAdmin);
+        assertEq(v4Oracle.emergencyAdmin(), emergencyAdmin);
+
+        vm.prank(address(0xB0B));
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        v4Oracle.setOracleMode(WETH_ADDRESS, V4Oracle.Mode.CHAINLINK);
+
+        vm.prank(emergencyAdmin);
+        v4Oracle.setOracleMode(WETH_ADDRESS, V4Oracle.Mode.CHAINLINK);
+
+        (,,,,,,,, V4Oracle.Mode mode,) = v4Oracle.feedConfigs(WETH_ADDRESS);
+        assertEq(uint256(mode), uint256(V4Oracle.Mode.CHAINLINK));
+    }
+
+    function testSetOracleModeWritesModeForUnconfiguredTokenLikeV3() public {
+        address unconfiguredToken = address(0x1234);
+
+        v4Oracle.setOracleMode(unconfiguredToken, V4Oracle.Mode.TWAP_CHAINLINK_VERIFY);
+
+        (,,,,,,,, V4Oracle.Mode mode,) = v4Oracle.feedConfigs(unconfiguredToken);
+        assertEq(uint256(mode), uint256(V4Oracle.Mode.TWAP_CHAINLINK_VERIFY));
+    }
+
+    function testSourceDivergenceRevertsInTwoSourceMode() public {
+        MockUniswapV3Pool badPool = new MockUniswapV3Pool(USDC_ADDRESS, WETH_ADDRESS, 0);
+        v4Oracle.setTokenConfig(
+            WETH_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30,
+            badPool,
+            WETH_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            MAX_ORACLE_SOURCE_DIFFERENCE
+        );
+
+        vm.expectRevert(abi.encodeWithSignature("PriceDifferenceExceeded()"));
+        v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS);
+    }
+
+    function testTwapEmergencyModeBypassesChainlinkError() public {
+        MockUniswapV3Pool twapPool = new MockUniswapV3Pool(USDC_ADDRESS, WETH_ADDRESS, 0);
+        v4Oracle.setTokenConfig(
+            WETH_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30,
+            twapPool,
+            WETH_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.TWAP,
+            type(uint16).max
+        );
+
+        vm.mockCall(
+            CHAINLINK_ETH_USD,
+            abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
+            abi.encode(uint80(1), int256(0), block.timestamp, block.timestamp, uint80(1))
+        );
+
+        assertEq(v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS), uint160(Q96));
+    }
+
+    function testChainlinkEmergencyModeBypassesTwapObserveFailure() public {
+        MockUniswapV3Pool twapPool = new MockUniswapV3Pool(USDC_ADDRESS, WETH_ADDRESS, 0);
+        twapPool.setObserveShouldRevert(true);
+        v4Oracle.setTokenConfig(
+            WETH_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30,
+            twapPool,
+            WETH_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.CHAINLINK_TWAP_VERIFY,
+            type(uint16).max
+        );
+
+        vm.expectRevert();
+        v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS);
+
+        v4Oracle.setOracleMode(WETH_ADDRESS, V4Oracle.Mode.CHAINLINK);
+        assertGt(v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS), 0);
+    }
+
+    function testTwapChainlinkVerifyUsesTwapAsPrimaryPrice() public {
+        MockUniswapV3Pool twapPool = new MockUniswapV3Pool(USDC_ADDRESS, WETH_ADDRESS, 0);
+        v4Oracle.setTokenConfig(
+            WETH_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600 * 24 * 30,
+            twapPool,
+            WETH_ADDRESS,
+            ORACLE_TWAP_SECONDS,
+            V4Oracle.Mode.TWAP_CHAINLINK_VERIFY,
+            type(uint16).max
+        );
+
+        assertEq(v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS), uint160(Q96));
+    }
+
+    function testNativeEthUsesWethTwapAlias() public view {
+        assertEq(
+            v4Oracle.getPoolSqrtPriceX96(address(0), USDC_ADDRESS),
+            v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS)
+        );
+    }
+
+    function testZeroTwapWindowUsesPoolSpotLikeV3() public {
+        MockUniswapV3Pool twapPool = new MockUniswapV3Pool(USDC_ADDRESS, WETH_ADDRESS, 0);
+        twapPool.setObserveShouldRevert(true);
+
+        v4Oracle.setTokenConfig(
+            WETH_ADDRESS,
+            AggregatorV3Interface(CHAINLINK_ETH_USD),
+            3600,
+            twapPool,
+            WETH_ADDRESS,
+            0,
+            V4Oracle.Mode.TWAP,
+            type(uint16).max
+        );
+
+        assertEq(v4Oracle.getPoolSqrtPriceX96(WETH_ADDRESS, USDC_ADDRESS), uint160(Q96));
+    }
+
     function testPoolPriceFromSqrtUsesFullPrecision() public {
         V4OracleHarness oracleHarness =
             new V4OracleHarness(positionManager, USDC_ADDRESS, 0x000000000000000000000000000000000000dEaD);
@@ -85,139 +213,143 @@ contract V4OracleTest is V4ForkTestBase {
         uint256[] memory testTokenIds = new uint256[](2);
         testTokenIds[0] = nft1TokenId; // NFT 1 from V4ForkTestBase
         testTokenIds[1] = nft2TokenId; // NFT 2 from V4ForkTestBase
-        
+
         // Test tokens configured in the oracle (from V4ForkTestBase setup)
         address[] memory testTokens = new address[](4);
-        testTokens[0] = USDC_ADDRESS;  // USDC (reference token)
-        testTokens[1] = DAI_ADDRESS;   // DAI
-        testTokens[2] = WETH_ADDRESS;  // WETH
-        testTokens[3] = address(0);    // Native ETH
-        
+        testTokens[0] = USDC_ADDRESS; // USDC (reference token)
+        testTokens[1] = DAI_ADDRESS; // DAI
+        testTokens[2] = WETH_ADDRESS; // WETH
+        testTokens[3] = address(0); // Native ETH
+
         for (uint256 i = 0; i < testTokenIds.length; i++) {
             for (uint256 j = 0; j < testTokens.length; j++) {
                 _testGetValueForToken(testTokenIds[i], testTokens[j]);
             }
         }
-        
+
         // Test edge cases
         _testGetValueEdgeCases();
     }
-    
+
     function _testGetValueForToken(uint256 tokenId, address token) internal {
         // Call getValue and assert it doesn't revert
-        (uint256 value, uint256 feeValue, uint256 price0X96, uint256 price1X96) = 
-            v4Oracle.getValue(tokenId, token);
-        
+        (uint256 value, uint256 feeValue, uint256 price0X96, uint256 price1X96) = v4Oracle.getValue(tokenId, token);
+
         // Assertions for basic validity
         assertTrue(value >= feeValue, "Total value should be >= fee value");
         assertTrue(price0X96 > 0, "Price0X96 should be positive");
         assertTrue(price1X96 > 0, "Price1X96 should be positive");
-        
+
         // Assert that prices are in reasonable Q96 format (not too small)
         assertTrue(price0X96 >= 1e12, "Price0X96 should be reasonable magnitude");
         assertTrue(price1X96 >= 1e12, "Price1X96 should be reasonable magnitude");
-        
+
         // Test specific token behaviors
         if (token == USDC_ADDRESS) {
             // USDC is the reference token, so one price should be Q96
-            assertTrue(price0X96 == 79228162514264337593543950336 || 
-                      price1X96 == 79228162514264337593543950336, 
-                      "One price should be Q96 for reference token");
+            assertTrue(
+                price0X96 == 79228162514264337593543950336 || price1X96 == 79228162514264337593543950336,
+                "One price should be Q96 for reference token"
+            );
         }
-        
+
         // Test that getValue is deterministic (same inputs = same outputs)
-        (uint256 value2, uint256 feeValue2, uint256 price0X96_2, uint256 price1X96_2) = 
+        (uint256 value2, uint256 feeValue2, uint256 price0X96_2, uint256 price1X96_2) =
             v4Oracle.getValue(tokenId, token);
-        
+
         assertEq(value, value2, "getValue should be deterministic");
         assertEq(feeValue, feeValue2, "getValue fee should be deterministic");
         assertEq(price0X96, price0X96_2, "getValue price0 should be deterministic");
         assertEq(price1X96, price1X96_2, "getValue price1 should be deterministic");
     }
-    
+
     function _testGetValueEdgeCases() internal {
         // Test with invalid tokenId (should revert)
         vm.expectRevert();
         v4Oracle.getValue(999999, USDC_ADDRESS);
-        
+
         // Test with unconfigured token (should revert)
         vm.expectRevert();
         v4Oracle.getValue(nft1TokenId, address(0x1234567890123456789012345678901234567890));
     }
-    
+
     function testGetValueWithNonExistingToken() public {
         // Test with a non-existing token address
         address nonExistingToken = address(0x9999999999999999999999999999999999999999);
-        
+
         // Test with both NFT positions
         uint256[] memory testTokenIds = new uint256[](2);
         testTokenIds[0] = nft1TokenId;
         testTokenIds[1] = nft2TokenId;
-        
+
         for (uint256 i = 0; i < testTokenIds.length; i++) {
             uint256 tokenId = testTokenIds[i];
-            
+
             // This should revert with NotConfigured because the token is not configured in the oracle
             vm.expectRevert(abi.encodeWithSignature("NotConfigured()"));
             v4Oracle.getValue(tokenId, nonExistingToken);
         }
     }
-    
+
     function testGetValueWithNonExistingTokenId() public {
- 
         // Test with additional non-existing tokenIds
         uint256[] memory additionalTokenIds = new uint256[](3);
         additionalTokenIds[0] = 9999999;
         additionalTokenIds[1] = 20000000;
         additionalTokenIds[2] = 0; // Edge case: tokenId 0
-        
+
         for (uint256 i = 0; i < additionalTokenIds.length; i++) {
             uint256 tokenId = additionalTokenIds[i];
-            
+
             // All should revert because these tokenIds don't exist
             vm.expectRevert();
             v4Oracle.getValue(tokenId, USDC_ADDRESS);
         }
     }
-    
+
     function testGetPositionBreakdownConsistency() public {
         // Test with the two preconfigured NFT positions from V4ForkTestBase
         uint256[] memory testTokenIds = new uint256[](2);
         testTokenIds[0] = nft1TokenId; // NFT 1 from V4ForkTestBase
         testTokenIds[1] = nft2TokenId; // NFT 2 from V4ForkTestBase
-        
+
         for (uint256 i = 0; i < testTokenIds.length; i++) {
             uint256 tokenId = testTokenIds[i];
-            
+
             // Get data from both functions
-            (uint128 liquidityFromBreakdown, uint128 fees0FromBreakdown, uint128 fees1FromBreakdown) = 
+            (uint128 liquidityFromBreakdown, uint128 fees0FromBreakdown, uint128 fees1FromBreakdown) =
                 _getLiquidityAndFeesFromBreakdown(tokenId);
-            (uint128 liquidityFromFees, uint128 fees0FromFees, uint128 fees1FromFees) = 
+            (uint128 liquidityFromFees, uint128 fees0FromFees, uint128 fees1FromFees) =
                 v4Oracle.getLiquidityAndFees(tokenId);
-            
+
             // Assert that liquidity values match
-            assertEq(liquidityFromBreakdown, liquidityFromFees, 
-                "Liquidity from getPositionBreakdown should match getLiquidityAndFees");
-            
+            assertEq(
+                liquidityFromBreakdown,
+                liquidityFromFees,
+                "Liquidity from getPositionBreakdown should match getLiquidityAndFees"
+            );
+
             // Assert that fee values match
-            assertEq(fees0FromBreakdown, fees0FromFees, 
-                "Fees0 from getPositionBreakdown should match getLiquidityAndFees");
-            assertEq(fees1FromBreakdown, fees1FromFees, 
-                "Fees1 from getPositionBreakdown should match getLiquidityAndFees");
-            
+            assertEq(
+                fees0FromBreakdown, fees0FromFees, "Fees0 from getPositionBreakdown should match getLiquidityAndFees"
+            );
+            assertEq(
+                fees1FromBreakdown, fees1FromFees, "Fees1 from getPositionBreakdown should match getLiquidityAndFees"
+            );
+
             // Additional validation: ensure values are reasonable
             assertTrue(liquidityFromBreakdown >= 0, "Liquidity should be non-negative");
             assertTrue(fees0FromBreakdown >= 0, "Fees0 should be non-negative");
             assertTrue(fees1FromBreakdown >= 0, "Fees1 should be non-negative");
         }
     }
-    
-    function _getLiquidityAndFeesFromBreakdown(uint256 tokenId) internal view returns (
-        uint128 liquidity, 
-        uint128 fees0, 
-        uint128 fees1
-    ) {
-        (, , , liquidity, , , fees0, fees1) = v4Oracle.getPositionBreakdown(tokenId);
+
+    function _getLiquidityAndFeesFromBreakdown(uint256 tokenId)
+        internal
+        view
+        returns (uint128 liquidity, uint128 fees0, uint128 fees1)
+    {
+        (,,, liquidity,,, fees0, fees1) = v4Oracle.getPositionBreakdown(tokenId);
     }
 
     function testGetPositionBreakdown() public {
@@ -251,8 +383,8 @@ contract V4OracleTest is V4ForkTestBase {
                 uint128 fees1
             ) = v4Oracle.getPositionBreakdown(tokenId);
 
-            uint balance0 = currency0.balanceOfSelf();
-            uint balance1 = currency1.balanceOfSelf();
+            uint256 balance0 = currency0.balanceOfSelf();
+            uint256 balance1 = currency1.balanceOfSelf();
 
             bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
             bytes[] memory paramsArray = new bytes[](2);
@@ -286,29 +418,29 @@ contract V4OracleTest is V4ForkTestBase {
         uint256[] memory testTokenIds = new uint256[](2);
         testTokenIds[0] = nft1TokenId; // NFT 1 from V4ForkTestBase
         testTokenIds[1] = nft2TokenId; // NFT 2 from V4ForkTestBase
-        
+
         for (uint256 i = 0; i < testTokenIds.length; i++) {
             uint256 tokenId = testTokenIds[i];
             _testGetPriceX96ForPosition(tokenId);
         }
     }
-    
+
     /// @notice Helper function to test getPriceX96 comparison for a specific position
     /// @param tokenId The token ID of the position to test
     function _testGetPriceX96ForPosition(uint256 tokenId) internal view {
         // Get pool information from position
-        (PoolKey memory poolKey, ) = positionManager.getPoolAndPositionInfo(tokenId);
-        
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+
         address token0 = Currency.unwrap(poolKey.currency0);
         address token1 = Currency.unwrap(poolKey.currency1);
-        
+
         // Get pool's sqrtPriceX96
         PoolId poolId = PoolIdLibrary.toId(poolKey);
-        (uint160 sqrtPriceX96, , , ) = StateLibrary.getSlot0(poolManager, poolId);
-        
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolId);
+
         // Get oracle price: price of token1 in terms of token0
         uint256 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(token0, token1);
-        
+
         // Log for debugging
         console.log("=== Testing getPriceX96 Comparison ===");
         console.log("TokenId:", tokenId);
@@ -316,11 +448,11 @@ contract V4OracleTest is V4ForkTestBase {
         console.log("Token1:", token1);
         console.log("Pool price (token1/token0):", sqrtPriceX96);
         console.log("Oracle price (token1/token0):", oracleSqrtPriceX96);
-        
+
         // Both prices should be positive
         assertTrue(sqrtPriceX96 > 0, "Pool price should be positive");
         assertTrue(oracleSqrtPriceX96 > 0, "Oracle price should be positive");
-        
+
         // Calculate the difference percentage (allowing for some deviation)
         // Prices may differ due to Chainlink vs pool price, but should be reasonably close
         uint256 difference;
@@ -332,15 +464,15 @@ contract V4OracleTest is V4ForkTestBase {
             difference = oracleSqrtPriceX96 - sqrtPriceX96;
             maxPrice = oracleSqrtPriceX96;
         }
-        
+
         // Calculate percentage difference (in basis points * 100, i.e., 200 = 2%)
         // Using maxPoolPriceDifference from oracle (200 = 2%) as tolerance
         uint256 differenceBpsX100 = (difference * 10000) / maxPrice;
         uint256 maxDifferenceBpsX100 = v4Oracle.maxPoolPriceDifference();
-        
+
         console.log("Price difference (bps*100):", differenceBpsX100);
         console.log("Max allowed difference (bps*100):", maxDifferenceBpsX100);
-        
+
         // Assert that the difference is within the oracle's maxPoolPriceDifference
         // This ensures the oracle and pool prices are reasonably aligned
         assertTrue(
@@ -412,8 +544,11 @@ contract V4OracleTest is V4ForkTestBase {
         console.log("Expected sqrtPriceX96:", expectedSqrtPriceX96);
 
         // Verify they match exactly
-        assertEq(oracleSqrtPriceX96, uint160(expectedSqrtPriceX96),
-            string(abi.encodePacked("sqrtPriceX96 mismatch for ", pairName)));
+        assertEq(
+            oracleSqrtPriceX96,
+            uint160(expectedSqrtPriceX96),
+            string(abi.encodePacked("sqrtPriceX96 mismatch for ", pairName))
+        );
 
         // Verify the price is reasonable (non-zero)
         assertTrue(oracleSqrtPriceX96 > 0, "sqrtPriceX96 should be positive");
@@ -435,8 +570,7 @@ contract V4OracleTest is V4ForkTestBase {
         }
 
         uint256 maxAllowedDiff = expectedPriceX96 / 10000; // 0.01%
-        assertTrue(priceDiff <= maxAllowedDiff,
-            "Derived price should match expected within 0.01%");
+        assertTrue(priceDiff <= maxAllowedDiff, "Derived price should match expected within 0.01%");
 
         console.log("Verified:", pairName, "calculation is correct");
     }
@@ -460,16 +594,16 @@ contract V4OracleTest is V4ForkTestBase {
         uint256 chainlinkReferencePriceX96 = _getManualChainlinkPriceX96(referenceToken);
 
         // Get token decimals
-        (,,,uint8 tokenDecimals) = v4Oracle.feedConfigs(token);
+        (,,, uint8 tokenDecimals,,,,,,) = v4Oracle.feedConfigs(token);
         uint8 referenceTokenDecimals = v4Oracle.referenceTokenDecimals();
 
         // Calculate price with decimal adjustment (same as V4Oracle._getReferenceTokenPriceX96)
         if (referenceTokenDecimals > tokenDecimals) {
-            priceX96 = (10 ** (referenceTokenDecimals - tokenDecimals)) * chainlinkPriceX96
-                * Q96 / chainlinkReferencePriceX96;
+            priceX96 =
+                (10 ** (referenceTokenDecimals - tokenDecimals)) * chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96;
         } else if (referenceTokenDecimals < tokenDecimals) {
-            priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96
-                / (10 ** (tokenDecimals - referenceTokenDecimals));
+            priceX96 =
+                chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96 / (10 ** (tokenDecimals - referenceTokenDecimals));
         } else {
             priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96;
         }
@@ -487,7 +621,7 @@ contract V4OracleTest is V4ForkTestBase {
         }
 
         // Get feed config
-        (AggregatorV3Interface feed,, uint8 feedDecimals,) = v4Oracle.feedConfigs(token);
+        (AggregatorV3Interface feed,, uint8 feedDecimals,,,,,,,) = v4Oracle.feedConfigs(token);
 
         // Get latest price from Chainlink
         (, int256 answer,,,) = feed.latestRoundData();
@@ -534,6 +668,5 @@ contract V4OracleTest is V4ForkTestBase {
     }
 
     // recieves ETH from decreasing liquidity
-    receive() external payable {
-    }
+    receive() external payable {}
 }

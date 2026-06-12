@@ -5,7 +5,7 @@
 It includes:
 
 - a lending vault that accepts Uniswap v4 LP NFTs as collateral,
-- an oracle for valuing LP positions with Chainlink-backed price checks,
+- a two-source oracle for valuing LP positions with Chainlink-compatible feeds and Uniswap v3 TWAP verification,
 - a Uniswap v4 hook for on-swap automation,
 - standalone automators for operator-driven execution,
 - transformers for vault-managed position changes,
@@ -42,7 +42,7 @@ The fork-only end-to-end demo in [UnichainForkHookathonE2E.s.sol](script/demo/Un
 Notes:
 
 - this script is a local fork demo, not a broadcast deployment flow,
-- it uses mock ERC20s and mock Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
+- it uses mock ERC20s and demo-only single-source Chainlink-style feeds for the demo pool while still using live Unichain v4 infrastructure,
 - a successful run logs the immediate config-time leverage rebalance from zero debt, then the `AUTO_RANGE` remint, and finally the lower-side `AUTO_EXIT` unwind.
 
 ### Partner integrations
@@ -69,13 +69,15 @@ Main responsibilities:
 
 [src/oracle/V4Oracle.sol](src/oracle/V4Oracle.sol)
 
-Values Uniswap v4 LP positions using Chainlink feeds plus pool-price sanity checks.
+Values Uniswap v4 LP positions using Chainlink-compatible feeds plus Uniswap v3 TWAP verification. The normal production mode is `CHAINLINK_TWAP_VERIFY`: Chainlink-compatible prices are used for valuation, Uniswap v3 TWAPs verify that source, and the live v4 pool spot price is still checked against the derived oracle price.
 
 Main responsibilities:
 
 - price normalization into a common reference asset
+- Chainlink-compatible and Uniswap v3 TWAP source-deviation checks
 - LP value and fee valuation
 - pool price vs oracle price deviation checks
+- emergency oracle source-mode switching
 - L2 sequencer uptime guard support
 
 ### `RevertHook`
@@ -253,6 +255,10 @@ forge script script/DeployBase.s.sol:DeployBase \
 
 The hook deployment scripts mine a CREATE2 salt so the deployed hook address has the required Uniswap v4 hook flags.
 
+Production deployment scripts configure two-source oracle mode for lendable/collateralizable tokens. Unichain uses USDC-referenced v3 TWAP pools for its USDC vault deployment and skips WBTC collateral in production until a suitable WBTC/USDC TWAP pool exists. `ALLOW_SINGLE_SOURCE_ORACLE=true` is reserved for explicit non-production or emergency deployments.
+
+See [docs/deployment-checklist.md](docs/deployment-checklist.md) for the deployment checklist.
+
 ## Configuration model
 
 Token and feature support is configuration-dependent.
@@ -263,9 +269,20 @@ Token and feature support is configuration-dependent.
 - hook value checks and oracle-distance guardrails,
 - automator slippage checks when slippage is not disabled.
 
+Default production oracle config:
+
+- `mode`: `CHAINLINK_TWAP_VERIFY`
+- `twapSeconds`: `30 minutes` for production TWAPs; `0` uses the v3 pool spot price, matching the old V3Oracle behavior
+- source deviation: `200` basis points unless the asset needs a stricter limit
+- v4 pool spot deviation: `MAX_POOL_PRICE_DIFFERENCE = 200`
+
+A token is lendable/collateralizable only when both oracle sources are configured and healthy. Native ETH is priced through a WETH TWAP alias. `CHAINLINK` and `TWAP` are temporary emergency modes, not normal deployment modes.
+
 Relevant admin calls:
 
 - `V4Oracle.setTokenConfig(...)`
+- `V4Oracle.setOracleMode(...)`
+- `V4Oracle.setEmergencyAdmin(...)`
 - `V4Oracle.setMaxPoolPriceDifference(...)`
 - `V4Oracle.setSequencerUptimeFeed(...)`
 
@@ -314,6 +331,7 @@ Relevant admin calls:
 - Long-tail pairs can still work in some automation flows when oracle-based slippage checks are intentionally disabled with `10000` bps and only `amountOutMin` is enforced.
 - That long-tail mode applies to selected standalone automator flows, not to the hook in the same way.
 - Vault lending and borrowing always depend on the oracle and token configuration being set correctly.
+- Production vault collateral should not be enabled until the token has a healthy Chainlink-compatible feed, a healthy Uniswap v3 TWAP pool against the oracle reference token, and passing fork validation.
 - The hook and the automators are intentionally separate execution models. The hook is for swap-time automation; the automators are for operator-triggered workflows.
 - Delegatecall targets under [src/hook](src/hook) are execution helpers for the hook, not standalone products.
 
@@ -321,8 +339,8 @@ Relevant admin calls:
 
 This codebase is built around a few important trust assumptions:
 
-- owners/admins are trusted to configure feeds, collateral factors, hook allowlists, and transformers correctly,
-- oracle feeds are trusted subject to staleness and pool-difference checks,
+- owners/admins are trusted to configure feeds, TWAP pools, emergency modes, collateral factors, hook allowlists, and transformers correctly,
+- oracle sources are trusted subject to staleness, source-deviation, and v4 pool spot-deviation checks,
 - transformer contracts are privileged and must be audited before allowlisting,
 - swap data for router-based operations is supplied off-chain and must be validated by the caller or operator.
 
