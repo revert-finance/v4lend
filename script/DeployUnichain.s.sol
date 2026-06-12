@@ -40,8 +40,9 @@ contract DeployUnichain is Script {
     // CREATE2 Deployer Proxy used by Forge for CREATE2 deployments
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
-    // 0x Protocol AllowanceHolder - overridable via env if needed
-    address constant ZEROX_ALLOWANCE_HOLDER = address(0);
+    // 0x Protocol AllowanceHolder for Cancun hardfork chains, including Unichain.
+    // Source: https://docs.0x.org/docs/core-concepts/0x-cheat-sheet
+    address constant ZEROX_ALLOWANCE_HOLDER = 0x0000000000001fF3684f28c67538d4D072C22734;
 
     // ==================== Unichain Token Addresses ====================
     // Common token addresses on Unichain mainnet
@@ -85,8 +86,9 @@ contract DeployUnichain is Script {
     // Keep WBTC out of production collateral until a nonzero-liquidity, TWAP-ready pool is available.
     address constant UNISWAP_V3_WBTC_USDC = address(0);
 
-    // L2 Sequencer Uptime Feed (for L2 oracle safety)
-    address constant SEQUENCER_UPTIME_FEED = address(0); // TODO: Update if RedStone provides sequencer feed
+    // L2 Sequencer Uptime Feed (for L2 oracle safety).
+    // Chainlink does not list a Unichain sequencer uptime feed; keep zero until a provider publishes one.
+    address constant SEQUENCER_UPTIME_FEED = address(0);
 
     // ==================== Configuration Constants ====================
 

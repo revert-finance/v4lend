@@ -14,6 +14,7 @@ This checklist captures deployment gates that should be completed before a produ
 - Set source deviation to `200` unless the token needs a stricter bound.
 - Keep v4 pool spot deviation at `MAX_POOL_PRICE_DIFFERENCE = 200` unless governance has an explicit runbook for a different value.
 - Configure the L2 sequencer uptime feed where the chain requires it.
+- On Unichain, Chainlink does not currently publish a sequencer uptime feed; deploy with `ALLOW_MISSING_SEQUENCER_FEED=true` only after explicitly accepting that launch risk.
 - Run fork validation for `getPoolSqrtPriceX96`, `getValue`, borrowing, withdrawing collateral, and liquidation before enabling vault collateral.
 - On Unichain, do not enable WBTC collateral until a nonzero-liquidity WBTC/USDC v3 pool with usable TWAP history is available.
 
