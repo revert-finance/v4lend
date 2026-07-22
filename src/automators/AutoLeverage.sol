@@ -336,6 +336,8 @@ contract AutoLeverage is Automator {
             if (lendAmount > ctx.currentDebt) lendAmount = ctx.currentDebt;
             SafeERC20.forceApprove(IERC20(Currency.unwrap(ctx.lendToken)), address(vault), lendAmount);
             vault.repay(params.tokenId, lendAmount, false);
+            // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
+            SafeERC20.forceApprove(IERC20(Currency.unwrap(ctx.lendToken)), address(vault), 0);
         }
 
     }

@@ -69,6 +69,10 @@ contract AutoLend is Automator {
     /// @notice Per-position lending state
     mapping(uint256 => LendState) public lendStates;
 
+    /// @notice Depositor recorded at lend time. Used only as a fallback authority for forceExit
+    /// when the position NFT has been burned (ownerOf reverts), so vault shares stay recoverable.
+    mapping(uint256 => address) public lendPositionOwner;
+
     struct DepositParams {
         uint256 tokenId;
         uint256 amountRemoveMin0;
@@ -203,6 +207,7 @@ contract AutoLend is Automator {
 
         lendStates[params.tokenId] =
             LendState({lentToken: idleTokenAddr, shares: shares, amount: idleAmount, vault: address(lendVault)});
+        lendPositionOwner[params.tokenId] = posOwner;
         vaultPositionCount[address(lendVault)]++;
 
         _sendProtocolFees(poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1);
@@ -294,6 +299,7 @@ contract AutoLend is Automator {
         // Clear lend state and release vault reference
         vaultPositionCount[state.vault]--;
         delete lendStates[params.tokenId];
+        delete lendPositionOwner[params.tokenId];
 
         if (newTokenId > 0) {
             // Configuration must follow the migrated position
@@ -312,18 +318,27 @@ contract AutoLend is Automator {
     /// @notice Position owner force-exits an active lend: redeems all vault shares and sends proceeds to the owner.
     /// @dev Escape hatch so funds are never dependent on operators or on price returning to the withdraw zone.
     /// Charges the configured max protocol fee on generated vault yield only and deactivates the position config.
+    /// Authority is the current NFT owner; if the NFT has been burned (ownerOf reverts) the depositor recorded
+    /// at lend time may still recover the shares, so a burned position can never strand the lent capital (M-7).
     function forceExit(uint256 tokenId) external nonReentrant {
         LendState memory state = lendStates[tokenId];
         if (state.shares == 0) {
             revert NotConfigured();
         }
 
-        address posOwner = IERC721(address(positionManager)).ownerOf(tokenId);
+        // Resolve the authorized caller: normally the current NFT owner; if the NFT was burned,
+        // fall back to the depositor recorded at deposit time.
+        address posOwner;
+        try IERC721(address(positionManager)).ownerOf(tokenId) returns (address currentOwner) {
+            posOwner = currentOwner;
+        } catch {
+            posOwner = lendPositionOwner[tokenId];
+        }
         if (posOwner != msg.sender) {
             revert Unauthorized();
         }
 
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        Currency lendCurrency = Currency.wrap(state.lentToken);
 
         // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
         // Accepts current ERC4626 redeem value without a minimum-assets guard; the owner
@@ -346,10 +361,13 @@ contract AutoLend is Automator {
         // Clear all position state before external sends
         vaultPositionCount[state.vault]--;
         delete lendStates[tokenId];
+        delete lendPositionOwner[tokenId];
         delete positionConfigs[tokenId];
 
-        _sendProtocolFee(Currency.wrap(state.lentToken), protocolFee);
-        _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
+        // Redemption only produces the lent currency, so sweeping it covers all proceeds without
+        // relying on the (possibly burned) position's pool key.
+        _sendProtocolFee(lendCurrency, protocolFee);
+        _sendRemainingBalance(posOwner, lendCurrency);
 
         emit AutoLendForceExit(tokenId, state.lentToken, redeemedAmount, state.shares);
         emit PositionConfigured(tokenId, false, 0, 0, 0, 0, 0);

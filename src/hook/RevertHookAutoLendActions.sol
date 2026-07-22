@@ -186,6 +186,12 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             isToken0Lent
         );
 
+        // Clear auto-lend state before re-adding liquidity. The increase/mint below triggers
+        // _afterAddLiquidity, which re-arms position triggers from the current state; if shares
+        // are still recorded here it would arm a stale withdraw trigger (against the pre-withdraw
+        // "still lent" state) instead of the correct deposit triggers (M-1).
+        _resetAutoLendState(tokenId);
+
         if (addToExisting) {
             (uint256 restored0, uint256 restored1) = _increaseLiquidity(
                 tokenId,
@@ -210,7 +216,6 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             );
         }
 
-        _resetAutoLendState(tokenId);
         if (newTokenId > 0) {
             _migrateRemintedPosition(tokenId, newTokenId);
         } else if (restoredExistingPosition) {

@@ -632,6 +632,16 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         payable
         returns (uint128 liquidity, uint256 amount0, uint256 amount1)
     {
+        // Only the position owner (direct or via vault transform) may operate on the position.
+        // Without this, anyone could call this on a position that granted V4Utils a standing
+        // approval, collect its fees, and redirect leftovers to an arbitrary recipient (H-1).
+        _validateCaller(positionManager, params.tokenId);
+
+        if (executing) {
+            revert Reentrancy();
+        }
+        executing = true;
+
         // first fees must be removed
         (uint256 fees0, uint256 fees1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
@@ -653,6 +663,8 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         params.amount1 = params.amount1 + fees1;
 
         (liquidity, amount0, amount1) = _swapAndIncrease(params, poolKey.currency0, poolKey.currency1);
+
+        executing = false;
     }
 
     // Internal helper functions

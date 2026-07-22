@@ -261,6 +261,8 @@ contract AutoExit is Automator {
                 uint256 repayAmount = lendAmount > debt ? debt : lendAmount;
                 SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), address(vault), repayAmount);
                 (uint256 repaid,) = vault.repay(tokenId, repayAmount, false);
+                // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
+                SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), address(vault), 0);
                 if (lendToken == token0) {
                     amount0 -= repaid;
                 } else {

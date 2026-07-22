@@ -85,10 +85,15 @@ contract InterestRateModel is Ownable, IInterestRateModel, Constants {
     }
 
     /// @notice Update interest rate values (onlyOwner)
+    /// @dev This model is shared by the vault(s) and has no callback into them. A vault applies the
+    ///      current rate to its entire un-accrued window, so changing values here applies retroactively
+    ///      to interest since each vault's last accrual. Governance should call the vault's interest
+    ///      accrual (e.g. via any state-changing vault interaction) in the same transaction as setValues
+    ///      to avoid retroactive rate application (L-c).
     /// @param baseRatePerYearX64 Base rate per year multiplied by Q64
     /// @param multiplierPerYearX64 Multiplier for utilization rate below kink multiplied by Q64
     /// @param jumpMultiplierPerYearX64 Multiplier for utilization rate above kink multiplied by Q64
-    /// @param _kinkX64 Kink percentage multiplied by Q64
+    /// @param _kinkX64 Kink percentage multiplied by Q64 (SafeCast to uint64 bounds it below Q64)
     function setValues(
         uint256 baseRatePerYearX64,
         uint256 multiplierPerYearX64,

@@ -7,6 +7,7 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {AutoLend} from "../../src/automators/AutoLend.sol";
 import {Constants} from "src/shared/Constants.sol";
@@ -683,6 +684,62 @@ contract AutoLendTest is AutomatorTestBase {
 
         (bool isActive,,,,,) = autoLend.positionConfigs(tokenId);
         assertFalse(isActive, "config should be deactivated after force exit");
+    }
+
+    function _burnEmptyPosition(uint256 tokenId) internal {
+        bytes memory actions = abi.encodePacked(uint8(Actions.BURN_POSITION));
+        bytes[] memory params = new bytes[](1);
+        params[0] = abi.encode(tokenId, uint128(0), uint128(0), bytes(""));
+        vm.prank(WHALE_ACCOUNT);
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+    }
+
+    function test_ForceExitRecoversAfterPositionBurned() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _defaultConfig(0));
+
+        // Move below range and deposit (token0/USDC lent); the position is now empty (0 liquidity).
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        _deposit(operator, _depositParams(tokenId));
+
+        (, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "position should be lent");
+        assertEq(autoLend.lendPositionOwner(tokenId), WHALE_ACCOUNT, "depositor should be recorded");
+
+        // Owner burns the now-empty position NFT. ownerOf would then revert on this tokenId.
+        _burnEmptyPosition(tokenId);
+
+        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+
+        // The recorded depositor can still force-exit and recover the lent capital.
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(tokenId);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "lend state should be cleared");
+        assertEq(autoLend.lendPositionOwner(tokenId), address(0), "recorded depositor should be cleared");
+        assertGe(usdc.balanceOf(WHALE_ACCOUNT) - ownerUsdcBefore, principal, "owner should recover lent principal");
+    }
+
+    function test_RevertWhenNonOwnerForceExitsBurnedPosition() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _defaultConfig(0));
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        _deposit(operator, _depositParams(tokenId));
+
+        _burnEmptyPosition(tokenId);
+
+        // A non-depositor cannot recover a burned position's shares.
+        vm.prank(makeAddr("random"));
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoLend.forceExit(tokenId);
     }
 
     function test_RevertWhenNonOwnerForceExits() public {

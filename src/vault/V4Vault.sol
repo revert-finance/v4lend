@@ -607,6 +607,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @custom:security Reentrancy Protection: Uses transformedTokenId as mutex - reverts if already in transform
     /// @custom:security Trust Model: Transformers are whitelisted by owner and can call borrow() during transform
     /// @custom:security After transform completes, loan health is verified to ensure sufficient collateralization
+    /// @custom:security Value conservation is NOT enforced: the only post-transform check is loan health
+    ///   (collateralValue >= debt). For a zero-debt loan that check is trivially satisfied, so a transformer
+    ///   authorized on the loan can extract the entire position value. Callers of approveTransform therefore
+    ///   grant full value-extraction authority to the target; only allowlist and approve trusted transformers
+    ///   whose behavior is constrained to the loan owner (M-3, accepted under the transformer trust model).
     function transform(uint256 tokenId, address transformer, bytes calldata data)
         external
         override
@@ -651,6 +656,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         address owner = IERC721(address(positionManager)).ownerOf(newTokenId);
         if (owner != address(this)) {
             revert Unauthorized();
+        }
+
+        // remove the approval that was granted on the original token. On a remint the old token is
+        // left with the vault as an empty husk, so without this the transformer would keep a live
+        // approval on it and could transferFrom it (with any residual value) later (M-2). If a
+        // (malicious) transformer already moved the old token out, the vault no longer owns it and
+        // this reverts, failing the whole transform - the intended failsafe.
+        if (tokenId != newTokenId) {
+            IERC721(address(positionManager)).approve(address(0), tokenId);
         }
 
         // remove access for transformer
@@ -1167,8 +1181,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         // if not fully repayed - check for loan size
         if (currentShares != shares) {
-            // if resulting loan is too small - revert
-            if (_convertToAssets(loanDebtShares, newDebtExchangeRateX96, Math.Rounding.Ceil) < minLoanSize) {
+            uint256 remainingDebt = _convertToAssets(loanDebtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
+            // Enforce the minimum only when the loan was not already below it. Otherwise raising
+            // minLoanSize would brick partial repayment of pre-existing small loans; a partial repay
+            // that strictly reduces an already-undersized loan is always allowed (L-h).
+            uint256 preRepayDebt = _convertToAssets(currentShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
+            if (remainingDebt < minLoanSize && preRepayDebt >= minLoanSize) {
                 revert MinLoanSize();
             }
         }
@@ -1349,6 +1367,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         } else {
             uint256 penalty = debt * MAX_LIQUIDATION_PENALTY_X32 / Q32;
 
+            // @custom:accepted-risk AUDIT-ACCEPTED-LIQUIDATION-RESERVE-SUBSIDY
+            // When debt <= fullValue < debt*(1+maxPenalty), the liquidator is charged fullValue-penalty
+            // and the shortfall (debt - liquidatorCost) is drawn from reserves even though the collateral
+            // alone still covers the debt. This subsidy (bounded by maxPenalty of debt, from the protocol's
+            // own reserves) is intentional to keep liquidations incentivized right at the solvency boundary (L-a).
             // if value is enough to pay penalty
             if (fullValue > penalty) {
                 liquidatorCost = fullValue - penalty;

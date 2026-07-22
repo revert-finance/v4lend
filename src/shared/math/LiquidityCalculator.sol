@@ -779,6 +779,14 @@ contract LiquidityCalculator is ILiquidityCalculator {
                     cBase := add(mload(add(state, 0x80)), cBase)
                 }
                 c = cBase - FullMath.mulDiv(liquidity, (MAX_FEE_PIPS * state.sqrtLower) / FEE_DIFF, FixedPoint96.Q96);
+                // NOTE (M-5): 'c' is intentionally not guarded with `c > amount1Target`. Unlike the 'a'
+                // guard above - whose invariant (sqrtUpper > (1-f)*sqrtPrice) always holds for a valid
+                // in-range state and so only catches corruption - `c > amount1Target` does NOT always hold:
+                // when sqrtPrice is within the fee band of sqrtLower, c is legitimately a small value below
+                // amount1Target. Guarding it reverts valid tight-range swaps (breaks
+                // test_LiquidityCalculator_NarrowRange). On the rare extreme where the subtraction wraps, the
+                // result degrades to the clamped boundary price (a minimal/no-op swap), and downstream
+                // amountOutMin / oracle slippage checks bound any mispricing - so a hard revert is worse.
                 b -= cBase.mulDiv(FixedPoint96.Q96, sqrtUpper);
             }
             // Multiply a and c by 2 for quadratic formula
@@ -824,6 +832,14 @@ contract LiquidityCalculator is ILiquidityCalculator {
             {
                 // Calculate coefficient 'a'
                 uint256 aBase;
+                // NOTE (M-5): 'a' is intentionally not guarded with `a > amount0Target`. Unlike the 'c'
+                // guard below - whose invariant (sqrtPrice > (1-f)*sqrtLower) always holds for a valid
+                // in-range state and so only catches corruption - `a > amount0Target` does NOT always hold:
+                // when sqrtPrice is within the fee band of sqrtUpper, a is legitimately a small value below
+                // amount0Target. Guarding it reverts valid tight-range swaps (breaks
+                // test_LiquidityCalculator_NarrowRange). On the rare extreme where the subtraction wraps, the
+                // result degrades to the clamped boundary price (a minimal/no-op swap), and downstream
+                // amountOutMin / oracle slippage checks bound any mispricing - so a hard revert is worse.
                 assembly ("memory-safe") {
                     let liqX96 := shl(96, liquidity)
                     // a = amount0Target + liquidity / sqrtPrice - liquidity / ((1 - f) * sqrtUpper)

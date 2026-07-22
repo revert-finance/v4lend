@@ -534,7 +534,39 @@ contract V4UtilsSimpleTest is V4TestBase {
         
         console.log("swapAndIncreaseLiquidity test completed successfully");
     }
-    
+
+    function testSwapAndIncreaseLiquidityRevertsForNonOwner() public {
+        // user1 owns a position and grants V4Utils a standing approval (normal for a periphery helper)
+        uint256 tokenId = _createTestPosition(user1);
+        vm.prank(user1);
+        IERC721(address(positionManager)).approve(address(v4Utils), tokenId);
+
+        address attacker = makeAddr("attacker");
+        V4Utils.SwapAndIncreaseLiquidityParams memory params = V4Utils.SwapAndIncreaseLiquidityParams({
+            tokenId: tokenId,
+            amount0: 0,
+            amount1: 0,
+            recipient: attacker, // attacker tries to sweep the collected fees to itself
+            deadline: block.timestamp,
+            swapSourceToken: CurrencyLibrary.ADDRESS_ZERO,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
+        });
+
+        // A non-owner must not be able to operate on the position (H-1).
+        vm.prank(attacker);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        v4Utils.swapAndIncreaseLiquidity(params);
+    }
+
     function testExecuteCompoundFeesWithETH() public {
         console.log("=== Testing COMPOUND_FEES with ETH ===");
         

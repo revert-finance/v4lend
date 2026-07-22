@@ -552,7 +552,7 @@ contract LiquidityCalculatorTest is Test {
         
         assertGt(amountIn, 0, "Should have swap input");
         assertGt(sqrtPriceX96, 0, "Should have final price");
-        
+
         // Verify final price is within range
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
         uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);

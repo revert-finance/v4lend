@@ -84,11 +84,16 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function _handleAutoExit(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
+        // Skip a position whose NFT no longer exists so a dead trigger cannot revert the swap (H-2);
+        // the fired node was already popped, so it will not be revisited.
+        (address owner, bool exists) = _tryGetOwner(tokenId, false);
+        if (!exists) {
+            return;
+        }
         // @custom:accepted-risk AUDIT-ACCEPTED-HOOK-TRIGGER-CONSUME
         // Triggers are consumed before action execution. Failed actions emit recovery
         // events rather than automatically re-arming the fired trigger.
         _removePositionTriggersWithConfig(tokenId, poolKey, _positionConfigs[tokenId]);
-        address owner = _getOwner(tokenId, false);
 
         if (!_executePositionAction(
                 owner,
@@ -101,7 +106,11 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function _handleAutoLend(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
-        if (_vaults[_getOwner(tokenId, false)]) {
+        // Skip a position whose NFT no longer exists (e.g. burned while lent). ownerOf would revert
+        // and, called from _afterSwap outside any try/catch, would roll back the swap and re-arm the
+        // dead node, permanently bricking the pool (H-2). The node has already been popped here.
+        (address owner, bool exists) = _tryGetOwner(tokenId, false);
+        if (!exists || _vaults[owner]) {
             return;
         }
 
@@ -115,11 +124,16 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function _handleAutoRange(PoolKey memory poolKey, uint256 tokenId) internal {
+        // Skip a position whose NFT no longer exists so a dead trigger cannot revert the swap (H-2);
+        // the fired node was already popped, so it will not be revisited.
+        (address owner, bool exists) = _tryGetOwner(tokenId, false);
+        if (!exists) {
+            return;
+        }
         // @custom:accepted-risk AUDIT-ACCEPTED-HOOK-TRIGGER-CONSUME
         // Triggers are consumed before action execution. Failed actions emit recovery
         // events rather than automatically re-arming the fired trigger.
         _removePositionTriggersWithConfig(tokenId, poolKey, _positionConfigs[tokenId]);
-        address owner = _getOwner(tokenId, false);
 
         if (!_executePositionAction(
                 owner,
@@ -132,8 +146,9 @@ abstract contract RevertHookExecution is RevertHookConfig {
     }
 
     function _handleAutoLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal override {
-        address owner = _getOwner(tokenId, false);
-        if (!_vaults[owner]) {
+        // Skip a position whose NFT no longer exists so a dead trigger cannot revert the swap (H-2).
+        (address owner, bool exists) = _tryGetOwner(tokenId, false);
+        if (!exists || !_vaults[owner]) {
             return;
         }
 
