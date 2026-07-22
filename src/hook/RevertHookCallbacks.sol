@@ -161,6 +161,10 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         ModifyLiquidityParams calldata,
         bytes calldata
     ) internal view override returns (bytes4) {
+        // NOTE: in practice sender is always the PositionManager - the hook's own liquidity
+        // operations also go through positionManager.modifyLiquidities, so the address(this)
+        // alternative here (and the sender == address(this) early-returns below) are defensive
+        // and currently unreachable. Do not build new logic on those branches firing.
         if (sender != address(positionManager) && sender != address(this)) {
             revert Unauthorized();
         }
@@ -179,6 +183,8 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
         feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
 
+        // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
+        // hook-internal operations run the logic below, which is idempotent by design
         if (sender == address(this)) {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
@@ -204,6 +210,8 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         uint256 tokenId = uint256(params.salt);
         feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
 
+        // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
+        // hook-internal operations run the logic below, which is idempotent by design
         if (sender == address(this)) {
             return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
         }

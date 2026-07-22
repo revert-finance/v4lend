@@ -2124,6 +2124,37 @@ contract V4VaultTest is V4ForkTestBase {
         vault.notifyERC721Received(nft1TokenId, nft1Owner);
     }
 
+    function test_NotifyERC721Received_RevertWithoutCustody() public {
+        _setupBasicLoan(false);
+
+        NotifyWithoutCustodyTransformer transformer = new NotifyWithoutCustodyTransformer(vault);
+        vault.setTransformer(address(transformer), true);
+
+        // nft2 exists but the vault does not hold it - a transformer must not be
+        // able to register it as a loan during transform
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(nft2TokenId), nft2Owner, "vault should not hold nft2"
+        );
+
+        vm.prank(nft1Owner);
+        vm.expectRevert(Constants.TransformFailed.selector);
+        vault.transform(
+            nft1TokenId,
+            address(transformer),
+            abi.encodeCall(NotifyWithoutCustodyTransformer.attemptNotify, (nft2TokenId))
+        );
+    }
+
+    function test_SetReserveFactor_RevertAboveMax() public {
+        uint32 maxReserveFactor = vault.MAX_RESERVE_FACTOR_X32();
+
+        vault.setReserveFactor(maxReserveFactor);
+        assertEq(vault.reserveFactorX32(), maxReserveFactor, "max reserve factor should be accepted");
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.setReserveFactor(maxReserveFactor + 1);
+    }
+
     function test_DecreaseLiquidityAndCollect_AllowsHealthyWithdrawal() public {
         _setupBasicLoan(false);
 
@@ -2234,6 +2265,18 @@ contract DecreaseLiquidityDuringTransformTransformer {
 
     function attemptDecrease(IVault.DecreaseLiquidityAndCollectParams calldata params) external {
         vault.decreaseLiquidityAndCollect(params);
+    }
+}
+
+contract NotifyWithoutCustodyTransformer {
+    IVault internal immutable vault;
+
+    constructor(IVault _vault) {
+        vault = _vault;
+    }
+
+    function attemptNotify(uint256 foreignTokenId) external {
+        vault.notifyERC721Received(foreignTokenId, address(this));
     }
 }
 

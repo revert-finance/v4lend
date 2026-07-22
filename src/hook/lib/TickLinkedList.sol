@@ -198,6 +198,11 @@ library TickLinkedList {
 
     /**
      * @dev Pops up to maxCount tokenIds from a tick without copying the full tick array.
+     * Popped entries are not cleared - tokenIdStart just advances past them. Because add()
+     * only dedups against the active region [tokenIdStart, length), a popped tokenId that is
+     * re-inserted at the same tick (e.g. requeued after a partial pop) is appended again,
+     * temporarily duplicating it in the array. This is accepted: duplicates are bounded by
+     * the per-swap execution cap and the whole array is deleted once the tick fully drains.
      * @param self Stored linked list from contract.
      * @param _tick The tick value.
      * @param maxCount Maximum number of tokenIds to pop.
