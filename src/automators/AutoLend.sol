@@ -312,6 +312,11 @@ contract AutoLend is Automator {
     /// @notice Position owner force-exits an active lend: redeems all vault shares and sends proceeds to the owner.
     /// @dev Escape hatch so funds are never dependent on operators or on price returning to the withdraw zone.
     /// Charges the configured max protocol fee on generated vault yield only and deactivates the position config.
+    /// @dev Authority is strictly the CURRENT NFT owner (via ownerOf), so a transferred position is always
+    /// exitable by its new owner. We deliberately do not fall back to a recorded depositor when ownerOf reverts:
+    /// the position may have changed hands after the deposit, and paying a stale depositor would misdirect funds
+    /// that belong to the current owner. Consequently, burning a lent position locks its vault shares
+    /// (self-inflicted) - owners must forceExit or withdraw before burning the empty position NFT.
     function forceExit(uint256 tokenId) external nonReentrant {
         LendState memory state = lendStates[tokenId];
         if (state.shares == 0) {
@@ -323,7 +328,7 @@ contract AutoLend is Automator {
             revert Unauthorized();
         }
 
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        Currency lendCurrency = Currency.wrap(state.lentToken);
 
         // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
         // Accepts current ERC4626 redeem value without a minimum-assets guard; the owner
@@ -348,8 +353,10 @@ contract AutoLend is Automator {
         delete lendStates[tokenId];
         delete positionConfigs[tokenId];
 
-        _sendProtocolFee(Currency.wrap(state.lentToken), protocolFee);
-        _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
+        // Redemption only produces the lent currency, so sweeping it covers all proceeds without
+        // depending on the position's pool key.
+        _sendProtocolFee(lendCurrency, protocolFee);
+        _sendRemainingBalance(posOwner, lendCurrency);
 
         emit AutoLendForceExit(tokenId, state.lentToken, redeemedAmount, state.shares);
         emit PositionConfigured(tokenId, false, 0, 0, 0, 0, 0);

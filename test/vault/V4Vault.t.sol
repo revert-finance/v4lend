@@ -2116,6 +2116,30 @@ contract V4VaultTest is V4ForkTestBase {
         );
     }
 
+    function test_Transform_RemintClearsApprovalOnOldToken() public {
+        _setupBasicLoan(true);
+
+        V4Utils.Instructions memory inst = _buildChangeRangeInstructions(nft1TokenId, nft1Owner);
+
+        vm.prank(nft1Owner);
+        uint256 newTokenId =
+            vault.transform(nft1TokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (nft1TokenId, inst)));
+
+        assertGt(newTokenId, nft1TokenId, "transform should remint to a new token");
+        // The transformer's ERC721 approval on the old husk must be cleared so it cannot
+        // transferFrom the old token (with any residual value) later (M-2).
+        assertEq(
+            IERC721(address(positionManager)).getApproved(nft1TokenId),
+            address(0),
+            "transformer approval on old token should be cleared"
+        );
+        assertEq(
+            IERC721(address(positionManager)).getApproved(newTokenId),
+            address(0),
+            "transformer approval on new token should be cleared"
+        );
+    }
+
     function test_NotifyERC721Received_RevertOutsideTransformMode() public {
         _setupBasicLoan(false);
 

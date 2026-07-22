@@ -281,6 +281,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             if (effectiveTwapToken == address(0)) {
                 revert InvalidConfig();
             }
+            // @custom:accepted-risk AUDIT-ACCEPTED-ORACLE-ZERO-TWAP-SPOT
+            // twapSeconds == 0 is intentionally allowed and makes the reference read the pool's slot0
+            // spot (v3-like), see _getReferencePoolPriceX96 and testZeroTwapWindowUsesPoolSpotLikeV3.
+            // The owner opts into this per token; spot is manipulable within a block, so it must only be
+            // configured for references where that is acceptable. A non-zero window is required otherwise (M-6b).
             twapTokenIsToken0 = _validateTWAPPool(twapPool, effectiveTwapToken);
         } else if (address(twapPool) != address(0)) {
             if (effectiveTwapToken == address(0)) {

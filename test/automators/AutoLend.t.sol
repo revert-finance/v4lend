@@ -7,6 +7,7 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {AutoLend} from "../../src/automators/AutoLend.sol";
 import {Constants} from "src/shared/Constants.sol";
@@ -683,6 +684,32 @@ contract AutoLendTest is AutomatorTestBase {
 
         (bool isActive,,,,,) = autoLend.positionConfigs(tokenId);
         assertFalse(isActive, "config should be deactivated after force exit");
+    }
+
+    function _burnEmptyPosition(uint256 tokenId) internal {
+        bytes memory actions = abi.encodePacked(uint8(Actions.BURN_POSITION));
+        bytes[] memory params = new bytes[](1);
+        params[0] = abi.encode(tokenId, uint128(0), uint128(0), bytes(""));
+        vm.prank(WHALE_ACCOUNT);
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+    }
+
+    function test_ForceExitRevertsAfterBurn() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _defaultConfig(0));
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        _deposit(operator, _depositParams(tokenId));
+
+        // Burning the empty lent position destroys the ownerOf record. forceExit then reverts for
+        // everyone (shares locked, self-inflicted) rather than misdirecting funds to a stale depositor.
+        _burnEmptyPosition(tokenId);
+
+        vm.prank(WHALE_ACCOUNT);
+        vm.expectRevert();
+        autoLend.forceExit(tokenId);
     }
 
     function test_RevertWhenNonOwnerForceExits() public {
