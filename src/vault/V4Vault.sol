@@ -52,6 +52,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     uint32 public constant MIN_RESERVE_PROTECTION_FACTOR_X32 = uint32(Q32 / 100); //1%
 
     // forge-lint: disable-next-line(unsafe-typecast)
+    uint32 public constant MAX_RESERVE_FACTOR_X32 = uint32(Q32 / 2); //50%
+
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MAX_DAILY_LEND_INCREASE_X32 = uint32(Q32 / 10); //10%
     // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MAX_DAILY_DEBT_INCREASE_X32 = uint32(Q32 / 10); //10%
@@ -472,6 +475,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Unauthorized();
         }
 
+        // the vault must actually hold the NFT - prevents registering a loan for a position not in custody
+        if (IERC721(address(positionManager)).ownerOf(tokenId) != address(this)) {
+            revert Unauthorized();
+        }
+
         _handleErc721Received(tokenId, recipient);
     }
 
@@ -548,6 +556,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice Allows another address to call transform on behalf of owner (on a given token)
+    /// @dev Approvals are keyed per (owner, tokenId, target) and are NOT cleared by remove(): if the
+    /// same owner re-deposits the same tokenId later, previously granted approvals are active again.
+    /// Approvals are also copied to the replacement tokenId when a transform remints the position.
+    /// Owners who want to revoke access must call this with isActive = false per target.
     /// @param tokenId The token to be permitted
     /// @param target The address to be allowed
     /// @param isActive If it allowed or not
@@ -870,6 +882,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice Removes position from the vault (only possible when all repayed)
+    /// @dev Transform approvals granted via approveTransform are intentionally not cleared here (the
+    /// per-target inner mapping cannot be enumerated); they become active again if the same owner
+    /// re-deposits the same tokenId. See approveTransform for revocation.
     /// @param tokenId The token ID to use as collateral
     /// @param recipient Address to recieve NFT
     /// @param data Optional data to send to reciever
@@ -974,6 +989,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @notice sets reserve factor - percentage difference between debt and lend interest (onlyOwner)
     /// @param _reserveFactorX32 reserve factor multiplied by Q32
     function setReserveFactor(uint32 _reserveFactorX32) external onlyOwner {
+        if (_reserveFactorX32 > MAX_RESERVE_FACTOR_X32) {
+            revert InvalidConfig();
+        }
         // update interest to be sure that reservefactor change is applied from now on
         _updateGlobalInterest();
         reserveFactorX32 = _reserveFactorX32;

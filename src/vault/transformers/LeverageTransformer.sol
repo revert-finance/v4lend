@@ -19,6 +19,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {Swapper} from "../../shared/swap/Swapper.sol";
+import {NativeAssetLib} from "../../shared/NativeAssetLib.sol";
 import {IVault} from "../interfaces/IVault.sol";
 import {Transformer} from "./Transformer.sol";
 
@@ -115,7 +116,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             params.tokenId, liquidity, type(uint128).max, type(uint128).max, params.increaseLiquidityHookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: NativeAssetLib.balanceIfNative(token0, token1)}(
             abi.encode(actions, paramsArray), params.deadline
         );
 
@@ -483,7 +484,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             params.mintHookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: NativeAssetLib.balanceIfNative(poolKey.currency0, poolKey.currency1)}(
             abi.encode(actions, mintParams), params.deadline
         );
     }
@@ -643,7 +644,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             params.mintHookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: NativeAssetLib.balanceIfNative(params.token0, params.token1)}(
             abi.encode(actions, mintParams), params.deadline
         );
 

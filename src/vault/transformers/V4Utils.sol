@@ -17,6 +17,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {Swapper} from "../../shared/swap/Swapper.sol";
+import {NativeAssetLib} from "../../shared/NativeAssetLib.sol";
 import {Transformer} from "./Transformer.sol";
 
 /// @title V4Utils v1.0
@@ -773,7 +774,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
             params.mintHookData // hookData
         );
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: NativeAssetLib.balanceIfNative(params.token0, params.token1)}(
             abi.encode(actions, paramsArray), params.deadline
         );
 
@@ -802,7 +803,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
 
         paramsArray[0] = abi.encode(params.tokenId, liquidity, total0, total1, params.increaseLiquidityHookData);
 
-        positionManager.modifyLiquidities{value: address(this).balance}(
+        positionManager.modifyLiquidities{value: NativeAssetLib.balanceIfNative(poolKey.currency0, poolKey.currency1)}(
             abi.encode(actions, paramsArray), params.deadline
         );
 

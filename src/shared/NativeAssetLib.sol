@@ -19,6 +19,14 @@ library NativeAssetLib {
         return 0;
     }
 
+    /// @notice Returns the contract's whole native balance when one of the pool tokens is native, 0 otherwise.
+    /// @dev Used to attach msg.value to modifyLiquidities calls: whole-balance forwarding is only safe
+    /// when the action set includes a native SWEEP back to the caller; for non-native pools no value
+    /// must be attached, or stray ETH would be donated to the PoolManager.
+    function balanceIfNative(Currency token0, Currency token1) internal view returns (uint256) {
+        return (token0.isAddressZero() || token1.isAddressZero()) ? address(this).balance : 0;
+    }
+
     function isDirectWrappedNativeSwap(IWETH9 weth, Currency tokenIn, Currency tokenOut)
         internal
         pure
