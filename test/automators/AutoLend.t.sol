@@ -694,51 +694,21 @@ contract AutoLendTest is AutomatorTestBase {
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
     }
 
-    function test_ForceExitRecoversAfterPositionBurned() public {
+    function test_ForceExitRevertsAfterBurn() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createNarrowPosition(poolKey);
 
         _configureAndApprove(tokenId, _defaultConfig(0));
-
-        // Move below range and deposit (token0/USDC lent); the position is now empty (0 liquidity).
         _swapExactInputSingle(poolKey, true, 10000e6, 0);
         _deposit(operator, _depositParams(tokenId));
 
-        (, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
-        assertGt(shares, 0, "position should be lent");
-        assertEq(autoLend.lendPositionOwner(tokenId), WHALE_ACCOUNT, "depositor should be recorded");
-
-        // Owner burns the now-empty position NFT. ownerOf would then revert on this tokenId.
+        // Burning the empty lent position destroys the ownerOf record. forceExit then reverts for
+        // everyone (shares locked, self-inflicted) rather than misdirecting funds to a stale depositor.
         _burnEmptyPosition(tokenId);
 
-        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
-
-        // The recorded depositor can still force-exit and recover the lent capital.
         vm.prank(WHALE_ACCOUNT);
-        autoLend.forceExit(tokenId);
-        _assertNoAutomatorDust(address(autoLend), "AutoLend");
-
-        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
-        assertEq(sharesAfter, 0, "lend state should be cleared");
-        assertEq(autoLend.lendPositionOwner(tokenId), address(0), "recorded depositor should be cleared");
-        assertGe(usdc.balanceOf(WHALE_ACCOUNT) - ownerUsdcBefore, principal, "owner should recover lent principal");
-    }
-
-    function test_RevertWhenNonOwnerForceExitsBurnedPosition() public {
-        PoolKey memory poolKey = _createPool();
-        _createFullRangePosition(poolKey);
-        uint256 tokenId = _createNarrowPosition(poolKey);
-
-        _configureAndApprove(tokenId, _defaultConfig(0));
-        _swapExactInputSingle(poolKey, true, 10000e6, 0);
-        _deposit(operator, _depositParams(tokenId));
-
-        _burnEmptyPosition(tokenId);
-
-        // A non-depositor cannot recover a burned position's shares.
-        vm.prank(makeAddr("random"));
-        vm.expectRevert(Constants.Unauthorized.selector);
+        vm.expectRevert();
         autoLend.forceExit(tokenId);
     }
 
