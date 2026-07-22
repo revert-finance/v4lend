@@ -452,7 +452,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @dev The position NFT must be approved for this contract. The recipient becomes the loan owner.
     /// @param tokenId The token ID of the Uniswap V4 position NFT to use as collateral
     /// @param recipient Address to receive ownership of the position/loan in the vault
-    /// @custom:security The hook attached to the position must be in hookAllowList or be address(0)
+    /// @custom:security The hook attached to the position (address(0) for non-hooked positions) must be in
+    /// hookAllowList. Non-hooked positions are only accepted if address(0) has been explicitly allowlisted.
     function create(uint256 tokenId, address recipient) external override {
         if (recipient == address(0)) {
             revert InvalidConfig();

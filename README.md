@@ -293,6 +293,8 @@ Relevant admin calls:
 - allowed position hooks,
 - allowed transformer contracts.
 
+Only positions whose hook is explicitly allowlisted can be deposited as collateral. Non-hooked positions require allowlisting `address(0)`; the production deployment scripts allowlist only the `RevertHook`, so plain (non-hooked) v4 positions are not accepted as collateral unless an admin additionally allowlists `address(0)`.
+
 Relevant admin calls:
 
 - `V4Vault.setTokenConfig(...)`
