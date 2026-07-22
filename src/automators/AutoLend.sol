@@ -27,6 +27,7 @@ contract AutoLend is Automator {
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event AutoLendDeposit(uint256 indexed tokenId, address token, uint256 amount, uint256 shares);
     event AutoLendWithdraw(uint256 indexed tokenId, uint256 newTokenId, address token, uint256 amount, uint256 shares);
+    event AutoLendForceExit(uint256 indexed tokenId, address token, uint256 amount, uint256 shares);
     event PositionConfigured(
         uint256 indexed tokenId,
         bool isActive,
@@ -306,6 +307,52 @@ contract AutoLend is Automator {
         _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
 
         emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
+    }
+
+    /// @notice Position owner force-exits an active lend: redeems all vault shares and sends proceeds to the owner.
+    /// @dev Escape hatch so funds are never dependent on operators or on price returning to the withdraw zone.
+    /// Charges the configured max protocol fee on generated vault yield only and deactivates the position config.
+    function forceExit(uint256 tokenId) external nonReentrant {
+        LendState memory state = lendStates[tokenId];
+        if (state.shares == 0) {
+            revert NotConfigured();
+        }
+
+        address posOwner = IERC721(address(positionManager)).ownerOf(tokenId);
+        if (posOwner != msg.sender) {
+            revert Unauthorized();
+        }
+
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
+        // Accepts current ERC4626 redeem value without a minimum-assets guard; the owner
+        // explicitly opts into exiting at the vault's current rate.
+        uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
+
+        uint256 protocolFee;
+        {
+            uint256 yieldAmount = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
+            (redeemedAmount, protocolFee) =
+                _calculateProtocolFee(redeemedAmount, yieldAmount, positionConfigs[tokenId].maxRewardX64);
+        }
+
+        // If lent token is native ETH (stored as WETH in vault), unwrap the full redeemed amount so
+        // protocol fees and owner proceeds are both handled in native ETH.
+        if (state.lentToken == address(0)) {
+            weth.withdraw(redeemedAmount + protocolFee);
+        }
+
+        // Clear all position state before external sends
+        vaultPositionCount[state.vault]--;
+        delete lendStates[tokenId];
+        delete positionConfigs[tokenId];
+
+        _sendProtocolFee(Currency.wrap(state.lentToken), protocolFee);
+        _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
+
+        emit AutoLendForceExit(tokenId, state.lentToken, redeemedAmount, state.shares);
+        emit PositionConfigured(tokenId, false, 0, 0, 0, 0, 0);
     }
 
     function _requireNonVaultPosition(uint256 tokenId) internal view returns (address posOwner) {

@@ -655,6 +655,123 @@ contract AutoLendTest is AutomatorTestBase {
         assertFalse(isActiveOld, "old position config should be cleared");
     }
 
+    function test_ForceExitRedeemsSharesToOwner() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _defaultConfig(0));
+
+        // Move below range and deposit (token0/USDC lent)
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        _deposit(operator, _depositParams(tokenId));
+
+        (, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "position should be lent");
+        assertEq(autoLend.vaultPositionCount(address(usdcLendVault)), 1, "vault should be referenced");
+
+        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(tokenId);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "lend state should be cleared");
+        assertEq(autoLend.vaultPositionCount(address(usdcLendVault)), 0, "vault reference should be released");
+        assertGe(usdc.balanceOf(WHALE_ACCOUNT) - ownerUsdcBefore, principal, "owner should receive lent principal");
+
+        (bool isActive,,,,,) = autoLend.positionConfigs(tokenId);
+        assertFalse(isActive, "config should be deactivated after force exit");
+    }
+
+    function test_RevertWhenNonOwnerForceExits() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        _configureAndApprove(tokenId, _defaultConfig(0));
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        _deposit(operator, _depositParams(tokenId));
+
+        vm.prank(makeAddr("random"));
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoLend.forceExit(tokenId);
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoLend.forceExit(tokenId);
+    }
+
+    function test_RevertWhenForceExitWithoutActiveLend() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        vm.prank(WHALE_ACCOUNT);
+        vm.expectRevert(Constants.NotConfigured.selector);
+        autoLend.forceExit(tokenId);
+    }
+
+    function test_ForceExitChargesProtocolFeeOnYield() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+
+        uint64 maxReward = uint64(Q64 * 10 / 100);
+        _configureAndApprove(tokenId, _defaultConfig(maxReward));
+
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        _deposit(operator, _depositParams(tokenId));
+
+        (, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "position should be lent");
+
+        uint256 donatedYield = principal + 1;
+        vm.prank(WHALE_ACCOUNT);
+        usdc.transfer(address(usdcLendVault), donatedYield);
+        usdcLendVault.simulatePositiveYield(10000); // +100% assets/share
+
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(tokenId);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+
+        assertGt(
+            usdc.balanceOf(protocolFeeRecipient),
+            recipientUsdcBefore,
+            "protocol fee should be charged from vault yield on force exit"
+        );
+    }
+
+    function test_ForceExitETHNativePosition() public {
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
+
+        autoLend.setAutoLendVault(address(0), IERC4626(address(wethLendVault)));
+        _configureAndApprove(tokenId, _defaultConfig(0));
+
+        _swapExactInputSingleEth(poolKey, true, 1e16, 0);
+        _deposit(operator, _depositParams(tokenId));
+
+        (address lentToken, uint256 shares, uint256 principal,) = autoLend.lendStates(tokenId);
+        assertEq(lentToken, address(0), "expected native ETH lend side");
+        assertGt(shares, 0, "position should be lent");
+
+        uint256 ownerEthBefore = WHALE_ACCOUNT.balance;
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(tokenId);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "lend state should be cleared");
+        assertEq(address(autoLend).balance, 0, "no native ETH should remain in contract");
+        assertGe(WHALE_ACCOUNT.balance - ownerEthBefore, principal, "owner should receive native ETH proceeds");
+    }
+
     function test_ProtocolFeesAreSentToRecipient() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);
