@@ -138,7 +138,10 @@ src/
   RevertHook.sol
   automators/
   hook/
+    interfaces/
+    lib/
   oracle/
+    interfaces/
   shared/
     math/
     planning/
@@ -150,9 +153,16 @@ src/
 
 test/
   automators/
+    utils/
   hook/
+    invariants/
+    lib/
   oracle/
   shared/
+    math/
+    planning/
+  utils/
+    libraries/
   vault/
     invariants/
     support/
@@ -276,7 +286,7 @@ Default production oracle config:
 - source deviation: `200` basis points unless the asset needs a stricter limit
 - v4 pool spot deviation: `MAX_POOL_PRICE_DIFFERENCE = 200`
 
-A token is lendable/collateralizable only when both oracle sources are configured and healthy. Native ETH is priced through a WETH TWAP alias. `CHAINLINK` and `TWAP` are temporary emergency modes, not normal deployment modes.
+A token is lendable/collateralizable only when both oracle sources are configured and healthy. Native ETH is priced through a WETH TWAP alias. `TWAP_CHAINLINK_VERIFY` is the inverted two-source mode (TWAP valuation verified against the Chainlink-compatible feed); `CHAINLINK` and `TWAP` are temporary single-source emergency modes, not normal deployment modes.
 
 Relevant admin calls:
 
