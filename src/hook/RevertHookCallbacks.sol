@@ -3,16 +3,16 @@ pragma solidity ^0.8.30;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
+import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
 import {RevertHookExecution} from "./RevertHookExecution.sol";
 
 /// @title RevertHookCallbacks
@@ -27,9 +27,9 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             afterInitialize: true,
             beforeAddLiquidity: true,
             afterAddLiquidity: true,
-            beforeRemoveLiquidity: false,
+            beforeRemoveLiquidity: true,
             afterRemoveLiquidity: true,
-            beforeSwap: false,
+            beforeSwap: true,
             afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
@@ -44,6 +44,38 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         int24 tickLower = _getTickLower(tick, key.tickSpacing);
         _tickLowerLasts[key.toId()] = tickLower;
         return BaseHook.afterInitialize.selector;
+    }
+
+    /// @dev Fail-open auction integration: the controller syncs auction epochs, drips vested
+    ///      auction proceeds to in-range LPs and returns the LP fee override for this swap
+    ///      (only meaningful on dynamic-fee pools). A reverting or unset controller never
+    ///      blocks swaps - the pool then uses its stored (baseline) dynamic fee.
+    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        uint24 lpFeeOverride;
+        if (address(hookAuctionController) != address(0)) {
+            try hookAuctionController.beforeSwap(key, sender) returns (uint24 fee) {
+                lpFeeOverride = fee;
+            } catch {
+                emit AuctionControllerFailed(key.toId());
+            }
+        }
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeOverride);
+    }
+
+    /// @dev Fail-open notification so vested auction proceeds are dripped to the liquidity
+    ///      that was in range while they vested, before the liquidity set changes.
+    function _notifyAuctionLiquidityChange(PoolKey calldata key) internal {
+        if (address(hookAuctionController) == address(0)) {
+            return;
+        }
+        try hookAuctionController.beforeLiquidityChange(key) {}
+        catch {
+            emit AuctionControllerFailed(key.toId());
+        }
     }
 
     function _afterSwap(address caller, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
@@ -157,10 +189,10 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
     function _beforeAddLiquidity(
         address sender,
-        PoolKey calldata,
+        PoolKey calldata key,
         ModifyLiquidityParams calldata,
         bytes calldata
-    ) internal view override returns (bytes4) {
+    ) internal override returns (bytes4) {
         // NOTE: in practice sender is always the PositionManager - the hook's own liquidity
         // operations also go through positionManager.modifyLiquidities, so the address(this)
         // alternative here (and the sender == address(this) early-returns below) are defensive
@@ -168,7 +200,21 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         if (sender != address(positionManager) && sender != address(this)) {
             revert Unauthorized();
         }
+        _notifyAuctionLiquidityChange(key);
         return BaseHook.beforeAddLiquidity.selector;
+    }
+
+    function _beforeRemoveLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata,
+        bytes calldata
+    ) internal override returns (bytes4) {
+        if (sender != address(positionManager) && sender != address(this)) {
+            revert Unauthorized();
+        }
+        _notifyAuctionLiquidityChange(key);
+        return BaseHook.beforeRemoveLiquidity.selector;
     }
 
     function _afterAddLiquidity(
@@ -227,76 +273,20 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
     }
 
+    /// @dev Implementation lives in RevertHookAutoLendActions (delegatecall, shared storage
+    ///      layout) to keep the hook's own bytecode under the EIP-170 limit.
     function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta)
         internal
         returns (BalanceDelta newFeeDelta)
     {
-        PositionState storage state = _positionStates[tokenId];
-        uint32 accumulatedActiveTime = state.accumulatedActiveTime;
-        uint32 lastActivated = state.lastActivated;
-        uint32 currentTime = uint32(block.timestamp);
-        if (lastActivated > 0) {
-            accumulatedActiveTime += currentTime - lastActivated;
-            state.lastActivated = currentTime;
-        }
-
-        uint32 lastCollect = state.lastCollect;
-        uint32 feeTime = lastCollect == 0 ? 0 : currentTime - lastCollect;
-        state.lastCollect = currentTime;
-        state.accumulatedActiveTime = 0;
-
-        if (feeTime == 0 || accumulatedActiveTime == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
-        }
-        if (accumulatedActiveTime > feeTime) {
-            accumulatedActiveTime = feeTime;
-        }
-
-        uint16 lpFeeBps = hookFeeController.lpFeeBps();
-        if (lpFeeBps == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
-        }
-
-        // Widen arithmetic to int256 so intermediate products cannot overflow once
-        // `feeTime` exceeds ~2.485 days (where `10000 * int32(feeTime)` exceeds int32.max).
-        int256 activeTimeSigned = int256(uint256(accumulatedActiveTime));
-        int256 feeTimeSigned = int256(uint256(feeTime));
-        int256 lpFeeBpsSigned = int256(uint256(lpFeeBps));
-        int256 denominator = int256(10000) * feeTimeSigned;
-
-        int128 protocolFee0 = SafeCast.toInt128(
-            activeTimeSigned * int256(feeDelta.amount0()) * lpFeeBpsSigned / denominator
+        (bool success, bytes memory returndata) = address(autoLendActions).delegatecall(
+            abi.encodeCall(RevertHookAutoLendActions.takeProtocolFees, (tokenId, key, feeDelta))
         );
-        int128 protocolFee1 = SafeCast.toInt128(
-            activeTimeSigned * int256(feeDelta.amount1()) * lpFeeBpsSigned / denominator
-        );
-
-        if (protocolFee0 == 0 && protocolFee1 == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returndata, 0x20), mload(returndata))
+            }
         }
-
-        address feeRecipient = hookFeeController.protocolFeeRecipient();
-
-        if (protocolFee0 > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            poolManager.take(key.currency0, feeRecipient, uint256(int256(protocolFee0)));
-        }
-        if (protocolFee1 > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            poolManager.take(key.currency1, feeRecipient, uint256(int256(protocolFee1)));
-        }
-
-        emit SendProtocolFee(
-            tokenId,
-            key.currency0,
-            key.currency1,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256(int256(protocolFee0)),
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256(int256(protocolFee1)),
-            feeRecipient
-        );
-
-        newFeeDelta = toBalanceDelta(protocolFee0, protocolFee1);
+        newFeeDelta = abi.decode(returndata, (BalanceDelta));
     }
 }

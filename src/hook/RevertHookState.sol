@@ -131,6 +131,7 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // Special events for swap failures / modifyLiquidities failures
     event HookActionFailed(uint256 indexed tokenId, Mode mode);
+    event AuctionControllerFailed(PoolId indexed poolId);
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
     event HookSwapPartial(uint256 indexed tokenId, bool zeroForOne, uint256 requested, uint256 swapped);
     event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 import {IV4Oracle} from "./oracle/interfaces/IV4Oracle.sol";
 import {IHookFeeController} from "./hook/interfaces/IHookFeeController.sol";
+import {IHookAuctionController} from "./hook/interfaces/IHookAuctionController.sol";
 import {RevertHookAutoLendActions} from "./hook/RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookBase} from "./hook/RevertHookBase.sol";
@@ -21,6 +22,7 @@ contract RevertHook is RevertHookCallbacks {
         address owner_,
         IV4Oracle _v4Oracle,
         IHookFeeController _hookFeeController,
+        IHookAuctionController _hookAuctionController,
         RevertHookPositionActions _positionActions,
         RevertHookAutoLeverageActions _autoLeverageActions,
         RevertHookAutoLendActions _autoLendActions
@@ -29,6 +31,7 @@ contract RevertHook is RevertHookCallbacks {
             owner_,
             _v4Oracle,
             _hookFeeController,
+            _hookAuctionController,
             _positionActions,
             _autoLeverageActions,
             _autoLendActions

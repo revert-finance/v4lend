@@ -32,6 +32,7 @@ import {LeverageTransformer} from "src/vault/transformers/LeverageTransformer.so
 import {RevertHook} from "src/RevertHook.sol";
 import {RevertHookState} from "src/hook/RevertHookState.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
@@ -201,11 +202,13 @@ contract UnichainForkHookathonE2E is Script {
         address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
         address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
         address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
+        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
             deployment.oracle,
             HookFeeController(predictedFeeController),
+            HookAuctionController(predictedAuctionController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
             RevertHookAutoLendActions(predictedAutoLendActions)
@@ -245,10 +248,15 @@ contract UnichainForkHookathonE2E is Script {
             deployment.routeController,
             swapActions
         );
+        HookAuctionController auctionController =
+            new HookAuctionController(expectedHookAddress, deployment.oracle.poolManager());
+        require(address(auctionController) == predictedAuctionController, "Demo: auction controller address mismatch");
+
         deployment.revertHook = new RevertHook{salt: salt}(
             deployer,
             deployment.oracle,
             feeController,
+            auctionController,
             deployment.positionActions,
             deployment.autoLeverageActions,
             deployment.autoLendActions
@@ -906,7 +914,8 @@ contract UnichainForkHookathonE2E is Script {
     function getHookFlags() internal pure returns (uint160) {
         return uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
         );
     }

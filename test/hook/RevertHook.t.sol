@@ -32,6 +32,7 @@ import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol"
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {HookOwnedControllerBase} from "src/hook/HookOwnedControllerBase.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
@@ -58,6 +59,7 @@ contract RevertHookTest is BaseTest {
     RevertHook hook;
     HookFeeController feeController;
     HookRouteController routeController;
+    HookAuctionController auctionController;
     LiquidityCalculator liquidityCalculator;
     PoolId poolId;
 
@@ -90,8 +92,9 @@ contract RevertHookTest is BaseTest {
         // Deploy the hook to an address with the correct flags
         address flags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                    | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
                     | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
@@ -105,6 +108,7 @@ contract RevertHookTest is BaseTest {
         liquidityCalculator = new LiquidityCalculator();
         feeController = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
         routeController = new HookRouteController(flags);
+        auctionController = new HookAuctionController(flags, poolManager);
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
 
         // Deploy RevertHook action targets
@@ -118,7 +122,7 @@ contract RevertHookTest is BaseTest {
             );
 
         bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
+            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(payable(flags));
@@ -3209,9 +3213,9 @@ contract RevertHookTest is BaseTest {
         assertTrue(permissions.afterInitialize, "afterInitialize should be enabled");
         assertTrue(permissions.beforeAddLiquidity, "beforeAddLiquidity should be enabled");
         assertTrue(permissions.afterAddLiquidity, "afterAddLiquidity should be enabled");
-        assertFalse(permissions.beforeRemoveLiquidity, "beforeRemoveLiquidity should be disabled");
+        assertTrue(permissions.beforeRemoveLiquidity, "beforeRemoveLiquidity should be enabled (auction drip)");
         assertTrue(permissions.afterRemoveLiquidity, "afterRemoveLiquidity should be enabled");
-        assertFalse(permissions.beforeSwap, "beforeSwap should be disabled");
+        assertTrue(permissions.beforeSwap, "beforeSwap should be enabled (auction fee override)");
         assertTrue(permissions.afterSwap, "afterSwap should be enabled");
         assertFalse(permissions.beforeDonate, "beforeDonate should be disabled");
         assertFalse(permissions.afterDonate, "afterDonate should be disabled");

@@ -26,6 +26,16 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         emit SetAutoLendVault(token, vault);
     }
 
+    /// @notice Mirrors a baseline fee into a pool's stored dynamic LP fee. The PoolManager
+    ///         only accepts dynamic fee updates from the pool's hook, so the auction
+    ///         controller (which owns the fee configuration) goes through this passthrough.
+    function updateDynamicLPFee(PoolKey calldata key, uint24 newDynamicLPFee) external payable {
+        if (msg.sender != address(hookAuctionController) && msg.sender != _owner) {
+            revert Unauthorized();
+        }
+        poolManager.updateDynamicLPFee(key, newDynamicLPFee);
+    }
+
     function setMaxTicksFromOracle(int24 newMaxTicksFromOracle) external payable onlyOwner {
         _maxTicksFromOracle = newMaxTicksFromOracle;
         emit SetMaxTicksFromOracle(newMaxTicksFromOracle);

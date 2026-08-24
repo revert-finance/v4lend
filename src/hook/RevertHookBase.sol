@@ -12,6 +12,7 @@ import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
+import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
 import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";
@@ -24,6 +25,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
     IWETH9 internal immutable weth;
     IV4Oracle internal immutable v4Oracle;
     IHookFeeController internal immutable hookFeeController;
+    IHookAuctionController internal immutable hookAuctionController;
 
     RevertHookPositionActions internal immutable positionActions;
     RevertHookAutoLeverageActions internal immutable autoLeverageActions;
@@ -33,6 +35,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         address owner_,
         IV4Oracle _v4Oracle,
         IHookFeeController _hookFeeController,
+        IHookAuctionController _hookAuctionController,
         RevertHookPositionActions _positionActions,
         RevertHookAutoLeverageActions _autoLeverageActions,
         RevertHookAutoLendActions _autoLendActions
@@ -48,6 +51,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         weth = NativeWrapper(payable(address(positionManager_))).WETH9();
         v4Oracle = _v4Oracle;
         hookFeeController = _hookFeeController;
+        hookAuctionController = _hookAuctionController;
         positionActions = _positionActions;
         autoLeverageActions = _autoLeverageActions;
         autoLendActions = _autoLendActions;

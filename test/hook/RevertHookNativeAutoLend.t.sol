@@ -31,6 +31,7 @@ import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol"
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {MockERC4626Vault} from "test/utils/MockERC4626Vault.sol";
@@ -107,8 +108,9 @@ contract RevertHookNativeAutoLendTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                    | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
                     | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4445 << 144)
         );
@@ -117,6 +119,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         liquidityCalculator = new LiquidityCalculator();
         feeController = new HookFeeController(flags, makeAddr("protocolFeeRecipient"), 200, 200);
         routeController = new HookRouteController(flags);
+        HookAuctionController auctionController = new HookAuctionController(flags, v4Oracle.poolManager());
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
 
         RevertHookPositionActions positionActions =
@@ -129,7 +132,7 @@ contract RevertHookNativeAutoLendTest is BaseTest {
             );
 
         bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
+            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         hook = RevertHook(payable(flags));
