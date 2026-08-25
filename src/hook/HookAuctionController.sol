@@ -95,11 +95,14 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     bool public bidsPaused;
 
-    // Optional owner-controlled executor allowlist. Off by default (bidding stays permissionless);
-    // when enabled, only allowlisted executors may be registered, so an operator can prevent a
-    // bidder from handing the discount to a shared public router.
-    bool public executorAllowlistEnabled;
-    mapping(address executor => bool allowed) public executorAllowed;
+    // Owner-managed executor denylist: blocks a bidder from handing the discount to a shared
+    // router (which would give every trader routing through it the discounted fee for the whole
+    // epoch). Bidding stays permissionless; the owner blocks the known shared routers (Universal
+    // Router, aggregators, ...). A denylist is inherently incomplete - a custom or unknown shared
+    // executor bypasses it - but the vector is economically self-limiting: the bidder pays the
+    // bid, which is dripped to LPs, so registering a shared router subsidizes traffic at the
+    // bidder's own expense.
+    mapping(address executor => bool denied) public executorDenied;
 
     mapping(PoolId poolId => PoolAuctionConfig config) internal _poolConfigs;
     mapping(PoolId poolId => PoolAuctionState state) internal _poolStates;
@@ -131,8 +134,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     event NormalLpFeeSet(PoolId indexed poolId, uint24 normalLpFee);
     event PendingDonationSwept(PoolId indexed poolId, Currency indexed currency, address recipient, uint256 amount);
     event DonateFailed(PoolId indexed poolId, uint256 amount);
-    event ExecutorAllowlistEnabledSet(bool enabled);
-    event ExecutorAllowedSet(address indexed executor, bool allowed);
+    event ExecutorDeniedSet(address indexed executor, bool denied);
 
     // ==================== Errors ====================
 
@@ -204,7 +206,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     ///         claimable via claimRefund.
     /// @param key The pool key
     /// @param executor The contract that will call PoolManager.swap and receive the fee
-    ///        discount if this bid wins. Must not be a shared router.
+    ///        discount if this bid wins. Must not be a shared router (denied executors are
+    ///        rejected).
     /// @param amount The bid amount in the pool's auction currency
     function bidNext(PoolKey calldata key, address executor, uint256 amount) external nonReentrant {
         if (bidsPaused) {
@@ -212,7 +215,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
         if (
             executor == address(0) || executor == address(poolManager) || executor == address(this)
-                || executor == hook || (executorAllowlistEnabled && !executorAllowed[executor])
+                || executor == hook || executorDenied[executor]
         ) {
             revert InvalidExecutor();
         }
@@ -409,20 +412,12 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         emit BidsPausedSet(paused_);
     }
 
-    /// @notice Turns the executor allowlist on or off. While on, bidNext only accepts executors
-    ///         set via setExecutorAllowed, so a bidder cannot register a shared public router and
-    ///         hand the discount to all of its traffic. Off by default (permissionless bidding).
-    function setExecutorAllowlistEnabled(bool enabled) external {
+    /// @notice Denies (or re-allows) an executor. A denied executor can never be registered via
+    ///         bidNext. Use it to block known shared routers while keeping bidding permissionless.
+    function setExecutorDenied(address executor, bool denied) external {
         _checkOwner();
-        executorAllowlistEnabled = enabled;
-        emit ExecutorAllowlistEnabledSet(enabled);
-    }
-
-    /// @notice Adds or removes an executor from the allowlist.
-    function setExecutorAllowed(address executor, bool allowed) external {
-        _checkOwner();
-        executorAllowed[executor] = allowed;
-        emit ExecutorAllowedSet(executor, allowed);
+        executorDenied[executor] = denied;
+        emit ExecutorDeniedSet(executor, denied);
     }
 
     /// @notice Updates the baseline LP fee of a configured pool and re-mirrors it into the

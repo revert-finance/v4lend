@@ -375,24 +375,28 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.claimRefund(currency1, bidderA);
     }
 
-    function testExecutorAllowlist() public {
-        // off by default: any executor accepted
+    function testExecutorDenylist() public {
+        // permissionless by default: any executor accepted
         _bid(bidderA, address(winnerSwapper), RESERVE);
 
-        // enable and require allowlisting
-        auctionController.setExecutorAllowlistEnabled(true);
+        // deny a (mock) shared router; it can no longer be registered, but others still can
+        address sharedRouter = makeAddr("sharedRouter");
+        auctionController.setExecutorDenied(sharedRouter, true);
         vm.prank(bidderB);
         vm.expectRevert(HookAuctionController.InvalidExecutor.selector);
-        auctionController.bidNext(auctionPoolKey, address(otherSwapper), RESERVE * 2);
+        auctionController.bidNext(auctionPoolKey, sharedRouter, RESERVE * 2);
 
-        // allow it, then the bid succeeds
-        auctionController.setExecutorAllowed(address(otherSwapper), true);
+        // a normal executor is unaffected
         _bid(bidderB, address(otherSwapper), RESERVE * 2);
 
-        // non-owner cannot manage the allowlist
+        // re-allowing lifts the block
+        auctionController.setExecutorDenied(sharedRouter, false);
+        _bid(bidderA, address(winnerSwapper), RESERVE * 4); // outbid stands, sanity that bidding still works
+
+        // non-owner cannot manage the denylist
         vm.prank(bidderA);
         vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
-        auctionController.setExecutorAllowlistEnabled(false);
+        auctionController.setExecutorDenied(sharedRouter, true);
     }
 
     function testBidInvalidExecutors() public {
