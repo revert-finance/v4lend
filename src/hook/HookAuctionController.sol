@@ -93,8 +93,6 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     IPoolManager public immutable poolManager;
 
-    bool public bidsPaused;
-
     // Owner-managed executor denylist: blocks a bidder from handing the discount to a shared
     // router (which would give every trader routing through it the discounted fee for the whole
     // epoch). Bidding stays permissionless; the owner blocks the known shared routers (Universal
@@ -113,7 +111,6 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     event PoolAuctionConfigured(PoolId indexed poolId, PoolAuctionConfig config);
     event BiddingEnabledSet(PoolId indexed poolId, bool enabled);
-    event BidsPausedSet(bool paused);
     event BidPlaced(
         PoolId indexed poolId,
         uint64 indexed epoch,
@@ -181,9 +178,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         // Compute the delivered obligation (the winner's fee override) from state alone, BEFORE
         // the best-effort drip. The override must survive a drip/token failure - the winner paid
-        // for it. Warm slot (auction.bid) is tested before the cold bidsPaused slot.
+        // for it.
         EpochAuction storage auction = state.active;
-        if (auction.bid != 0 && sender == auction.executor && !bidsPaused) {
+        if (auction.bid != 0 && sender == auction.executor) {
             lpFeeOverride = _winnerLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         }
 
@@ -211,9 +208,6 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     ///        rejected).
     /// @param amount The bid amount in the pool's auction currency
     function bidNext(PoolKey calldata key, address executor, uint256 amount) external nonReentrant {
-        if (bidsPaused) {
-            revert BiddingDisabled();
-        }
         if (
             executor == address(0) || executor == address(poolManager) || executor == address(this)
                 || executor == hook || executorDenied[executor]
@@ -401,20 +395,6 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         config.biddingEnabled = enabled;
         emit BiddingEnabledSet(poolId, enabled);
-    }
-
-    /// @notice Emergency stop: blocks new bids on all pools and suspends the winner fee
-    ///         discount. Dripping and claims stay available.
-    /// @dev This is a heavy-handed brake. A bid still only queued for a future epoch is refunded
-    ///      to escrow when that epoch is first synced while paused (it is not promoted into a
-    ///      paid-but-unserved winner - see _syncPool). A winner already active mid-epoch when the
-    ///      pause began is best-effort: it keeps paying the baseline fee for the rest of that epoch
-    ///      and is NOT refunded (its bid is already materialized). For a graceful, refunding
-    ///      wind-down of a single pool use setBiddingEnabled(false) instead.
-    function setBidsPaused(bool paused_) external {
-        _checkOwner();
-        bidsPaused = paused_;
-        emit BidsPausedSet(paused_);
     }
 
     /// @notice Denies (or re-allows) an executor. A denied executor can never be registered via
@@ -643,17 +623,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         _carryEpoch(poolId, config, state, state.activeEpoch, state.active);
         if (current == state.activeEpoch + 1) {
-            if (bidsPaused && state.next.bidder != address(0)) {
-                // Globally paused: the winner would receive no discounted swaps this epoch, so
-                // refund the queued bid to escrow rather than promote it into a paid-but-unserved
-                // active winner whose proceeds still drip. (A winner already active mid-epoch when
-                // the pause began is best-effort - see setBidsPaused.)
-                refunds[config.auctionCurrency][state.next.bidder] += state.next.bid;
-                emit RefundEscrowed(poolId, config.auctionCurrency, state.next.bidder, state.next.bid);
-                delete state.active;
-            } else {
-                state.active = state.next;
-            }
+            state.active = state.next;
             delete state.next;
         } else {
             // More than one epoch skipped: the epoch-N+1 winner was never promoted to active

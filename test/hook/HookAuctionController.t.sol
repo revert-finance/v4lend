@@ -885,42 +885,6 @@ contract HookAuctionControllerTest is BaseTest {
         _bid(bidderB, address(otherSwapper), RESERVE);
     }
 
-    function testBidsPausedRefundsQueuedBidAndSuspendsDiscount() public {
-        _bid(bidderA, address(winnerSwapper), 1e18); // queued for epoch 1
-        _warpToEpoch(1);
-
-        auctionController.setBidsPaused(true);
-
-        // no new bids while paused
-        vm.expectRevert(HookAuctionController.BiddingDisabled.selector);
-        _bid(bidderB, address(otherSwapper), 2e18);
-
-        // no discount while paused
-        uint256 snap = vm.snapshotState();
-        uint256 outWinnerPaused = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
-        vm.revertToState(snap);
-        snap = vm.snapshotState();
-        uint256 outOther = otherSwapper.swapExactIn(auctionPoolKey, true, 1e18);
-        vm.revertToState(snap);
-        assertApproxEqRel(outWinnerPaused, outOther, 1e12, "no discount while paused");
-
-        // the first real sync of the paused epoch refunds the queued bid instead of consuming it
-        auctionController.drip(auctionPoolKey);
-        assertEq(auctionController.refunds(currency1, bidderA), 1e18, "queued bid refunded on paused promotion");
-
-        // no active winner exists, so no discount even after unpausing (the bid was refunded)
-        auctionController.setBidsPaused(false);
-        snap = vm.snapshotState();
-        uint256 outAfter = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
-        vm.revertToState(snap);
-        assertApproxEqRel(outAfter, outOther, 1e12, "refunded bid grants no discount");
-
-        // bidder is made whole and bidding works again
-        vm.prank(bidderA);
-        auctionController.claimRefund(currency1, bidderA);
-        _bid(bidderB, address(otherSwapper), RESERVE);
-    }
-
     // ==================== Fail-open glue ====================
 
     function testHookFailsOpenWhenControllerReverts() public {
