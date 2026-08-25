@@ -245,6 +245,98 @@ contract HookAuctionControllerTest is BaseTest {
 
     // ==================== Configuration ====================
 
+    /// @notice READ THIS ONE to understand the system. It walks the entire auction lifecycle end
+    ///         to end in a single flow; every other test in this file isolates one property of it.
+    ///
+    ///         Flow: configure a 0.30% pool with a 50% winner discount -> two searchers bid for the
+    ///         next epoch, the loser's bid is escrowed and reclaimed -> in the won epoch the winner's
+    ///         executor trades at 0.15% while everyone else pays 0.30% -> the winning bid splits into
+    ///         a protocol fee and an LP drip that vests across the epoch -> the LP collects the drip
+    ///         and the protocol recipient claims the fee -> the controller is left fully settled.
+    function testFullAuctionLifecycle() public {
+        IERC20 token1 = IERC20(Currency.unwrap(currency1));
+
+        // ---- 1. Configure: 50% winner discount on a 0.30% pool (realistic launch shape) ----
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.feeDiscountPpm = 500_000; // winner pays half the LP fee
+        auctionController.configurePool(auctionPoolKey, config);
+        startTime = uint64(block.timestamp);
+        assertEq(auctionController.winnerLpFee(auctionPoolId), 1500, "winner fee = 0.15% (half of 0.30%)");
+
+        // ---- 2. Bidding during epoch 0 for the right to epoch 1: B outbids A ----
+        _bid(bidderA, address(otherSwapper), RESERVE); // A opens at the reserve
+        uint256 winningBid = auctionController.minNextBid(auctionPoolId); // reserve + 5% bump
+        _bid(bidderB, address(winnerSwapper), winningBid); // B outbids and will be the winner
+
+        // A's outbid bid is escrowed (pull-based refund), never pushed back automatically
+        assertEq(auctionController.refunds(currency1, bidderA), RESERVE, "outbid bid escrowed");
+        uint256 aBalBefore = token1.balanceOf(bidderA);
+        vm.prank(bidderA);
+        auctionController.claimRefund(currency1, bidderA);
+        assertEq(token1.balanceOf(bidderA), aBalBefore + RESERVE, "A reclaims its outbid bid");
+
+        // Still epoch 0: the discount was bought for epoch 1, so it does not apply yet
+        uint256 snap = vm.snapshotState();
+        uint256 outBeforeWin = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+
+        // ---- 3. Epoch 1: the winner trades at 0.15%, everyone else at 0.30% ----
+        _warpToEpoch(1);
+        snap = vm.snapshotState();
+        uint256 outWinner = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        uint256 outOther = otherSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+
+        assertApproxEqRel(outBeforeWin, outOther, 1e12, "no discount before the won epoch");
+        assertGt(outWinner, outOther, "winner gets the better rate in its epoch");
+        assertApproxEqRel(outWinner, outOther * (PPM - 1500) / (PPM - NORMAL_FEE), 1e14, "0.15% vs 0.30%");
+
+        // ---- 4. First real pool touch of epoch 1 materializes the bid into fee + drip ----
+        uint256 expectedProtocolFee = winningBid * PROTOCOL_FEE_BPS / 10_000;
+        uint256 expectedDrip = winningBid - expectedProtocolFee;
+
+        auctionController.drip(auctionPoolKey); // real tx: syncs epoch 1 active + materializes
+        (address wBidder, address wExecutor, uint256 bid, uint256 totalDrip,,, bool materialized) =
+            auctionController.getEpochAuction(auctionPoolId, false);
+        assertTrue(materialized, "epoch materialized on first touch");
+        assertEq(wBidder, bidderB, "B is the active-epoch winner");
+        assertEq(wExecutor, address(winnerSwapper), "winner's executor recorded");
+        assertEq(bid, winningBid);
+        assertEq(totalDrip, expectedDrip, "drip = bid - protocol fee");
+        assertEq(
+            auctionController.protocolFeesAccrued(currency1, protocolFeeRecipient),
+            expectedProtocolFee,
+            "protocol fee accrued once"
+        );
+
+        // ---- 5. The drip vests across the epoch and reaches the LP (here the sole in-range LP) ----
+        _drainPending(auctionPoolKey); // warps past epoch end and drains the pending bucket to zero
+        (,, uint256 pending) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertEq(pending, 0, "everything vested");
+
+        uint256 lpBefore = token1.balanceOf(address(this));
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        assertApproxEqAbs(
+            token1.balanceOf(address(this)) - lpBefore, expectedDrip, 10, "LP collects the whole drip"
+        );
+
+        // ---- 6. The protocol fee is claimable by its recipient ----
+        uint256 recipBefore = token1.balanceOf(protocolFeeRecipient);
+        vm.prank(protocolFeeRecipient);
+        auctionController.claimProtocolFees(currency1, protocolFeeRecipient);
+        assertEq(
+            token1.balanceOf(protocolFeeRecipient) - recipBefore, expectedProtocolFee, "protocol fee claimed"
+        );
+
+        // ---- 7. Conservation: everything taken in (A's + B's bids) has left the controller ----
+        // A's bid refunded, B's bid -> LP drip + protocol fee, all now claimed/donated.
+        assertApproxEqAbs(token1.balanceOf(address(auctionController)), 0, 5, "controller fully settled");
+    }
+
     function testConfigureValidations() public {
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
 
