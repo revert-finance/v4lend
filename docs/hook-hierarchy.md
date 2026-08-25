@@ -107,6 +107,16 @@ That means future mutable storage changes must be made carefully:
 
 Immutables are less dangerous here because they are not part of the contract storage layout used by delegatecall.
 
+## Hook-Owned Controllers
+
+Three standalone controller contracts extend `HookOwnedControllerBase` (immutable `hook` reference; admin calls authorize against the hook's owner). They are constructor-wired immutables of the hook, deployed at nonce-predicted addresses before the CREATE2 hook deployment:
+
+- `HookFeeController` - protocol fee parameters for automation flows.
+- `HookRouteController` - protocol-managed swap routes.
+- `HookAuctionController` - per-pool arbitrage auctions. Called directly (no try/catch) from `beforeSwap`, `beforeAddLiquidity`, and `beforeRemoveLiquidity`; its hook entrypoints are non-reverting by construction, with the token-dependent donate leg isolated behind an internal try/catch. It is the only caller of the hook's `updateDynamicLPFee` passthrough, so a pool's stored dynamic fee cannot drift from the fee the auction winner is quoted against.
+
+Controllers hold their own storage (the auction controller custodies bid escrow, refunds, and protocol fees) and are plain external calls, so they cannot affect the delegatecall storage layout below.
+
 ## Source Files
 
 - `src/RevertHook.sol`
@@ -121,3 +131,7 @@ Immutables are less dangerous here because they are not part of the contract sto
 - `src/hook/RevertHookPositionActions.sol`
 - `src/hook/RevertHookAutoLendActions.sol`
 - `src/hook/RevertHookAutoLeverageActions.sol`
+- `src/hook/HookOwnedControllerBase.sol`
+- `src/hook/HookFeeController.sol`
+- `src/hook/HookRouteController.sol`
+- `src/hook/HookAuctionController.sol`

@@ -102,6 +102,21 @@ Supported hook-side automation modes include:
 - auto lend
 - auto leverage
 
+### Arbitrage auction (`HookAuctionController`)
+
+[src/hook/HookAuctionController.sol](src/hook/HookAuctionController.sol)
+
+A per-pool auction that converts arbitrage value (LVR) into LP income on dynamic-fee pools using `RevertHook`:
+
+- Searchers bid during epoch N (English auction, timestamp-based epochs) for a discounted-LP-fee executor slot in epoch N + 1.
+- The winner is the contract that calls `PoolManager.swap` directly (its registered executor); it pays `normalLpFee` reduced by `feeDiscountPpm`, everyone else pays the baseline.
+- The winning bid, minus a protocol fee, is dripped to in-range LPs via `PoolManager.donate()`, vested linearly over the epoch with throttled anti-JIT release.
+- Outbid and refunded bids are escrowed pull-based (`claimRefund`); a queued bid whose epoch never delivers a discount (skipped epochs) is refunded automatically.
+- Per-pool wind-down via `setBiddingEnabled(false)`: new bids stop, the running epoch is honored, vested proceeds finish dripping.
+- Bidding is permissionless; an owner-managed executor denylist (`setExecutorDenied`) blocks shared routers so a bidder cannot hand the discount to all router traffic.
+
+Auctioned pools must be created with `LPFeeLibrary.DYNAMIC_FEE_FLAG`. The hook calls the controller directly from `beforeSwap` / `beforeAddLiquidity` / `beforeRemoveLiquidity`; the controller's hook entrypoints are non-reverting by construction, and a misbehaving auction currency (blacklist, fee-on-transfer) only pauses dripping - it cannot block swaps, liquidity changes, or liquidations.
+
 ### Standalone automators
 
 [src/automators](src/automators)
@@ -113,6 +128,7 @@ Operator-driven contracts that execute one automation strategy at a time:
 - [AutoLend.sol](src/automators/AutoLend.sol)
 - [AutoLeverage.sol](src/automators/AutoLeverage.sol)
 - [AutoRange.sol](src/automators/AutoRange.sol)
+- [AuctionArbExecutor.sol](src/automators/AuctionArbExecutor.sol) - an owner-operated arbitrage router intended to be registered as an auction winner's executor
 
 These are useful when automation should be triggered by operators or keepers instead of fully inside the hook path.
 
@@ -320,7 +336,9 @@ Relevant admin calls:
 - minimum position value,
 - per-position automation mode settings,
 - per-position swap protection settings,
-- auto-lend token-to-vault routing.
+- auto-lend token-to-vault routing,
+- per-pool arbitrage auctions (epoch length, winner discount, reserve, bump, protocol fee),
+- the auction executor denylist.
 
 Relevant admin calls:
 
@@ -336,6 +354,11 @@ Relevant admin calls:
 - `RevertHook.setMaxTicksFromOracle(...)`
 - `RevertHook.setMinPositionValueNative(...)`
 - `RevertHook.setAutoLendVault(...)`
+- `HookAuctionController.configurePool(...)`
+- `HookAuctionController.setBiddingEnabled(...)`
+- `HookAuctionController.setNormalLpFee(...)` (only while no bid is outstanding)
+- `HookAuctionController.setExecutorDenied(...)`
+- `HookAuctionController.sweepPendingDonation(...)` (rescue, only after wind-down)
 
 ## Operational notes
 
@@ -346,6 +369,8 @@ Relevant admin calls:
 - Production vault collateral should not be enabled until the token has a healthy Chainlink-compatible feed, a healthy Uniswap v3 TWAP pool against the oracle reference token, and passing fork validation.
 - The hook and the automators are intentionally separate execution models. The hook is for swap-time automation; the automators are for operator-triggered workflows.
 - Delegatecall targets under [src/hook](src/hook) are execution helpers for the hook, not standalone products.
+- Auction executors must call `PoolManager.swap` directly. Registering a shared router as an executor would give every trader routing through it the discounted fee; deploy scripts seed the denylist with each chain's UniversalRouter, and operators should extend it with other shared routers or aggregators used on the chain.
+- The auction's drip distribution is point-in-time to in-range liquidity (like v4 swap fees), with throttled release bounding JIT capture; it is not time-weighted per position.
 
 ## Security model
 

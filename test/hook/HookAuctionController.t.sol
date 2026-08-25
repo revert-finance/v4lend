@@ -2,7 +2,13 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
+
+import {V4Vault} from "src/vault/V4Vault.sol";
+import {IVault} from "src/vault/interfaces/IVault.sol";
+import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -461,6 +467,12 @@ contract HookAuctionControllerTest is BaseTest {
         address sink = makeAddr("sink");
         uint256 swept = auctionController.sweepPendingDonation(auctionPoolKey, sink);
         assertEq(swept, pending);
+
+        // sweeping credits the refund escrow (so it also works for a token whose transfers from
+        // the controller currently revert); the recipient pulls it via claimRefund
+        assertEq(auctionController.refunds(currency1, sink), pending);
+        vm.prank(sink);
+        auctionController.claimRefund(currency1, sink);
         assertEq(IERC20(Currency.unwrap(currency1)).balanceOf(sink), pending);
 
         // pending cleared, so the pool can be reconfigured
@@ -900,6 +912,92 @@ contract HookAuctionControllerTest is BaseTest {
         // re-enable: bidding works again
         auctionController.setBiddingEnabled(auctionPoolKey, true);
         _bid(bidderB, address(otherSwapper), RESERVE);
+    }
+
+    // ==================== Vault integration ====================
+
+    /// @notice End-to-end: a position in an auctioned pool serves as V4Vault collateral - the
+    ///         auction (bid -> winner discount -> drip) runs while the position is collateralized,
+    ///         and liquidation still works mid-epoch (the liquidation's liquidity removal routes
+    ///         through beforeRemoveLiquidity and the controller's drip without interference).
+    function testVaultCollateralInAuctionedPoolEndToEnd() public {
+        IERC20 asset = IERC20(Currency.unwrap(currency1));
+
+        // ---- vault stack on top of the auction environment ----
+        InterestRateModel interestRateModel = new InterestRateModel(0, uint256(2 ** 64) * 5 / 100, uint256(2 ** 64) * 109 / 100, uint256(2 ** 64) * 80 / 100);
+        V4Vault vault = new V4Vault(
+            "Revert Lend t1", "rlT1", address(asset), positionManager, interestRateModel, v4Oracle, IWETH9(address(0))
+        );
+        vault.setTokenConfig(Currency.unwrap(currency0), uint32(uint256(2 ** 32) * 9 / 10), type(uint32).max);
+        vault.setTokenConfig(Currency.unwrap(currency1), uint32(uint256(2 ** 32) * 9 / 10), type(uint32).max);
+        vault.setLimits(0, 1_000e18, 1_000e18, 1_000e18, 1_000e18);
+        vault.setReserveFactor(0);
+        vault.setHookAllowList(address(hook), true);
+        hook.setVault(address(vault));
+
+        // ---- lend + collateralize the position living in the auctioned pool ----
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(100e18, address(this));
+
+        IERC721(address(positionManager)).approve(address(vault), fullRangeTokenId);
+        vault.create(fullRangeTokenId, address(this));
+
+        // MockV4Oracle values the position at 1e18 asset; borrow against it
+        vault.borrow(fullRangeTokenId, 0.5e18);
+        (uint256 debt,, uint256 collateralValue,,) = vault.loanInfo(fullRangeTokenId);
+        assertEq(debt, 0.5e18);
+        assertGt(collateralValue, debt, "healthy after borrow");
+
+        // ---- the auction runs while the position is vault collateral ----
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        _warpToEpoch(1);
+
+        uint256 snap = vm.snapshotState();
+        uint256 outWinner = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        uint256 outOther = otherSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+        assertGt(outWinner, outOther, "winner discount active on the collateralized pool");
+
+        // drips flow to the (vault-held) in-range position
+        vm.warp(block.timestamp + EPOCH_LENGTH / 2);
+        auctionController.drip(auctionPoolKey);
+        (,,,, uint256 donated,,) = auctionController.getEpochAuction(auctionPoolId, false);
+        assertGt(donated, 0, "auction proceeds drip while collateralized");
+
+        // a second (non-collateral) LP so the pool keeps liquidity after the full liquidation
+        positionManager.mint(
+            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        // ---- liquidation still works mid-epoch on the auctioned pool ----
+        v4Oracle.setMockPositionValue(0.4e18); // 0.5 debt > 0.4 value -> underwater, full liquidation
+        (,,,, uint256 liquidationValue) = vault.loanInfo(fullRangeTokenId);
+        assertGt(liquidationValue, 0, "liquidatable");
+
+        vm.startPrank(bidderB);
+        asset.approve(address(vault), type(uint256).max);
+        (uint256 amount0, uint256 amount1) = vault.liquidate(
+            IVault.LiquidateParams({
+                tokenId: fullRangeTokenId,
+                amount0Min: 0,
+                amount1Min: 0,
+                recipient: bidderB,
+                deadline: block.timestamp,
+                decreaseLiquidityHookData: ""
+            })
+        );
+        vm.stopPrank();
+        assertTrue(amount0 > 0 || amount1 > 0, "liquidator received position tokens");
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(fullRangeTokenId);
+        assertEq(debtAfter, 0, "loan cleared by liquidation");
+
+        // the pool remains fully functional afterwards
+        uint256 outAfter = otherSwapper.swapExactIn(auctionPoolKey, true, 1e17);
+        assertGt(outAfter, 0, "pool swappable after liquidation");
     }
 
     // ==================== Fail-open glue ====================

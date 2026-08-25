@@ -442,8 +442,11 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     ///         a pool that sat at zero in-range liquidity so donate() never fired, or a bucket
     ///         stuck behind a now-broken auction currency. Only callable once the pool's
     ///         bidding has been wound down, so it cannot pre-empt normal dripping to LPs.
-    /// @dev Also the only way to clear a stuck bucket so configurePool (which requires
-    ///      pendingDonation == 0) can restart the pool.
+    /// @dev Credits the amount to the refund escrow of `recipient` instead of transferring, so
+    ///      the sweep also works for a currency whose transfers from this contract currently
+    ///      revert (e.g. a blacklisting token): the accounting is cleared now - unblocking
+    ///      configurePool, which requires pendingDonation == 0 - and the tokens stay claimable
+    ///      via claimRefund whenever transfers work again.
     function sweepPendingDonation(PoolKey calldata key, address recipient)
         external
         nonReentrant
@@ -479,7 +482,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             revert NothingToClaim();
         }
         state.pendingDonation = 0;
-        IERC20(Currency.unwrap(config.auctionCurrency)).safeTransfer(recipient, amount);
+        refunds[config.auctionCurrency][recipient] += amount;
         emit PendingDonationSwept(poolId, config.auctionCurrency, recipient, amount);
     }
 
@@ -761,6 +764,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         amountToDonate = _donate(key, poolId, config, release);
         if (amountToDonate == 0) {
+            // donate failed (e.g. broken auction currency): back off for minDripSeconds instead
+            // of re-attempting - and re-paying the failed transfer's gas - on every pool touch
+            state.pendingLastDripTime = uint64(block.timestamp);
             return 0;
         }
         state.pendingDonation = pending - amountToDonate;
@@ -818,6 +824,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         amountToDonate = _donate(key, poolId, config, claimable);
         if (amountToDonate == 0) {
+            // donate failed: back off for minDripSeconds (vesting is computed from epochStart and
+            // `donated`, so throttling retries loses nothing)
+            auction.lastDripTime = uint64(block.timestamp);
             return 0;
         }
 
