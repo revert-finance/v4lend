@@ -32,6 +32,10 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
 
     IHookFeeController internal immutable hookFeeController;
 
+    /// @dev This contract's own deployed address, used to reject direct (non-delegatecall) calls
+    ///      to takeProtocolFees. Under delegatecall address(this) is the hook, so it differs.
+    address private immutable _selfAddress;
+
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
@@ -41,17 +45,22 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         RevertHookSwapActions _swapActions
     ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {
         hookFeeController = _hookFeeController;
+        _selfAddress = address(this);
     }
 
     /// @notice Time-weighted protocol fee on collected position fees. Called by the hook
     ///         via delegatecall from its after-liquidity callbacks (shared storage layout);
     ///         hosted here to keep the hook bytecode under the EIP-170 limit.
-    /// @dev A direct (non-delegatecall) invocation only touches this contract's own unused
-    ///      storage and reverts in poolManager.take because the PoolManager is not unlocked.
+    /// @dev Delegatecall-only: a direct call (which would run on this sidecar's own storage and
+    ///      could emit spoofed SendProtocolFee events) is rejected. Under delegatecall
+    ///      address(this) is the hook, which differs from the captured deploy address.
     function takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta)
         external
         returns (BalanceDelta newFeeDelta)
     {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
         PositionState storage state = _positionStates[tokenId];
         uint32 accumulatedActiveTime = state.accumulatedActiveTime;
         uint32 lastActivated = state.lastActivated;

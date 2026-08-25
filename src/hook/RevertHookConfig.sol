@@ -29,8 +29,11 @@ abstract contract RevertHookConfig is RevertHookImmediate {
     /// @notice Mirrors a baseline fee into a pool's stored dynamic LP fee. The PoolManager
     ///         only accepts dynamic fee updates from the pool's hook, so the auction
     ///         controller (which owns the fee configuration) goes through this passthrough.
+    /// @dev Controller-only. The owner changes a pool's baseline via the controller's
+    ///      setNormalLpFee, which updates config.normalLpFee and re-mirrors atomically, so the
+    ///      stored fee and the winner's _winnerLpFee can never drift apart.
     function updateDynamicLPFee(PoolKey calldata key, uint24 newDynamicLPFee) external payable {
-        if (msg.sender != address(hookAuctionController) && msg.sender != _owner) {
+        if (msg.sender != address(hookAuctionController)) {
             revert Unauthorized();
         }
         poolManager.updateDynamicLPFee(key, newDynamicLPFee);

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.30;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -17,10 +16,10 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 ///         executor of a HookAuctionController epoch. The auction controller recognizes
 ///         the winner as the contract that calls PoolManager.swap directly, so routes
 ///         must be executed through this contract (never through shared routers).
-/// @dev v1 supports ERC20 pool currencies only.
-contract AuctionArbExecutor is IUnlockCallback, Ownable, ReentrancyGuard {
-    using SafeERC20 for IERC20;
-
+/// @dev v1 supports ERC20 pool currencies only. Uses two-step ownership so a mistyped
+///      transferOwnership cannot permanently brick this contract - which, as a registered
+///      auction winner, would strand the epoch's paid-for discount.
+contract AuctionArbExecutor is IUnlockCallback, Ownable2Step, ReentrancyGuard {
     IPoolManager public immutable poolManager;
 
     struct V4Route {
@@ -49,6 +48,7 @@ contract AuctionArbExecutor is IUnlockCallback, Ownable, ReentrancyGuard {
     error RouteCurrencyMismatch();
     error UnexpectedSwapDelta();
     error InsufficientProfit(uint256 actualProfit, uint256 minProfit);
+    error RouteEndedBelowInput(uint256 amountReturned, uint256 amountIn);
     error NativeCurrencyUnsupported();
 
     constructor(IPoolManager _poolManager, address initialOwner) Ownable(initialOwner) {
@@ -103,7 +103,8 @@ contract AuctionArbExecutor is IUnlockCallback, Ownable, ReentrancyGuard {
         }
 
         if (!(currentCurrency == route.startCurrency)) revert RouteCurrencyMismatch();
-        if (amountIn <= initialAmountIn) revert InsufficientProfit(0, route.minProfit);
+        // Distinct signal so the off-chain bot can tell an outright loss from a below-target win.
+        if (amountIn <= initialAmountIn) revert RouteEndedBelowInput(amountIn, initialAmountIn);
 
         uint256 profit = amountIn - initialAmountIn;
         if (profit < route.minProfit) revert InsufficientProfit(profit, route.minProfit);

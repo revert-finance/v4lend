@@ -9,7 +9,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
@@ -115,6 +115,7 @@ contract HookAuctionControllerTest is BaseTest {
     RevertHook hook;
     HookFeeController feeController;
     HookAuctionController auctionController;
+    RevertHookAutoLendActions autoLendActionsRef;
     MockV4Oracle v4Oracle;
 
     DirectSwapper winnerSwapper;
@@ -156,6 +157,7 @@ contract HookAuctionControllerTest is BaseTest {
         RevertHookAutoLendActions autoLendActions = new RevertHookAutoLendActions(
             permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
         );
+        autoLendActionsRef = autoLendActions;
 
         bytes memory constructorArgs = abi.encode(
             address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
@@ -229,6 +231,18 @@ contract HookAuctionControllerTest is BaseTest {
         vm.warp(uint256(startTime) + uint256(epoch) * EPOCH_LENGTH + 1);
     }
 
+    /// @dev Pending donation now releases gradually (anti-JIT); drive it to empty by warping a
+    ///      full epoch per drip so the flush branch releases the remainder. Warps then drips
+    ///      before checking, so the first call also rolls any end-of-epoch remainder into pending.
+    function _drainPending(PoolKey memory key) internal {
+        for (uint256 i = 0; i < 60; i++) {
+            vm.warp(block.timestamp + EPOCH_LENGTH);
+            auctionController.drip(key);
+            (,, uint256 pending) = auctionController.getPoolAuctionState(key.toId());
+            if (pending == 0) break;
+        }
+    }
+
     // ==================== Configuration ====================
 
     function testConfigureValidations() public {
@@ -260,15 +274,74 @@ contract HookAuctionControllerTest is BaseTest {
         assertEq(lpFee, NORMAL_FEE, "stored dynamic fee should be the baseline fee");
     }
 
-    function testUpdateDynamicLPFeeAuth() public {
+    function testUpdateDynamicLPFeeIsControllerOnly() public {
+        // non-owner cannot touch the baseline
         vm.prank(bidderA);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
+        auctionController.setNormalLpFee(auctionPoolKey, 500);
+
+        // even the hook owner can no longer call the passthrough directly (controller-only),
+        // so the stored fee and the winner's fee cannot drift apart
         vm.expectRevert();
         hook.updateDynamicLPFee(auctionPoolKey, 500);
 
-        // hook owner may adjust directly (safety valve)
-        hook.updateDynamicLPFee(auctionPoolKey, 500);
+        // the owner changes the baseline through the controller, which re-mirrors atomically
+        auctionController.setNormalLpFee(auctionPoolKey, 500);
         (,,, uint24 lpFee) = poolManager.getSlot0(auctionPoolId);
-        assertEq(lpFee, 500);
+        assertEq(lpFee, 500, "stored fee re-mirrored");
+        assertEq(auctionController.winnerLpFee(auctionPoolId), 0, "winner fee still derived from baseline");
+    }
+
+    function testConfigureRejectsZeroReserveOrBump() public {
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.openingBidReserve = 0;
+        vm.expectRevert(HookAuctionController.InvalidConfig.selector);
+        auctionController.configurePool(auctionPoolKey, config);
+
+        config = _defaultConfig();
+        config.minBidBumpPpm = 0;
+        vm.expectRevert(HookAuctionController.InvalidConfig.selector);
+        auctionController.configurePool(auctionPoolKey, config);
+    }
+
+    function testSweepPendingDonationRescuesStuckValue() public {
+        // Drive value into pending with the pool empty, so it can never drip.
+        uint256 bid = 1e18;
+        _bid(bidderA, address(winnerSwapper), bid);
+        _warpToEpoch(1);
+        uint256 liquidity = positionManager.getPositionLiquidity(fullRangeTokenId);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, liquidity, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        _warpToEpoch(3);
+        auctionController.drip(auctionPoolKey);
+        (,, uint256 pending) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertGt(pending, 0);
+
+        // sweep requires the pool to be wound down first
+        vm.expectRevert(HookAuctionController.BiddingDisabled.selector);
+        auctionController.sweepPendingDonation(auctionPoolKey, address(this));
+
+        auctionController.setBiddingEnabled(auctionPoolKey, false);
+        address sink = makeAddr("sink");
+        uint256 swept = auctionController.sweepPendingDonation(auctionPoolKey, sink);
+        assertEq(swept, pending);
+        assertEq(IERC20(Currency.unwrap(currency1)).balanceOf(sink), pending);
+
+        // pending cleared, so the pool can be reconfigured
+        (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertEq(pendingAfter, 0);
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.epochStartTime = uint64(block.timestamp);
+        auctionController.configurePool(auctionPoolKey, config); // no longer reverts PoolStateNotClean
+    }
+
+    function testMinNextBidReflectsPendingRollover() public {
+        _bid(bidderA, address(winnerSwapper), 5e15); // epoch 1 winner
+        // move into epoch 1 without any pool touch: the stored next slot is stale
+        vm.warp(uint256(startTime) + EPOCH_LENGTH + 1);
+        // effective next bid is 0 (rollover pending), so only the reserve is required, not 5e15+bump
+        assertEq(auctionController.minNextBid(auctionPoolId), RESERVE);
     }
 
     // ==================== Bidding ====================
@@ -402,17 +475,47 @@ contract HookAuctionControllerTest is BaseTest {
         (,,,, uint256 donated,,) = auctionController.getEpochAuction(auctionPoolId, false);
         assertApproxEqAbs(donated, totalDrip / 2, totalDrip / EPOCH_LENGTH + 1, "half vested at half epoch");
 
-        // end of epoch: fully vested
-        vm.warp(uint256(startTime) + 2 * EPOCH_LENGTH);
-        auctionController.drip(auctionPoolKey);
+        // past epoch end the undripped remainder rolls into the pending bucket, which releases
+        // gradually; drive it to empty, then confirm the LP collects the whole bid's drip.
+        _drainPending(auctionPoolKey);
+        (,, uint256 pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertEq(pendingDonation, 0, "pending fully drained");
 
-        // the donation is collectable as position fees (only in-range LP here is ours)
         uint256 balance1Before = IERC20(Currency.unwrap(currency1)).balanceOf(address(this));
         positionManager.decreaseLiquidity(
             fullRangeTokenId, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
         );
         uint256 collected = IERC20(Currency.unwrap(currency1)).balanceOf(address(this)) - balance1Before;
-        assertApproxEqAbs(collected, totalDrip, 10, "LP should collect the full drip");
+        assertApproxEqAbs(collected, totalDrip, 10, "LP eventually collects the full drip");
+    }
+
+    function testPendingReleasesGraduallyNotInOneBlock() public {
+        // A winner's proceeds accrue while the pool has zero in-range liquidity, filling the
+        // pending bucket. A JIT position must NOT be able to capture the whole bucket at once.
+        uint256 bid = 1e18;
+        uint256 totalDrip = bid - bid * PROTOCOL_FEE_BPS / 10_000;
+        _bid(bidderA, address(winnerSwapper), bid);
+        _warpToEpoch(1);
+
+        uint256 liquidity = positionManager.getPositionLiquidity(fullRangeTokenId);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, liquidity, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        _warpToEpoch(3);
+        auctionController.drip(auctionPoolKey); // materialize + carry into pending (no liquidity)
+        (,, uint256 pendingBefore) = auctionController.getPoolAuctionState(auctionPoolId);
+        // ~all of the drip is parked (a sliver may have vested in the 1s before the removal)
+        assertGt(pendingBefore, totalDrip * 99 / 100, "~whole drip parked as pending");
+
+        // JIT: add liquidity then immediately drip in the same timestamp
+        positionManager.mint(
+            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        auctionController.drip(auctionPoolKey);
+        (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
+        // one release is capped to ~minDripSeconds/epochLength of the bucket, far below the whole
+        assertGt(pendingAfter, pendingBefore * 90 / 100, "single-block capture is bounded");
     }
 
     function testDripHonorsMinDripSecondsAndCatchesUp() public {
@@ -435,25 +538,31 @@ contract HookAuctionControllerTest is BaseTest {
         assertGt(donatedLater, donatedFirst);
     }
 
-    function testSkippedEpochsCarryAndDripFully() public {
+    function testSkippedEpochRefundsUnservedWinner() public {
+        // Bidder wins epoch 1 during epoch 0, but the pool is never touched for several epochs,
+        // so that winner is never promoted to active and never gets a discounted swap. Their bid
+        // must be refunded, not confiscated into LP drip.
         uint256 bid = 1e18;
-        uint256 totalDrip = bid - bid * PROTOCOL_FEE_BPS / 10_000;
         _bid(bidderA, address(winnerSwapper), bid);
 
-        // nobody touches the pool for several epochs
         _warpToEpoch(4);
         auctionController.drip(auctionPoolKey);
 
-        (, , uint256 pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
-        assertEq(pendingDonation, 0, "carried value should have been donated");
+        assertEq(auctionController.refunds(currency1, bidderA), bid, "unserved winner is refunded");
+        (,, uint256 pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertEq(pendingDonation, 0, "nothing dripped to LPs");
 
-        // full drip landed in LP fees
         uint256 balance1Before = IERC20(Currency.unwrap(currency1)).balanceOf(address(this));
         positionManager.decreaseLiquidity(
             fullRangeTokenId, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
         );
-        uint256 collected = IERC20(Currency.unwrap(currency1)).balanceOf(address(this)) - balance1Before;
-        assertApproxEqAbs(collected, totalDrip, 10);
+        assertEq(
+            IERC20(Currency.unwrap(currency1)).balanceOf(address(this)) - balance1Before, 0, "LP collects nothing"
+        );
+
+        vm.prank(bidderA);
+        auctionController.claimRefund(currency1, bidderA);
+        assertEq(IERC20(Currency.unwrap(currency1)).balanceOf(bidderA), 100e18, "bidder made whole");
     }
 
     function testZeroLiquidityKeepsValuePending() public {
@@ -474,7 +583,7 @@ contract HookAuctionControllerTest is BaseTest {
         (,, uint256 pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
         assertGt(pendingDonation, 0, "undonatable value must be kept pending");
 
-        // adding liquidity back flushes the pending bucket (drip runs on the add itself)
+        // adding liquidity back lets the pending bucket drain (gradually, anti-JIT)
         positionManager.mint(
             auctionPoolKey,
             TickMath.minUsableTick(60),
@@ -486,9 +595,9 @@ contract HookAuctionControllerTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-        auctionController.drip(auctionPoolKey);
+        _drainPending(auctionPoolKey);
         (,, pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
-        assertEq(pendingDonation, 0, "pending must flush once liquidity exists");
+        assertEq(pendingDonation, 0, "pending fully drains once liquidity exists");
 
         // conservation: everything the controller no longer holds went to LPs or protocol fees
         uint256 controllerBalance = IERC20(Currency.unwrap(currency1)).balanceOf(address(auctionController));
@@ -527,13 +636,16 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.drip(auctionPoolKey);
         (,,,, uint256 donated,,) = auctionController.getEpochAuction(auctionPoolId, false);
         assertEq(donated, 0, "no active auction after wind-down");
-        (,, uint256 pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
-        assertEq(pendingDonation, 0, "old epoch fully dripped");
 
         snap = vm.snapshotState();
         uint256 outAfter = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
         vm.revertToState(snap);
         assertApproxEqRel(outAfter, outOther, 1e12, "no discount after wind-down");
+
+        // the previous epoch's undripped remainder drains gradually to LPs
+        _drainPending(auctionPoolKey);
+        (,, uint256 pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertEq(pendingDonation, 0, "old epoch fully dripped");
 
         // re-enable: bidding works again
         auctionController.setBiddingEnabled(auctionPoolKey, true);
@@ -584,7 +696,8 @@ contract HookAuctionControllerTest is BaseTest {
 
         PoolKey memory key = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(flags2));
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
-        RevertHook(payable(flags2)).updateDynamicLPFee(key, NORMAL_FEE); // owner safety valve
+        // No configured baseline fee (the controller reverts), so the pool runs at the 0% dynamic
+        // default; the point is that swaps and liquidity ops still succeed fail-open.
 
         // liquidity ops and swaps succeed despite the broken controller
         positionManager.mint(
@@ -690,5 +803,12 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.beforeSwap(auctionPoolKey, address(this));
         vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
         auctionController.beforeLiquidityChange(auctionPoolKey);
+    }
+
+    function testTakeProtocolFeesRejectsDirectCall() public {
+        // takeProtocolFees is delegatecall-only; a direct call on the sidecar (which would run on
+        // its own storage and could emit spoofed SendProtocolFee events) must revert.
+        vm.expectRevert(); // Unauthorized (Constants.Unauthorized selector)
+        autoLendActionsRef.takeProtocolFees(1, auctionPoolKey, toBalanceDelta(int128(1), int128(1)));
     }
 }
