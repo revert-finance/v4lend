@@ -83,7 +83,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         uint64 activeEpoch;
         EpochAuction active;
         EpochAuction next;
-        uint128 pendingDonation; // vested value not yet donated (e.g. zero-liquidity periods)
+        // Vested value not yet donated (e.g. zero-liquidity periods). uint256 so carrying many
+        // near-MAX_BID_AMOUNT epochs can never overflow and brick _syncPool.
+        uint256 pendingDonation;
         uint64 pendingLastDripTime; // throttles gradual release of the pending bucket
     }
 
@@ -92,6 +94,12 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     IPoolManager public immutable poolManager;
 
     bool public bidsPaused;
+
+    // Optional owner-controlled executor allowlist. Off by default (bidding stays permissionless);
+    // when enabled, only allowlisted executors may be registered, so an operator can prevent a
+    // bidder from handing the discount to a shared public router.
+    bool public executorAllowlistEnabled;
+    mapping(address executor => bool allowed) public executorAllowed;
 
     mapping(PoolId poolId => PoolAuctionConfig config) internal _poolConfigs;
     mapping(PoolId poolId => PoolAuctionState state) internal _poolStates;
@@ -123,6 +131,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     event NormalLpFeeSet(PoolId indexed poolId, uint24 normalLpFee);
     event PendingDonationSwept(PoolId indexed poolId, Currency indexed currency, address recipient, uint256 amount);
     event DonateFailed(PoolId indexed poolId, uint256 amount);
+    event ExecutorAllowlistEnabledSet(bool enabled);
+    event ExecutorAllowedSet(address indexed executor, bool allowed);
 
     // ==================== Errors ====================
 
@@ -202,7 +212,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
         if (
             executor == address(0) || executor == address(poolManager) || executor == address(this)
-                || executor == hook
+                || executor == hook || (executorAllowlistEnabled && !executorAllowed[executor])
         ) {
             revert InvalidExecutor();
         }
@@ -397,6 +407,22 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         _checkOwner();
         bidsPaused = paused_;
         emit BidsPausedSet(paused_);
+    }
+
+    /// @notice Turns the executor allowlist on or off. While on, bidNext only accepts executors
+    ///         set via setExecutorAllowed, so a bidder cannot register a shared public router and
+    ///         hand the discount to all of its traffic. Off by default (permissionless bidding).
+    function setExecutorAllowlistEnabled(bool enabled) external {
+        _checkOwner();
+        executorAllowlistEnabled = enabled;
+        emit ExecutorAllowlistEnabledSet(enabled);
+    }
+
+    /// @notice Adds or removes an executor from the allowlist.
+    function setExecutorAllowed(address executor, bool allowed) external {
+        _checkOwner();
+        executorAllowed[executor] = allowed;
+        emit ExecutorAllowedSet(executor, allowed);
     }
 
     /// @notice Updates the baseline LP fee of a configured pool and re-mirrors it into the
@@ -661,20 +687,32 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         amountDonated += _dripActiveEpoch(key, poolId, config, state);
     }
 
-    /// @dev Releases the pending-donation bucket gradually rather than in one lump. Because
-    ///      donate() credits whoever is in range at that instant, dumping the whole bucket at
-    ///      once lets a single-block JIT position capture all of it; throttling by minDripSeconds
-    ///      and capping each release to the epoch's linear rate bounds a JIT to one small slice.
-    ///      This mitigates, but does not eliminate, point-in-time JIT exposure (a known tradeoff
-    ///      of donate-based distribution).
+    /// @dev Releases the pending-donation bucket gradually rather than in one lump. donate()
+    ///      credits whoever is in range at that instant, so dumping the whole bucket at once
+    ///      lets a single-block JIT position capture all of it. Each release is throttled by
+    ///      minDripSeconds and bounded to (elapsed / epochLength) of the bucket, with the
+    ///      catch-up window capped at one epoch. Crucially, whenever the pool has no in-range
+    ///      liquidity the throttle clock is advanced, so an idle zero-liquidity stretch is NOT
+    ///      later paid out as one large catch-up slice to the first LP that reappears (which
+    ///      would be the sole in-range recipient of the whole accrued bucket). A JIT therefore
+    ///      has to hold liquidity for at least minDripSeconds to receive even one bounded slice.
+    ///      This bounds, but does not fully eliminate, point-in-time JIT exposure - a known
+    ///      tradeoff of donate-based distribution.
     function _dripPending(
         PoolKey memory key,
         PoolId poolId,
         PoolAuctionConfig memory config,
         PoolAuctionState storage state
     ) internal returns (uint256 amountToDonate) {
-        uint128 pending = state.pendingDonation;
+        uint256 pending = state.pendingDonation;
         if (pending == 0) {
+            return 0;
+        }
+
+        // Cannot donate without in-range liquidity; advance the clock so the gap cannot become a
+        // giant catch-up slice once liquidity returns.
+        if (StateLibrary.getLiquidity(poolManager, poolId) == 0) {
+            state.pendingLastDripTime = uint64(block.timestamp);
             return 0;
         }
 
@@ -683,24 +721,25 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             return 0;
         }
 
-        uint256 release;
-        if (last != 0 && block.timestamp >= uint256(last) + config.epochLengthSeconds) {
-            // a full epoch of inactivity: flush the remainder so dust can never get stuck
-            release = pending;
-        } else {
-            uint256 elapsed = last == 0 ? config.minDripSeconds : block.timestamp - last;
-            release = FullMath.mulDiv(pending, elapsed, config.epochLengthSeconds);
-            if (release > pending) release = pending;
+        uint256 elapsed = last == 0 ? config.minDripSeconds : block.timestamp - last;
+        if (elapsed > config.epochLengthSeconds) {
+            elapsed = config.epochLengthSeconds; // cap the catch-up at one epoch's worth
         }
-        if (release == 0) {
-            return 0;
+        uint256 release = FullMath.mulDiv(pending, elapsed, config.epochLengthSeconds);
+        // release rounds to 0 only for sub-slice dust (pending < epochLength / minDripSeconds,
+        // e.g. < a few dozen wei); clear it so the bucket cannot get permanently stuck.
+        if (release == 0 || release > pending) {
+            release = pending;
+        }
+        if (release > MAX_BID_AMOUNT) {
+            release = MAX_BID_AMOUNT; // keep each donate within int128 range
         }
 
         amountToDonate = _donate(key, poolId, config, release);
         if (amountToDonate == 0) {
             return 0;
         }
-        state.pendingDonation = pending - uint128(amountToDonate);
+        state.pendingDonation = pending - amountToDonate;
         state.pendingLastDripTime = uint64(block.timestamp);
         emit PendingDonationDripped(poolId, amountToDonate, state.pendingDonation);
     }
@@ -725,12 +764,6 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (totalDrip == 0 || auction.donated >= totalDrip) {
             return 0;
         }
-        if (
-            auction.lastDripTime != 0 && block.timestamp < uint256(auction.lastDripTime) + config.minDripSeconds
-                && block.timestamp < epochEnd
-        ) {
-            return 0;
-        }
 
         uint256 effectiveTime = block.timestamp < epochEnd ? block.timestamp : epochEnd;
         if (effectiveTime <= epochStart) {
@@ -740,6 +773,22 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         uint256 vested = uint256(totalDrip) * (effectiveTime - epochStart) / config.epochLengthSeconds;
         uint256 claimable = vested - auction.donated;
         if (claimable == 0) {
+            return 0;
+        }
+
+        // No in-range liquidity: park the newly-vested slice into the pending bucket (anti-JIT
+        // gradual release) instead of letting it dump to the first LP that reappears, and mark
+        // it donated so it is not counted twice. Mirrors _dripPending's zero-liquidity handling.
+        if (StateLibrary.getLiquidity(poolManager, poolId) == 0) {
+            auction.donated += uint128(claimable);
+            state.pendingDonation += claimable;
+            return 0;
+        }
+
+        if (
+            auction.lastDripTime != 0 && block.timestamp < uint256(auction.lastDripTime) + config.minDripSeconds
+                && block.timestamp < epochEnd
+        ) {
             return 0;
         }
 

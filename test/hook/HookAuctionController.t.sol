@@ -375,6 +375,51 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.claimRefund(currency1, bidderA);
     }
 
+    function testExecutorAllowlist() public {
+        // off by default: any executor accepted
+        _bid(bidderA, address(winnerSwapper), RESERVE);
+
+        // enable and require allowlisting
+        auctionController.setExecutorAllowlistEnabled(true);
+        vm.prank(bidderB);
+        vm.expectRevert(HookAuctionController.InvalidExecutor.selector);
+        auctionController.bidNext(auctionPoolKey, address(otherSwapper), RESERVE * 2);
+
+        // allow it, then the bid succeeds
+        auctionController.setExecutorAllowed(address(otherSwapper), true);
+        _bid(bidderB, address(otherSwapper), RESERVE * 2);
+
+        // non-owner cannot manage the allowlist
+        vm.prank(bidderA);
+        vm.expectRevert(HookOwnedControllerBase.Unauthorized.selector);
+        auctionController.setExecutorAllowlistEnabled(false);
+    }
+
+    function testSetAuctionControllerRepointsHook() public {
+        // non-owner cannot repoint
+        vm.prank(bidderA);
+        vm.expectRevert(); // OwnableUnauthorizedAccount
+        hook.setAuctionController(IHookAuctionController(address(0)));
+
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        _warpToEpoch(1);
+
+        // owner disables auctions by pointing at address(0); swaps still work fail-open, and the
+        // winner gets no discount (measured from the same pool state via snapshots)
+        hook.setAuctionController(IHookAuctionController(address(0)));
+        uint256 snap = vm.snapshotState();
+        uint256 outNoController = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+        assertGt(outNoController, 0, "swaps work with no controller");
+
+        // repoint back to the real controller; winner discount resumes
+        hook.setAuctionController(IHookAuctionController(address(auctionController)));
+        snap = vm.snapshotState();
+        uint256 outWinner = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+        assertGt(outWinner, outNoController, "winner discount active again after repoint");
+    }
+
     function testBidInvalidExecutors() public {
         vm.expectRevert(HookAuctionController.InvalidExecutor.selector);
         _bid(bidderA, address(0), RESERVE);
@@ -516,6 +561,71 @@ contract HookAuctionControllerTest is BaseTest {
         (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
         // one release is capped to ~minDripSeconds/epochLength of the bucket, far below the whole
         assertGt(pendingAfter, pendingBefore * 90 / 100, "single-block capture is bounded");
+    }
+
+    function testPendingCatchupBoundedAfterZeroLiquidityGap() public {
+        // Codex P2: pending dripped once, then the pool sits at zero liquidity for a full epoch;
+        // the first LP to reappear must NOT be able to capture the whole accrued bucket at once.
+        uint256 bid = 1e18;
+        _bid(bidderA, address(winnerSwapper), bid);
+        _warpToEpoch(1);
+        auctionController.drip(auctionPoolKey); // active-epoch drip once, with liquidity present
+
+        // remove all liquidity, let a couple of epochs pass
+        uint256 liquidity = positionManager.getPositionLiquidity(fullRangeTokenId);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, liquidity, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        _warpToEpoch(4);
+        auctionController.drip(auctionPoolKey); // zero liquidity: clock advanced, nothing released
+        (,, uint256 pendingBefore) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertGt(pendingBefore, 0);
+
+        // JIT reappears and immediately drips in the same block
+        positionManager.mint(
+            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        auctionController.drip(auctionPoolKey);
+        (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
+        // throttled in the same block: essentially nothing is released to the JIT
+        assertEq(pendingAfter, pendingBefore, "no catch-up dumped to a same-block JIT");
+    }
+
+    function testLargePendingDoesNotOverflowAndIsSweepable() public {
+        // Codex P2: with protocolFeeBps == 0, carrying several near-MAX_BID_AMOUNT epochs into the
+        // pending bucket must not overflow / brick the pool. pendingDonation is uint256.
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.protocolFeeBps = 0;
+        config.feeDiscountPpm = 500_000;
+        auctionController.configurePool(auctionPoolKey, config);
+        startTime = uint64(block.timestamp);
+
+        uint256 huge = uint256(uint128(type(int128).max)); // MAX_BID_AMOUNT
+        // remove liquidity so every winning epoch's proceeds carry into pending
+        uint256 liquidity = positionManager.getPositionLiquidity(fullRangeTokenId);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, liquidity, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        IERC20 token1 = IERC20(Currency.unwrap(currency1));
+        for (uint64 e = 0; e < 3; e++) {
+            deal(address(token1), bidderA, huge);
+            vm.prank(bidderA);
+            token1.approve(address(auctionController), huge);
+            vm.prank(bidderA);
+            auctionController.bidNext(auctionPoolKey, address(winnerSwapper), huge);
+            _warpToEpoch(e + 1);
+            auctionController.drip(auctionPoolKey); // carries prior epoch into pending, no revert
+        }
+
+        (,, uint256 pending) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertGt(pending, huge, "aggregate exceeds a single MAX_BID_AMOUNT without overflow");
+
+        // still recoverable
+        auctionController.setBiddingEnabled(auctionPoolKey, false);
+        uint256 swept = auctionController.sweepPendingDonation(auctionPoolKey, makeAddr("sink"));
+        assertEq(swept, pending);
     }
 
     function testDripHonorsMinDripSecondsAndCatchesUp() public {
