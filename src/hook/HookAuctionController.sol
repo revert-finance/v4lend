@@ -462,24 +462,41 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     ///         bidding has been wound down, so it cannot pre-empt normal dripping to LPs.
     /// @dev Also the only way to clear a stuck bucket so configurePool (which requires
     ///      pendingDonation == 0) can restart the pool.
-    function sweepPendingDonation(PoolKey calldata key, address recipient) external returns (uint256 amount) {
+    function sweepPendingDonation(PoolKey calldata key, address recipient)
+        external
+        nonReentrant
+        returns (uint256 amount)
+    {
         _checkOwner();
         if (recipient == address(0)) {
             revert InvalidConfig();
         }
         PoolId poolId = key.toId();
-        PoolAuctionConfig storage config = _poolConfigs[poolId];
+        PoolAuctionConfig memory config = _poolConfigs[poolId];
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
         }
         if (config.biddingEnabled) {
             revert BiddingDisabled();
         }
-        amount = _poolStates[poolId].pendingDonation;
+
+        // Roll epochs forward first so a just-ended winner is cleared (and its undonated
+        // remainder carried into pending). Only sweep once no bid is active or queued: otherwise
+        // the owner could pull an in-flight winner's parked proceeds while beforeSwap is still
+        // honoring the discount they paid for. The owner must wait for the active epoch to end.
+        PoolAuctionState storage state = _poolStates[poolId];
+        if (block.timestamp >= config.epochStartTime) {
+            state = _syncPool(poolId, config);
+        }
+        if (state.active.bid != 0 || state.next.bid != 0) {
+            revert BidsOutstanding();
+        }
+
+        amount = state.pendingDonation;
         if (amount == 0) {
             revert NothingToClaim();
         }
-        _poolStates[poolId].pendingDonation = 0;
+        state.pendingDonation = 0;
         IERC20(Currency.unwrap(config.auctionCurrency)).safeTransfer(recipient, amount);
         emit PendingDonationSwept(poolId, config.auctionCurrency, recipient, amount);
     }

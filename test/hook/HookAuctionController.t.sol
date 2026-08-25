@@ -454,6 +454,31 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.configurePool(auctionPoolKey, config); // no longer reverts PoolStateNotClean
     }
 
+    function testSweepBlockedWhileWinnerActive() public {
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        _warpToEpoch(1); // winner active for epoch 1
+
+        // remove liquidity, then drip mid-epoch so the active epoch's vested proceeds park into pending
+        uint256 liquidity = positionManager.getPositionLiquidity(fullRangeTokenId);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, liquidity, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        vm.warp(uint256(startTime) + EPOCH_LENGTH + EPOCH_LENGTH / 2);
+        auctionController.drip(auctionPoolKey);
+        (,, uint256 pending) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertGt(pending, 0, "active-epoch vesting parked while empty");
+
+        // disabling bidding does not let the owner sweep an in-flight winner's proceeds
+        auctionController.setBiddingEnabled(auctionPoolKey, false);
+        vm.expectRevert(HookAuctionController.BidsOutstanding.selector);
+        auctionController.sweepPendingDonation(auctionPoolKey, makeAddr("sink"));
+
+        // only once the active epoch ends and the winner rolls off is the sweep allowed
+        _warpToEpoch(2);
+        uint256 swept = auctionController.sweepPendingDonation(auctionPoolKey, makeAddr("sink"));
+        assertGt(swept, 0, "sweep allowed after the winner's epoch ends");
+    }
+
     function testMinNextBidReflectsPendingRollover() public {
         _bid(bidderA, address(winnerSwapper), 5e15); // epoch 1 winner
         // move into epoch 1 without any pool touch: the stored next slot is stale
@@ -719,10 +744,11 @@ contract HookAuctionControllerTest is BaseTest {
         (,, uint256 pending) = auctionController.getPoolAuctionState(auctionPoolId);
         assertGt(pending, huge, "aggregate exceeds a single MAX_BID_AMOUNT without overflow");
 
-        // still recoverable
+        // wind down and let the final active epoch end; then the whole aggregate is recoverable
         auctionController.setBiddingEnabled(auctionPoolKey, false);
+        _warpToEpoch(4);
         uint256 swept = auctionController.sweepPendingDonation(auctionPoolKey, makeAddr("sink"));
-        assertEq(swept, pending);
+        assertGt(swept, pending, "final active epoch also settles into the sweep");
     }
 
     function testDripHonorsMinDripSecondsAndCatchesUp() public {
