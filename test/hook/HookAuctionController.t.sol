@@ -167,26 +167,11 @@ contract HookAuctionControllerTest is BaseTest {
         v4Oracle = new MockV4Oracle(positionManager);
         protocolFeeRecipient = makeAddr("protocolFeeRecipient");
 
-        LiquidityCalculator liquidityCalculator = new LiquidityCalculator();
-        feeController = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
-        HookRouteController routeController = new HookRouteController(flags);
-        auctionController = new HookAuctionController(flags, poolManager);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(poolManager, feeController);
-
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLendActions autoLendActions = new RevertHookAutoLendActions(
-            permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
-        );
-        autoLendActionsRef = autoLendActions;
-
-        bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
-        );
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
-        hook = RevertHook(payable(flags));
+        RevertHookStack memory stack = deployRevertHookStack(flags, v4Oracle, protocolFeeRecipient);
+        hook = stack.hook;
+        feeController = stack.feeController;
+        auctionController = stack.auctionController;
+        autoLendActionsRef = stack.autoLendActions;
 
         auctionPoolKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
         auctionPoolId = auctionPoolKey.toId();
@@ -914,6 +899,63 @@ contract HookAuctionControllerTest is BaseTest {
         _bid(bidderB, address(otherSwapper), RESERVE);
     }
 
+    function testGetActiveWinnerIsRolloverAware() public {
+        _bid(bidderA, address(winnerSwapper), 1e18);
+
+        // still epoch 0: the queued bid is not the active winner yet
+        (, address executor0,,) = auctionController.getActiveWinner(auctionPoolId);
+        assertEq(executor0, address(0), "no winner before the won epoch");
+
+        // epoch 1 with NO pool touch: the raw slot is stale, the view is not
+        _warpToEpoch(1);
+        (,, uint256 rawActiveBid,,,,) = auctionController.getEpochAuction(auctionPoolId, false);
+        assertEq(rawActiveBid, 0, "raw storage not yet synced");
+        (address bidder, address executor, uint256 bid, uint24 lpFee) =
+            auctionController.getActiveWinner(auctionPoolId);
+        assertEq(bidder, bidderA);
+        assertEq(executor, address(winnerSwapper), "view promotes the queued winner across the boundary");
+        assertEq(bid, 1e18);
+        assertEq(lpFee, 0, "full discount");
+
+        // a multi-epoch skip means the queued bid gets refunded: nobody is the winner
+        _warpToEpoch(3);
+        (, executor,,) = auctionController.getActiveWinner(auctionPoolId);
+        assertEq(executor, address(0), "no winner after a skipped epoch");
+    }
+
+    /// @notice Pins the auction's hot-path gas so regressions surface in CI. The recorded
+    ///         numbers land in snapshots/ via forge's native gas snapshots; the assertions are
+    ///         generous ceilings that fail on gross regressions (e.g. an accidental extra
+    ///         cold-storage pass or an unconditional donate attempt per swap).
+    function testGas_HookSwapOverhead() public {
+        // hooked pool WITHOUT an auction configuration: the controller must exit on one slot load
+        PoolKey memory plainHooked = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
+        poolManager.initialize(plainHooked, Constants.SQRT_PRICE_1_1);
+        positionManager.mint(
+            plainHooked, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        otherSwapper.swapExactIn(plainHooked, true, 1e18); // warm pool + token slots
+        uint256 gasBefore = gasleft();
+        otherSwapper.swapExactIn(plainHooked, true, 1e18);
+        uint256 unconfiguredSwapGas = gasBefore - gasleft();
+        vm.snapshotGasLastCall("HookAuction", "swap_unconfiguredPool");
+
+        // configured pool, non-winner swap (includes epoch sync + drip bookkeeping)
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        _warpToEpoch(1);
+        otherSwapper.swapExactIn(auctionPoolKey, true, 1e18); // warm + first drip/materialize
+        gasBefore = gasleft();
+        otherSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        uint256 configuredSwapGas = gasBefore - gasleft();
+        vm.snapshotGasLastCall("HookAuction", "swap_configuredPool_nonWinner");
+
+        // ceilings with headroom; a regression like an unconditional 3-slot config copy or a
+        // failed-donate retry per swap blows through these
+        assertLt(unconfiguredSwapGas, 90_000, "unconfigured-pool swap gas regressed");
+        assertLt(configuredSwapGas, 110_000, "configured-pool swap gas regressed");
+    }
+
     // ==================== Vault integration ====================
 
     /// @notice End-to-end: a position in an auctioned pool serves as V4Vault collateral - the
@@ -1138,21 +1180,7 @@ contract HookAuctionControllerTest is BaseTest {
     }
 
     function _deployHookTo(address flags, address controller) internal {
-        LiquidityCalculator liquidityCalculator = new LiquidityCalculator();
-        HookFeeController feeController2 = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
-        HookRouteController routeController2 = new HookRouteController(flags);
-        RevertHookSwapActions swapActions2 = new RevertHookSwapActions(poolManager, feeController2);
-        RevertHookPositionActions positionActions2 =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController2, swapActions2);
-        RevertHookAutoLeverageActions autoLeverageActions2 =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController2, swapActions2);
-        RevertHookAutoLendActions autoLendActions2 = new RevertHookAutoLendActions(
-            permit2, v4Oracle, liquidityCalculator, feeController2, routeController2, swapActions2
-        );
-        bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController2, controller, positionActions2, autoLeverageActions2, autoLendActions2
-        );
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
+        deployRevertHookStackWithController(flags, v4Oracle, protocolFeeRecipient, controller);
     }
 
     // ==================== Accounting ====================

@@ -14,6 +14,8 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {CurrencySettler} from "@openzeppelin/uniswap-hooks/src/utils/CurrencySettler.sol";
+
 import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
 import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 
@@ -44,6 +46,7 @@ interface IRevertHookDynamicFee {
 ///        currency0 are supported by auctioning in the ERC20 currency1.
 contract HookAuctionController is HookOwnedControllerBase, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using CurrencySettler for Currency;
     using PoolIdLibrary for PoolKey;
 
     // ==================== Constants ====================
@@ -75,14 +78,15 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         address bidder;
         address executor;
         uint128 bid;
+        // set once by _materializeEpoch; nonzero totalDrip doubles as the "materialized" flag
+        // (protocolFeeBps is capped at 20%, so any nonzero bid materializes to a nonzero drip)
         uint128 totalDrip;
         uint128 donated;
         uint64 lastDripTime;
-        bool materialized;
     }
 
     struct PoolAuctionState {
-        bool initialized;
+        bool epochsSynced; // set on the first pool touch; NOT "configured" - see isConfigured()
         uint64 activeEpoch;
         EpochAuction active;
         EpochAuction next;
@@ -158,10 +162,14 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     }
 
     modifier onlyHook() {
+        _checkHook();
+        _;
+    }
+
+    function _checkHook() internal view {
         if (msg.sender != hook) {
             revert Unauthorized();
         }
-        _;
     }
 
     // ==================== Hook-facing entry points ====================
@@ -495,14 +503,49 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     function getPoolAuctionState(PoolId poolId)
         external
         view
-        returns (bool initialized, uint64 activeEpoch, uint256 pendingDonation)
+        returns (bool epochsSynced, uint64 activeEpoch, uint256 pendingDonation)
     {
         PoolAuctionState storage state = _poolStates[poolId];
-        return (state.initialized, state.activeEpoch, state.pendingDonation);
+        return (state.epochsSynced, state.activeEpoch, state.pendingDonation);
     }
 
-    /// @notice Returns the auction slot of the currently active or the next epoch.
-    /// @dev Values reflect stored state; call drip() or wait for a pool action to sync epochs.
+    /// @notice Whether a pool has an auction configuration (independent of any activity).
+    function isConfigured(PoolId poolId) external view returns (bool) {
+        return _isConfigured(_poolConfigs[poolId]);
+    }
+
+    /// @notice Rollover-aware view of the winner whose executor receives the fee discount RIGHT
+    ///         NOW, matching what beforeSwap would apply after its sync. Use this (not the raw
+    ///         getEpochAuction) to identify the current winner across untouched epoch boundaries.
+    function getActiveWinner(PoolId poolId)
+        external
+        view
+        returns (address bidder, address executor, uint256 bid, uint24 lpFee)
+    {
+        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        if (!_isRunning(config)) {
+            return (address(0), address(0), 0, 0);
+        }
+        PoolAuctionState storage state = _poolStates[poolId];
+        EpochAuction storage auction = state.active;
+        if (_rolloverPending(config, state)) {
+            if (_currentEpoch(config) == state.activeEpoch + 1) {
+                // a single-epoch advance promotes the queued bid to active
+                auction = state.next;
+            } else {
+                // multi-epoch skip: the queued bid gets refunded, nobody is the winner
+                return (address(0), address(0), 0, 0);
+            }
+        }
+        if (auction.bid == 0) {
+            return (address(0), address(0), 0, 0);
+        }
+        return (auction.bidder, auction.executor, auction.bid, _winnerLpFee(config));
+    }
+
+    /// @notice Returns the raw stored auction slot of the currently active or the next epoch.
+    /// @dev Values reflect stored state; call drip() or wait for a pool action to sync epochs
+    ///      (or use getActiveWinner / minNextBid, which are rollover-aware).
     function getEpochAuction(PoolId poolId, bool nextEpoch)
         external
         view
@@ -516,6 +559,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             bool materialized
         )
     {
+        // materialized is derived: a nonzero bid materializes to a nonzero totalDrip
         PoolAuctionState storage state = _poolStates[poolId];
         EpochAuction storage auction = nextEpoch ? state.next : state.active;
         return (
@@ -525,7 +569,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             auction.totalDrip,
             auction.donated,
             auction.lastDripTime,
-            auction.materialized
+            auction.totalDrip != 0
         );
     }
 
@@ -561,7 +605,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         view
         returns (bool)
     {
-        return state.initialized && block.timestamp >= config.epochStartTime
+        return state.epochsSynced && block.timestamp >= config.epochStartTime
             && _currentEpoch(config) > state.activeEpoch;
     }
 
@@ -588,22 +632,13 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         return uint64((block.timestamp - config.epochStartTime) / config.epochLengthSeconds);
     }
 
-    function _epochBounds(PoolAuctionConfig memory config, uint64 epoch)
-        internal
-        pure
-        returns (uint256 start, uint256 end)
-    {
-        start = uint256(config.epochStartTime) + uint256(epoch) * uint256(config.epochLengthSeconds);
-        end = start + config.epochLengthSeconds;
-    }
-
     function _winnerLpFee(PoolAuctionConfig memory config) internal pure returns (uint24) {
         return uint24(uint256(config.normalLpFee) - uint256(config.normalLpFee) * config.feeDiscountPpm / PPM);
     }
 
     function _minNextBid(PoolAuctionConfig memory config, uint128 currentBid) internal pure returns (uint256) {
         if (currentBid == 0) {
-            return config.openingBidReserve > 0 ? config.openingBidReserve : 1;
+            return config.openingBidReserve; // validated nonzero in configurePool
         }
         uint256 bump = uint256(currentBid) * config.minBidBumpPpm / PPM;
         return uint256(currentBid) + (bump > 0 ? bump : 1);
@@ -617,8 +652,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     {
         state = _poolStates[poolId];
         uint64 current = _currentEpoch(config);
-        if (!state.initialized) {
-            state.initialized = true;
+        if (!state.epochsSynced) {
+            state.epochsSynced = true;
             state.activeEpoch = current;
             return state;
         }
@@ -686,18 +721,16 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         uint64 epoch,
         EpochAuction storage auction
     ) internal {
-        if (auction.materialized) {
+        // callers guard on auction.bid != 0, and a materialized nonzero bid always has a nonzero
+        // totalDrip (protocol fee is capped at 20%), so totalDrip doubles as the materialized flag
+        if (auction.totalDrip != 0) {
             return;
         }
-        auction.materialized = true;
 
-        uint256 protocolFee;
-        if (auction.bid != 0) {
-            protocolFee = uint256(auction.bid) * config.protocolFeeBps / BPS_DENOMINATOR;
-            auction.totalDrip = auction.bid - uint128(protocolFee);
-            if (protocolFee != 0) {
-                protocolFeesAccrued[config.auctionCurrency][config.protocolFeeRecipient] += protocolFee;
-            }
+        uint256 protocolFee = uint256(auction.bid) * config.protocolFeeBps / BPS_DENOMINATOR;
+        auction.totalDrip = auction.bid - uint128(protocolFee);
+        if (protocolFee != 0) {
+            protocolFeesAccrued[config.auctionCurrency][config.protocolFeeRecipient] += protocolFee;
         }
         emit EpochMaterialized(poolId, epoch, auction.executor, auction.bid, protocolFee);
     }
@@ -786,7 +819,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
 
         uint64 epoch = state.activeEpoch;
-        (uint256 epochStart, uint256 epochEnd) = _epochBounds(config, epoch);
+        // every caller runs _syncPool first, so epochStart <= block.timestamp < epochEnd holds
+        uint256 epochStart = uint256(config.epochStartTime) + uint256(epoch) * uint256(config.epochLengthSeconds);
 
         _materializeEpoch(poolId, config, epoch, auction);
 
@@ -795,12 +829,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             return 0;
         }
 
-        uint256 effectiveTime = block.timestamp < epochEnd ? block.timestamp : epochEnd;
-        if (effectiveTime <= epochStart) {
-            return 0;
-        }
-
-        uint256 vested = uint256(totalDrip) * (effectiveTime - epochStart) / config.epochLengthSeconds;
+        uint256 vested = uint256(totalDrip) * (block.timestamp - epochStart) / config.epochLengthSeconds;
         uint256 claimable = vested - auction.donated;
         if (claimable == 0) {
             return 0;
@@ -815,10 +844,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             return 0;
         }
 
-        if (
-            auction.lastDripTime != 0 && block.timestamp < uint256(auction.lastDripTime) + config.minDripSeconds
-                && block.timestamp < epochEnd
-        ) {
+        if (auction.lastDripTime != 0 && block.timestamp < uint256(auction.lastDripTime) + config.minDripSeconds) {
             return 0;
         }
 
@@ -867,8 +893,6 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
         bool isCurrency0 = currency == key.currency0;
         poolManager.donate(key, isCurrency0 ? amount : 0, isCurrency0 ? 0 : amount, "");
-        poolManager.sync(currency);
-        IERC20(Currency.unwrap(currency)).safeTransfer(address(poolManager), amount);
-        poolManager.settle();
+        currency.settle(poolManager, address(this), amount, false);
     }
 }

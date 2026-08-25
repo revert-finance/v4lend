@@ -66,23 +66,9 @@ contract AuctionArbExecutorTest is BaseTest {
         v4Oracle = new MockV4Oracle(positionManager);
         profitRecipient = makeAddr("profitRecipient");
 
-        LiquidityCalculator liquidityCalculator = new LiquidityCalculator();
-        HookFeeController feeController = new HookFeeController(flags, makeAddr("feeRecipient"), 200, 200);
-        HookRouteController routeController = new HookRouteController(flags);
-        auctionController = new HookAuctionController(flags, poolManager);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(poolManager, feeController);
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLendActions autoLendActions = new RevertHookAutoLendActions(
-            permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
-        );
-        bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
-        );
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
-        hook = RevertHook(payable(flags));
+        RevertHookStack memory stack = deployRevertHookStack(flags, v4Oracle, makeAddr("feeRecipient"));
+        hook = stack.hook;
+        auctionController = stack.auctionController;
 
         auctionPoolKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
         plainPoolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));

@@ -116,26 +116,11 @@ contract RevertHookNativeAutoLendTest is BaseTest {
         );
 
         v4Oracle = new MockV4Oracle(positionManager);
-        liquidityCalculator = new LiquidityCalculator();
-        feeController = new HookFeeController(flags, makeAddr("protocolFeeRecipient"), 200, 200);
-        routeController = new HookRouteController(flags);
-        HookAuctionController auctionController = new HookAuctionController(flags, v4Oracle.poolManager());
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
-
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(
-                permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
-            );
-
-        bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
-        );
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
-        hook = RevertHook(payable(flags));
+        RevertHookStack memory stack = deployRevertHookStack(flags, v4Oracle, makeAddr("protocolFeeRecipient"));
+        hook = stack.hook;
+        feeController = stack.feeController;
+        routeController = stack.routeController;
+        liquidityCalculator = stack.liquidityCalculator;
 
         wethVault = new MockERC4626Vault(IERC20(address(weth)), "Wrapped Native Vault", "vWETH");
         token1Vault = new MockERC4626Vault(IERC20(address(token1)), "Token1 Vault", "vT1");

@@ -104,28 +104,12 @@ contract RevertHookTest is BaseTest {
 
         protocolFeeRecipient = makeAddr("protocolFeeRecipient");
 
-        // Deploy LiquidityCalculator
-        liquidityCalculator = new LiquidityCalculator();
-        feeController = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
-        routeController = new HookRouteController(flags);
-        auctionController = new HookAuctionController(flags, poolManager);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
-
-        // Deploy RevertHook action targets
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(
-                permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
-            );
-
-        bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
-        );
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
-        hook = RevertHook(payable(flags));
+        RevertHookStack memory stack = deployRevertHookStack(flags, v4Oracle, protocolFeeRecipient);
+        hook = stack.hook;
+        feeController = stack.feeController;
+        routeController = stack.routeController;
+        auctionController = stack.auctionController;
+        liquidityCalculator = stack.liquidityCalculator;
 
         // Deploy MockERC4626Vault for both currencies
         vault0 = new MockERC4626Vault(IERC20(Currency.unwrap(currency0)), "Vault Token0", "vT0");
