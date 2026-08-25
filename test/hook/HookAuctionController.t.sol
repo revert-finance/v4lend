@@ -98,6 +98,28 @@ contract RevertingAuctionController is IHookAuctionController {
     }
 }
 
+/// @notice ERC20 with a toggleable transfer fee - models an auction currency that starts
+///         charging a fee only AFTER bids were escrowed. The controller's donate() then
+///         under-settles the PoolManager, which must be detected inside donateExternal (revert
+///         and isolate) rather than surfacing as CurrencyNotSettled at the end of the unlock.
+contract FeeOnTransferToken is MockERC20 {
+    uint256 public feeBps;
+
+    constructor() MockERC20("FeeOnTransfer", "FOT", 18) {}
+
+    function setFeeBps(uint256 newFeeBps) external {
+        feeBps = newFeeBps;
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        uint256 fee = amount * feeBps / 10_000;
+        if (fee != 0) {
+            super.transfer(address(0xdead), fee);
+        }
+        return super.transfer(to, amount - fee);
+    }
+}
+
 /// @notice ERC20 that reverts on transfers from a chosen sender - models an auction currency that
 ///         blacklists the controller, so the controller's donate() leg reverts.
 contract BlacklistingToken is MockERC20 {
@@ -1109,6 +1131,69 @@ contract HookAuctionControllerTest is BaseTest {
         vm.expectEmit(true, false, false, false, address(auctionController));
         emit DonateFailed(pid, 0);
         winnerSwapper.swapExactIn(key, zeroForOne, 1e18);
+    }
+
+    function testFeeOnTransferDonateIsIsolatedAndDoesNotBrickPool() public {
+        // Codex P1: a currency that begins charging a transfer fee AFTER a bid is escrowed makes
+        // the donate under-settle the PoolManager. donateExternal must detect the shortfall and
+        // revert inside the isolation (rolling the donation back), NOT return success and leave a
+        // dangling delta that reverts the whole unlock (bricking every swap that attempts a drip).
+        FeeOnTransferToken fot = new FeeOnTransferToken();
+        fot.mint(address(this), 10_000_000 ether);
+        fot.approve(address(permit2), type(uint256).max);
+        fot.approve(address(swapRouter), type(uint256).max);
+        permit2.approve(address(fot), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(fot), address(poolManager), type(uint160).max, type(uint48).max);
+        MockERC20 partner = deployToken();
+
+        (Currency c0, Currency c1) = address(fot) < address(partner)
+            ? (Currency.wrap(address(fot)), Currency.wrap(address(partner)))
+            : (Currency.wrap(address(partner)), Currency.wrap(address(fot)));
+        PoolKey memory key = PoolKey(c0, c1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
+        PoolId pid = key.toId();
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        positionManager.mint(
+            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.auctionCurrency = Currency.wrap(address(fot));
+        config.feeDiscountPpm = 500_000;
+        auctionController.configurePool(key, config);
+        uint64 s = uint64(block.timestamp);
+
+        // bid while the token is still fee-free (the exact-transfer check passes)
+        fot.mint(bidderA, 10e18);
+        vm.prank(bidderA);
+        fot.approve(address(auctionController), type(uint256).max);
+        vm.prank(bidderA);
+        auctionController.bidNext(key, address(winnerSwapper), 1e18);
+
+        fot.mint(address(otherSwapper), 100e18);
+        partner.mint(address(otherSwapper), 100e18);
+        fot.mint(address(winnerSwapper), 100e18);
+        partner.mint(address(winnerSwapper), 100e18);
+
+        // into the won epoch, then the token turns on a 1% transfer fee
+        vm.warp(uint256(s) + EPOCH_LENGTH + EPOCH_LENGTH / 2);
+        fot.setFeeBps(100);
+
+        // the drip attempt under-settles -> must be isolated as DonateFailed, and the swap and
+        // the winner's discount must be unaffected
+        bool zeroForOne = true;
+        vm.expectEmit(true, false, false, false, address(auctionController));
+        emit DonateFailed(pid, 0);
+        uint256 outFirst = otherSwapper.swapExactIn(key, zeroForOne, 1e18);
+        assertGt(outFirst, 0, "swap succeeds despite the under-settling donate");
+
+        uint256 snap = vm.snapshotState();
+        uint256 outWinner = winnerSwapper.swapExactIn(key, zeroForOne, 1e18);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        uint256 outOther = otherSwapper.swapExactIn(key, zeroForOne, 1e18);
+        vm.revertToState(snap);
+        assertGt(outWinner, outOther, "winner keeps the discount despite the broken currency");
     }
 
     function testRevertingControllerRevertsHookOps() public {

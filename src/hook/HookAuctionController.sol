@@ -14,8 +14,6 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {CurrencySettler} from "@openzeppelin/uniswap-hooks/src/utils/CurrencySettler.sol";
-
 import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
 import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 
@@ -46,7 +44,6 @@ interface IRevertHookDynamicFee {
 ///        currency0 are supported by auctioning in the ERC20 currency1.
 contract HookAuctionController is HookOwnedControllerBase, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
-    using CurrencySettler for Currency;
     using PoolIdLibrary for PoolKey;
 
     // ==================== Constants ====================
@@ -893,6 +890,18 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
         bool isCurrency0 = currency == key.currency0;
         poolManager.donate(key, isCurrency0 ? amount : 0, isCurrency0 ? 0 : amount, "");
-        currency.settle(poolManager, address(this), amount, false);
+
+        // Deliberately NOT CurrencySettler.settle: it discards PoolManager's credited amount.
+        // If the auction currency takes a transfer fee, the PoolManager receives less than
+        // `amount` and the donate's debt stays partially unsettled - without this check the
+        // self-call would return success, _donate's catch would not fire, and the outer unlock
+        // would revert CurrencyNotSettled outside the isolation, blocking the pool's swaps and
+        // liquidity ops whenever a drip is attempted. Reverting here instead rolls the whole
+        // donation back through the existing catch (DonateFailed + retry back-off).
+        poolManager.sync(currency);
+        IERC20(Currency.unwrap(currency)).safeTransfer(address(poolManager), amount);
+        if (poolManager.settle() != amount) {
+            revert ExactTransferFailed();
+        }
     }
 }
