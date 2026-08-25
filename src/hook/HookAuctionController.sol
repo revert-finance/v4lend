@@ -141,6 +141,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     error InvalidConfig();
     error PoolNotConfigured();
     error PoolStateNotClean();
+    error BidsOutstanding();
     error AuctionNotStarted();
     error BiddingDisabled();
     error InvalidBid();
@@ -439,6 +440,17 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
         }
+
+        // Freeze the fee terms while any bid is outstanding. A live or queued winner paid for an
+        // exclusive discount priced against the current baseline; moving normalLpFee (and hence
+        // _winnerLpFee) mid-auction would erode or invert the advantage they paid for. The owner
+        // can change the baseline once no bid is active or queued (call drip() to force a rollover
+        // that clears a just-ended winner if needed).
+        PoolAuctionState storage state = _poolStates[poolId];
+        if (state.active.bid != 0 || state.next.bid != 0) {
+            revert BidsOutstanding();
+        }
+
         config.normalLpFee = newNormalLpFee;
         IRevertHookDynamicFee(hook).updateDynamicLPFee(key, newNormalLpFee);
         emit NormalLpFeeSet(poolId, newNormalLpFee);

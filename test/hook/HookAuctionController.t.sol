@@ -384,6 +384,26 @@ contract HookAuctionControllerTest is BaseTest {
         assertEq(auctionController.winnerLpFee(auctionPoolId), 0, "winner fee still derived from baseline");
     }
 
+    function testSetNormalLpFeeFrozenWhileBidsOutstanding() public {
+        // a queued next-epoch bid freezes the baseline fee
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        vm.expectRevert(HookAuctionController.BidsOutstanding.selector);
+        auctionController.setNormalLpFee(auctionPoolKey, 100);
+
+        // still frozen once that bid is the active winner
+        _warpToEpoch(1);
+        auctionController.drip(auctionPoolKey); // sync promotes the bid to active
+        vm.expectRevert(HookAuctionController.BidsOutstanding.selector);
+        auctionController.setNormalLpFee(auctionPoolKey, 100);
+
+        // once the epoch ends and no bid is active or queued, the owner can move the baseline again
+        _warpToEpoch(2);
+        auctionController.drip(auctionPoolKey); // rollover clears the spent winner
+        auctionController.setNormalLpFee(auctionPoolKey, 100);
+        (,,, uint24 lpFee) = poolManager.getSlot0(auctionPoolId);
+        assertEq(lpFee, 100, "baseline changeable once bids are settled");
+    }
+
     function testConfigureRejectsZeroReserveOrBump() public {
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
         config.openingBidReserve = 0;
