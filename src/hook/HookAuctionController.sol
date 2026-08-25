@@ -34,9 +34,12 @@ interface IRevertHookDynamicFee {
 ///        (its registered executor). Shared routers must never be registered as executors.
 ///      - Refunds of outbid bids are escrowed (pull-based) so a reverting token transfer
 ///        can never block the auction.
-///      - Hook-facing entry points never revert for configured-but-idle pools and are
-///        additionally wrapped in try/catch by the hook (fail-open): a broken controller
-///        can never block swaps, liquidity changes, or liquidations.
+///      - Hook-facing entry points (beforeSwap / beforeLiquidityChange) are non-reverting by
+///        construction: they early-return for configured-but-idle pools, and the only
+///        externally-dependent step - donating to LPs in the config-chosen auction currency,
+///        which could blacklist / fee-on-transfer - is isolated inside this contract's own donate
+///        try/catch. The hook therefore calls them directly (no wholesale fail-open wrapper), so a
+///        misbehaving auction currency still cannot block swaps, liquidity changes, or liquidations.
 ///      - The auction currency must be an ERC20 side of the pool. Pools with a native
 ///        currency0 are supported by auctioning in the ERC20 currency1.
 contract HookAuctionController is HookOwnedControllerBase, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
@@ -164,9 +167,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     // ==================== Hook-facing entry points ====================
 
     /// @inheritdoc IHookAuctionController
-    /// @dev Never reverts for configured pools in normal operation; the hook additionally
-    ///      wraps this call in try/catch. Runs inside the hook's beforeSwap, i.e. while the
-    ///      PoolManager is unlocked, so donations settle directly.
+    /// @dev Non-reverting by construction (the hook calls it directly): early-returns for idle
+    ///      pools, and the donate leg is isolated in _donate's own try/catch. Runs inside the
+    ///      hook's beforeSwap, i.e. while the PoolManager is unlocked, so donations settle directly.
     function beforeSwap(PoolKey calldata key, address sender) external onlyHook returns (uint24 lpFeeOverride) {
         PoolId poolId = key.toId();
         // single cold SLOAD to skip the full struct copy on the many pools that never run an auction
@@ -362,8 +365,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         _poolConfigs[poolId] = config;
 
-        // mirror the baseline fee into the pool's stored dynamic fee so all non-winner
-        // swaps (and any fail-open fallback in the hook) use it
+        // mirror the baseline fee into the pool's stored dynamic fee so all non-winner swaps use it
         IRevertHookDynamicFee(hook).updateDynamicLPFee(key, config.normalLpFee);
 
         emit PoolAuctionConfigured(poolId, config);

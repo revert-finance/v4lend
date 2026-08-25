@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -91,12 +92,28 @@ contract RevertingAuctionController is IHookAuctionController {
     }
 }
 
+/// @notice ERC20 that reverts on transfers from a chosen sender - models an auction currency that
+///         blacklists the controller, so the controller's donate() leg reverts.
+contract BlacklistingToken is MockERC20 {
+    address public blockedSender;
+
+    constructor() MockERC20("Blacklist", "BLK", 18) {}
+
+    function setBlockedSender(address account) external {
+        blockedSender = account;
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        require(msg.sender != blockedSender, "blocked");
+        return super.transfer(to, amount);
+    }
+}
+
 contract HookAuctionControllerTest is BaseTest {
     using EasyPosm for IPositionManager;
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
-    event AuctionControllerFailed(PoolId indexed poolId);
 
     uint32 internal constant PPM = 1_000_000;
     uint32 internal constant EPOCH_LENGTH = 3600;
@@ -887,8 +904,77 @@ contract HookAuctionControllerTest is BaseTest {
 
     // ==================== Fail-open glue ====================
 
-    function testHookFailsOpenWhenControllerReverts() public {
-        // separate hook wired to an always-reverting controller
+    event DonateFailed(PoolId indexed poolId, uint256 amount);
+
+    function testDonateFailureIsIsolatedAndDoesNotBrickPool() public {
+        // The safety property that makes removing the hook's fail-open wrapper OK: a misbehaving
+        // auction currency (here one that blacklists the controller) makes the controller's donate
+        // leg revert, but that revert is isolated inside the controller (DonateFailed) - the swap
+        // still succeeds and the winner still receives the discount they paid for.
+        BlacklistingToken bt = new BlacklistingToken();
+        bt.mint(address(this), 10_000_000 ether);
+        bt.approve(address(permit2), type(uint256).max);
+        bt.approve(address(swapRouter), type(uint256).max);
+        permit2.approve(address(bt), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(bt), address(poolManager), type(uint160).max, type(uint48).max);
+        MockERC20 partner = deployToken();
+
+        (Currency c0, Currency c1) = address(bt) < address(partner)
+            ? (Currency.wrap(address(bt)), Currency.wrap(address(partner)))
+            : (Currency.wrap(address(partner)), Currency.wrap(address(bt)));
+        PoolKey memory key = PoolKey(c0, c1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
+        PoolId pid = key.toId();
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        positionManager.mint(
+            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        // configure the auction with the blacklisting token as the auction currency
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.auctionCurrency = Currency.wrap(address(bt));
+        config.feeDiscountPpm = 500_000;
+        auctionController.configurePool(key, config);
+        uint64 s = uint64(block.timestamp);
+
+        // bidderA wins with winnerSwapper as executor
+        bt.mint(bidderA, 10e18);
+        vm.prank(bidderA);
+        bt.approve(address(auctionController), type(uint256).max);
+        vm.prank(bidderA);
+        auctionController.bidNext(key, address(winnerSwapper), 1e18);
+
+        // fund the swappers to trade on this pool
+        bt.mint(address(winnerSwapper), 100e18);
+        partner.mint(address(winnerSwapper), 100e18);
+        bt.mint(address(otherSwapper), 100e18);
+        partner.mint(address(otherSwapper), 100e18);
+
+        // into the won epoch, then blacklist the controller so its donate() transfer reverts
+        vm.warp(uint256(s) + EPOCH_LENGTH + EPOCH_LENGTH / 2);
+        bt.setBlockedSender(address(auctionController));
+
+        bool zeroForOne = Currency.unwrap(c0) != address(bt); // swap so bt is the input? either works
+        // winner vs non-winner rate (each self-syncs in a snapshot)
+        uint256 snap = vm.snapshotState();
+        uint256 outWinner = winnerSwapper.swapExactIn(key, zeroForOne, 1e18);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        uint256 outOther = otherSwapper.swapExactIn(key, zeroForOne, 1e18);
+        vm.revertToState(snap);
+        assertGt(outWinner, 0, "swap succeeds despite the donate failure");
+        assertGt(outWinner, outOther, "winner still gets the discount despite the donate failure");
+
+        // the donate failure is surfaced (isolated), not reverted up into the swap
+        vm.expectEmit(true, false, false, false, address(auctionController));
+        emit DonateFailed(pid, 0);
+        winnerSwapper.swapExactIn(key, zeroForOne, 1e18);
+    }
+
+    function testRevertingControllerRevertsHookOps() public {
+        // The fail-open wrapper is intentionally gone: the controller is immutable + audited, so a
+        // reverting controller is NOT masked - it reverts the hook op. (Token-level failures on the
+        // donate path are still isolated inside the controller; that is what makes this safe.)
         address flags2 = address(
             uint160(
                 Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
@@ -902,10 +988,16 @@ contract HookAuctionControllerTest is BaseTest {
 
         PoolKey memory key = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(flags2));
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
-        // No configured baseline fee (the controller reverts), so the pool runs at the 0% dynamic
-        // default; the point is that swaps and liquidity ops still succeed fail-open.
 
-        // liquidity ops and swaps succeed despite the broken controller
+        // a liquidity op runs beforeAddLiquidity -> beforeLiquidityChange -> the controller reverts.
+        // Wrapped in a single external call so expectRevert binds to the whole mint, not the token
+        // approvals EasyPosm makes first.
+        vm.expectRevert();
+        this.mintFullRange(key);
+    }
+
+    /// @dev External wrapper so a whole mint can be asserted to revert.
+    function mintFullRange(PoolKey calldata key) external {
         positionManager.mint(
             key,
             TickMath.minUsableTick(60),
@@ -917,11 +1009,6 @@ contract HookAuctionControllerTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-
-        vm.expectEmit(true, false, false, false, flags2);
-        emit AuctionControllerFailed(key.toId());
-        uint256 amountOut = otherSwapper.swapExactIn(key, true, 1e18);
-        assertGt(amountOut, 0, "swap must succeed fail-open");
     }
 
     function testHookWorksWithZeroController() public {

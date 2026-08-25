@@ -55,13 +55,14 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        // The auction controller is immutable and audited, and its hook-facing entry points are
+        // non-reverting by construction: the only externally-dependent step (donating to LPs in
+        // the config-chosen auction currency, which could blacklist / fee-on-transfer) is isolated
+        // inside the controller's own donate try/catch. So it is called directly here - a wholesale
+        // fail-open wrapper is unnecessary and would only mask a genuine controller regression.
         uint24 lpFeeOverride;
         if (address(hookAuctionController) != address(0)) {
-            try hookAuctionController.beforeSwap(key, sender) returns (uint24 fee) {
-                lpFeeOverride = fee;
-            } catch {
-                emit AuctionControllerFailed(key.toId());
-            }
+            lpFeeOverride = hookAuctionController.beforeSwap(key, sender);
         }
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeOverride);
     }
@@ -72,10 +73,8 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         if (address(hookAuctionController) == address(0)) {
             return;
         }
-        try hookAuctionController.beforeLiquidityChange(key) {}
-        catch {
-            emit AuctionControllerFailed(key.toId());
-        }
+        // Direct call - see _beforeSwap: the controller is trusted and non-reverting by construction.
+        hookAuctionController.beforeLiquidityChange(key);
     }
 
     function _afterSwap(address caller, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
