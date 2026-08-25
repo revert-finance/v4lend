@@ -313,6 +313,12 @@ contract DeployBase is Script {
         revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
         console.log("  RevertHook configured");
 
+        // Seed the executor denylist with the canonical shared router so a bidder cannot register
+        // it as their executor and hand the discounted fee to all of the router's traffic for the
+        // epoch. Extend this with any other shared routers / aggregators used on this chain.
+        auctionController.setExecutorDenied(UNIVERSAL_ROUTER, true);
+        console.log("  Executor denylist seeded (UniversalRouter):", UNIVERSAL_ROUTER);
+
         // ==================== Step 5: Deploy V4Vault (USDC lending) ====================
 
         console.log("Step 5: Deploying V4Vault (USDC)...");
