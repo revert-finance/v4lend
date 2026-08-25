@@ -395,31 +395,6 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.setExecutorAllowlistEnabled(false);
     }
 
-    function testSetAuctionControllerRepointsHook() public {
-        // non-owner cannot repoint
-        vm.prank(bidderA);
-        vm.expectRevert(); // OwnableUnauthorizedAccount
-        hook.setAuctionController(IHookAuctionController(address(0)));
-
-        _bid(bidderA, address(winnerSwapper), 1e18);
-        _warpToEpoch(1);
-
-        // owner disables auctions by pointing at address(0); swaps still work fail-open, and the
-        // winner gets no discount (measured from the same pool state via snapshots)
-        hook.setAuctionController(IHookAuctionController(address(0)));
-        uint256 snap = vm.snapshotState();
-        uint256 outNoController = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
-        vm.revertToState(snap);
-        assertGt(outNoController, 0, "swaps work with no controller");
-
-        // repoint back to the real controller; winner discount resumes
-        hook.setAuctionController(IHookAuctionController(address(auctionController)));
-        snap = vm.snapshotState();
-        uint256 outWinner = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
-        vm.revertToState(snap);
-        assertGt(outWinner, outNoController, "winner discount active again after repoint");
-    }
-
     function testBidInvalidExecutors() public {
         vm.expectRevert(HookAuctionController.InvalidExecutor.selector);
         _bid(bidderA, address(0), RESERVE);

@@ -26,17 +26,11 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
     IV4Oracle internal immutable v4Oracle;
     IHookFeeController internal immutable hookFeeController;
 
+    IHookAuctionController internal immutable hookAuctionController;
+
     RevertHookPositionActions internal immutable positionActions;
     RevertHookAutoLeverageActions internal immutable autoLeverageActions;
     RevertHookAutoLendActions internal immutable autoLendActions;
-
-    /// @dev Settable (not immutable) so a broken auction controller - which custodies escrowed
-    ///      bids, refunds and protocol fees - can be replaced without redeploying the hook and
-    ///      orphaning every pool. Declared here in a hook-only derived contract, NOT in the
-    ///      delegatecall-shared RevertHookState, so it cannot disturb the shared storage layout.
-    IHookAuctionController internal hookAuctionController;
-
-    event AuctionControllerSet(address indexed auctionController);
 
     constructor(
         address owner_,
@@ -77,13 +71,6 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
 
     function setVault(address vault) external payable onlyOwner {
         _setVault(vault);
-    }
-
-    /// @notice Repoints the hook at a new auction controller (or address(0) to disable auctions).
-    ///         The successor controller must be reconfigured per pool via its own configurePool.
-    function setAuctionController(IHookAuctionController newAuctionController) external payable onlyOwner {
-        hookAuctionController = newAuctionController;
-        emit AuctionControllerSet(address(newAuctionController));
     }
 
     receive() external payable {}
