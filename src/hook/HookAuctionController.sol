@@ -346,8 +346,10 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             config.epochLengthSeconds < MIN_EPOCH_SECONDS || config.epochLengthSeconds > MAX_EPOCH_SECONDS
                 || config.minDripSeconds == 0 || config.minDripSeconds > config.epochLengthSeconds
                 || config.minBidBumpPpm == 0 || config.minBidBumpPpm > PPM || config.openingBidReserve == 0
+                || config.openingBidReserve > MAX_BID_AMOUNT
         ) {
-            // a zero reserve or zero bump would let a 1-wei bid win, so both have a positive floor
+            // a zero reserve or zero bump would let a 1-wei bid win, so both have a positive floor;
+            // a reserve above MAX_BID_AMOUNT would make the pool un-biddable (bidNext caps bids there)
             revert InvalidConfig();
         }
         if (config.epochStartTime == 0) {
@@ -402,10 +404,12 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     /// @notice Emergency stop: blocks new bids on all pools and suspends the winner fee
     ///         discount. Dripping and claims stay available.
-    /// @dev This is a heavy-handed brake: a winner whose epoch is paused mid-flight keeps
-    ///      paying the baseline fee for the rest of that epoch and is NOT refunded (their bid
-    ///      is already materialized). For a graceful, refunding wind-down of a single pool use
-    ///      setBiddingEnabled(false) instead, which honors the running epoch.
+    /// @dev This is a heavy-handed brake. A bid still only queued for a future epoch is refunded
+    ///      to escrow when that epoch is first synced while paused (it is not promoted into a
+    ///      paid-but-unserved winner - see _syncPool). A winner already active mid-epoch when the
+    ///      pause began is best-effort: it keeps paying the baseline fee for the rest of that epoch
+    ///      and is NOT refunded (its bid is already materialized). For a graceful, refunding
+    ///      wind-down of a single pool use setBiddingEnabled(false) instead.
     function setBidsPaused(bool paused_) external {
         _checkOwner();
         bidsPaused = paused_;
@@ -610,7 +614,17 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         _carryEpoch(poolId, config, state, state.activeEpoch, state.active);
         if (current == state.activeEpoch + 1) {
-            state.active = state.next;
+            if (bidsPaused && state.next.bidder != address(0)) {
+                // Globally paused: the winner would receive no discounted swaps this epoch, so
+                // refund the queued bid to escrow rather than promote it into a paid-but-unserved
+                // active winner whose proceeds still drip. (A winner already active mid-epoch when
+                // the pause began is best-effort - see setBidsPaused.)
+                refunds[config.auctionCurrency][state.next.bidder] += state.next.bid;
+                emit RefundEscrowed(poolId, config.auctionCurrency, state.next.bidder, state.next.bid);
+                delete state.active;
+            } else {
+                state.active = state.next;
+            }
             delete state.next;
         } else {
             // More than one epoch skipped: the epoch-N+1 winner was never promoted to active
@@ -644,7 +658,21 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             return;
         }
         auction.donated = auction.totalDrip;
-        state.pendingDonation += remaining;
+        _addPending(state, remaining);
+    }
+
+    /// @dev Adds to the pending-donation bucket, (re)initializing the throttle clock whenever the
+    ///      bucket transitions from empty to non-empty. Without this, a stale pendingLastDripTime
+    ///      left over from a previously-drained bucket would let the first drip of a fresh bucket
+    ///      compute a full-epoch elapsed interval and release the whole thing to a same-block JIT.
+    function _addPending(PoolAuctionState storage state, uint256 amount) internal {
+        if (amount == 0) {
+            return;
+        }
+        if (state.pendingDonation == 0) {
+            state.pendingLastDripTime = uint64(block.timestamp);
+        }
+        state.pendingDonation += amount;
     }
 
     /// @dev Splits the winning bid into protocol fee and drip amount, exactly once per epoch.
@@ -776,7 +804,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         // it donated so it is not counted twice. Mirrors _dripPending's zero-liquidity handling.
         if (StateLibrary.getLiquidity(poolManager, poolId) == 0) {
             auction.donated += uint128(claimable);
-            state.pendingDonation += claimable;
+            _addPending(state, claimable);
             return 0;
         }
 

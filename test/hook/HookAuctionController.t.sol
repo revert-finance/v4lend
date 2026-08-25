@@ -394,6 +394,12 @@ contract HookAuctionControllerTest is BaseTest {
         config.minBidBumpPpm = 0;
         vm.expectRevert(HookAuctionController.InvalidConfig.selector);
         auctionController.configurePool(auctionPoolKey, config);
+
+        // a reserve above MAX_BID_AMOUNT would be unmeetable (bidNext caps bids there) -> un-biddable
+        config = _defaultConfig();
+        config.openingBidReserve = uint128(uint256(uint128(type(int128).max)) + 1);
+        vm.expectRevert(HookAuctionController.InvalidConfig.selector);
+        auctionController.configurePool(auctionPoolKey, config);
     }
 
     function testSweepPendingDonationRescuesStuckValue() public {
@@ -833,15 +839,17 @@ contract HookAuctionControllerTest is BaseTest {
         _bid(bidderB, address(otherSwapper), RESERVE);
     }
 
-    function testBidsPausedSuspendsDiscountAndBids() public {
-        _bid(bidderA, address(winnerSwapper), 1e18);
+    function testBidsPausedRefundsQueuedBidAndSuspendsDiscount() public {
+        _bid(bidderA, address(winnerSwapper), 1e18); // queued for epoch 1
         _warpToEpoch(1);
 
         auctionController.setBidsPaused(true);
 
+        // no new bids while paused
         vm.expectRevert(HookAuctionController.BiddingDisabled.selector);
         _bid(bidderB, address(otherSwapper), 2e18);
 
+        // no discount while paused
         uint256 snap = vm.snapshotState();
         uint256 outWinnerPaused = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
         vm.revertToState(snap);
@@ -850,14 +858,21 @@ contract HookAuctionControllerTest is BaseTest {
         vm.revertToState(snap);
         assertApproxEqRel(outWinnerPaused, outOther, 1e12, "no discount while paused");
 
-        // drip still works while paused
+        // the first real sync of the paused epoch refunds the queued bid instead of consuming it
         auctionController.drip(auctionPoolKey);
+        assertEq(auctionController.refunds(currency1, bidderA), 1e18, "queued bid refunded on paused promotion");
 
+        // no active winner exists, so no discount even after unpausing (the bid was refunded)
         auctionController.setBidsPaused(false);
         snap = vm.snapshotState();
-        uint256 outWinner = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        uint256 outAfter = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
         vm.revertToState(snap);
-        assertGt(outWinner, outOther, "discount restored after unpause");
+        assertApproxEqRel(outAfter, outOther, 1e12, "refunded bid grants no discount");
+
+        // bidder is made whole and bidding works again
+        vm.prank(bidderA);
+        auctionController.claimRefund(currency1, bidderA);
+        _bid(bidderB, address(otherSwapper), RESERVE);
     }
 
     // ==================== Fail-open glue ====================
