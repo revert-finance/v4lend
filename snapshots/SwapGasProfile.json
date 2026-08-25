@@ -1,10 +1,10 @@
 {
   "1_hookless_tickMove": "75533",
-  "2_hooked_noTickMove": "110539",
-  "3_hooked_tickMove_noTriggers": "123272",
-  "4_hooked_tickMove_triggerFar": "123652",
+  "2_hooked_noTickMove": "107566",
+  "3_hooked_tickMove_noTriggers": "91093",
+  "4_hooked_tickMove_triggerFar": "118461",
   "5_hookless_noTickMove": "92006",
-  "6_auction_nonWinner_tickMove": "141657",
-  "7_auction_winner_tickMove": "141964",
-  "8_auction_nonWinner_dripDue": "178066"
+  "6_auction_nonWinner_tickMove": "112213",
+  "7_auction_winner_tickMove": "112614",
+  "8_auction_nonWinner_dripDue": "150838"
 }

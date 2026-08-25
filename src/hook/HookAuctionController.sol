@@ -55,20 +55,34 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     uint32 internal constant MAX_EPOCH_SECONDS = 30 days;
     uint256 internal constant MAX_BID_AMOUNT = uint256(uint128(type(int128).max));
 
+    // Salt for the per-pool same-TRANSACTION memo slot (EIP-1153 transient storage is cleared
+    // after every transaction). Epoch sync and drip checks are idempotent within a timestamp,
+    // so once a pool was synced+dripped in this transaction, later touches (aggregator
+    // split-routes, multi-hop routes, and the 2-3 controller pings of every automation action
+    // in a trigger cascade) skip straight to the winner check.
+    bytes32 internal constant _TX_MEMO_SALT = keccak256("HookAuctionController.txMemo");
+
     // ==================== Structs ====================
 
+    /// @dev Field order is gas-deliberate: slot 0 carries everything the swap hot path needs
+    ///      (configured-gate, epoch sync, drip throttle, winner fee), so beforeSwap serves
+    ///      non-winner and winner swaps from a single cold SLOAD. Bid-time and claim-time
+    ///      fields live in slots 1-2, read only on the cold paths.
     struct PoolAuctionConfig {
-        Currency auctionCurrency; // ERC20 side of the pool used for bids, drips and protocol fees
+        // slot 0 - swap hot path
+        uint64 epochStartTime; // unix seconds
+        uint32 epochLengthSeconds; // nonzero doubles as the "configured" flag
+        uint32 minDripSeconds; // drip throttle inside an epoch
         uint24 normalLpFee; // baseline LP fee, mirrored into the pool's stored dynamic fee
         uint32 feeDiscountPpm; // winner discount on normalLpFee; 1_000_000 = zero-fee winner
-        uint64 epochStartTime; // unix seconds
-        uint32 epochLengthSeconds;
-        uint32 minDripSeconds; // drip throttle inside an epoch
-        uint128 openingBidReserve; // minimum first bid of an epoch
+        bool biddingEnabled; // false = deactivated: no new bids, running epoch is honored
+        // slot 1 - bid time
+        Currency auctionCurrency; // ERC20 side of the pool used for bids, drips and protocol fees
         uint32 minBidBumpPpm; // relative outbid increment
         uint16 protocolFeeBps; // share of the winning bid sent to protocolFeeRecipient
+        // slot 2 - materialize/claim time
         address protocolFeeRecipient;
-        bool biddingEnabled; // false = deactivated: no new bids, running epoch is honored
+        uint96 openingBidReserve; // minimum first bid of an epoch (uint96 keeps it packed; far above any sane reserve)
     }
 
     struct EpochAuction {
@@ -181,7 +195,23 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (_poolConfigs[poolId].epochLengthSeconds == 0 || block.timestamp < _poolConfigs[poolId].epochStartTime) {
             return 0;
         }
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
+
+        // same-transaction memo: sync + drip are idempotent per timestamp, only the winner
+        // check remains for repeat touches
+        bytes32 memoSlot = PoolId.unwrap(poolId) ^ _TX_MEMO_SALT;
+        bool memoHit;
+        assembly ("memory-safe") {
+            memoHit := eq(tload(memoSlot), timestamp())
+        }
+        if (memoHit) {
+            EpochAuction storage memoAuction = _poolStates[poolId].active;
+            if (memoAuction.bid != 0 && sender == memoAuction.executor) {
+                return _winnerLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
+            }
+            return 0;
+        }
+
         PoolAuctionState storage state = _syncPool(poolId, config);
 
         // Compute the delivered obligation (the winner's fee override) from state alone, BEFORE
@@ -193,6 +223,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
 
         _dripAvailable(key, poolId, config, state);
+        assembly ("memory-safe") {
+            tstore(memoSlot, timestamp())
+        }
     }
 
     /// @inheritdoc IHookAuctionController
@@ -201,9 +234,20 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (_poolConfigs[poolId].epochLengthSeconds == 0 || block.timestamp < _poolConfigs[poolId].epochStartTime) {
             return;
         }
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        bytes32 memoSlot = PoolId.unwrap(poolId) ^ _TX_MEMO_SALT;
+        bool memoHit;
+        assembly ("memory-safe") {
+            memoHit := eq(tload(memoSlot), timestamp())
+        }
+        if (memoHit) {
+            return; // already synced + dripped at this timestamp in this transaction
+        }
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         PoolAuctionState storage state = _syncPool(poolId, config);
         _dripAvailable(key, poolId, config, state);
+        assembly ("memory-safe") {
+            tstore(memoSlot, timestamp())
+        }
     }
 
     // ==================== Bidding ====================
@@ -224,7 +268,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
 
         PoolId poolId = key.toId();
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
         }
@@ -279,7 +323,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
         PoolKey memory key = abi.decode(data, (PoolKey));
         PoolId poolId = key.toId();
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         if (!_isRunning(config)) {
             return abi.encode(uint256(0));
         }
@@ -369,10 +413,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             config.epochLengthSeconds < MIN_EPOCH_SECONDS || config.epochLengthSeconds > MAX_EPOCH_SECONDS
                 || config.minDripSeconds == 0 || config.minDripSeconds > config.epochLengthSeconds
                 || config.minBidBumpPpm == 0 || config.minBidBumpPpm > PPM || config.openingBidReserve == 0
-                || config.openingBidReserve > MAX_BID_AMOUNT
         ) {
-            // a zero reserve or zero bump would let a 1-wei bid win, so both have a positive floor;
-            // a reserve above MAX_BID_AMOUNT would make the pool un-biddable (bidNext caps bids there)
+            // a zero reserve or zero bump would let a 1-wei bid win, so both have a positive floor
+            // (uint96 type-bounds the reserve far below MAX_BID_AMOUNT, so it is always meetable)
             revert InvalidConfig();
         }
         if (config.epochStartTime == 0) {
@@ -482,7 +525,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             revert InvalidConfig();
         }
         PoolId poolId = key.toId();
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
         }
@@ -539,7 +582,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         view
         returns (address bidder, address executor, uint256 bid, uint24 lpFee)
     {
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         if (!_isRunning(config)) {
             return (address(0), address(0), 0, 0);
         }
@@ -591,7 +634,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     }
 
     function currentEpoch(PoolId poolId) external view returns (uint64) {
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
         }
@@ -607,7 +650,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     ///      to beat is 0 (the opening reserve). Reading the raw stored next.bid here would quote
     ///      the previous epoch's winning bid and make a keeper overpay.
     function minNextBid(PoolId poolId) external view returns (uint256) {
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
         }
@@ -617,7 +660,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     }
 
     /// @dev True when a bidNext call would sync the pool to a later epoch, resetting the next slot.
-    function _rolloverPending(PoolAuctionConfig memory config, PoolAuctionState storage state)
+    function _rolloverPending(PoolAuctionConfig storage config, PoolAuctionState storage state)
         internal
         view
         returns (bool)
@@ -628,7 +671,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     /// @notice The LP fee the epoch winner's executor pays on this pool.
     function winnerLpFee(PoolId poolId) external view returns (uint24) {
-        PoolAuctionConfig memory config = _poolConfigs[poolId];
+        PoolAuctionConfig storage config = _poolConfigs[poolId];
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
         }
@@ -637,23 +680,23 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     // ==================== Internal: epoch machine ====================
 
-    function _isConfigured(PoolAuctionConfig memory config) internal pure returns (bool) {
+    function _isConfigured(PoolAuctionConfig storage config) internal view returns (bool) {
         return config.epochLengthSeconds != 0;
     }
 
-    function _isRunning(PoolAuctionConfig memory config) internal view returns (bool) {
+    function _isRunning(PoolAuctionConfig storage config) internal view returns (bool) {
         return _isConfigured(config) && block.timestamp >= config.epochStartTime;
     }
 
-    function _currentEpoch(PoolAuctionConfig memory config) internal view returns (uint64) {
+    function _currentEpoch(PoolAuctionConfig storage config) internal view returns (uint64) {
         return uint64((block.timestamp - config.epochStartTime) / config.epochLengthSeconds);
     }
 
-    function _winnerLpFee(PoolAuctionConfig memory config) internal pure returns (uint24) {
+    function _winnerLpFee(PoolAuctionConfig storage config) internal view returns (uint24) {
         return uint24(uint256(config.normalLpFee) - uint256(config.normalLpFee) * config.feeDiscountPpm / PPM);
     }
 
-    function _minNextBid(PoolAuctionConfig memory config, uint128 currentBid) internal pure returns (uint256) {
+    function _minNextBid(PoolAuctionConfig storage config, uint128 currentBid) internal view returns (uint256) {
         if (currentBid == 0) {
             return config.openingBidReserve; // validated nonzero in configurePool
         }
@@ -663,7 +706,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     /// @dev Rolls the stored epoch state forward to the current epoch. Fully vests and
     ///      carries skipped epochs into the pending-donation bucket.
-    function _syncPool(PoolId poolId, PoolAuctionConfig memory config)
+    function _syncPool(PoolId poolId, PoolAuctionConfig storage config)
         internal
         returns (PoolAuctionState storage state)
     {
@@ -699,7 +742,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     function _carryEpoch(
         PoolId poolId,
-        PoolAuctionConfig memory config,
+        PoolAuctionConfig storage config,
         PoolAuctionState storage state,
         uint64 epoch,
         EpochAuction storage auction
@@ -734,7 +777,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     /// @dev Splits the winning bid into protocol fee and drip amount, exactly once per epoch.
     function _materializeEpoch(
         PoolId poolId,
-        PoolAuctionConfig memory config,
+        PoolAuctionConfig storage config,
         uint64 epoch,
         EpochAuction storage auction
     ) internal {
@@ -757,7 +800,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     function _dripAvailable(
         PoolKey memory key,
         PoolId poolId,
-        PoolAuctionConfig memory config,
+        PoolAuctionConfig storage config,
         PoolAuctionState storage state
     ) internal returns (uint256 amountDonated) {
         amountDonated = _dripPending(key, poolId, config, state);
@@ -778,7 +821,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     function _dripPending(
         PoolKey memory key,
         PoolId poolId,
-        PoolAuctionConfig memory config,
+        PoolAuctionConfig storage config,
         PoolAuctionState storage state
     ) internal returns (uint256 amountToDonate) {
         uint256 pending = state.pendingDonation;
@@ -827,7 +870,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     function _dripActiveEpoch(
         PoolKey memory key,
         PoolId poolId,
-        PoolAuctionConfig memory config,
+        PoolAuctionConfig storage config,
         PoolAuctionState storage state
     ) internal returns (uint256 amountToDonate) {
         EpochAuction storage auction = state.active;
@@ -884,7 +927,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     ///      blacklisting or fee-on-transfer auction currency). Isolating the failure this way
     ///      guarantees a misbehaving currency can neither brick pool swaps/liquidity ops nor
     ///      void a winner's fee override; the undonated value simply stays pending.
-    function _donate(PoolKey memory key, PoolId poolId, PoolAuctionConfig memory config, uint256 amount)
+    function _donate(PoolKey memory key, PoolId poolId, PoolAuctionConfig storage config, uint256 amount)
         internal
         returns (uint256 amountToDonate)
     {

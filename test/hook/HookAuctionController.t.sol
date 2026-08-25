@@ -155,7 +155,7 @@ contract HookAuctionControllerTest is BaseTest {
     uint32 internal constant PPM = 1_000_000;
     uint32 internal constant EPOCH_LENGTH = 3600;
     uint32 internal constant MIN_DRIP = 60;
-    uint128 internal constant RESERVE = 1e15;
+    uint96 internal constant RESERVE = 1e15;
     uint16 internal constant PROTOCOL_FEE_BPS = 1000; // 10%
     uint24 internal constant NORMAL_FEE = 3000;
 
@@ -454,11 +454,7 @@ contract HookAuctionControllerTest is BaseTest {
         vm.expectRevert(HookAuctionController.InvalidConfig.selector);
         auctionController.configurePool(auctionPoolKey, config);
 
-        // a reserve above MAX_BID_AMOUNT would be unmeetable (bidNext caps bids there) -> un-biddable
-        config = _defaultConfig();
-        config.openingBidReserve = uint128(uint256(uint128(type(int128).max)) + 1);
-        vm.expectRevert(HookAuctionController.InvalidConfig.selector);
-        auctionController.configurePool(auctionPoolKey, config);
+        // (a reserve above MAX_BID_AMOUNT is impossible by construction: uint96 < int128.max)
     }
 
     function testSweepPendingDonationRescuesStuckValue() public {
@@ -983,8 +979,8 @@ contract HookAuctionControllerTest is BaseTest {
 
         // ceilings with headroom; a regression like an unconditional 3-slot config copy or a
         // failed-donate retry per swap blows through these
-        assertLt(unconfiguredSwapGas, 90_000, "unconfigured-pool swap gas regressed");
-        assertLt(configuredSwapGas, 110_000, "configured-pool swap gas regressed");
+        assertLt(unconfiguredSwapGas, 60_000, "unconfigured-pool swap gas regressed");
+        assertLt(configuredSwapGas, 70_000, "configured-pool swap gas regressed");
     }
 
     // ==================== Vault integration ====================

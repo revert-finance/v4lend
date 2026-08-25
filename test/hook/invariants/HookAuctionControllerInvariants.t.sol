@@ -38,7 +38,7 @@ contract HookAuctionControllerHandler is BaseTest {
     using PoolIdLibrary for PoolKey;
 
     uint32 public constant EPOCH_LENGTH = 3600;
-    uint128 public constant RESERVE = 1e15;
+    uint96 public constant RESERVE = 1e15;
 
     HookAuctionController public auctionController;
     RevertHook public hook;
