@@ -291,6 +291,14 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     // ==================== Claims ====================
 
     /// @notice Claims escrowed refunds of outbid or deactivated bids.
+    /// @dev Deliberately does NOT verify the recipient's balance delta: if the token charges a
+    ///      transfer fee, the claimant bears it - the same haircut any holder takes on any
+    ///      transfer of that token. Claiming is voluntary and deferrable, so a claimant expecting
+    ///      a temporary fee window can simply wait; enforcing exactness instead would make claims
+    ///      permanently unclaimable for genuinely fee-charging tokens and strand the funds. This
+    ///      differs from donateExternal, where exactness is required because a shortfall corrupts
+    ///      the PoolManager's flash accounting and would block third parties. Controller solvency
+    ///      is unaffected either way (obligations and balance decrease by the same amount).
     function claimRefund(Currency currency, address recipient) external nonReentrant returns (uint256 amount) {
         amount = refunds[currency][msg.sender];
         if (amount == 0) {
@@ -302,6 +310,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     }
 
     /// @notice Claims accrued protocol fees. Callable by the configured recipient account.
+    /// @dev Fee-on-transfer semantics as in claimRefund: the claimant bears any token transfer
+    ///      fee; exactness is deliberately not enforced.
     function claimProtocolFees(Currency currency, address recipient)
         external
         nonReentrant
