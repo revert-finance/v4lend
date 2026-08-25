@@ -291,27 +291,25 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     // ==================== Claims ====================
 
     /// @notice Claims escrowed refunds of outbid or deactivated bids.
-    /// @dev Deliberately does NOT verify the recipient's balance delta: if the token charges a
-    ///      transfer fee, the claimant bears it - the same haircut any holder takes on any
-    ///      transfer of that token. Claiming is voluntary and deferrable, so a claimant expecting
-    ///      a temporary fee window can simply wait; enforcing exactness instead would make claims
-    ///      permanently unclaimable for genuinely fee-charging tokens and strand the funds. This
-    ///      differs from donateExternal, where exactness is required because a shortfall corrupts
-    ///      the PoolManager's flash accounting and would block third parties. Controller solvency
-    ///      is unaffected either way (obligations and balance decrease by the same amount).
+    /// @dev Recipient-side transfer fees are deliberately NOT checked: the claimant bears the
+    ///      token's own fee - the same haircut any holder takes on any transfer - and claiming is
+    ///      voluntary and deferrable; enforcing recipient exactness would make claims permanently
+    ///      unclaimable for genuinely fee-charging tokens. The CONTROLLER's debit, however, must
+    ///      be exact: a sender-side surcharge would consume funds backing other claimants'
+    ///      refunds and the protocol fees, so an over-debit reverts to protect third parties.
     function claimRefund(Currency currency, address recipient) external nonReentrant returns (uint256 amount) {
         amount = refunds[currency][msg.sender];
         if (amount == 0) {
             revert NothingToClaim();
         }
         refunds[currency][msg.sender] = 0;
-        IERC20(Currency.unwrap(currency)).safeTransfer(recipient, amount);
+        _transferOutExact(currency, recipient, amount);
         emit RefundClaimed(currency, msg.sender, recipient, amount);
     }
 
     /// @notice Claims accrued protocol fees. Callable by the configured recipient account.
-    /// @dev Fee-on-transfer semantics as in claimRefund: the claimant bears any token transfer
-    ///      fee; exactness is deliberately not enforced.
+    /// @dev Fee-on-transfer semantics as in claimRefund: the claimant bears any recipient-side
+    ///      token fee, while a sender-side surcharge on the controller's balance reverts.
     function claimProtocolFees(Currency currency, address recipient)
         external
         nonReentrant
@@ -322,8 +320,20 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             revert NothingToClaim();
         }
         protocolFeesAccrued[currency][msg.sender] = 0;
-        IERC20(Currency.unwrap(currency)).safeTransfer(recipient, amount);
+        _transferOutExact(currency, recipient, amount);
         emit ProtocolFeesClaimed(currency, msg.sender, recipient, amount);
+    }
+
+    /// @dev Transfers `amount` out, reverting unless this contract's balance decreases by exactly
+    ///      `amount` - a sender-side surcharge would silently consume funds backing the other
+    ///      escrowed obligations (refunds, protocol fees, pending donations).
+    function _transferOutExact(Currency currency, address recipient, uint256 amount) internal {
+        IERC20 token = IERC20(Currency.unwrap(currency));
+        uint256 balanceBefore = token.balanceOf(address(this));
+        token.safeTransfer(recipient, amount);
+        if (balanceBefore - token.balanceOf(address(this)) != amount) {
+            revert ExactTransferFailed();
+        }
     }
 
     // ==================== Owner configuration ====================
@@ -909,8 +919,16 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         // liquidity ops whenever a drip is attempted. Reverting here instead rolls the whole
         // donation back through the existing catch (DonateFailed + retry back-off).
         poolManager.sync(currency);
-        IERC20(Currency.unwrap(currency)).safeTransfer(address(poolManager), amount);
+        IERC20 token = IERC20(Currency.unwrap(currency));
+        uint256 balanceBefore = token.balanceOf(address(this));
+        token.safeTransfer(address(poolManager), amount);
         if (poolManager.settle() != amount) {
+            revert ExactTransferFailed();
+        }
+        // Also verify OUR debit: a sender-side surcharge (controller debited amount + fee while
+        // the PoolManager is credited exactly amount) would pass the settle check but silently
+        // consume funds backing refunds and protocol fees, making the controller insolvent.
+        if (balanceBefore - token.balanceOf(address(this)) != amount) {
             revert ExactTransferFailed();
         }
     }

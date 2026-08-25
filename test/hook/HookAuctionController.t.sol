@@ -103,7 +103,8 @@ contract RevertingAuctionController is IHookAuctionController {
 ///         under-settles the PoolManager, which must be detected inside donateExternal (revert
 ///         and isolate) rather than surfacing as CurrencyNotSettled at the end of the unlock.
 contract FeeOnTransferToken is MockERC20 {
-    uint256 public feeBps;
+    uint256 public feeBps; // recipient-side: recipient receives amount - fee
+    uint256 public senderFeeBps; // sender-side surcharge: sender is debited amount + fee
 
     constructor() MockERC20("FeeOnTransfer", "FOT", 18) {}
 
@@ -111,7 +112,15 @@ contract FeeOnTransferToken is MockERC20 {
         feeBps = newFeeBps;
     }
 
+    function setSenderFeeBps(uint256 newSenderFeeBps) external {
+        senderFeeBps = newSenderFeeBps;
+    }
+
     function transfer(address to, uint256 amount) public override returns (bool) {
+        uint256 surcharge = amount * senderFeeBps / 10_000;
+        if (surcharge != 0) {
+            _burn(msg.sender, surcharge);
+        }
         uint256 fee = amount * feeBps / 10_000;
         if (fee != 0) {
             super.transfer(address(0xdead), fee);
@@ -1194,6 +1203,110 @@ contract HookAuctionControllerTest is BaseTest {
         uint256 outOther = otherSwapper.swapExactIn(key, zeroForOne, 1e18);
         vm.revertToState(snap);
         assertGt(outWinner, outOther, "winner keeps the discount despite the broken currency");
+    }
+
+    function testSenderSurchargeDonateIsIsolatedAndSolvencyHolds() public {
+        // Codex P2: a token that debits the SENDER amount + fee while crediting the PoolManager
+        // exactly `amount` passes the settle check but would silently consume funds backing
+        // refunds/protocol fees. donateExternal must verify the controller's own debit and revert
+        // (isolated), keeping the controller solvent.
+        FeeOnTransferToken fot = new FeeOnTransferToken();
+        fot.mint(address(this), 10_000_000 ether);
+        fot.approve(address(permit2), type(uint256).max);
+        fot.approve(address(swapRouter), type(uint256).max);
+        permit2.approve(address(fot), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(fot), address(poolManager), type(uint160).max, type(uint48).max);
+        MockERC20 partner = deployToken();
+
+        (Currency c0, Currency c1) = address(fot) < address(partner)
+            ? (Currency.wrap(address(fot)), Currency.wrap(address(partner)))
+            : (Currency.wrap(address(partner)), Currency.wrap(address(fot)));
+        PoolKey memory key = PoolKey(c0, c1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
+        PoolId pid = key.toId();
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        positionManager.mint(
+            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.auctionCurrency = Currency.wrap(address(fot));
+        auctionController.configurePool(key, config);
+        uint64 s = uint64(block.timestamp);
+
+        fot.mint(bidderA, 10e18);
+        vm.prank(bidderA);
+        fot.approve(address(auctionController), type(uint256).max);
+        vm.prank(bidderA);
+        auctionController.bidNext(key, address(winnerSwapper), 1e18);
+        fot.mint(address(otherSwapper), 100e18);
+        partner.mint(address(otherSwapper), 100e18);
+
+        // surcharge turns on after the bid was escrowed
+        vm.warp(uint256(s) + EPOCH_LENGTH + EPOCH_LENGTH / 2);
+        fot.setSenderFeeBps(100);
+
+        vm.expectEmit(true, false, false, false, address(auctionController));
+        emit DonateFailed(pid, 0);
+        uint256 amountOut = otherSwapper.swapExactIn(key, true, 1e18);
+        assertGt(amountOut, 0, "swap succeeds; over-debiting donation rolled back");
+
+        // solvency: nothing was consumed - the controller still holds the full escrowed bid
+        assertEq(
+            IERC20(address(fot)).balanceOf(address(auctionController)), 1e18, "controller balance fully backs the bid"
+        );
+
+        // a claim under a sender-side surcharge also reverts rather than consuming others' backing
+        auctionController.setBiddingEnabled(key, false); // refunds the... (no queued bid; winner active)
+        vm.prank(bidderB);
+        vm.expectRevert(HookAuctionController.NothingToClaim.selector);
+        auctionController.claimRefund(Currency.wrap(address(fot)), bidderB);
+    }
+
+    function testClaimRevertsOnSenderSurcharge() public {
+        // outbid escrow with the standard token, then verify the sender-side guard on claims via
+        // a surcharge token pool
+        FeeOnTransferToken fot = new FeeOnTransferToken();
+        fot.mint(address(this), 10_000_000 ether);
+        fot.approve(address(permit2), type(uint256).max);
+        permit2.approve(address(fot), address(positionManager), type(uint160).max, type(uint48).max);
+        MockERC20 partner = deployToken();
+        (Currency c0, Currency c1) = address(fot) < address(partner)
+            ? (Currency.wrap(address(fot)), Currency.wrap(address(partner)))
+            : (Currency.wrap(address(partner)), Currency.wrap(address(fot)));
+        PoolKey memory key = PoolKey(c0, c1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        positionManager.mint(
+            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.auctionCurrency = Currency.wrap(address(fot));
+        auctionController.configurePool(key, config);
+
+        // A bids, B outbids -> A has an escrowed refund in the fot currency
+        fot.mint(bidderA, 10e18);
+        fot.mint(bidderB, 10e18);
+        vm.prank(bidderA);
+        fot.approve(address(auctionController), type(uint256).max);
+        vm.prank(bidderB);
+        fot.approve(address(auctionController), type(uint256).max);
+        vm.prank(bidderA);
+        auctionController.bidNext(key, address(winnerSwapper), RESERVE);
+        vm.prank(bidderB);
+        auctionController.bidNext(key, address(otherSwapper), RESERVE * 2);
+
+        // surcharge on: the claim must revert (protecting other claimants' backing), and succeed
+        // again once the surcharge is off - the claim is preserved, not consumed
+        fot.setSenderFeeBps(100);
+        vm.prank(bidderA);
+        vm.expectRevert(HookAuctionController.ExactTransferFailed.selector);
+        auctionController.claimRefund(Currency.wrap(address(fot)), bidderA);
+
+        fot.setSenderFeeBps(0);
+        vm.prank(bidderA);
+        auctionController.claimRefund(Currency.wrap(address(fot)), bidderA);
+        assertEq(IERC20(address(fot)).balanceOf(bidderA), 10e18, "refund recovered in full");
     }
 
     function testRevertingControllerRevertsHookOps() public {
