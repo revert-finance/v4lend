@@ -445,6 +445,40 @@ contract HookAuctionControllerTest is BaseTest {
         assertEq(lpFee, 100, "baseline changeable once bids are settled");
     }
 
+    /// @notice Staged launch: a dynamic-fee pool can be configured with bidding DISABLED, so it
+    ///         trades at the baseline fee like a normal pool (instead of the dynamic-pool 0%
+    ///         default) while no auction runs; the owner enables bidding whenever the bidder
+    ///         ecosystem is ready. This is the recommended flagship-pool launch sequence.
+    function testStagedLaunchConfigureDisabledThenEnable() public {
+        // reconfigure the pool with bidding off from day one (clean state, so this is allowed)
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.biddingEnabled = false;
+        auctionController.configurePool(auctionPoolKey, config);
+
+        // the baseline fee is live immediately - the pool does NOT trade at the dynamic 0%
+        (,,, uint24 storedFee) = poolManager.getSlot0(auctionPoolId);
+        assertEq(storedFee, NORMAL_FEE, "baseline fee mirrored while staged");
+        assertGt(otherSwapper.swapExactIn(auctionPoolKey, true, 1e18), 0, "pool trades normally");
+
+        // but no bids are accepted while staged
+        vm.expectRevert(HookAuctionController.BiddingDisabled.selector);
+        vm.prank(bidderA);
+        auctionController.bidNext(auctionPoolKey, address(winnerSwapper), 1e18);
+
+        // flip the switch: the auction starts without touching the pool or the fee
+        auctionController.setBiddingEnabled(auctionPoolKey, true);
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        vm.warp(block.timestamp + EPOCH_LENGTH + 1); // into the won epoch
+
+        uint256 snap = vm.snapshotState();
+        uint256 outWinner = winnerSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        uint256 outOther = otherSwapper.swapExactIn(auctionPoolKey, true, 1e18);
+        vm.revertToState(snap);
+        assertGt(outWinner, outOther, "auction fully live after enabling");
+    }
+
     function testConfigureRejectsZeroReserveOrBump() public {
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
         config.openingBidReserve = 0;

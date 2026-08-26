@@ -340,6 +340,27 @@ contract HookLeaseControllerTest is BaseTest {
         leaseController.configurePool(leasePoolKey, config);
     }
 
+    /// @notice Staged launch (lease variant): configure with leasing DISABLED so the pool trades
+    ///         at the baseline fee while no lease can start; enable later to open the market.
+    function testStagedLaunchConfigureDisabledThenEnable() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.leasingEnabled = false;
+        leaseController.configurePool(leasePoolKey, config);
+
+        (,,, uint24 storedFee) = poolManager.getSlot0(leasePoolId);
+        assertEq(storedFee, NORMAL_FEE, "baseline fee mirrored while staged");
+        assertGt(otherSwapper.swapExactIn(leasePoolKey, true, 1e18), 0, "pool trades normally");
+
+        vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
+        vm.prank(lesseeA);
+        leaseController.startLease(leasePoolKey, address(lesseeSwapper), 1e18, 0.2e18);
+
+        leaseController.setLeasingEnabled(leasePoolKey, true);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        (uint256 outLessee, uint256 outOther) = _swapOutcomes(1e18);
+        assertGt(outLessee, outOther, "lease market fully live after enabling");
+    }
+
     function testConfigureRequiresCleanState() public {
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
         vm.expectRevert(HookLeaseController.PoolStateNotClean.selector);

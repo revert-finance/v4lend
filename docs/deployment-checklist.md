@@ -33,6 +33,7 @@ This checklist captures deployment gates that should be completed before a produ
 ## Arbitrage Auction
 
 - Auctioned pools must be initialized with `LPFeeLibrary.DYNAMIC_FEE_FLAG`; a dynamic-fee pool on the hook charges 0% LP fee until `HookAuctionController.configurePool(...)` mirrors the baseline, so configure before advertising the pool.
+- Recommended launch sequence per flagship pool: initialize the pool and `configurePool` with `biddingEnabled: false` in the same script (the pool then trades at `normalLpFee` like a normal pool, no bids accepted), and `setBiddingEnabled(true)` once the floor bidder / bidder ecosystem is ready. The lease controller stages identically via `leasingEnabled: false`.
 - Configure per-pool parameters from the backtest recommendations: Base ~4h epochs at 25-50% `feeDiscountPpm`, Arbitrum ~1d epochs at 50%; opening reserve around $25 in the auction currency; `minBidBumpPpm = 50_000` (5%); `minDripSeconds` small (~12-60s).
 - The auction currency must be an ERC20 side of the pool (use `currency1` for native pools) and should be a reputable token - a currency that later blocks transfers from the controller pauses dripping (isolated, never blocking swaps or liquidations) until wind-down + `sweepPendingDonation`.
 - Deploy scripts seed the executor denylist with the chain's UniversalRouter; extend it with every other shared router/aggregator with meaningful flow on the chain (`setExecutorDenied`). Bidders' executors must call `PoolManager.swap` directly.
