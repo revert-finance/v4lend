@@ -614,7 +614,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
                 // a single-epoch advance promotes the queued bid to active
                 auction = state.next;
             } else {
-                // multi-epoch skip: the queued bid gets refunded, nobody is the winner
+                // multi-epoch skip: the queued bid's epoch already ended (it is consumed to the
+                // LPs' pending bucket at the next sync), nobody is the winner now
                 return (address(0), address(0), 0, 0);
             }
         }
@@ -751,14 +752,15 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             state.active = promoted;
             delete state.next;
         } else {
-            // More than one epoch skipped: the epoch-N+1 winner was never promoted to active
-            // and never received a single discounted swap, so refund its bid to escrow rather
-            // than confiscate it.
-            EpochAuction storage skipped = state.next;
-            if (skipped.bidder != address(0)) {
-                refunds[config.auctionCurrency][skipped.bidder] += skipped.bid;
-                emit RefundEscrowed(poolId, config.auctionCurrency, skipped.bidder, skipped.bid);
-            }
+            // More than one epoch skipped: the epoch-N+1 winner's discount right was live for
+            // all of epoch N+1 regardless of promotion - sync is lazy, so their executor's
+            // first swap would have promoted the bid and received the discount. A no-show bid
+            // is therefore consumed like any other won epoch: materialized and carried to the
+            // LPs' pending bucket. (Refunding it instead would make the outcome depend on
+            // whether any third party touched the pool mid-epoch - a permissionless drip()
+            // could then decide between refund and distribution - and would hand every winner
+            // a free option to bid, squat the epoch, and be made whole if they never swap.)
+            _carryEpoch(poolId, config, state, state.activeEpoch + 1, state.next);
             delete state.active;
             delete state.next;
             state.activeExecutor = address(0);

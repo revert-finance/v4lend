@@ -181,6 +181,7 @@ contract HookAuctionControllerTest is BaseTest {
 
     uint256 fullRangeTokenId;
     uint64 startTime;
+    uint256 _initialPoolManagerBalance1;
 
     function setUp() public {
         deployArtifactsAndLabel();
@@ -243,6 +244,7 @@ contract HookAuctionControllerTest is BaseTest {
 
         startTime = uint64(block.timestamp);
         auctionController.configurePool(auctionPoolKey, _defaultConfig());
+        _initialPoolManagerBalance1 = IERC20(Currency.unwrap(currency1)).balanceOf(address(poolManager));
     }
 
     function _defaultConfig() internal view returns (HookAuctionController.PoolAuctionConfig memory) {
@@ -812,31 +814,46 @@ contract HookAuctionControllerTest is BaseTest {
         assertGt(donatedLater, donatedFirst);
     }
 
-    function testSkippedEpochRefundsUnservedWinner() public {
-        // Bidder wins epoch 1 during epoch 0, but the pool is never touched for several epochs,
-        // so that winner is never promoted to active and never gets a discounted swap. Their bid
-        // must be refunded, not confiscated into LP drip.
+    /// @notice Codex P2: a won epoch's outcome must not depend on whether some third party
+    ///         touched the pool mid-epoch. The discount right is self-serve under lazy sync
+    ///         (the winner's first swap would promote and discount), so a no-show bid is
+    ///         consumed to the LPs' pending bucket deterministically - never refunded, and
+    ///         identically with or without a permissionless drip() during the epoch.
+    function testSkippedEpochNoShowBidIsConsumedDeterministically() public {
         uint256 bid = 1e18;
+        uint256 protocolFee = bid * PROTOCOL_FEE_BPS / 10_000;
         _bid(bidderA, address(winnerSwapper), bid);
 
+        // scenario A: the pool is completely untouched for the whole won epoch
+        uint256 snap = vm.snapshotState();
         _warpToEpoch(4);
         auctionController.drip(auctionPoolKey);
+        assertEq(auctionController.refunds(currency1, bidderA), 0, "no-show bid is not refunded");
+        (,, uint256 pendingA) = auctionController.getPoolAuctionState(auctionPoolId);
+        uint256 feeA = auctionController.protocolFeesAccrued(currency1, protocolFeeRecipient);
+        uint256 lpValueA = pendingA + _donatedToPool();
+        vm.revertToState(snap);
 
-        assertEq(auctionController.refunds(currency1, bidderA), bid, "unserved winner is refunded");
-        (,, uint256 pendingDonation) = auctionController.getPoolAuctionState(auctionPoolId);
-        assertEq(pendingDonation, 0, "nothing dripped to LPs");
+        // scenario B: a third party drips mid-epoch (promoting the bid), then the epoch passes
+        _warpToEpoch(1);
+        auctionController.drip(auctionPoolKey);
+        _warpToEpoch(4);
+        auctionController.drip(auctionPoolKey);
+        assertEq(auctionController.refunds(currency1, bidderA), 0, "still not refunded");
+        (,, uint256 pendingB) = auctionController.getPoolAuctionState(auctionPoolId);
+        uint256 feeB = auctionController.protocolFeesAccrued(currency1, protocolFeeRecipient);
+        uint256 lpValueB = pendingB + _donatedToPool();
 
-        uint256 balance1Before = IERC20(Currency.unwrap(currency1)).balanceOf(address(this));
-        positionManager.decreaseLiquidity(
-            fullRangeTokenId, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
-        );
-        assertEq(
-            IERC20(Currency.unwrap(currency1)).balanceOf(address(this)) - balance1Before, 0, "LP collects nothing"
-        );
+        // identical outcomes: the full bid is materialized either way
+        assertEq(feeA, protocolFee, "protocol fee accrued from the no-show bid");
+        assertEq(feeA, feeB, "protocol fee independent of third-party touches");
+        assertEq(lpValueA, bid - protocolFee, "LPs receive the full drip either way");
+        assertEq(lpValueA, lpValueB, "LP value independent of third-party touches");
+    }
 
-        vm.prank(bidderA);
-        auctionController.claimRefund(currency1, bidderA);
-        assertEq(IERC20(Currency.unwrap(currency1)).balanceOf(bidderA), 100e18, "bidder made whole");
+    /// @dev Auction-currency value already donated into the pool (test starts with none).
+    function _donatedToPool() internal view returns (uint256) {
+        return IERC20(Currency.unwrap(currency1)).balanceOf(address(poolManager)) - _initialPoolManagerBalance1;
     }
 
     function testZeroLiquidityKeepsValuePending() public {

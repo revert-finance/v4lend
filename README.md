@@ -111,7 +111,7 @@ A per-pool auction that converts arbitrage value (LVR) into LP income on dynamic
 - Searchers bid during epoch N (English auction, timestamp-based epochs) for a discounted-LP-fee executor slot in epoch N + 1.
 - The winner is the contract that calls `PoolManager.swap` directly (its registered executor); it pays `normalLpFee` reduced by `feeDiscountPpm`, everyone else pays the baseline.
 - The winning bid, minus a protocol fee, is dripped to in-range LPs via `PoolManager.donate()`, vested linearly over the epoch with throttled anti-JIT release.
-- Outbid and refunded bids are escrowed pull-based (`claimRefund`); a queued bid whose epoch never delivers a discount (skipped epochs) is refunded automatically.
+- Outbid and refunded bids are escrowed pull-based (`claimRefund`). A bid is consumed once its epoch starts: the discount right is self-serve under lazy sync (the winner's first swap promotes and discounts), so a no-show winner's bid drips to LPs deterministically - never dependent on third-party touches. Only wind-down refunds a queued, not-yet-started bid.
 - Per-pool wind-down via `setBiddingEnabled(false)`: new bids stop, the running epoch is honored, vested proceeds finish dripping.
 - Bidding is permissionless; an owner-managed executor denylist (`setExecutorDenied`) blocks shared routers so a bidder cannot hand the discount to all router traffic.
 
