@@ -429,6 +429,34 @@ contract HookLeaseControllerTest is BaseTest {
         assertGt(outLessee, outOther, "discount restored after refunding rent");
     }
 
+    /// @notice Codex P1: a zero-duration rent top-up must not activate the discount. On an
+    ///         insolvent lease, fundRent with sub-second dust floors rentBalance/rps to zero, so
+    ///         paidThrough == now; with an inclusive comparison the lessee could re-arm the
+    ///         discount every block for 1 wei. The comparison is strict: a deposit covering k
+    ///         seconds grants exactly [start, start+k), so dust grants nothing.
+    function testDustRentTopUpDoesNotActivateDiscount() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        vm.warp(uint256(paidThrough) + 100); // insolvent
+
+        // dust top-up: less than one second of rent
+        vm.prank(lesseeA);
+        leaseController.fundRent(leasePoolKey, 1);
+        (,,,,, uint40 paidThroughAfter,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(paidThroughAfter, uint40(block.timestamp), "dust floors the runway to zero duration");
+
+        (uint256 outLessee, uint256 outOther) = _swapOutcomes(1e18);
+        assertEq(outLessee, outOther, "zero-duration top-up must not grant the discount");
+        (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, address(0), "view agrees: no active discount");
+
+        // a real top-up (>= 1s of rent) re-activates it
+        vm.prank(lesseeA);
+        leaseController.fundRent(leasePoolKey, 0.1e18);
+        (outLessee, outOther) = _swapOutcomes(1e18);
+        assertGt(outLessee, outOther, "a positive-duration top-up restores the discount");
+    }
+
     function testPaidThroughSaturation() public {
         // a huge prepaid rent saturates paidThrough at uint40 max instead of overflowing
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();

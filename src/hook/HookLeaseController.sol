@@ -86,7 +86,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     struct PoolLeaseState {
         // slot 0 - swap hot path
         address executor; // zero = no active lease
-        uint40 paidThrough; // rent covers through this timestamp; discount active while now <= this
+        uint40 paidThrough; // rent covers [start, paidThrough); discount active STRICTLY while now < this
         uint40 lastDripTime; // shared throttle clock for accrual + pending release
         bool hasPending; // mirror of pendingDonation != 0
         // slot 1 - accrual time
@@ -196,8 +196,11 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
         // The delivered obligation (the lessee's fee override) is decided from state slot 0
         // alone, BEFORE the best-effort drip: it must survive a drip/token failure - the lessee
-        // paid rent for it. now <= paidThrough encodes rent solvency without any math.
-        if (state.executor != address(0) && sender == state.executor && block.timestamp <= state.paidThrough) {
+        // paid rent for it. now < paidThrough encodes rent solvency without any math; the
+        // comparison is STRICT so a deposit covering k seconds grants exactly [start, start+k) -
+        // a zero-duration top-up (sub-second dust that floors to paidThrough == now) activates
+        // nothing, otherwise 1 wei per block would rent the slot.
+        if (state.executor != address(0) && sender == state.executor && block.timestamp < state.paidThrough) {
             lpFeeOverride = _discountedLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         }
 
@@ -565,7 +568,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             revert NoActiveLease();
         }
         _accrue(poolId, config, state);
-        if (block.timestamp <= state.paidThrough) {
+        // same strict boundary as the discount: at paidThrough the lease no longer covers rent
+        if (block.timestamp < state.paidThrough) {
             revert LeaseStillSolvent();
         }
 
@@ -671,7 +675,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     {
         PoolLeaseConfig storage config = _poolConfigs[poolId];
         PoolLeaseState storage state = _poolStates[poolId];
-        if (!_isRunning(config) || state.executor == address(0) || block.timestamp > state.paidThrough) {
+        if (!_isRunning(config) || state.executor == address(0) || block.timestamp >= state.paidThrough) {
             return (address(0), address(0), 0, 0);
         }
         return (state.lessee, state.executor, state.price, _discountedLpFee(config));
