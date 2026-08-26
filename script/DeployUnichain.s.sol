@@ -12,6 +12,7 @@ import {LeverageTransformer} from "src/vault/transformers/LeverageTransformer.so
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {RevertHook} from "src/RevertHook.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
@@ -130,7 +131,8 @@ contract DeployUnichain is Script {
     function getHookFlags() internal pure returns (uint160) {
         return uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
         );
     }
@@ -351,11 +353,13 @@ contract DeployUnichain is Script {
         address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
         address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
         address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
+        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
             oracle,
             HookFeeController(predictedFeeController),
+            HookAuctionController(predictedAuctionController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
             RevertHookAutoLendActions(predictedAutoLendActions)
@@ -407,10 +411,15 @@ contract DeployUnichain is Script {
         console.log("  RevertHookAutoLendActions deployed at:", address(autoLendActions));
 
         // Deploy RevertHook using CREATE2
+        HookAuctionController auctionController = new HookAuctionController(expectedHookAddress, oracle.poolManager());
+        require(address(auctionController) == predictedAuctionController, "Auction controller address mismatch");
+        console.log("  HookAuctionController deployed at:", address(auctionController));
+
         RevertHook revertHook = new RevertHook{salt: salt}(
             deployer, // owner
             oracle,
             feeController,
+            auctionController,
             positionActions,
             autoLeverageActions,
             autoLendActions
@@ -422,6 +431,12 @@ contract DeployUnichain is Script {
         revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
         console.log("  RevertHook configured");
+
+        // Seed the executor denylist with the canonical shared router so a bidder cannot register
+        // it as their executor and hand the discounted fee to all of the router's traffic for the
+        // epoch. Extend this with any other shared routers / aggregators used on this chain.
+        auctionController.setExecutorDenied(UNIVERSAL_ROUTER, true);
+        console.log("  Executor denylist seeded (UniversalRouter):", UNIVERSAL_ROUTER);
 
         // ==================== Step 5: Deploy V4Vault (USDC lending) ====================
 

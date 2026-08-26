@@ -3,16 +3,19 @@ pragma solidity ^0.8.30;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
+import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
 import {RevertHookExecution} from "./RevertHookExecution.sol";
 
 /// @title RevertHookCallbacks
@@ -27,9 +30,9 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             afterInitialize: true,
             beforeAddLiquidity: true,
             afterAddLiquidity: true,
-            beforeRemoveLiquidity: false,
+            beforeRemoveLiquidity: true,
             afterRemoveLiquidity: true,
-            beforeSwap: false,
+            beforeSwap: true,
             afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
@@ -46,6 +49,58 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         return BaseHook.afterInitialize.selector;
     }
 
+    /// @dev Auction integration: on dynamic-fee pools the controller syncs auction epochs,
+    ///      drips vested proceeds to in-range LPs, and returns the LP fee override for this swap.
+    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        // The auction controller is immutable and audited, and its hook-facing entry points are
+        // non-reverting by construction: the only externally-dependent step (donating to LPs in
+        // the config-chosen auction currency, which could blacklist / fee-on-transfer) is isolated
+        // inside the controller's own donate try/catch. So it is called directly here - a wholesale
+        // fail-open wrapper is unnecessary and would only mask a genuine controller regression.
+        uint24 lpFeeOverride;
+        // auctions require the dynamic fee flag (enforced by configurePool), so static-fee pools
+        // skip the controller round trip entirely - a pure calldata check
+        if (key.fee == LPFeeLibrary.DYNAMIC_FEE_FLAG && address(hookAuctionController) != address(0)) {
+            lpFeeOverride = hookAuctionController.beforeSwap(key, sender);
+        }
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeOverride);
+    }
+
+    /// @dev Isolates the oracle read so a failing oracle aborts trigger processing (never the swap):
+    ///      the price call is tried directly and bounds-checked before the tick conversion, instead
+    ///      of an external self-call wrapper (saves the call overhead and the extra entrypoint).
+    function _tryOracleMaxEndTick(PoolKey calldata key, bool up) internal view returns (bool ok, int24 maxEndTick) {
+        try v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(key.currency0), Currency.unwrap(key.currency1)) returns (
+            uint160 oracleSqrtPriceX96
+        ) {
+            if (oracleSqrtPriceX96 < TickMath.MIN_SQRT_PRICE || oracleSqrtPriceX96 >= TickMath.MAX_SQRT_PRICE) {
+                return (false, 0);
+            }
+            int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), key.tickSpacing);
+            maxEndTick = up
+                ? _getTickLower(oracleTick + _maxTicksFromOracle, key.tickSpacing)
+                : _getTickLower(oracleTick - _maxTicksFromOracle, key.tickSpacing);
+            return (true, maxEndTick);
+        } catch {
+            return (false, 0);
+        }
+    }
+
+    /// @dev Fail-open notification so vested auction proceeds are dripped to the liquidity
+    ///      that was in range while they vested, before the liquidity set changes.
+    function _notifyAuctionLiquidityChange(PoolKey calldata key) internal {
+        // static-fee pools can never carry an auction (see _beforeSwap)
+        if (key.fee != LPFeeLibrary.DYNAMIC_FEE_FLAG || address(hookAuctionController) == address(0)) {
+            return;
+        }
+        // Direct call - see _beforeSwap: the controller is trusted and non-reverting by construction.
+        hookAuctionController.beforeLiquidityChange(key);
+    }
+
     function _afterSwap(address caller, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
         internal
         override
@@ -57,7 +112,17 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         }
 
         int24 cursor = _tickLowerLasts[poolId];
-        int24 liveTick;
+        int24 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
+        if (cursor == liveTick) {
+            return (this.afterSwap.selector, 0);
+        }
+        // No registered triggers: skip the oracle bound, the list walks, and the cursor
+        // write entirely (the dominant per-swap costs). The cursor is left stale on
+        // purpose - _addPositionTriggers re-baselines it when the first trigger registers,
+        // so pre-registration price movement can never fire a trigger.
+        if (_lowerTriggerAfterSwap[poolId].size == 0 && _upperTriggerAfterSwap[poolId].size == 0) {
+            return (this.afterSwap.selector, 0);
+        }
 
         bool hasCachedUpperOracleMaxEndTick;
         bool hasCachedLowerOracleMaxEndTick;
@@ -72,29 +137,25 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
             bool increasing = cursor < liveTick;
             int24 tickEnd = liveTick;
-            if (increasing) {
-                if (!hasCachedUpperOracleMaxEndTick) {
-                    try this.getOracleMaxEndTick(key, true) returns (int24 maxEndTick) {
-                        upperOracleMaxEndTick = maxEndTick;
-                    } catch {
+            {
+                // single _tryOracleMaxEndTick call site: its inlined tick-math body must exist
+                // exactly once in the bytecode (one copy per call site would blow EIP-170)
+                if (increasing ? !hasCachedUpperOracleMaxEndTick : !hasCachedLowerOracleMaxEndTick) {
+                    (bool ok, int24 bound) = _tryOracleMaxEndTick(key, increasing);
+                    if (!ok) {
                         return (this.afterSwap.selector, 0);
                     }
-                    hasCachedUpperOracleMaxEndTick = true;
-                }
-                if (upperOracleMaxEndTick < tickEnd) {
-                    tickEnd = upperOracleMaxEndTick;
-                }
-            } else {
-                if (!hasCachedLowerOracleMaxEndTick) {
-                    try this.getOracleMaxEndTick(key, false) returns (int24 maxEndTick) {
-                        lowerOracleMaxEndTick = maxEndTick;
-                    } catch {
-                        return (this.afterSwap.selector, 0);
+                    if (increasing) {
+                        upperOracleMaxEndTick = bound;
+                        hasCachedUpperOracleMaxEndTick = true;
+                    } else {
+                        lowerOracleMaxEndTick = bound;
+                        hasCachedLowerOracleMaxEndTick = true;
                     }
-                    hasCachedLowerOracleMaxEndTick = true;
                 }
-                if (lowerOracleMaxEndTick > tickEnd) {
-                    tickEnd = lowerOracleMaxEndTick;
+                int24 oracleBound = increasing ? upperOracleMaxEndTick : lowerOracleMaxEndTick;
+                if (increasing ? oracleBound < tickEnd : oracleBound > tickEnd) {
+                    tickEnd = oracleBound;
                 }
             }
             if (tickEnd == cursor) {
@@ -157,18 +218,34 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
     function _beforeAddLiquidity(
         address sender,
-        PoolKey calldata,
+        PoolKey calldata key,
         ModifyLiquidityParams calldata,
         bytes calldata
-    ) internal view override returns (bytes4) {
+    ) internal override returns (bytes4) {
         // NOTE: in practice sender is always the PositionManager - the hook's own liquidity
         // operations also go through positionManager.modifyLiquidities, so the address(this)
         // alternative here (and the sender == address(this) early-returns below) are defensive
         // and currently unreachable. Do not build new logic on those branches firing.
+        _checkLiquiditySender(sender);
+        _notifyAuctionLiquidityChange(key);
+        return BaseHook.beforeAddLiquidity.selector;
+    }
+
+    function _checkLiquiditySender(address sender) internal view {
         if (sender != address(positionManager) && sender != address(this)) {
             revert Unauthorized();
         }
-        return BaseHook.beforeAddLiquidity.selector;
+    }
+
+    function _beforeRemoveLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata,
+        bytes calldata
+    ) internal override returns (bytes4) {
+        _checkLiquiditySender(sender);
+        _notifyAuctionLiquidityChange(key);
+        return BaseHook.beforeRemoveLiquidity.selector;
     }
 
     function _afterAddLiquidity(
@@ -227,76 +304,20 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
     }
 
+    /// @dev Implementation lives in RevertHookAutoLendActions (delegatecall, shared storage
+    ///      layout) to keep the hook's own bytecode under the EIP-170 limit.
     function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta)
         internal
         returns (BalanceDelta newFeeDelta)
     {
-        PositionState storage state = _positionStates[tokenId];
-        uint32 accumulatedActiveTime = state.accumulatedActiveTime;
-        uint32 lastActivated = state.lastActivated;
-        uint32 currentTime = uint32(block.timestamp);
-        if (lastActivated > 0) {
-            accumulatedActiveTime += currentTime - lastActivated;
-            state.lastActivated = currentTime;
-        }
-
-        uint32 lastCollect = state.lastCollect;
-        uint32 feeTime = lastCollect == 0 ? 0 : currentTime - lastCollect;
-        state.lastCollect = currentTime;
-        state.accumulatedActiveTime = 0;
-
-        if (feeTime == 0 || accumulatedActiveTime == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
-        }
-        if (accumulatedActiveTime > feeTime) {
-            accumulatedActiveTime = feeTime;
-        }
-
-        uint16 lpFeeBps = hookFeeController.lpFeeBps();
-        if (lpFeeBps == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
-        }
-
-        // Widen arithmetic to int256 so intermediate products cannot overflow once
-        // `feeTime` exceeds ~2.485 days (where `10000 * int32(feeTime)` exceeds int32.max).
-        int256 activeTimeSigned = int256(uint256(accumulatedActiveTime));
-        int256 feeTimeSigned = int256(uint256(feeTime));
-        int256 lpFeeBpsSigned = int256(uint256(lpFeeBps));
-        int256 denominator = int256(10000) * feeTimeSigned;
-
-        int128 protocolFee0 = SafeCast.toInt128(
-            activeTimeSigned * int256(feeDelta.amount0()) * lpFeeBpsSigned / denominator
+        (bool success, bytes memory returndata) = address(autoLendActions).delegatecall(
+            abi.encodeCall(RevertHookAutoLendActions.takeProtocolFees, (tokenId, key, feeDelta))
         );
-        int128 protocolFee1 = SafeCast.toInt128(
-            activeTimeSigned * int256(feeDelta.amount1()) * lpFeeBpsSigned / denominator
-        );
-
-        if (protocolFee0 == 0 && protocolFee1 == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returndata, 0x20), mload(returndata))
+            }
         }
-
-        address feeRecipient = hookFeeController.protocolFeeRecipient();
-
-        if (protocolFee0 > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            poolManager.take(key.currency0, feeRecipient, uint256(int256(protocolFee0)));
-        }
-        if (protocolFee1 > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            poolManager.take(key.currency1, feeRecipient, uint256(int256(protocolFee1)));
-        }
-
-        emit SendProtocolFee(
-            tokenId,
-            key.currency0,
-            key.currency1,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256(int256(protocolFee0)),
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256(int256(protocolFee1)),
-            feeRecipient
-        );
-
-        newFeeDelta = toBalanceDelta(protocolFee0, protocolFee1);
+        newFeeDelta = abi.decode(returndata, (BalanceDelta));
     }
 }

@@ -26,6 +26,7 @@ import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol"
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -80,8 +81,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Deploy RevertHook
         address hookFlags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                    | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
                     | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
@@ -89,6 +91,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Deploy RevertHook action targets
         feeController = new HookFeeController(hookFlags, address(this), 200, 200);
         routeController = new HookRouteController(hookFlags);
+        HookAuctionController auctionController = new HookAuctionController(hookFlags, v4Oracle.poolManager());
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
         RevertHookPositionActions positionActions =
             new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
@@ -100,7 +103,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             );
 
         bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
+            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
         revertHook = RevertHook(payable(hookFlags));

@@ -4,7 +4,6 @@ pragma solidity ^0.8.30;
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {IVault} from "../vault/interfaces/IVault.sol";
@@ -262,22 +261,6 @@ abstract contract RevertHookExecution is RevertHookConfig {
             }
         }
         return _tryDelegatecallPositionActions(delegateData);
-    }
-
-    function _getOracleMaxEndTick(PoolKey memory poolKey, bool up) internal view returns (int24 maxEndTick) {
-        uint160 oracleSqrtPriceX96 =
-            v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(poolKey.currency0), Currency.unwrap(poolKey.currency1));
-        int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), poolKey.tickSpacing);
-
-        if (up) {
-            maxEndTick = _getTickLower(oracleTick + _maxTicksFromOracle, poolKey.tickSpacing);
-        } else {
-            maxEndTick = _getTickLower(oracleTick - _maxTicksFromOracle, poolKey.tickSpacing);
-        }
-    }
-
-    function getOracleMaxEndTick(PoolKey calldata poolKey, bool up) external view returns (int24 maxEndTick) {
-        return _getOracleMaxEndTick(poolKey, up);
     }
 
     function _hasDirectionReversed(int24 previousLiveTick, int24 currentLiveTick, bool increasing)

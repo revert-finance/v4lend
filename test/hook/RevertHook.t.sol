@@ -32,6 +32,7 @@ import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol"
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {HookOwnedControllerBase} from "src/hook/HookOwnedControllerBase.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
@@ -58,6 +59,7 @@ contract RevertHookTest is BaseTest {
     RevertHook hook;
     HookFeeController feeController;
     HookRouteController routeController;
+    HookAuctionController auctionController;
     LiquidityCalculator liquidityCalculator;
     PoolId poolId;
 
@@ -90,8 +92,9 @@ contract RevertHookTest is BaseTest {
         // Deploy the hook to an address with the correct flags
         address flags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                    | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
                     | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
         );
@@ -101,27 +104,12 @@ contract RevertHookTest is BaseTest {
 
         protocolFeeRecipient = makeAddr("protocolFeeRecipient");
 
-        // Deploy LiquidityCalculator
-        liquidityCalculator = new LiquidityCalculator();
-        feeController = new HookFeeController(flags, protocolFeeRecipient, 200, 200);
-        routeController = new HookRouteController(flags);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
-
-        // Deploy RevertHook action targets
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(
-                permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
-            );
-
-        bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
-        );
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
-        hook = RevertHook(payable(flags));
+        RevertHookStack memory stack = deployRevertHookStack(flags, v4Oracle, protocolFeeRecipient);
+        hook = stack.hook;
+        feeController = stack.feeController;
+        routeController = stack.routeController;
+        auctionController = stack.auctionController;
+        liquidityCalculator = stack.liquidityCalculator;
 
         // Deploy MockERC4626Vault for both currencies
         vault0 = new MockERC4626Vault(IERC20(Currency.unwrap(currency0)), "Vault Token0", "vT0");
@@ -1878,6 +1866,150 @@ contract RevertHookTest is BaseTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "Hook should have 0 balance of currency1 after auto-exit");
     }
 
+    /// @notice While a pool has no registered triggers, _afterSwap skips all trigger bookkeeping
+    ///         (gas fast path) and deliberately leaves the tick cursor stale. This pins the
+    ///         mechanics that make that legal: (1) the cursor really is left stale, (2) the first
+    ///         trigger registration re-baselines it to the current bucket, so stale-cursor
+    ///         replays cannot fire a trigger spuriously, and (3) a genuine fresh crossing still
+    ///         fires. (A trigger whose condition is ALREADY met at registration is handled by
+    ///         config-time immediate execution, a separate, pre-existing path.)
+    function testTriggerRegistrationRebaselinesStaleCursor() public {
+        int24 initialBucket = hook.tickLowerLasts(poolId);
+
+        // 1. price moves down several buckets while NO triggers exist: the fast path leaves
+        //    the cursor stale on purpose
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 3e18,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        (, int24 tickAfterMove,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 bucketAfterMove = _getTickLower(tickAfterMove, poolKey.tickSpacing);
+        assertTrue(bucketAfterMove < initialBucket, "price must have moved buckets");
+        assertEq(hook.tickLowerLasts(poolId), initialBucket, "cursor stays stale while no triggers exist");
+
+        // 2. register an auto-exit whose condition is NOT yet met (exit tick below the current
+        //    price). Registration must re-baseline the cursor to the current bucket.
+        int24 exitTick = bucketAfterMove - 2 * poolKey.tickSpacing;
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitTick,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        assertEq(
+            hook.tickLowerLasts(poolId),
+            bucketAfterMove,
+            "first trigger registration must re-baseline the cursor to the current bucket"
+        );
+
+        // 3. a small swap that does not reach the exit tick fires nothing
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1e15,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        assertGt(positionManager.getPositionLiquidity(token2Id), 0, "no spurious fire");
+
+        // 4. a genuine crossing of the exit tick still fires the trigger
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 3e18,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        (, int24 tickFinal,,) = StateLibrary.getSlot0(poolManager, poolId);
+        assertTrue(tickFinal < exitTick, "price must have crossed the exit tick");
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "fresh crossing fires the trigger");
+    }
+
+    /// @notice The oracle-bound arithmetic (oracleTick ± _maxTicksFromOracle) runs OUTSIDE
+    ///         _tryOracleMaxEndTick's try/catch, so an unbounded setting could overflow int24
+    ///         and revert every trigger-bearing tick-crossing swap instead of failing open.
+    ///         setMaxTicksFromOracle therefore only accepts (0, MAX_TICK] - a range in which
+    ///         the sum can never leave int24 - and the extreme allowed value must still swap.
+    function testSetMaxTicksFromOracleBoundsPreventOverflow() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(0);
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(-1);
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(TickMath.MAX_TICK + 1);
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(type(int24).max);
+
+        // the extreme allowed value: register a not-yet-met trigger so the oracle bound is
+        // actually computed, then cross buckets in both directions without a panic
+        hook.setMaxTicksFromOracle(TickMath.MAX_TICK);
+
+        (, int24 tickNow,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 exitTick = _getTickLower(tickNow, poolKey.tickSpacing) - 100 * poolKey.tickSpacing;
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitTick,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        // down-move exercises oracleTick - MAX_TICK, up-move exercises oracleTick + MAX_TICK
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 3e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 3e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        assertGt(positionManager.getPositionLiquidity(token2Id), 0, "far trigger must not have fired");
+    }
+
     function testBasicAutoExit_Relative() public {
         // Get initial position info to understand the tick range
         (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token2Id);
@@ -3209,9 +3341,9 @@ contract RevertHookTest is BaseTest {
         assertTrue(permissions.afterInitialize, "afterInitialize should be enabled");
         assertTrue(permissions.beforeAddLiquidity, "beforeAddLiquidity should be enabled");
         assertTrue(permissions.afterAddLiquidity, "afterAddLiquidity should be enabled");
-        assertFalse(permissions.beforeRemoveLiquidity, "beforeRemoveLiquidity should be disabled");
+        assertTrue(permissions.beforeRemoveLiquidity, "beforeRemoveLiquidity should be enabled (auction drip)");
         assertTrue(permissions.afterRemoveLiquidity, "afterRemoveLiquidity should be enabled");
-        assertFalse(permissions.beforeSwap, "beforeSwap should be disabled");
+        assertTrue(permissions.beforeSwap, "beforeSwap should be enabled (auction fee override)");
         assertTrue(permissions.afterSwap, "afterSwap should be enabled");
         assertFalse(permissions.beforeDonate, "beforeDonate should be disabled");
         assertFalse(permissions.afterDonate, "afterDonate should be disabled");

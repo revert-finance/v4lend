@@ -102,6 +102,35 @@ Supported hook-side automation modes include:
 - auto lend
 - auto leverage
 
+### Arbitrage auction (`HookAuctionController`)
+
+[src/hook/HookAuctionController.sol](src/hook/HookAuctionController.sol)
+
+A per-pool auction that converts arbitrage value (LVR) into LP income on dynamic-fee pools using `RevertHook`:
+
+- Searchers bid during epoch N (English auction, timestamp-based epochs) for a discounted-LP-fee executor slot in epoch N + 1.
+- The winner is the contract that calls `PoolManager.swap` directly (its registered executor); it pays `normalLpFee` reduced by `feeDiscountPpm`, everyone else pays the baseline.
+- The winning bid, minus a protocol fee, is dripped to in-range LPs via `PoolManager.donate()`, vested linearly over the epoch with throttled anti-JIT release.
+- Outbid and refunded bids are escrowed pull-based (`claimRefund`). A bid is consumed once its epoch starts: the discount right is self-serve under lazy sync (the winner's first swap promotes and discounts), so a no-show winner's bid drips to LPs deterministically - never dependent on third-party touches. Only wind-down refunds a queued, not-yet-started bid.
+- Per-pool wind-down via `setBiddingEnabled(false)`: new bids stop, the running epoch is honored, vested proceeds finish dripping.
+- Staged launch: `configurePool` with `biddingEnabled: false` mirrors the baseline fee without opening bidding - a dynamic-fee pool otherwise trades at the v4 default of 0% LP fee until configured. Create the pool, configure it staged (ideally in the same script), and flip `setBiddingEnabled(true)` when the bidder ecosystem is ready. (`HookLeaseController` supports the same via `leasingEnabled: false`.)
+- Bidding is permissionless; an owner-managed executor denylist (`setExecutorDenied`) blocks shared routers so a bidder cannot hand the discount to all router traffic.
+
+Auctioned pools must be created with `LPFeeLibrary.DYNAMIC_FEE_FLAG`. The hook calls the controller directly from `beforeSwap` / `beforeAddLiquidity` / `beforeRemoveLiquidity`; the controller's hook entrypoints are non-reverting by construction, and a misbehaving auction currency (blacklist, fee-on-transfer) only pauses dripping - it cannot block swaps, liquidity changes, or liquidations.
+
+### Harberger lease (`HookLeaseController`) - alternative mechanism
+
+[src/hook/HookLeaseController.sol](src/hook/HookLeaseController.sol)
+
+An alternative to the epoch auction that sells the same discounted-fee executor slot as a continuous Harberger lease instead of per-epoch bids:
+
+- One lessee holds the slot at a time. They self-assess a price (escrowed as a deposit) and pay rent on it continuously at a per-second tax rate; the rent, minus a protocol fee, drips to in-range LPs with the same throttled anti-JIT release.
+- Anyone can take the slot at any time by buying it out at the self-assessed price plus `minBuyoutBumpPpm`; the old lessee's deposit and unused rent go to pull-refund escrow. Self-assessing low invites a cheap buyout, self-assessing high costs more rent - the classic Harberger honesty incentive.
+- The discount is active only while the prepaid rent covers the current time; when it runs out the discount stops automatically (no eviction needed for correctness).
+- Per-pool wind-down via `setLeasingEnabled(false)`: no new leases, buyouts, rent top-ups or price raises; the running lease is honored while its prepaid rent lasts, and `evictLease` can clear a rent-insolvent lease whose lessee never exits.
+
+Both controllers implement the same hook-facing `IHookAuctionController` interface with the same safety construction (non-reverting entrypoints, isolated donate leg, exact-transfer checks, executor denylist). A deployment chooses the mechanism by wiring ONE of the two as the hook's immutable auction controller; the deploy scripts wire the epoch auction by default.
+
 ### Standalone automators
 
 [src/automators](src/automators)
@@ -113,6 +142,7 @@ Operator-driven contracts that execute one automation strategy at a time:
 - [AutoLend.sol](src/automators/AutoLend.sol)
 - [AutoLeverage.sol](src/automators/AutoLeverage.sol)
 - [AutoRange.sol](src/automators/AutoRange.sol)
+- [AuctionArbExecutor.sol](src/automators/AuctionArbExecutor.sol) - an owner-operated arbitrage router intended to be registered as an auction winner's executor
 
 These are useful when automation should be triggered by operators or keepers instead of fully inside the hook path.
 
@@ -320,7 +350,9 @@ Relevant admin calls:
 - minimum position value,
 - per-position automation mode settings,
 - per-position swap protection settings,
-- auto-lend token-to-vault routing.
+- auto-lend token-to-vault routing,
+- per-pool arbitrage auctions (epoch length, winner discount, reserve, bump, protocol fee),
+- the auction executor denylist.
 
 Relevant admin calls:
 
@@ -336,6 +368,11 @@ Relevant admin calls:
 - `RevertHook.setMaxTicksFromOracle(...)`
 - `RevertHook.setMinPositionValueNative(...)`
 - `RevertHook.setAutoLendVault(...)`
+- `HookAuctionController.configurePool(...)`
+- `HookAuctionController.setBiddingEnabled(...)`
+- `HookAuctionController.setNormalLpFee(...)` (only while no bid is outstanding)
+- `HookAuctionController.setExecutorDenied(...)`
+- `HookAuctionController.sweepPendingDonation(...)` (rescue, only after wind-down)
 
 ## Operational notes
 
@@ -346,6 +383,8 @@ Relevant admin calls:
 - Production vault collateral should not be enabled until the token has a healthy Chainlink-compatible feed, a healthy Uniswap v3 TWAP pool against the oracle reference token, and passing fork validation.
 - The hook and the automators are intentionally separate execution models. The hook is for swap-time automation; the automators are for operator-triggered workflows.
 - Delegatecall targets under [src/hook](src/hook) are execution helpers for the hook, not standalone products.
+- Auction executors must call `PoolManager.swap` directly. Registering a shared router as an executor would give every trader routing through it the discounted fee; deploy scripts seed the denylist with each chain's UniversalRouter, and operators should extend it with other shared routers or aggregators used on the chain.
+- The auction's drip distribution is point-in-time to in-range liquidity (like v4 swap fees), with throttled release bounding JIT capture; it is not time-weighted per position.
 
 ## Security model
 

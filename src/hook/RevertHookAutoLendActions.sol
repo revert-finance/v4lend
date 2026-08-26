@@ -4,10 +4,12 @@ pragma solidity ^0.8.30;
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
@@ -30,6 +32,10 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
 
     IHookFeeController internal immutable hookFeeController;
 
+    /// @dev This contract's own deployed address, used to reject direct (non-delegatecall) calls
+    ///      to takeProtocolFees. Under delegatecall address(this) is the hook, so it differs.
+    address private immutable _selfAddress;
+
     constructor(
         IPermit2 _permit2,
         IV4Oracle _v4Oracle,
@@ -39,6 +45,89 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         RevertHookSwapActions _swapActions
     ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {
         hookFeeController = _hookFeeController;
+        _selfAddress = address(this);
+    }
+
+    /// @notice Time-weighted protocol fee on collected position fees. Called by the hook
+    ///         via delegatecall from its after-liquidity callbacks (shared storage layout);
+    ///         hosted here to keep the hook bytecode under the EIP-170 limit.
+    /// @dev Delegatecall-only: a direct call (which would run on this sidecar's own storage and
+    ///      could emit spoofed SendProtocolFee events) is rejected. Under delegatecall
+    ///      address(this) is the hook, which differs from the captured deploy address.
+    function takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta)
+        external
+        returns (BalanceDelta newFeeDelta)
+    {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
+        PositionState storage state = _positionStates[tokenId];
+        uint32 accumulatedActiveTime = state.accumulatedActiveTime;
+        uint32 lastActivated = state.lastActivated;
+        uint32 currentTime = uint32(block.timestamp);
+        if (lastActivated > 0) {
+            accumulatedActiveTime += currentTime - lastActivated;
+            state.lastActivated = currentTime;
+        }
+
+        uint32 lastCollect = state.lastCollect;
+        uint32 feeTime = lastCollect == 0 ? 0 : currentTime - lastCollect;
+        state.lastCollect = currentTime;
+        state.accumulatedActiveTime = 0;
+
+        if (feeTime == 0 || accumulatedActiveTime == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+        if (accumulatedActiveTime > feeTime) {
+            accumulatedActiveTime = feeTime;
+        }
+
+        uint16 lpFeeBps = hookFeeController.lpFeeBps();
+        if (lpFeeBps == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+
+        // Widen arithmetic to int256 so intermediate products cannot overflow once
+        // `feeTime` exceeds ~2.485 days (where `10000 * int32(feeTime)` exceeds int32.max).
+        int256 activeTimeSigned = int256(uint256(accumulatedActiveTime));
+        int256 feeTimeSigned = int256(uint256(feeTime));
+        int256 lpFeeBpsSigned = int256(uint256(lpFeeBps));
+        int256 denominator = int256(10000) * feeTimeSigned;
+
+        int128 protocolFee0 = SafeCast.toInt128(
+            activeTimeSigned * int256(feeDelta.amount0()) * lpFeeBpsSigned / denominator
+        );
+        int128 protocolFee1 = SafeCast.toInt128(
+            activeTimeSigned * int256(feeDelta.amount1()) * lpFeeBpsSigned / denominator
+        );
+
+        if (protocolFee0 == 0 && protocolFee1 == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+
+        address feeRecipient = hookFeeController.protocolFeeRecipient();
+
+        if (protocolFee0 > 0) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            poolManager.take(key.currency0, feeRecipient, uint256(int256(protocolFee0)));
+        }
+        if (protocolFee1 > 0) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            poolManager.take(key.currency1, feeRecipient, uint256(int256(protocolFee1)));
+        }
+
+        emit SendProtocolFee(
+            tokenId,
+            key.currency0,
+            key.currency1,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256(int256(protocolFee0)),
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256(int256(protocolFee1)),
+            feeRecipient
+        );
+
+        newFeeDelta = toBalanceDelta(protocolFee0, protocolFee1);
     }
 
     /// @notice Forces exit from auto-lend position (called by position owner)

@@ -31,6 +31,7 @@ import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol"
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {MockERC4626Vault} from "test/utils/MockERC4626Vault.sol";
@@ -107,32 +108,19 @@ contract RevertHookNativeAutoLendTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                    | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
                     | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
             ) ^ (0x4445 << 144)
         );
 
         v4Oracle = new MockV4Oracle(positionManager);
-        liquidityCalculator = new LiquidityCalculator();
-        feeController = new HookFeeController(flags, makeAddr("protocolFeeRecipient"), 200, 200);
-        routeController = new HookRouteController(flags);
-        RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
-
-        RevertHookPositionActions positionActions =
-            new RevertHookPositionActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLeverageActions autoLeverageActions =
-            new RevertHookAutoLeverageActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
-        RevertHookAutoLendActions autoLendActions =
-            new RevertHookAutoLendActions(
-                permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
-            );
-
-        bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, positionActions, autoLeverageActions, autoLendActions
-        );
-        deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
-        hook = RevertHook(payable(flags));
+        RevertHookStack memory stack = deployRevertHookStack(flags, v4Oracle, makeAddr("protocolFeeRecipient"));
+        hook = stack.hook;
+        feeController = stack.feeController;
+        routeController = stack.routeController;
+        liquidityCalculator = stack.liquidityCalculator;
 
         wethVault = new MockERC4626Vault(IERC20(address(weth)), "Wrapped Native Vault", "vWETH");
         token1Vault = new MockERC4626Vault(IERC20(address(token1)), "Token1 Vault", "vT1");
