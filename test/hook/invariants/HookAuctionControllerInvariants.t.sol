@@ -258,4 +258,18 @@ contract HookAuctionControllerInvariantTest is BaseTest {
             "controller balance must exactly equal its obligations"
         );
     }
+
+    /// @notice The slot-0 hot-path mirrors never diverge from the structs they mirror.
+    ///         beforeSwap decides the winner fee override and the drip gates from the mirrors
+    ///         alone, so a divergence would silently mis-price swaps or strand vested value.
+    function invariant_HotPathMirrorsMatchStructs() public view {
+        HookAuctionController controller = handler.auctionController();
+        PoolId poolId = handler.poolId();
+        (address activeExecutor, bool activeHasBid, bool hasPending) = controller.getHotPathMirrors(poolId);
+        (, address executor, uint256 bid,,,,) = controller.getEpochAuction(poolId, false);
+        (,, uint256 pendingDonation) = controller.getPoolAuctionState(poolId);
+        assertEq(activeExecutor, executor, "activeExecutor mirror diverged from active.executor");
+        assertEq(activeHasBid, bid != 0, "activeHasBid mirror diverged from active.bid");
+        assertEq(hasPending, pendingDonation != 0, "hasPending mirror diverged from pendingDonation");
+    }
 }

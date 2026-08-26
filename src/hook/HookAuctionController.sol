@@ -96,9 +96,19 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         uint64 lastDripTime;
     }
 
+    /// @dev Slot 0 packs everything beforeSwap needs after the config gate: the epoch-sync
+    ///      check, the winner check, and the two drip gates resolve from ONE cold SLOAD.
+    ///      activeExecutor / activeHasBid / hasPending are MIRRORS of active.executor,
+    ///      active.bid != 0 and pendingDonation != 0 (the structs stay the storage of record);
+    ///      every write to those fields maintains the mirror, and the invariant suite checks
+    ///      they never diverge.
     struct PoolAuctionState {
+        // slot 0 - swap hot path
         bool epochsSynced; // set on the first pool touch; NOT "configured" - see isConfigured()
         uint64 activeEpoch;
+        address activeExecutor; // mirror of active.executor
+        bool activeHasBid; // mirror of active.bid != 0
+        bool hasPending; // mirror of pendingDonation != 0
         EpochAuction active;
         EpochAuction next;
         // Vested value not yet donated (e.g. zero-liquidity periods). uint256 so carrying many
@@ -205,8 +215,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             memoHit := eq(tload(memoSlot), timestamp())
         }
         if (memoHit) {
-            EpochAuction storage memoAuction = _poolStates[poolId].active;
-            if (memoAuction.bid != 0 && sender == memoAuction.executor) {
+            PoolAuctionState storage memoState = _poolStates[poolId];
+            if (memoState.activeHasBid && sender == memoState.activeExecutor) {
                 return _winnerLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
             }
             return 0;
@@ -217,8 +227,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         // Compute the delivered obligation (the winner's fee override) from state alone, BEFORE
         // the best-effort drip. The override must survive a drip/token failure - the winner paid
         // for it.
-        EpochAuction storage auction = state.active;
-        if (auction.bid != 0 && sender == auction.executor) {
+        if (state.activeHasBid && sender == state.activeExecutor) {
             lpFeeOverride = _winnerLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         }
 
@@ -550,6 +559,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             revert NothingToClaim();
         }
         state.pendingDonation = 0;
+        state.hasPending = false;
         refunds[config.auctionCurrency][recipient] += amount;
         emit PendingDonationSwept(poolId, config.auctionCurrency, recipient, amount);
     }
@@ -572,6 +582,17 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     /// @notice Whether a pool has an auction configuration (independent of any activity).
     function isConfigured(PoolId poolId) external view returns (bool) {
         return _isConfigured(_poolConfigs[poolId]);
+    }
+
+    /// @notice The slot-0 hot-path mirrors (see PoolAuctionState). Exposed so the invariant
+    ///         suite and off-chain monitoring can verify they never diverge from the structs.
+    function getHotPathMirrors(PoolId poolId)
+        external
+        view
+        returns (address activeExecutor, bool activeHasBid, bool hasPending)
+    {
+        PoolAuctionState storage state = _poolStates[poolId];
+        return (state.activeExecutor, state.activeHasBid, state.hasPending);
     }
 
     /// @notice Rollover-aware view of the winner whose executor receives the fee discount RIGHT
@@ -723,7 +744,11 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         _carryEpoch(poolId, config, state, state.activeEpoch, state.active);
         if (current == state.activeEpoch + 1) {
-            state.active = state.next;
+            EpochAuction storage promoted = state.next;
+            // maintain the slot-0 mirrors before the struct copy consumes `next`
+            state.activeExecutor = promoted.executor;
+            state.activeHasBid = promoted.bid != 0;
+            state.active = promoted;
             delete state.next;
         } else {
             // More than one epoch skipped: the epoch-N+1 winner was never promoted to active
@@ -736,6 +761,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             }
             delete state.active;
             delete state.next;
+            state.activeExecutor = address(0);
+            state.activeHasBid = false;
         }
         state.activeEpoch = current;
     }
@@ -770,6 +797,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
         if (state.pendingDonation == 0) {
             state.pendingLastDripTime = uint64(block.timestamp);
+            state.hasPending = true;
         }
         state.pendingDonation += amount;
     }
@@ -781,8 +809,9 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         uint64 epoch,
         EpochAuction storage auction
     ) internal {
-        // callers guard on auction.bid != 0, and a materialized nonzero bid always has a nonzero
-        // totalDrip (protocol fee is capped at 20%), so totalDrip doubles as the materialized flag
+        // callers guard on a nonzero bid (directly or via the activeHasBid mirror), and a
+        // materialized nonzero bid always has a nonzero totalDrip (protocol fee is capped at
+        // 20%), so totalDrip doubles as the materialized flag
         if (auction.totalDrip != 0) {
             return;
         }
@@ -803,8 +832,14 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         PoolAuctionConfig storage config,
         PoolAuctionState storage state
     ) internal returns (uint256 amountDonated) {
-        amountDonated = _dripPending(key, poolId, config, state);
-        amountDonated += _dripActiveEpoch(key, poolId, config, state);
+        // both gates come from state slot 0 (already warm after _syncPool), so an idle
+        // configured pool pays no auction-struct or pending-bucket SLOADs at all
+        if (state.hasPending) {
+            amountDonated = _dripPending(key, poolId, config, state);
+        }
+        if (state.activeHasBid) {
+            amountDonated += _dripActiveEpoch(key, poolId, config, state);
+        }
     }
 
     /// @dev Releases the pending-donation bucket gradually rather than in one lump. donate()
@@ -862,9 +897,13 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             state.pendingLastDripTime = uint64(block.timestamp);
             return 0;
         }
-        state.pendingDonation = pending - amountToDonate;
+        uint256 pendingRemaining = pending - amountToDonate;
+        state.pendingDonation = pendingRemaining;
+        if (pendingRemaining == 0) {
+            state.hasPending = false;
+        }
         state.pendingLastDripTime = uint64(block.timestamp);
-        emit PendingDonationDripped(poolId, amountToDonate, state.pendingDonation);
+        emit PendingDonationDripped(poolId, amountToDonate, pendingRemaining);
     }
 
     function _dripActiveEpoch(
@@ -873,8 +912,15 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         PoolAuctionConfig storage config,
         PoolAuctionState storage state
     ) internal returns (uint256 amountToDonate) {
+        // caller gates on state.activeHasBid, so active.bid != 0 here
         EpochAuction storage auction = state.active;
-        if (auction.bid == 0) {
+
+        // Throttle FIRST: a throttled touch then pays only this slot's SLOAD - not the
+        // bid/totalDrip slot and not the PoolManager liquidity read. Vesting is computed from
+        // epochStart and `donated`, so returning early loses nothing; the zero-liquidity parking
+        // below is deferred by at most one throttle window, i.e. one bounded slice - exactly the
+        // granularity the anti-JIT throttle already accepts.
+        if (auction.lastDripTime != 0 && block.timestamp < uint256(auction.lastDripTime) + config.minDripSeconds) {
             return 0;
         }
 
@@ -884,8 +930,10 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         _materializeEpoch(poolId, config, epoch, auction);
 
+        // totalDrip is nonzero after materializing a nonzero bid (protocol fee capped at 20%);
+        // the >= also safely covers the fully-donated epoch
         uint128 totalDrip = auction.totalDrip;
-        if (totalDrip == 0 || auction.donated >= totalDrip) {
+        if (auction.donated >= totalDrip) {
             return 0;
         }
 
@@ -901,10 +949,6 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (StateLibrary.getLiquidity(poolManager, poolId) == 0) {
             auction.donated += uint128(claimable);
             _addPending(state, claimable);
-            return 0;
-        }
-
-        if (auction.lastDripTime != 0 && block.timestamp < uint256(auction.lastDripTime) + config.minDripSeconds) {
             return 0;
         }
 

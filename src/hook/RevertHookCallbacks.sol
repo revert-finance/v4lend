@@ -10,6 +10,8 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
@@ -68,17 +70,28 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeOverride);
     }
 
-    /// @dev Fail-open notification so vested auction proceeds are dripped to the liquidity
-    ///      that was in range while they vested, before the liquidity set changes.
-    /// @dev Isolates the oracle read so a failing oracle aborts trigger processing (never the swap).
-    function _tryOracleMaxEndTick(PoolKey calldata key, bool up) internal returns (bool ok, int24 maxEndTick) {
-        try this.getOracleMaxEndTick(key, up) returns (int24 t) {
-            return (true, t);
+    /// @dev Isolates the oracle read so a failing oracle aborts trigger processing (never the swap):
+    ///      the price call is tried directly and bounds-checked before the tick conversion, instead
+    ///      of an external self-call wrapper (saves the call overhead and the extra entrypoint).
+    function _tryOracleMaxEndTick(PoolKey calldata key, bool up) internal view returns (bool ok, int24 maxEndTick) {
+        try v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(key.currency0), Currency.unwrap(key.currency1)) returns (
+            uint160 oracleSqrtPriceX96
+        ) {
+            if (oracleSqrtPriceX96 < TickMath.MIN_SQRT_PRICE || oracleSqrtPriceX96 >= TickMath.MAX_SQRT_PRICE) {
+                return (false, 0);
+            }
+            int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), key.tickSpacing);
+            maxEndTick = up
+                ? _getTickLower(oracleTick + _maxTicksFromOracle, key.tickSpacing)
+                : _getTickLower(oracleTick - _maxTicksFromOracle, key.tickSpacing);
+            return (true, maxEndTick);
         } catch {
             return (false, 0);
         }
     }
 
+    /// @dev Fail-open notification so vested auction proceeds are dripped to the liquidity
+    ///      that was in range while they vested, before the liquidity set changes.
     function _notifyAuctionLiquidityChange(PoolKey calldata key) internal {
         // static-fee pools can never carry an auction (see _beforeSwap)
         if (key.fee != LPFeeLibrary.DYNAMIC_FEE_FLAG || address(hookAuctionController) == address(0)) {
@@ -124,29 +137,25 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
             bool increasing = cursor < liveTick;
             int24 tickEnd = liveTick;
-            if (increasing) {
-                if (!hasCachedUpperOracleMaxEndTick) {
-                    bool ok;
-                    (ok, upperOracleMaxEndTick) = _tryOracleMaxEndTick(key, true);
+            {
+                // single _tryOracleMaxEndTick call site: its inlined tick-math body must exist
+                // exactly once in the bytecode (one copy per call site would blow EIP-170)
+                if (increasing ? !hasCachedUpperOracleMaxEndTick : !hasCachedLowerOracleMaxEndTick) {
+                    (bool ok, int24 bound) = _tryOracleMaxEndTick(key, increasing);
                     if (!ok) {
                         return (this.afterSwap.selector, 0);
                     }
-                    hasCachedUpperOracleMaxEndTick = true;
-                }
-                if (upperOracleMaxEndTick < tickEnd) {
-                    tickEnd = upperOracleMaxEndTick;
-                }
-            } else {
-                if (!hasCachedLowerOracleMaxEndTick) {
-                    bool ok;
-                    (ok, lowerOracleMaxEndTick) = _tryOracleMaxEndTick(key, false);
-                    if (!ok) {
-                        return (this.afterSwap.selector, 0);
+                    if (increasing) {
+                        upperOracleMaxEndTick = bound;
+                        hasCachedUpperOracleMaxEndTick = true;
+                    } else {
+                        lowerOracleMaxEndTick = bound;
+                        hasCachedLowerOracleMaxEndTick = true;
                     }
-                    hasCachedLowerOracleMaxEndTick = true;
                 }
-                if (lowerOracleMaxEndTick > tickEnd) {
-                    tickEnd = lowerOracleMaxEndTick;
+                int24 oracleBound = increasing ? upperOracleMaxEndTick : lowerOracleMaxEndTick;
+                if (increasing ? oracleBound < tickEnd : oracleBound > tickEnd) {
+                    tickEnd = oracleBound;
                 }
             }
             if (tickEnd == cursor) {
