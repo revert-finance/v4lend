@@ -117,6 +117,19 @@ A per-pool auction that converts arbitrage value (LVR) into LP income on dynamic
 
 Auctioned pools must be created with `LPFeeLibrary.DYNAMIC_FEE_FLAG`. The hook calls the controller directly from `beforeSwap` / `beforeAddLiquidity` / `beforeRemoveLiquidity`; the controller's hook entrypoints are non-reverting by construction, and a misbehaving auction currency (blacklist, fee-on-transfer) only pauses dripping - it cannot block swaps, liquidity changes, or liquidations.
 
+### Harberger lease (`HookLeaseController`) - alternative mechanism
+
+[src/hook/HookLeaseController.sol](src/hook/HookLeaseController.sol)
+
+An alternative to the epoch auction that sells the same discounted-fee executor slot as a continuous Harberger lease instead of per-epoch bids:
+
+- One lessee holds the slot at a time. They self-assess a price (escrowed as a deposit) and pay rent on it continuously at a per-second tax rate; the rent, minus a protocol fee, drips to in-range LPs with the same throttled anti-JIT release.
+- Anyone can take the slot at any time by buying it out at the self-assessed price plus `minBuyoutBumpPpm`; the old lessee's deposit and unused rent go to pull-refund escrow. Self-assessing low invites a cheap buyout, self-assessing high costs more rent - the classic Harberger honesty incentive.
+- The discount is active only while the prepaid rent covers the current time; when it runs out the discount stops automatically (no eviction needed for correctness).
+- Per-pool wind-down via `setLeasingEnabled(false)`: no new leases, buyouts, rent top-ups or price raises; the running lease is honored while its prepaid rent lasts, and `evictLease` can clear a rent-insolvent lease whose lessee never exits.
+
+Both controllers implement the same hook-facing `IHookAuctionController` interface with the same safety construction (non-reverting entrypoints, isolated donate leg, exact-transfer checks, executor denylist). A deployment chooses the mechanism by wiring ONE of the two as the hook's immutable auction controller; the deploy scripts wire the epoch auction by default.
+
 ### Standalone automators
 
 [src/automators](src/automators)

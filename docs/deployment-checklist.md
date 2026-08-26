@@ -39,6 +39,7 @@ This checklist captures deployment gates that should be completed before a produ
 - Fee changes (`setNormalLpFee`) only work while no bid is active or queued; plan them between epochs.
 - Wind-down runbook: `setBiddingEnabled(pool, false)` stops new bids and refunds the queued bid; the running epoch is honored; after it ends and dripping finishes, `sweepPendingDonation` (credits the refund escrow) clears any stuck remainder and unblocks `configurePool`.
 - Monitor `DonateFailed` (drip problems), `EpochMaterialized`/`EpochDripped` (auction health), and bid activity per epoch; run a floor bidder via `AuctionArbExecutor` on flagship pools at launch.
+- Mechanism choice: `HookLeaseController` (continuous Harberger lease) is a drop-in alternative implementing the same `IHookAuctionController` interface. The hook takes exactly ONE controller at deploy time - decide the mechanism per chain BEFORE mining the hook address (the controller address is a constructor arg and part of the CREATE2 mining). The deploy scripts wire the epoch auction by default; to use the lease instead, deploy `HookLeaseController` at the sidecar nonce and pass it to the hook. Lease-specific wind-down: `setLeasingEnabled(pool, false)`, wait for rent insolvency (or lessee exit), `evictLease` if needed, then `sweepPendingDonation`.
 
 ## Emergency Runbook
 
