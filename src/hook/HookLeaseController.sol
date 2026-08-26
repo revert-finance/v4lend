@@ -98,8 +98,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         // slot 2 - accrual time
         uint128 price; // self-assessed price, escrowed as the lease deposit
         uint128 rentBalance; // prepaid rent not yet accrued
-        // Accrued rent not yet donated (e.g. zero-liquidity periods). uint256 so a long-lived
-        // lease can never overflow the accumulator.
+        // Accrued rent that could not be delivered directly (zero-liquidity periods, failed
+        // donates, lease-action accruals); released gradually. uint256 so a long-lived lease
+        // can never overflow the accumulator.
         uint256 pendingDonation;
     }
 
@@ -137,6 +138,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     event LeaseExited(PoolId indexed poolId, address indexed lessee, uint256 refund);
     event LeaseEvicted(PoolId indexed poolId, address indexed lessee, uint256 refund);
     event RentAccrued(PoolId indexed poolId, uint256 amount, uint256 protocolFee, uint256 remainingRentBalance);
+    event RentDripped(PoolId indexed poolId, uint256 amount);
     event PendingDonationDripped(PoolId indexed poolId, uint256 amount, uint256 pendingRemaining);
     event RefundEscrowed(PoolId indexed poolId, Currency indexed currency, address indexed account, uint256 amount);
     event RefundClaimed(Currency indexed currency, address indexed account, address recipient, uint256 amount);
@@ -283,7 +285,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (oldLessee == address(0)) {
             revert NoActiveLease();
         }
-        _accrue(poolId, config, state);
+        _addPending(state, _accrue(poolId, config, state));
 
         if (newPrice < minBuyoutPrice(poolId)) {
             revert InvalidPrice();
@@ -333,7 +335,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             revert InvalidRentDeposit();
         }
 
-        _accrue(poolId, config, state);
+        _addPending(state, _accrue(poolId, config, state));
         state.rentBalance += uint128(amount);
         state.paidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, state.price));
         _pullExact(config.auctionCurrency, amount);
@@ -358,7 +360,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         }
         _checkPrice(newPrice);
 
-        _accrue(poolId, config, state);
+        _addPending(state, _accrue(poolId, config, state));
         state.price = uint128(newPrice);
         state.paidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, newPrice));
 
@@ -384,7 +386,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         PoolLeaseState storage state = _requireLessee(poolId);
 
         // a lease can only exist once startTime has passed, so accrual is always safe here
-        _accrue(poolId, config, state);
+        _addPending(state, _accrue(poolId, config, state));
         refund = uint256(state.price) + state.rentBalance;
         _clearLease(state);
         if (refund != 0) {
@@ -569,7 +571,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (lessee == address(0)) {
             revert NoActiveLease();
         }
-        _accrue(poolId, config, state);
+        _addPending(state, _accrue(poolId, config, state));
         // same strict boundary as the discount: at paidThrough the lease no longer covers rent
         if (block.timestamp < state.paidThrough) {
             revert LeaseStillSolvent();
@@ -799,20 +801,25 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     }
 
     /// @dev Moves rent owed since lastAccrualTime out of the lease: the protocol-fee share to
-    ///      protocolFeesAccrued, the rest into the pending bucket for throttled dripping.
-    function _accrue(PoolId poolId, PoolLeaseConfig storage config, PoolLeaseState storage state) internal {
+    ///      protocolFeesAccrued, the rest RETURNED for the caller to deliver - _accrueAndDrip
+    ///      donates it directly to the in-range LPs who earned it, lease actions park it into
+    ///      the pending bucket (`_addPending(state, _accrue(...))`).
+    function _accrue(PoolId poolId, PoolLeaseConfig storage config, PoolLeaseState storage state)
+        internal
+        returns (uint256 netAccrued)
+    {
         if (state.lessee == address(0)) {
-            return;
+            return 0;
         }
         uint256 elapsed = block.timestamp - state.lastAccrualTime;
         if (elapsed == 0) {
-            return;
+            return 0;
         }
         state.lastAccrualTime = uint64(block.timestamp);
 
         uint256 rentBalance = state.rentBalance;
         if (rentBalance == 0) {
-            return;
+            return 0;
         }
         uint256 owed = _rentPerSecond(config, state.price) * elapsed;
         if (owed > rentBalance) {
@@ -828,9 +835,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (protocolFee != 0) {
             protocolFeesAccrued[config.auctionCurrency][config.protocolFeeRecipient] += protocolFee;
         }
-        // protocolFee <= owed always (bps <= 2000, carry < 10000: even owed == 1 yields fee <= 1)
-        _addPending(state, owed - protocolFee);
         emit RentAccrued(poolId, owed, protocolFee, state.rentBalance);
+        // protocolFee <= owed always (bps <= 2000, carry < 10000: even owed == 1 yields fee <= 1)
+        return owed - protocolFee;
     }
 
     /// @dev Adds to the pending bucket, maintaining the hasPending slot-0 mirror and
@@ -851,16 +858,21 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
     // ==================== Internal: dripping ====================
 
-    /// @dev Accrues rent and releases the pending bucket gradually - the same anti-JIT design as
-    ///      HookAuctionController's pending drip: each release is throttled by minDripSeconds and
-    ///      bounded to (elapsed / dripHorizonSeconds) of the bucket, with the catch-up window
-    ///      capped at one horizon; whenever the pool has no in-range liquidity the throttle clock
-    ///      is advanced, so an idle zero-liquidity stretch is NOT later paid out as one large
-    ///      catch-up slice to the first LP that reappears. A JIT position has to hold liquidity
-    ///      for at least minDripSeconds to receive even one bounded slice.
-    ///      The throttle runs FIRST, from state slot 0 alone, so throttled touches skip the
-    ///      accrual math and every further storage read; accrual is time-based, so deferring it
-    ///      to the next unthrottled touch loses nothing.
+    /// @dev Two delivery streams, mirroring HookAuctionController's design:
+    ///      1) FRESH rent (accrued since the last touch) donates DIRECTLY to the current
+    ///         in-range LPs - they are exactly who earned it: every liquidity change is itself
+    ///         a touch, so the set was constant over the accrual window, and a JIT's own mint
+    ///         touch pays the incumbents before its liquidity registers. This is what lets a
+    ///         departing LP (beforeRemoveLiquidity) collect the rent of its own tenure.
+    ///      2) The PENDING bucket - value that could not be delivered (zero liquidity, failed
+    ///         donates, lease-action accruals) - releases gradually: throttled by
+    ///         minDripSeconds, bounded to (elapsed / dripHorizonSeconds) per release, clock
+    ///         (re)initialized on every empty-to-nonempty transition and advanced over
+    ///         zero-liquidity stretches, so no stale interval can dump the bucket to a JIT.
+    ///      The shared throttle runs FIRST, from state slot 0 alone, so throttled touches skip
+    ///      the accrual math and every further storage read; accrual is time-based, so deferring
+    ///      it to the next unthrottled touch loses nothing (a topology change inside a throttle
+    ///      window shifts at most minDripSeconds of rent - the slice granularity everywhere).
     function _accrueAndDrip(
         PoolKey memory key,
         PoolId poolId,
@@ -871,57 +883,66 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (last != 0 && block.timestamp < uint256(last) + config.minDripSeconds) {
             return 0;
         }
+
+        uint256 fresh;
         if (state.executor != address(0)) {
-            _accrue(poolId, config, state);
+            fresh = _accrue(poolId, config, state);
         }
-        if (!state.hasPending) {
-            return 0;
-        }
-        uint256 pending = state.pendingDonation;
 
-        // Cannot donate without in-range liquidity; advance the clock so the gap cannot become a
-        // giant catch-up slice once liquidity returns.
-        if (StateLibrary.getLiquidity(poolManager, poolId) == 0) {
+        bool zeroLiquidity = StateLibrary.getLiquidity(poolManager, poolId) == 0;
+
+        // 1) old bucket first (so the fresh rent cannot inflate this release), measured from
+        //    the pre-touch clock; hasPending implies last != 0 and, since this touch passed the
+        //    throttle, elapsed >= minDripSeconds
+        if (state.hasPending && !zeroLiquidity) {
+            uint256 pending = state.pendingDonation;
+            uint256 elapsed = block.timestamp - uint256(last);
+            if (elapsed > config.dripHorizonSeconds) {
+                elapsed = config.dripHorizonSeconds; // cap the catch-up at one horizon's worth
+            }
+            uint256 release = FullMath.mulDiv(pending, elapsed, config.dripHorizonSeconds);
+            // release rounds to 0 only for sub-slice dust; clear it so the bucket cannot stick
+            if (release == 0 || release > pending) {
+                release = pending;
+            }
+            if (release > MAX_ESCROW_AMOUNT) {
+                release = MAX_ESCROW_AMOUNT; // keep each donate within int128 range
+            }
+            uint256 released = _donate(key, poolId, config, release);
+            if (released != 0) {
+                uint256 pendingRemaining = pending - released;
+                state.pendingDonation = pendingRemaining;
+                if (pendingRemaining == 0) {
+                    state.hasPending = false;
+                }
+                amountToDonate = released;
+                emit PendingDonationDripped(poolId, released, pendingRemaining);
+            }
+            // on a failed release the value stays pending; the clock update below backs off
+            // for minDripSeconds instead of re-paying the failed transfer on every touch
+        }
+
+        // 2) fresh rent: straight to the LPs who were in range while it accrued; park it only
+        //    when it cannot be delivered
+        if (fresh != 0) {
+            uint256 freshDonated;
+            if (!zeroLiquidity) {
+                freshDonated = _donate(key, poolId, config, fresh);
+                if (freshDonated != 0) {
+                    amountToDonate += freshDonated;
+                    emit RentDripped(poolId, freshDonated);
+                }
+            }
+            if (freshDonated != fresh) {
+                _addPending(state, fresh - freshDonated);
+            }
+        }
+
+        // one shared clock update: throttles the next touch, backs off after failed donates,
+        // and advances over zero-liquidity stretches (so they never become catch-up slices)
+        if (fresh != 0 || state.hasPending) {
             state.lastDripTime = uint40(block.timestamp);
-            return 0;
         }
-
-        // Re-read the clock: if the accrual above (or an earlier lease action) just created a
-        // FRESH bucket, _addPending re-initialized it to now - the stale pre-accrual value must
-        // not measure the new bucket's elapsed time. A brand-new bucket (elapsed 0) waits one
-        // full throttle period for its first bounded slice. hasPending implies a nonzero clock
-        // (every empty-to-nonempty transition sets it), so no zero-fallback is needed.
-        last = state.lastDripTime;
-        uint256 elapsed = block.timestamp - uint256(last);
-        if (elapsed == 0) {
-            return 0;
-        }
-        if (elapsed > config.dripHorizonSeconds) {
-            elapsed = config.dripHorizonSeconds; // cap the catch-up at one horizon's worth
-        }
-        uint256 release = FullMath.mulDiv(pending, elapsed, config.dripHorizonSeconds);
-        // release rounds to 0 only for sub-slice dust; clear it so the bucket cannot get stuck
-        if (release == 0 || release > pending) {
-            release = pending;
-        }
-        if (release > MAX_ESCROW_AMOUNT) {
-            release = MAX_ESCROW_AMOUNT; // keep each donate within int128 range
-        }
-
-        amountToDonate = _donate(key, poolId, config, release);
-        if (amountToDonate == 0) {
-            // donate failed (e.g. broken auction currency): back off for minDripSeconds instead
-            // of re-attempting - and re-paying the failed transfer's gas - on every pool touch
-            state.lastDripTime = uint40(block.timestamp);
-            return 0;
-        }
-        uint256 pendingRemaining = pending - amountToDonate;
-        state.pendingDonation = pendingRemaining;
-        if (pendingRemaining == 0) {
-            state.hasPending = false;
-        }
-        state.lastDripTime = uint40(block.timestamp);
-        emit PendingDonationDripped(poolId, amountToDonate, pendingRemaining);
     }
 
     /// @dev Donates `amount` of the auction currency to the pool's in-range liquidity.

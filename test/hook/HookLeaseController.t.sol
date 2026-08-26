@@ -499,31 +499,29 @@ contract HookLeaseControllerTest is BaseTest {
 
     function testDripThrottleAndGradualRelease() public {
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId);
 
-        // accumulate half an hour of rent; the touch that CREATES the bucket releases nothing
-        // (the bucket gets its own clock), one throttle period later the first slice flows
+        // fresh rent donates DIRECTLY to the LPs who were in range while it accrued
         vm.warp(block.timestamp + 1800);
         uint256 pmBefore = token1.balanceOf(address(poolManager));
         leaseController.drip(leasePoolKey);
-        assertEq(token1.balanceOf(address(poolManager)), pmBefore, "bucket-creating touch releases nothing");
-        vm.warp(block.timestamp + MIN_DRIP + 1);
-        leaseController.drip(leasePoolKey);
         uint256 firstDrip = token1.balanceOf(address(poolManager)) - pmBefore;
         (,,,,,, uint256 pendingAfter) = leaseController.getPoolLeaseState(leasePoolId);
-        assertGt(firstDrip, 0, "first drip releases a slice");
-        assertGt(pendingAfter, 0, "the rest stays pending (gradual anti-JIT release)");
+        uint256 net = rps * 1800 - (rps * 1800 * PROTOCOL_FEE_BPS / 10_000);
+        assertEq(firstDrip, net, "the whole accrual window donates directly to its LPs");
+        assertEq(pendingAfter, 0, "nothing parked while liquidity is present");
 
-        // a second drip inside minDripSeconds releases nothing
+        // a drip inside minDripSeconds is throttled: no accrual, no donation
         vm.warp(block.timestamp + MIN_DRIP - 2);
         pmBefore = token1.balanceOf(address(poolManager));
         leaseController.drip(leasePoolKey);
         assertEq(token1.balanceOf(address(poolManager)), pmBefore, "throttled drip releases nothing");
 
-        // after the throttle, the next slice flows
+        // after the throttle, the next window's rent flows
         vm.warp(block.timestamp + MIN_DRIP);
         pmBefore = token1.balanceOf(address(poolManager));
         leaseController.drip(leasePoolKey);
-        assertGt(token1.balanceOf(address(poolManager)), pmBefore, "next slice after the throttle");
+        assertGt(token1.balanceOf(address(poolManager)), pmBefore, "next window after the throttle");
     }
 
     function testZeroLiquidityGapDoesNotDumpToJIT() public {
@@ -576,46 +574,69 @@ contract HookLeaseControllerTest is BaseTest {
         jitTokenId; // silence unused
     }
 
-    /// @notice Codex P2: a lastDripTime left stale by a long-drained previous bucket must not
-    ///         let the first drip of a FRESH bucket compute a full-horizon elapsed interval and
-    ///         release the entire new bucket at once. _addPending re-initializes the clock on
-    ///         every empty-to-nonempty transition (and the drip path re-reads it after accrual).
-    function testFreshBucketAfterDrainedBucketGetsItsOwnClock() public {
-        // lease A: accrue some rent, then fully drain the bucket (a horizon-old elapsed
-        // interval releases everything to the standing LPs - by design)
+    /// @notice Codex P2 (fresh-clock): a pending bucket created by a LEASE ACTION outside the
+    ///         drip path (here: exitLease parking the final accrual) gets its own clock - a
+    ///         lastDripTime left stale by a long quiet gap must not dump the bucket at once.
+    function testActionParkedBucketGetsItsOwnClock() public {
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.5e18);
-        vm.warp(block.timestamp + DRIP_HORIZON + 1);
-        leaseController.drip(leasePoolKey);
-        vm.warp(block.timestamp + DRIP_HORIZON + 1);
-        leaseController.drip(leasePoolKey);
-        // exit at the drip's own timestamp: zero seconds re-accrue, the bucket stays empty
+        vm.warp(block.timestamp + MIN_DRIP + 1);
+        leaseController.drip(leasePoolKey); // direct stream: clock set, nothing pending
+
+        // a long quiet stretch, then the lessee exits: the exit's accrual is PARKED
+        vm.warp(block.timestamp + 3 * DRIP_HORIZON);
         vm.prank(lesseeA);
         leaseController.exitLease(leasePoolKey);
-        (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
-        assertEq(pending, 0, "previous bucket fully drained");
+        (,,,,,, uint256 bucket) = leaseController.getPoolLeaseState(leasePoolId);
+        assertGt(bucket, 0, "exit parked the final accrual");
 
-        // a long quiet gap leaves lastDripTime far in the past
-        vm.warp(block.timestamp + 3 * DRIP_HORIZON);
-
-        // lease B: its first accrual creates a FRESH bucket on the same touch that drips
-        _startLease(lesseeB, address(otherSwapper), 1e18, 0.5e18);
-        vm.warp(block.timestamp + MIN_DRIP + 1);
+        // a drip at the very same timestamp is throttled by the bucket's own fresh clock -
+        // the 3-horizon-stale interval must not release everything
         uint256 pmBefore = token1.balanceOf(address(poolManager));
         leaseController.drip(leasePoolKey);
-        assertEq(
-            token1.balanceOf(address(poolManager)),
-            pmBefore,
-            "the touch that creates the fresh bucket must release nothing (stale clock ignored)"
-        );
-        (,,,,,, uint256 freshBucket) = leaseController.getPoolLeaseState(leasePoolId);
-        assertGt(freshBucket, 0, "fresh bucket holds the accrued rent");
+        assertEq(token1.balanceOf(address(poolManager)), pmBefore, "same-block drip releases nothing");
 
-        // after one full throttle period the bucket releases a bounded slice, not everything
+        // one throttle period later: a bounded slice, not the whole bucket
         vm.warp(block.timestamp + MIN_DRIP + 1);
         leaseController.drip(leasePoolKey);
         (,,,,,, uint256 remaining) = leaseController.getPoolLeaseState(leasePoolId);
         assertGt(token1.balanceOf(address(poolManager)), pmBefore, "bounded slice released");
-        assertGt(remaining, 0, "most of the fresh bucket still pending (gradual release)");
+        assertGt(remaining, 0, "most of the parked bucket still pending (gradual release)");
+    }
+
+    event RentDripped(PoolId indexed poolId, uint256 amount);
+
+    /// @notice Codex P2 (departing LP): beforeRemoveLiquidity delivers the rent accrued during
+    ///         the departing LP's tenure to the in-range set that includes them, BEFORE their
+    ///         liquidity leaves - it is not parked for later LPs or the owner sweep.
+    function testDepartingLPCollectsAccruedRent() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId);
+        vm.warp(block.timestamp + 1800); // rent accrues; no touches in between
+
+        // the removal itself must trigger the direct donation of the accrued rent
+        vm.expectEmit(true, false, false, false, address(leaseController));
+        emit RentDripped(leasePoolId, 0);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId,
+            positionManager.getPositionLiquidity(fullRangeTokenId),
+            0,
+            0,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        // nothing was parked, and the controller paid the net rent out
+        (,,, uint256 rentBalance,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(pending, 0, "rent delivered to the departing LP, not parked");
+        uint256 accrued = 0.2e18 - rentBalance;
+        assertEq(accrued, rps * 1800, "the whole tenure accrued");
+        uint256 fee = accrued * PROTOCOL_FEE_BPS / 10_000;
+        assertEq(
+            token1.balanceOf(address(leaseController)),
+            1e18 + rentBalance + fee,
+            "controller keeps only deposit + unaccrued rent + protocol fee"
+        );
     }
 
     // ==================== Buyout / price / exit ====================
@@ -818,7 +839,6 @@ contract HookLeaseControllerTest is BaseTest {
     function testSweepRequiresWindDownAndVacancy() public {
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
         vm.warp(block.timestamp + 1000);
-        leaseController.drip(leasePoolKey);
 
         vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
         leaseController.sweepPendingDonation(leasePoolKey, address(this));
@@ -827,6 +847,7 @@ contract HookLeaseControllerTest is BaseTest {
         vm.expectRevert(HookLeaseController.LeaseAlreadyActive.selector);
         leaseController.sweepPendingDonation(leasePoolKey, address(this));
 
+        // the exit parks its final accrual into the pending bucket (an action-created bucket)
         vm.prank(lesseeA);
         leaseController.exitLease(leasePoolKey);
         (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
