@@ -486,6 +486,17 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         ) {
             revert InvalidConfig();
         }
+        // The mandatory rent deposit must be escrowable at EVERY installable price (rps is
+        // monotonic in price, so checking the cap covers all): otherwise an incumbent could
+        // raise their price to one whose buyout deposit exceeds MAX_ESCROW_AMOUNT, making the
+        // slot un-buyoutable. Economically this bounds the mandatory prepay to at most ~100%
+        // of the self-assessed price - any config demanding more is nonsensical anyway.
+        if (
+            FullMath.mulDivRoundingUp(MAX_ESCROW_AMOUNT, config.taxRatePerSecondX64, Q64)
+                * config.minRentDepositSeconds > MAX_ESCROW_AMOUNT
+        ) {
+            revert InvalidConfig();
+        }
         if (config.startTime == 0) {
             config.startTime = uint64(block.timestamp);
         }

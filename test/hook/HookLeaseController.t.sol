@@ -319,6 +319,15 @@ contract HookLeaseControllerTest is BaseTest {
         vm.expectRevert(HookLeaseController.InvalidConfig.selector);
         leaseController.configurePool(leasePoolKey, bad);
 
+        // Codex P2: the mandatory rent deposit must stay escrowable at every installable price,
+        // or an incumbent could raise to a price whose buyout deposit exceeds the escrow cap
+        // (un-buyoutable slot). tax * minRentDepositSeconds must not exceed ~100% of the price.
+        bad = _defaultConfig();
+        bad.minRentDepositSeconds = 36_000; // 10h at a 100%-per-10h tax: prepay == 100% of price
+        bad.taxRatePerSecondX64 = TAX_X64 + 1; // nudge just past the feasibility bound
+        vm.expectRevert(HookLeaseController.InvalidConfig.selector);
+        leaseController.configurePool(leasePoolKey, bad);
+
         vm.warp(block.timestamp + 1000); // ensure timestamp-1 is not the 0 "defaults to now" sentinel
         bad = _defaultConfig();
         bad.startTime = uint64(block.timestamp - 1); // in the past
