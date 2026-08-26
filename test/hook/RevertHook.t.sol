@@ -1947,6 +1947,69 @@ contract RevertHookTest is BaseTest {
         assertEq(positionManager.getPositionLiquidity(token2Id), 0, "fresh crossing fires the trigger");
     }
 
+    /// @notice The oracle-bound arithmetic (oracleTick ± _maxTicksFromOracle) runs OUTSIDE
+    ///         _tryOracleMaxEndTick's try/catch, so an unbounded setting could overflow int24
+    ///         and revert every trigger-bearing tick-crossing swap instead of failing open.
+    ///         setMaxTicksFromOracle therefore only accepts (0, MAX_TICK] - a range in which
+    ///         the sum can never leave int24 - and the extreme allowed value must still swap.
+    function testSetMaxTicksFromOracleBoundsPreventOverflow() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(0);
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(-1);
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(TickMath.MAX_TICK + 1);
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setMaxTicksFromOracle(type(int24).max);
+
+        // the extreme allowed value: register a not-yet-met trigger so the oracle bound is
+        // actually computed, then cross buckets in both directions without a panic
+        hook.setMaxTicksFromOracle(TickMath.MAX_TICK);
+
+        (, int24 tickNow,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 exitTick = _getTickLower(tickNow, poolKey.tickSpacing) - 100 * poolKey.tickSpacing;
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        hook.setPositionConfig(
+            token2Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitTick,
+                autoExitTickUpper: tickUpper2,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        // down-move exercises oracleTick - MAX_TICK, up-move exercises oracleTick + MAX_TICK
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 3e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 3e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        assertGt(positionManager.getPositionLiquidity(token2Id), 0, "far trigger must not have fired");
+    }
+
     function testBasicAutoExit_Relative() public {
         // Get initial position info to understand the tick range
         (, PositionInfo posInfoBefore) = positionManager.getPoolAndPositionInfo(token2Id);

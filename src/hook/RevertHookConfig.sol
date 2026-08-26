@@ -6,6 +6,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {IVault} from "../vault/interfaces/IVault.sol";
@@ -40,6 +41,11 @@ abstract contract RevertHookConfig is RevertHookImmediate {
     }
 
     function setMaxTicksFromOracle(int24 newMaxTicksFromOracle) external payable onlyOwner {
+        // (0, MAX_TICK] so oracleTick ± _maxTicksFromOracle can never overflow int24 inside
+        // _tryOracleMaxEndTick, whose try/catch isolates only the oracle call itself
+        if (newMaxTicksFromOracle <= 0 || newMaxTicksFromOracle > TickMath.MAX_TICK) {
+            revert InvalidConfig();
+        }
         _maxTicksFromOracle = newMaxTicksFromOracle;
         emit SetMaxTicksFromOracle(newMaxTicksFromOracle);
     }
