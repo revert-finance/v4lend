@@ -833,13 +833,18 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         emit RentAccrued(poolId, owed, protocolFee, state.rentBalance);
     }
 
-    /// @dev Adds to the pending bucket, maintaining the hasPending slot-0 mirror.
+    /// @dev Adds to the pending bucket, maintaining the hasPending slot-0 mirror and
+    ///      (re)initializing the drip clock whenever the bucket transitions from empty to
+    ///      non-empty. Without this, a lastDripTime left stale by a long-drained previous
+    ///      bucket would let the first drip of a fresh bucket compute a full-horizon elapsed
+    ///      interval and release the entire new bucket to a same-block JIT position.
     function _addPending(PoolLeaseState storage state, uint256 amount) internal {
         if (amount == 0) {
             return;
         }
         if (state.pendingDonation == 0) {
             state.hasPending = true;
+            state.lastDripTime = uint40(block.timestamp);
         }
         state.pendingDonation += amount;
     }
@@ -881,7 +886,16 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             return 0;
         }
 
-        uint256 elapsed = last == 0 ? config.minDripSeconds : block.timestamp - last;
+        // Re-read the clock: if the accrual above (or an earlier lease action) just created a
+        // FRESH bucket, _addPending re-initialized it to now - the stale pre-accrual value must
+        // not measure the new bucket's elapsed time. A brand-new bucket (elapsed 0) waits one
+        // full throttle period for its first bounded slice. hasPending implies a nonzero clock
+        // (every empty-to-nonempty transition sets it), so no zero-fallback is needed.
+        last = state.lastDripTime;
+        uint256 elapsed = block.timestamp - uint256(last);
+        if (elapsed == 0) {
+            return 0;
+        }
         if (elapsed > config.dripHorizonSeconds) {
             elapsed = config.dripHorizonSeconds; // cap the catch-up at one horizon's worth
         }

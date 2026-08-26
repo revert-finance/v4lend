@@ -282,11 +282,17 @@ contract HookLeaseControllerInvariantTest is BaseTest {
     function invariant_HotPathStateConsistent() public view {
         HookLeaseController controller = handler.leaseController();
         PoolId poolId = handler.poolId();
-        (address executor, uint40 paidThrough,, bool hasPending) = controller.getHotPathState(poolId);
+        (address executor, uint40 paidThrough, uint40 lastDripTime, bool hasPending) =
+            controller.getHotPathState(poolId);
         (address lessee,, uint256 price, uint256 rentBalance, uint64 lastAccrualTime,, uint256 pendingDonation) =
             controller.getPoolLeaseState(poolId);
 
         assertEq(hasPending, pendingDonation != 0, "hasPending diverged from pendingDonation");
+        if (hasPending) {
+            // every empty-to-nonempty transition initializes the drip clock, so a fresh bucket
+            // can never be measured against a stale timestamp (full-horizon JIT dump)
+            assertGt(lastDripTime, 0, "pending bucket must have a drip clock");
+        }
         assertEq(executor == address(0), lessee == address(0), "executor/lessee vacancy diverged");
         if (lessee != address(0)) {
             uint256 expected = uint256(lastAccrualTime) + rentBalance / controller.rentPerSecond(poolId);
