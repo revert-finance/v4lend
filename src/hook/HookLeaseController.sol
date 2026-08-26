@@ -92,6 +92,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         // slot 1 - accrual time
         address lessee;
         uint64 lastAccrualTime;
+        // sub-bps protocol-fee remainder (wei * bps units, < BPS_DENOMINATOR) carried across
+        // accruals so per-second rent slices cannot round the protocol fee to zero forever
+        uint16 feeCarry;
         // slot 2 - accrual time
         uint128 price; // self-assessed price, escrowed as the lease deposit
         uint128 rentBalance; // prepaid rent not yet accrued
@@ -304,9 +307,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         uint256 price,
         uint256 rentDeposit
     ) internal {
-        if (price == 0 || price > MAX_ESCROW_AMOUNT) {
-            revert InvalidPrice();
-        }
+        _checkPrice(price);
         uint256 rps = _rentPerSecond(config, price);
         if (rentDeposit < rps * config.minRentDepositSeconds || rentDeposit > MAX_ESCROW_AMOUNT) {
             revert InvalidRentDeposit();
@@ -352,9 +353,10 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         }
         PoolLeaseState storage state = _requireLessee(poolId);
         uint256 oldPrice = state.price;
-        if (newPrice == 0 || newPrice == oldPrice || newPrice > MAX_ESCROW_AMOUNT) {
+        if (newPrice == oldPrice) {
             revert InvalidPrice();
         }
+        _checkPrice(newPrice);
 
         _accrue(poolId, config, state);
         state.price = uint128(newPrice);
@@ -691,8 +693,10 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (state.lessee == address(0)) {
             revert NoActiveLease();
         }
-        uint256 bump = uint256(state.price) * config.minBuyoutBumpPpm / PPM;
-        return uint256(state.price) + (bump > 0 ? bump : 1);
+        // saturate at the escrow cap: an incumbent at (or bumped past) the cap is contestable
+        // at the cap itself - equal price - so no price makes the slot un-buyoutable
+        uint256 required = uint256(state.price) + _buyoutBump(config, state.price);
+        return required > MAX_ESCROW_AMOUNT ? MAX_ESCROW_AMOUNT : required;
     }
 
     /// @notice Current rent per second of a pool's active lease.
@@ -755,6 +759,20 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         return uint24(uint256(config.normalLpFee) - uint256(config.normalLpFee) * config.feeDiscountPpm / PPM);
     }
 
+    /// @dev Self-assessed prices are capped at MAX_ESCROW_AMOUNT; minBuyoutPrice saturates at
+    ///      the same cap (a bump-headroom requirement here would only move the un-buyoutable
+    ///      price one level down - any finite cap has a top), so the top price stays contestable.
+    function _checkPrice(uint256 price) internal pure {
+        if (price == 0 || price > MAX_ESCROW_AMOUNT) {
+            revert InvalidPrice();
+        }
+    }
+
+    function _buyoutBump(PoolLeaseConfig storage config, uint256 price) internal view returns (uint256) {
+        uint256 bump = price * config.minBuyoutBumpPpm / PPM;
+        return bump > 0 ? bump : 1;
+    }
+
     /// @dev Rent per second, rounded UP so a nonzero price always burns rent (paidThrough stays
     ///      finite) and the lessee can never hold the slot for free.
     function _rentPerSecond(PoolLeaseConfig storage config, uint256 price) internal view returns (uint256) {
@@ -802,10 +820,15 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         }
         state.rentBalance = uint128(rentBalance - owed);
 
-        uint256 protocolFee = owed * config.protocolFeeBps / BPS_DENOMINATOR;
+        // carry the sub-bps remainder across accruals: fundRent-forced per-second slices would
+        // otherwise floor every slice's fee to zero, starving the protocol of its share
+        uint256 feeUnits = owed * config.protocolFeeBps + state.feeCarry;
+        uint256 protocolFee = feeUnits / BPS_DENOMINATOR;
+        state.feeCarry = uint16(feeUnits % BPS_DENOMINATOR);
         if (protocolFee != 0) {
             protocolFeesAccrued[config.auctionCurrency][config.protocolFeeRecipient] += protocolFee;
         }
+        // protocolFee <= owed always (bps <= 2000, carry < 10000: even owed == 1 yields fee <= 1)
         _addPending(state, owed - protocolFee);
         emit RentAccrued(poolId, owed, protocolFee, state.rentBalance);
     }

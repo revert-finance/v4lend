@@ -590,6 +590,69 @@ contract HookLeaseControllerTest is BaseTest {
         assertEq(leaseController.minBuyoutPrice(leasePoolId), 2, "bump is at least 1 wei");
     }
 
+    /// @notice Codex P2: no self-assessed price may make the slot un-buyoutable. The required
+    ///         buyout price saturates at the escrow cap, so an incumbent at the cap is
+    ///         contestable at equal price (a bump-headroom rule would only move the
+    ///         un-buyoutable price one level down - any finite cap has a top).
+    function testPriceCapAlwaysLeavesRoomForABuyout() public {
+        uint256 maxEscrow = uint256(uint128(type(int128).max));
+
+        // above the cap is not installable
+        vm.expectRevert(HookLeaseController.InvalidPrice.selector);
+        vm.prank(lesseeA);
+        leaseController.startLease(leasePoolKey, address(lesseeSwapper), maxEscrow + 1, 1e18);
+
+        // the cap itself is installable - and still buyable, at the cap exactly
+        uint256 depositA = _ceilRentPerSecond(maxEscrow) * MIN_RENT_SECONDS;
+        deal(Currency.unwrap(currency1), lesseeA, maxEscrow + depositA);
+        vm.prank(lesseeA);
+        leaseController.startLease(leasePoolKey, address(lesseeSwapper), maxEscrow, depositA);
+
+        uint256 minBuyout = leaseController.minBuyoutPrice(leasePoolId);
+        assertEq(minBuyout, maxEscrow, "required buyout price saturates at the cap");
+        uint256 depositB = _ceilRentPerSecond(minBuyout) * MIN_RENT_SECONDS;
+        deal(Currency.unwrap(currency1), lesseeB, minBuyout + depositB);
+        vm.prank(lesseeB);
+        leaseController.buyout(leasePoolKey, address(otherSwapper), minBuyout, depositB);
+        (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, lesseeB, "the max-price incumbent was bought out at the cap");
+    }
+
+    /// @dev Mirrors the controller's mulDivRoundingUp(price, TAX_X64, 2^64) rent math.
+    function _ceilRentPerSecond(uint256 price) internal pure returns (uint256) {
+        uint256 num = price * TAX_X64;
+        return num / (1 << 64) + (num % (1 << 64) == 0 ? 0 : 1);
+    }
+
+    /// @notice Codex P2: per-second accrual slices (forcible via fundRent, which accrues without
+    ///         the drip throttle) must not round the protocol fee to zero forever - the sub-bps
+    ///         remainder is carried across accruals.
+    function testProtocolFeeSurvivesFragmentedAccruals() public {
+        // taxRatePerSecondX64 = 1 -> rent rounds up to 1 wei/second: each 1s slice owes 1 wei,
+        // and 1 * 1000 bps < 10000 would floor to zero fee on every slice without the carry.
+        // Warp targets are LITERALS: via-ir may rematerialize a captured `block.timestamp`
+        // variable into a fresh TIMESTAMP read (legal in real EVM, wrong under cheatcode warps),
+        // which would compound the warp targets.
+        uint256 base = 1_800_000_000;
+        vm.warp(base);
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1;
+        leaseController.configurePool(leasePoolKey, config);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 1e18);
+
+        for (uint256 i = 1; i <= 30; i++) {
+            vm.warp(base + i);
+            vm.prank(lesseeA);
+            leaseController.fundRent(leasePoolKey, 1); // forces an unthrottled 1-second accrual
+        }
+        // 30 wei of rent accrued at 10% protocol fee: the carry yields 3 wei instead of 0
+        assertEq(
+            leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient),
+            3,
+            "sub-bps remainders must accumulate into whole-wei protocol fees"
+        );
+    }
+
     function testSetPriceRaiseAndLower() public {
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
         (,,,,, uint40 paidThroughBefore,) = leaseController.getPoolLeaseState(leasePoolId);
