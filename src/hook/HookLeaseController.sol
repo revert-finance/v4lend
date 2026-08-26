@@ -911,9 +911,11 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             if (elapsed > config.dripHorizonSeconds) {
                 elapsed = config.dripHorizonSeconds; // cap the catch-up at one horizon's worth
             }
-            uint256 release = FullMath.mulDiv(pending, elapsed, config.dripHorizonSeconds);
-            // release rounds to 0 only for sub-slice dust; clear it so the bucket cannot stick
-            if (release == 0 || release > pending) {
+            // round UP so every release moves at least one base unit - the bucket self-drains
+            // without a flush-on-zero branch, which for a small bucket against a long horizon
+            // (e.g. low-decimal currencies) would dump the whole bucket to the first LP
+            uint256 release = FullMath.mulDivRoundingUp(pending, elapsed, config.dripHorizonSeconds);
+            if (release > pending) {
                 release = pending;
             }
             if (release > MAX_ESCROW_AMOUNT) {

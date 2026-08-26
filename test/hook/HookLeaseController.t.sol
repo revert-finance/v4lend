@@ -612,6 +612,31 @@ contract HookLeaseControllerTest is BaseTest {
         assertGt(remaining, 0, "most of the parked bucket still pending (gradual release)");
     }
 
+    /// @notice Codex P2: a small bucket against a long horizon must not flush at once when the
+    ///         proportional release rounds to zero - it releases one base unit per drip instead.
+    function testTinyBucketDrainsUnitByUnitNotAtOnce() public {
+        // rps = 1 wei/second so an exit parks a tiny, countable bucket
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1;
+        leaseController.configurePool(leasePoolKey, config);
+        uint256 t0 = 1_900_000_000;
+        vm.warp(t0);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 1e18);
+
+        // 10 seconds of rent (10 wei, 1 wei protocol fee) parked by the exit
+        vm.warp(t0 + 10);
+        vm.prank(lesseeA);
+        leaseController.exitLease(leasePoolKey);
+        (,,,,,, uint256 bucket) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(bucket, 9, "9 wei parked (10 wei rent minus 10% fee)");
+
+        // 9 * 61 / 3600 rounds to zero proportionally: release exactly ONE unit, not the bucket
+        vm.warp(t0 + 10 + MIN_DRIP + 1);
+        leaseController.drip(leasePoolKey);
+        (,,,,,, uint256 remaining) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(remaining, 8, "one base unit released; the rest stays on the gradual schedule");
+    }
+
     event RentDripped(PoolId indexed poolId, uint256 amount);
 
     /// @notice Codex P2 (departing LP): beforeRemoveLiquidity delivers the rent accrued during

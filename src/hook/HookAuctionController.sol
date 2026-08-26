@@ -882,10 +882,11 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (elapsed > config.epochLengthSeconds) {
             elapsed = config.epochLengthSeconds; // cap the catch-up at one epoch's worth
         }
-        uint256 release = FullMath.mulDiv(pending, elapsed, config.epochLengthSeconds);
-        // release rounds to 0 only for sub-slice dust (pending < epochLength / minDripSeconds,
-        // e.g. < a few dozen wei); clear it so the bucket cannot get permanently stuck.
-        if (release == 0 || release > pending) {
+        // round UP so every release moves at least one base unit - the bucket self-drains
+        // without a flush-on-zero branch, which for a small bucket against a long epoch (e.g.
+        // low-decimal currencies) would dump the whole bucket to the first LP
+        uint256 release = FullMath.mulDivRoundingUp(pending, elapsed, config.epochLengthSeconds);
+        if (release > pending) {
             release = pending;
         }
         if (release > MAX_BID_AMOUNT) {
