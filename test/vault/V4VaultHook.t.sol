@@ -1200,7 +1200,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         uint256 leverageTokenId = _createPositionInHookedPool(hookedPoolKey);
         (uint256 debtBefore,) = _setupCollateralizedPositionForAutoLeverage(leverageTokenId);
-        _configurePositionForAutoLeverage(leverageTokenId, 1500);
+        _configurePositionForAutoLeverage(leverageTokenId, 1000);
         (uint256 debtAfterConfig,,,,) = vault.loanInfo(leverageTokenId);
         if (debtAfterConfig < debtBefore) {
             vm.prank(WHALE_ACCOUNT);
@@ -2700,9 +2700,15 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(usdcAfterUp, usdcBefore, "leverage-up should not charge USDC on the WETH-buying swap");
         assertGt(wethAfterUp, wethBefore, "leverage-up should charge a swap fee on bought WETH");
 
+        // A lower pool price increases this position's USDC-denominated
+        // collateral value. Start sufficiently above target so the lower
+        // trigger exercises the deleverage path rather than leveraging up.
+        _alignLoanToTargetBps(hookedTokenId, 6500);
         _movePriceDown(hookedPoolKey);
 
-        assertGt(usdc.balanceOf(address(this)), usdcAfterUp, "leverage-down should charge a swap fee on lend token output");
+        assertGt(
+            usdc.balanceOf(address(this)), usdcAfterUp, "leverage-down should charge a swap fee on lend token output"
+        );
     }
 
     function testSwapRouting_AutoLeverageUsesAsymmetricRoutesAtRuntime() public {
