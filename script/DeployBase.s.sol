@@ -66,7 +66,11 @@ contract DeployBase is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 1 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 1 hours;
+    // Base's USDC/USD feed has a materially slower heartbeat than ETH/USD.
+    // A shared one-hour limit made otherwise healthy vault reads revert when
+    // the stablecoin price had not moved enough to publish a new round.
+    uint32 constant USDC_MAX_FEED_AGE = 25 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
@@ -193,7 +197,7 @@ contract DeployBase is Script {
         oracle.setTokenConfig(
             WETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -203,7 +207,7 @@ contract DeployBase is Script {
         oracle.setTokenConfig(
             ETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -216,7 +220,7 @@ contract DeployBase is Script {
         oracle.setTokenConfig(
             USDC,
             AggregatorV3Interface(CHAINLINK_USDC_USD),
-            MAX_FEED_AGE,
+            USDC_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
             USDC,
             ORACLE_TWAP_SECONDS,

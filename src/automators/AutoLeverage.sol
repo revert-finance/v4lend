@@ -21,6 +21,8 @@ import {Automator} from "./Automator.sol";
 /// @notice Automatically rebalances leverage ratio when price moves.
 /// Operator-triggered, works through vault.transform() for vault-owned positions.
 contract AutoLeverage is Automator {
+    error NoImprovement();
+
     event AutoLeverageExecuted(uint256 indexed tokenId, bool leverageUp, uint256 debtBefore, uint256 debtAfter);
     event PositionConfigured(
         uint256 indexed tokenId,
@@ -57,6 +59,7 @@ contract AutoLeverage is Automator {
         Currency token1;
         Currency lendToken;
         uint256 currentDebt;
+        uint256 fullValue;
         uint256 collateralValue;
         bool isThirdToken;
     }
@@ -110,9 +113,7 @@ contract AutoLeverage is Automator {
             revert Unauthorized();
         }
 
-        IVault(params.vault).transform(
-            params.tokenId, address(this), abi.encodeCall(this._execute, (params))
-        );
+        IVault(params.vault).transform(params.tokenId, address(this), abi.encodeCall(this._execute, (params)));
     }
 
     /// @notice Internal execution called from vault.transform()
@@ -125,7 +126,7 @@ contract AutoLeverage is Automator {
         }
 
         IVault vault = IVault(msg.sender);
-        (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(params.tokenId);
+        (uint256 currentDebt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(params.tokenId);
 
         // Check if rebalancing is needed
         uint256 currentRatio = AutoLeverageLib.currentRatio(currentDebt, collateralValue);
@@ -150,6 +151,7 @@ contract AutoLeverage is Automator {
         ctx.token1 = ctx.poolKey.currency1;
         ctx.lendToken = Currency.wrap(vault.asset());
         ctx.currentDebt = currentDebt;
+        ctx.fullValue = fullValue;
         ctx.collateralValue = collateralValue;
         ctx.isThirdToken = !(ctx.lendToken == ctx.token0) && !(ctx.lendToken == ctx.token1);
 
@@ -157,9 +159,8 @@ contract AutoLeverage is Automator {
 
         // Collect fees first and reserve protocol fees until the end of execution.
         // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively).
-        (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
-            params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData
-        );
+        (uint256 feeAmount0, uint256 feeAmount1) =
+            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
@@ -170,8 +171,10 @@ contract AutoLeverage is Automator {
 
         // Adjust collateral: deduct only the protocol fee value because net fees are reused.
         {
+            uint256 postFullValue;
             uint256 postCollateral;
-            (ctx.currentDebt,, postCollateral,,) = vault.loanInfo(params.tokenId);
+            (ctx.currentDebt, postFullValue, postCollateral,,) = vault.loanInfo(params.tokenId);
+            ctx.fullValue = postFullValue + (ctx.fullValue - postFullValue) * (Q64 - params.rewardX64) / Q64;
             ctx.collateralValue =
                 postCollateral + (ctx.collateralValue - postCollateral) * (Q64 - params.rewardX64) / Q64;
         }
@@ -189,7 +192,10 @@ contract AutoLeverage is Automator {
         }
         _sendRemainingBalances(owner, ctx.token0, ctx.token1);
 
-        (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
+        (uint256 newDebt,, uint256 newCollateralValue,,) = vault.loanInfo(params.tokenId);
+        if (!AutoLeverageLib.improvesTowardTarget(
+                ctx.currentDebt, ctx.collateralValue, newDebt, newCollateralValue, targetRatio
+            )) revert NoImprovement();
         emit AutoLeverageExecuted(params.tokenId, params.leverageUp, ctx.currentDebt, newDebt);
     }
 
@@ -204,8 +210,9 @@ contract AutoLeverage is Automator {
         uint256 amount1;
 
         {
-            uint256 borrowAmount =
-                AutoLeverageLib.borrowAmountToTarget(ctx.currentDebt, ctx.collateralValue, config.targetLeverageBps);
+            uint256 borrowAmount = AutoLeverageLib.borrowAmountToTarget(
+                ctx.currentDebt, ctx.fullValue, ctx.collateralValue, config.targetLeverageBps
+            );
             if (borrowAmount == 0) revert NotReady();
 
             // Borrow from vault
@@ -263,7 +270,6 @@ contract AutoLeverage is Automator {
                 revert InsufficientAmountAdded();
             }
         }
-
     }
 
     function _leverageDown(
@@ -276,13 +282,14 @@ contract AutoLeverage is Automator {
         uint128 liquidityToRemove;
         uint256 netFeeLendValue;
         {
-            uint256 repayAmount =
-                AutoLeverageLib.repayAmountToTarget(ctx.currentDebt, ctx.collateralValue, config.targetLeverageBps);
+            uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(
+                ctx.currentDebt, ctx.fullValue, ctx.collateralValue, config.targetLeverageBps
+            );
 
             // Net fees that can be conservatively converted into the lend token reduce how much liquidity must be removed.
-            netFeeLendValue =
-                _quoteConservativeLendValue(ctx.token0, ctx.lendToken, state.netFee0, config.maxSwapSlippageBps)
-                + _quoteConservativeLendValue(ctx.token1, ctx.lendToken, state.netFee1, config.maxSwapSlippageBps);
+            netFeeLendValue = _quoteConservativeLendValue(
+                ctx.token0, ctx.lendToken, state.netFee0, config.maxSwapSlippageBps
+            ) + _quoteConservativeLendValue(ctx.token1, ctx.lendToken, state.netFee1, config.maxSwapSlippageBps);
             repayAmount = repayAmount > netFeeLendValue ? repayAmount - netFeeLendValue : 0;
 
             if (repayAmount > 0) {
@@ -291,7 +298,8 @@ contract AutoLeverage is Automator {
 
                 // Calculate proportional liquidity to remove
                 // Use collateralValue as proxy for total position value
-                liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, ctx.collateralValue);
+                liquidityToRemove =
+                    AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, ctx.collateralValue);
             }
             if (liquidityToRemove == 0 && netFeeLendValue == 0) revert NotReady();
         }
@@ -339,7 +347,6 @@ contract AutoLeverage is Automator {
             // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
             SafeERC20.forceApprove(IERC20(Currency.unwrap(ctx.lendToken)), address(vault), 0);
         }
-
     }
 
     function _quoteConservativeLendValue(
