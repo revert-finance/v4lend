@@ -53,7 +53,8 @@ contract AutoLeverageTest is AutomatorTestBase {
         (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(tokenId);
         uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(debt, fullValue, collateralValue, targetRatioBps);
         uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
-        uint128 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, collateralValue);
+        (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, address(usdc));
+        uint128 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
         (, amount1) = LiquidityAmounts.getAmountsForLiquidity(
             sqrtPriceX96, TickMath.getSqrtPriceAtTick(-887220), TickMath.getSqrtPriceAtTick(887220), liquidityToRemove
@@ -323,8 +324,14 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         _execute(params);
 
-        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
         assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down");
+        assertApproxEqAbs(
+            debtAfter * 10000 / collateralAfter,
+            3000,
+            25,
+            "deleverage should land near target without excess liquidity removal"
+        );
     }
 
     function test_LeverageDownSweepsDustedBalances() public {

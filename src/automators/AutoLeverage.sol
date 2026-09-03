@@ -296,10 +296,12 @@ contract AutoLeverage is Automator {
                 uint128 currentLiquidity = positionManager.getPositionLiquidity(params.tokenId);
                 if (currentLiquidity == 0) revert NoLiquidity();
 
-                // Calculate proportional liquidity to remove
-                // Use collateralValue as proxy for total position value
-                liquidityToRemove =
-                    AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, ctx.collateralValue);
+                // repayAmount is denominated in full position value, so use
+                // the oracle's undiscounted position value here. Dividing by
+                // collateralValue would remove too much liquidity whenever
+                // the vault applies a collateral-factor haircut.
+                (uint256 positionValue,,,) = v4Oracle.getValue(params.tokenId, Currency.unwrap(ctx.lendToken));
+                liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
             }
             if (liquidityToRemove == 0 && netFeeLendValue == 0) revert NotReady();
         }
