@@ -222,9 +222,15 @@ abstract contract Swapper is Constants {
         amount0 = currency0.balanceOfSelf();
         amount1 = currency1.balanceOfSelf();
 
-        // V4 uses different approach - need to use modifyLiquidities with encoded actions
-        // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        // A zero-liquidity call is fee collection, not a removal. In particular,
+        // hooks with AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA may reject a zero-sized
+        // DECREASE_LIQUIDITY because there is no principal delta to cast/account.
+        // PositionManager supports collecting the fees through a zero-sized
+        // INCREASE_LIQUIDITY instead (the same route RevertHook uses internally).
+        bool feesOnly = liquidityRemove == 0;
+        bytes memory actions = abi.encodePacked(
+            feesOnly ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)
+        );
         bytes[] memory paramsArray = new bytes[](2);
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
         // Uniswap v4 encodes amount minima as uint128. Callers/operators are trusted
@@ -232,10 +238,8 @@ abstract contract Swapper is Constants {
         paramsArray[0] = abi.encode(
             tokenId,
             uint256(liquidityRemove),
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint128(amount0Min),
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint128(amount1Min),
+            feesOnly ? type(uint128).max : uint128(amount0Min),
+            feesOnly ? type(uint128).max : uint128(amount1Min),
             decreaseLiquidityHookData
         );
         paramsArray[1] = abi.encode(currency0, currency1, address(this));
@@ -245,6 +249,12 @@ abstract contract Swapper is Constants {
         // calculate delta
         amount0 = currency0.balanceOfSelf() - amount0;
         amount1 = currency1.balanceOfSelf() - amount1;
+
+        // INCREASE_LIQUIDITY interprets its amount fields as maxima rather than
+        // collected-amount minima, so retain the caller's slippage guarantee here.
+        if (feesOnly && (amount0 < amount0Min || amount1 < amount1Min)) {
+            revert SlippageError();
+        }
     }
 
     // recieves ETH from swaps

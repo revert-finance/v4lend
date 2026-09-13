@@ -40,6 +40,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MockERC4626Vault} from "test/utils/MockERC4626Vault.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 
 contract RevertHookTest is BaseTest {
     using EasyPosm for IPositionManager;
@@ -1221,6 +1222,69 @@ contract RevertHookTest is BaseTest {
         uint256 protocolFee0 = protocolFeeRecipientBalance0After - before.protocolFeeRecipientBalance0;
         uint256 protocolFee1 = protocolFeeRecipientBalance1After - before.protocolFeeRecipientBalance1;
         assertGt(protocolFee0 + protocolFee1, 0, "ProtocolFeeRecipient should have received fees");
+    }
+
+    function testV4UtilsCollectsFeesFromHookedPositionWithoutRemovingLiquidity() public {
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token2Id);
+
+        // Accrue fees on the hooked pool before exercising the manual-collect route.
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1 ether,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        uint256 balance0Before = currency0.balanceOf(address(this));
+        uint256 balance1Before = currency1.balanceOf(address(this));
+        V4Utils v4Utils = new V4Utils(positionManager, address(swapRouter), address(0), permit2);
+        IERC721(address(positionManager)).approve(address(v4Utils), token2Id);
+
+        V4Utils.Instructions memory instructions = V4Utils.Instructions({
+            whatToDo: V4Utils.WhatToDo.WITHDRAW_AND_COLLECT_AND_SWAP,
+            targetToken: currency0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 1,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            fee: 0,
+            tickSpacing: 0,
+            tickLower: 0,
+            tickUpper: 0,
+            liquidity: 0,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            recipient: address(this),
+            recipientNFT: address(this),
+            returnData: bytes(""),
+            swapAndMintReturnData: bytes(""),
+            hook: address(hook),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+
+        v4Utils.execute(token2Id, instructions);
+
+        assertEq(
+            positionManager.getPositionLiquidity(token2Id),
+            liquidityBefore,
+            "manual fee collection must preserve liquidity"
+        );
+        assertGt(
+            currency0.balanceOf(address(this)) + currency1.balanceOf(address(this)),
+            balance0Before + balance1Before,
+            "manual fee collection should pay accrued fees to the owner"
+        );
+        assertEq(currency0.balanceOf(address(v4Utils)), 0, "V4Utils must not retain currency0");
+        assertEq(currency1.balanceOf(address(v4Utils)), 0, "V4Utils must not retain currency1");
     }
 
     function testBasicAutoHarvestToken0() public {
