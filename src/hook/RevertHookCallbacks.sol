@@ -189,8 +189,15 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
 
-        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
-            if (_getPositionValueNative(tokenId) >= _minPositionValueNative) {
+        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags)) {
+            uint256 positionValueNative = _getPositionValueNative(tokenId);
+            if (_isActivated(tokenId) && positionValueNative < _minPositionValueNative) {
+                // A zero-liquidity INCREASE is also the safe fee-collection path
+                // for hooked positions. Harvesting can move an otherwise active
+                // position below the minimum even though principal is unchanged.
+                _removePositionTriggers(tokenId, key);
+                _deactivatePosition(tokenId);
+            } else if (!_isActivated(tokenId) && positionValueNative >= _minPositionValueNative) {
                 _addPositionTriggers(tokenId, key);
                 _activatePosition(tokenId);
             }

@@ -2569,6 +2569,47 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("Expected new upper trigger:", expectedUpperTrigger);
     }
 
+    function test_AutoLeverageNoOpRearmsConsumedTrigger() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        _configurePositionForAutoLeverage(hookedTokenId, 5000);
+
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
+        (,,,,,,, int24 baseTickBefore) = revertHook.positionStates(hookedTokenId);
+
+        // Model the rounding boundary where the reported ratio is exactly at target.
+        // The fired trigger has already been popped before autoLeverage runs, so a
+        // successful no-op must still refresh both trigger nodes at the new base tick.
+        vm.mockCall(
+            address(vault),
+            abi.encodeWithSelector(vault.loanInfo.selector, hookedTokenId),
+            abi.encode(uint256(5000), uint256(10000), uint256(10000), uint256(0), uint256(0))
+        );
+
+        vm.recordLogs();
+        _movePriceUp(hookedPoolKey);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        vm.clearMockedCalls();
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        (,,,,,,, int24 baseTickAfter) = revertHook.positionStates(hookedTokenId);
+
+        assertTrue(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "No-op auto-leverage should complete and emit its action event"
+        );
+        assertFalse(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "No-op auto-leverage should not fail after consuming its trigger"
+        );
+        assertEq(lowerAfter, lowerBefore, "No-op auto-leverage must re-arm the lower trigger");
+        assertEq(upperAfter, upperBefore, "No-op auto-leverage must re-arm the upper trigger");
+        assertTrue(baseTickAfter != baseTickBefore, "No-op auto-leverage should refresh its base tick");
+    }
+
     function test_AutoLeverageSwapFailure_RestoresDebtAndLiquidity() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_LEVERAGE), 500);

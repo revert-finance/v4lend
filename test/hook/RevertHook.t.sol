@@ -1226,6 +1226,19 @@ contract RevertHookTest is BaseTest {
 
     function testV4UtilsCollectsFeesFromHookedPositionWithoutRemovingLiquidity() public {
         uint128 liquidityBefore = positionManager.getPositionLiquidity(token2Id);
+        (uint32 lowerBaseline, uint32 upperBaseline) = _getTriggerListSizes();
+
+        v4Oracle.setMockPositionValue(1 ether);
+        RevertHookState.PositionConfig memory config = _buildNonVaultModeConfig(
+            PositionModeFlags.MODE_AUTO_EXIT,
+            false,
+            true,
+            tickLower2 - poolKey.tickSpacing,
+            tickUpper2 + poolKey.tickSpacing
+        );
+        hook.setPositionConfig(token2Id, config);
+        (,, uint32 lastActivatedBefore,,,,,) = hook.positionStates(token2Id);
+        assertGt(lastActivatedBefore, 0, "configured position should start active");
 
         // Accrue fees on the hooked pool before exercising the manual-collect route.
         swapRouter.swapExactTokensForTokens({
@@ -1242,6 +1255,10 @@ contract RevertHookTest is BaseTest {
         uint256 balance1Before = currency1.balanceOf(address(this));
         V4Utils v4Utils = new V4Utils(positionManager, address(swapRouter), address(0), permit2);
         IERC721(address(positionManager)).approve(address(v4Utils), token2Id);
+
+        // Model the edge case where fees kept the position above the minimum,
+        // but principal alone is dust after those fees are harvested.
+        v4Oracle.setMockPositionValue(0.001 ether);
 
         V4Utils.Instructions memory instructions = V4Utils.Instructions({
             whatToDo: V4Utils.WhatToDo.WITHDRAW_AND_COLLECT_AND_SWAP,
@@ -1285,6 +1302,11 @@ contract RevertHookTest is BaseTest {
         );
         assertEq(currency0.balanceOf(address(v4Utils)), 0, "V4Utils must not retain currency0");
         assertEq(currency1.balanceOf(address(v4Utils)), 0, "V4Utils must not retain currency1");
+        (,, uint32 lastActivatedAfter,,,,,) = hook.positionStates(token2Id);
+        assertEq(lastActivatedAfter, 0, "fee collection should deactivate a below-minimum position");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBaseline, "fee collection should remove the stale lower trigger");
+        assertEq(upperAfter, upperBaseline, "fee collection should remove the stale upper trigger");
     }
 
     function testBasicAutoHarvestToken0() public {

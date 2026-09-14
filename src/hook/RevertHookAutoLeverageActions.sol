@@ -62,9 +62,13 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         }
 
         (uint256 checkedDebt,, uint256 checkedCollateral,,) = vault.loanInfo(tokenId);
-        if (!AutoLeverageLib.improvesTowardTarget(
-                currentDebt, collateralValue, checkedDebt, checkedCollateral, targetRatioBps
-            )) revert NoImprovement();
+        bool loanUnchanged = checkedDebt == currentDebt && checkedCollateral == collateralValue;
+        if (
+            !loanUnchanged
+                && !AutoLeverageLib.improvesTowardTarget(
+                    currentDebt, collateralValue, checkedDebt, checkedCollateral, targetRatioBps
+                )
+        ) revert NoImprovement();
 
         // Update triggers for new base tick
         _removePositionTriggers(tokenId, poolKey);
