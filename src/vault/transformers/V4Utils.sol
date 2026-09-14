@@ -19,6 +19,7 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {Swapper} from "../../shared/swap/Swapper.sol";
 import {NativeAssetLib} from "../../shared/NativeAssetLib.sol";
 import {Transformer} from "./Transformer.sol";
+import {IRemintMigrationHook} from "../../hook/interfaces/IRemintMigrationHook.sol";
 
 /// @title V4Utils v1.0
 /// @notice Utility contract for Uniswap V4 position management operations
@@ -44,6 +45,11 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     /// @dev address(0) disables the hook-specific collection path.
     address public feeCollectionHook;
 
+    /// @notice Hook notified when a vault-held position is replaced by CHANGE_RANGE.
+    /// @dev address(0) disables migration. Only this exact hook receives callbacks, so unrelated
+    ///      hooks and hookless positions retain the standard V4Utils behavior.
+    address public remintMigrationHook;
+
     /// @dev Prevents callbacks from re-entering execute() while this contract has temporary NFT custody.
     bool private executing;
 
@@ -54,6 +60,7 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     event SwapAndMint(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
     event SwapAndIncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
     event FeeCollectionHookSet(address indexed hook);
+    event RemintMigrationHookSet(address indexed hook);
 
     /// @notice Action which should be executed on provided NFT
     enum WhatToDo {
@@ -203,6 +210,12 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     function setFeeCollectionHook(address hook) external onlyOwner {
         feeCollectionHook = hook;
         emit FeeCollectionHookSet(hook);
+    }
+
+    /// @notice Selects the hook whose token-id keyed state must follow vault-held range remints.
+    function setRemintMigrationHook(address hook) external onlyOwner {
+        remintMigrationHook = hook;
+        emit RemintMigrationHookSet(hook);
     }
 
     /// @notice Execute instruction accessing approved NFT instead of direct safeTransferFrom call from owner
@@ -378,6 +391,15 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         );
 
         (newTokenId, liquidity, amount0, amount1) = _swapAndMint(mintParams);
+
+        // A vault transform moves the loan to newTokenId while hook configuration remains keyed
+        // by tokenId. Notify only the explicitly configured hook, after the vault has received the
+        // replacement NFT and updated transformedTokenId. A callback failure deliberately reverts
+        // the whole range move rather than returning an unprotected position.
+        address migrationHook = remintMigrationHook;
+        if (vaults[msg.sender] && migrationHook != address(0) && address(poolKey.hooks) == migrationHook) {
+            IRemintMigrationHook(migrationHook).migrateVaultPosition(msg.sender, tokenId, newTokenId);
+        }
 
         emit ChangeRange(tokenId, newTokenId, liquidity, amount0, amount1);
     }

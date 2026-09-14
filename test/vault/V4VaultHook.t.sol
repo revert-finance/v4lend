@@ -14,6 +14,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 
 // base contracts
 import {V4Vault} from "src/vault/V4Vault.sol";
+import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 import {V4Oracle} from "src/oracle/V4Oracle.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 
@@ -110,6 +111,9 @@ contract V4VaultHookTest is V4ForkTestBase {
         revertHook.setVault(address(vault));
         vault.setTransformer(address(revertHook), true);
         vault.setHookAllowList(address(revertHook), true);
+        v4Utils.setVault(address(vault));
+        v4Utils.setRemintMigrationHook(address(revertHook));
+        vault.setTransformer(address(v4Utils), true);
 
         // create tolerant oracle for testing
         v4Oracle.setMaxPoolPriceDifference(1000);
@@ -141,6 +145,116 @@ contract V4VaultHookTest is V4ForkTestBase {
         (uint256 initialDebt,,,,) = vault.loanInfo(hookedTokenId);
         _triggerAutoRange(hookedPoolKey, initialTickLower, initialTickUpper);
         _executeAndVerifyAutoRange(hookedTokenId, collateralValue, initialTickLower, initialTickUpper, initialDebt);
+    }
+
+    function test_V4UtilsChangeRangePreservesHookConfigAndApproval() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+
+        RevertHookState.PositionConfig memory expectedConfig = _manualRangeMigrationConfig();
+        _setPositionConfigAtTarget(oldTokenId, expectedConfig);
+
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
+        (uint256 debtBefore,,,,) = vault.loanInfo(oldTokenId);
+
+        uint256 newTokenId = _executeManualRangeMove(oldTokenId);
+        _assertManualRangeMigration(oldTokenId, newTokenId, debtBefore, expectedConfig);
+    }
+
+    function test_MigrateVaultPositionRejectsCallOutsideActiveTransform() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        uint256 newTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        vm.prank(address(v4Utils));
+        vm.expectRevert(Constants.Unauthorized.selector);
+        revertHook.migrateVaultPosition(address(vault), oldTokenId, newTokenId);
+    }
+
+    function _manualRangeMigrationConfig() internal pure returns (RevertHookState.PositionConfig memory config) {
+        config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
+            autoExitIsRelative: false,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 2500
+        });
+    }
+
+    function _executeManualRangeMove(uint256 oldTokenId) internal returns (uint256 newTokenId) {
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        V4Utils.Instructions memory instructions = V4Utils.Instructions({
+            whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
+            targetToken: poolKey.currency0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            fee: poolKey.fee,
+            tickSpacing: poolKey.tickSpacing,
+            tickLower: positionInfo.tickLower(),
+            tickUpper: positionInfo.tickUpper(),
+            liquidity: positionManager.getPositionLiquidity(oldTokenId),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            recipient: WHALE_ACCOUNT,
+            recipientNFT: address(vault),
+            returnData: bytes(""),
+            swapAndMintReturnData: bytes(""),
+            hook: address(revertHook),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        newTokenId =
+            vault.transform(oldTokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (oldTokenId, instructions)));
+    }
+
+    function _assertManualRangeMigration(
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        uint256 debtBefore,
+        RevertHookState.PositionConfig memory expectedConfig
+    ) internal view {
+        assertGt(newTokenId, oldTokenId, "range move should remint the position");
+        _assertVaultHookPositionConfigEq(newTokenId, expectedConfig);
+        (uint8 oldModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldModeFlags, PositionModeFlags.MODE_NONE, "old hook config should be disabled");
+
+        (uint128 priceMultiplier0, uint128 priceMultiplier1) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(priceMultiplier0, 0, "token0 swap protection should migrate");
+        assertGt(priceMultiplier1, 0, "token1 swap protection should migrate");
+        assertTrue(
+            vault.transformApprovals(WHALE_ACCOUNT, newTokenId, address(revertHook)),
+            "replacement position should preserve hook transform approval"
+        );
+
+        (uint256 oldDebt,,,,) = vault.loanInfo(oldTokenId);
+        (uint256 newDebt,,,,) = vault.loanInfo(newTokenId);
+        assertEq(oldDebt, 0, "old position debt should be cleared");
+        assertApproxEqAbs(newDebt, debtBefore, 1, "replacement position should preserve debt");
+        assertEq(vault.ownerOf(newTokenId), WHALE_ACCOUNT, "replacement loan owner should be preserved");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(newTokenId),
+            address(vault),
+            "replacement NFT should remain vault-held"
+        );
     }
 
     function _createHookedPool() internal returns (PoolKey memory hookedPoolKey) {

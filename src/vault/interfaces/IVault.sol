@@ -6,6 +6,8 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 interface IVault is IERC4626 {
     function transformedTokenId() external view returns (uint256 tokenId);
 
+    function transformerAllowList(address transformer) external view returns (bool);
+
     function notifyERC721Received(uint256 tokenId, address recipient) external;
 
     function loans(uint256 tokenId) external view returns (uint256 debtShares);

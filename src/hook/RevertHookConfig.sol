@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -15,6 +16,48 @@ import {RevertHookImmediate} from "./RevertHookImmediate.sol";
 /// @title RevertHookConfig
 /// @notice Hook configuration setters and validation helpers
 abstract contract RevertHookConfig is RevertHookImmediate {
+    /// @notice Migrates automation state after an approved vault transformer remints a position.
+    /// @dev The active transform and transformer allowlist checks bind this callback to the vault
+    ///      transaction currently replacing oldTokenId. Both positions must use this exact pool.
+    function migrateVaultPosition(address vault, uint256 oldTokenId, uint256 newTokenId) external {
+        if (
+            !_vaults[vault] || !IVault(vault).transformerAllowList(msg.sender)
+                || IVault(vault).transformedTokenId() != newTokenId
+                || IERC721(address(positionManager)).ownerOf(oldTokenId) != vault
+                || IERC721(address(positionManager)).ownerOf(newTokenId) != vault
+        ) {
+            revert Unauthorized();
+        }
+
+        (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        (PoolKey memory newPoolKey, PositionInfo newPositionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
+        if (
+            address(oldPoolKey.hooks) != address(this) || address(newPoolKey.hooks) != address(this)
+                || Currency.unwrap(oldPoolKey.currency0) != Currency.unwrap(newPoolKey.currency0)
+                || Currency.unwrap(oldPoolKey.currency1) != Currency.unwrap(newPoolKey.currency1)
+                || oldPoolKey.fee != newPoolKey.fee || oldPoolKey.tickSpacing != newPoolKey.tickSpacing
+        ) {
+            revert InvalidConfig();
+        }
+
+        PositionConfig memory config = _positionConfigs[oldTokenId];
+        _validateTickAlignedConfig(config, newPoolKey.tickSpacing);
+        _validateModeFlags(config.modeFlags, newTokenId, newPoolKey);
+        _validateRangeConfig(newPoolKey.tickSpacing, newPositionInfo.tickLower(), newPositionInfo.tickUpper(), config);
+        _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[oldTokenId];
+        _positionConfigs[newTokenId] = config;
+        if (_positionStates[newTokenId].lastActivated == 0) {
+            _positionStates[newTokenId].lastActivated = uint32(block.timestamp);
+        }
+        if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
+            _positionStates[newTokenId].autoLeverageBaseTick =
+                _getTickLower(_getTick(newPoolKey.toId()), newPoolKey.tickSpacing);
+        }
+        _addPositionTriggers(newTokenId, newPoolKey);
+        emit SetPositionConfig(newTokenId, config);
+        _disablePosition(oldTokenId);
+    }
+
     function setAutoLendVault(address token, IERC4626 vault) external payable onlyOwner {
         if (address(vault) != address(0)) {
             address expectedAsset = token == address(0) ? address(weth) : token;

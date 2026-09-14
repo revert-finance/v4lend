@@ -31,6 +31,7 @@ contract DeployV4Utils is Script {
 
         if (feeCollectionHook != address(0)) {
             v4Utils.setFeeCollectionHook(feeCollectionHook);
+            v4Utils.setRemintMigrationHook(feeCollectionHook);
         }
 
         console2.log("V4Utils deployed at:", address(v4Utils));

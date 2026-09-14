@@ -482,6 +482,7 @@ contract DeployUnichain is Script {
 
         v4Utils.setVault(address(vault));
         v4Utils.setFeeCollectionHook(address(revertHook));
+        v4Utils.setRemintMigrationHook(address(revertHook));
         vault.setTransformer(address(v4Utils), true);
         console.log("  V4Utils registered with vault");
 

@@ -287,6 +287,7 @@ contract UnichainForkHookathonE2E is Script {
 
         deployment.v4Utils.setVault(address(deployment.vault));
         deployment.v4Utils.setFeeCollectionHook(address(deployment.revertHook));
+        deployment.v4Utils.setRemintMigrationHook(address(deployment.revertHook));
         deployment.vault.setTransformer(address(deployment.v4Utils), true);
         deployment.leverageTransformer.setVault(address(deployment.vault));
         deployment.vault.setTransformer(address(deployment.leverageTransformer), true);

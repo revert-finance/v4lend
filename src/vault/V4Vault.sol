@@ -652,6 +652,21 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             transformApprovals[loanOwner][newTokenId][msg.sender] = true;
         }
 
+        // Preserve approval for the pool hook when a same-hook range remint replaces the NFT.
+        // Hook automation is independent from the account that initiated this transform, and its
+        // approval would otherwise remain stranded on the retired token ID.
+        if (tokenId != newTokenId) {
+            (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+            (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+            address oldHook = address(oldPoolKey.hooks);
+            if (
+                oldHook != address(0) && oldHook == address(newPoolKey.hooks)
+                    && transformApprovals[loanOwner][tokenId][oldHook]
+            ) {
+                transformApprovals[loanOwner][newTokenId][oldHook] = true;
+            }
+        }
+
         // check owner not changed (NEEDED because token could have been moved somewhere else in the meantime)
         address owner = IERC721(address(positionManager)).ownerOf(newTokenId);
         if (owner != address(this)) {

@@ -162,6 +162,7 @@ contract DeployBaseHookUpgrade is Script {
             new V4Utils(IPositionManager(POSITION_MANAGER), UNIVERSAL_ROUTER, zeroXAllowanceHolder, IPermit2(PERMIT2));
         v4Utils.setVault(address(vault));
         v4Utils.setFeeCollectionHook(address(revertHook));
+        v4Utils.setRemintMigrationHook(address(revertHook));
         vault.setTransformer(address(v4Utils), true);
 
         vm.stopBroadcast();

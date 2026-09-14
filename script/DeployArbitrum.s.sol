@@ -372,6 +372,7 @@ contract DeployArbitrum is Script {
         console.log("Step 7: Configuring integrations...");
         v4Utils.setVault(address(vault));
         v4Utils.setFeeCollectionHook(address(revertHook));
+        v4Utils.setRemintMigrationHook(address(revertHook));
         vault.setTransformer(address(v4Utils), true);
         console.log("  V4Utils registered with vault");
 
