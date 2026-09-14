@@ -7,6 +7,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -36,6 +37,8 @@ import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 abstract contract RevertHookActionBase is RevertHookLookupBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
+    using ProtocolFeeLibrary for uint24;
+    using ProtocolFeeLibrary for uint16;
 
     struct SwapPlan {
         PoolKey poolKey;
@@ -193,8 +196,15 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             return plan;
         }
 
+        (uint160 swapSqrtPriceX96,, uint24 packedProtocolFee, uint24 lpFee) =
+            StateLibrary.getSlot0(poolManager, plan.poolKey.toId());
+        uint16 protocolFee = plan.zeroForOne
+            ? packedProtocolFee.getZeroForOneFee()
+            : packedProtocolFee.getOneForZeroFee();
+        uint24 swapFee = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
+
         (plan.amountIn,, plan.zeroForOne) = liquidityCalculator.calculateSimple(
-            sqrtPriceX96, tickLower, tickUpper, amount0, amount1, plan.poolKey.fee
+            sqrtPriceX96, swapSqrtPriceX96, tickLower, tickUpper, amount0, amount1, swapFee
         );
     }
 

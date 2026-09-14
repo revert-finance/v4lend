@@ -22,6 +22,7 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 /// @title DeployBase
 /// @notice Deployment script for RevertHook and all related contracts on Base
@@ -89,6 +90,12 @@ contract DeployBase is Script {
     uint16 constant PROTOCOL_FEE_BPS = 100; // 1% protocol fee
     int24 constant MAX_TICKS_FROM_ORACLE = 100; // Max tick deviation from oracle price
     uint256 constant MIN_POSITION_VALUE_NATIVE = 0.01 ether; // Minimum position value
+
+    // Deep hookless Base ETH/USDC v4 pool used for hook action swaps. Without
+    // this bidirectional route, hook actions fall back to swapping inside the
+    // much shallower RevertHook pool and can fail the oracle deviation check.
+    uint24 constant ETH_USDC_ROUTE_FEE = 500;
+    int24 constant ETH_USDC_ROUTE_TICK_SPACING = 10;
 
     // Vault configuration
     uint256 constant MIN_LOAN_SIZE = 100000; // 0.1 USDC (6 decimals)
@@ -307,6 +314,14 @@ contract DeployBase is Script {
         revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
         console.log("  RevertHook configured");
+
+        routeController.setRoute(
+            ETH, USDC, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0))
+        );
+        routeController.setRoute(
+            USDC, ETH, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0))
+        );
+        console.log("  Configured bidirectional hookless ETH/USDC swap route");
 
         // ==================== Step 5: Deploy V4Vault (USDC lending) ====================
 

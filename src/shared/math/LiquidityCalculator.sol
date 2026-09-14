@@ -10,6 +10,7 @@ import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {BitMath} from "@uniswap/v4-core/src/libraries/BitMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -19,6 +20,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 interface ILiquidityCalculator {
     error Invalid_Pool();
     error Invalid_Tick_Range();
+    error Invalid_Fee();
     error Math_Overflow();
 
     /// @notice Pool configuration struct containing pool manager, pool ID, and tick spacing
@@ -30,7 +32,8 @@ interface ILiquidityCalculator {
 
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit (simple version)
     function calculateSimple(
-        uint160 sqrtPrice,
+        uint160 positionSqrtPrice,
+        uint160 swapSqrtPrice,
         int24 lowerTick,
         int24 upperTick,
         uint256 amount0,
@@ -55,6 +58,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
     using FullMath for uint256;
     using UnsafeMath for uint256;
     using StateLibrary for IPoolManager;
+    using ProtocolFeeLibrary for uint24;
+    using ProtocolFeeLibrary for uint16;
 
     /// @notice Maximum fee in hundredths of a bip (1e6 = 100%)
     uint256 internal constant MAX_FEE_PIPS = 1e6;
@@ -100,17 +105,21 @@ contract LiquidityCalculator is ILiquidityCalculator {
 
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit
     /// @dev Simplified version that assumes swap happens in another pool (no tick crossing simulation)
-    /// @param sqrtPrice Current sqrt price of the pool
+    /// @param positionSqrtPrice Current sqrt price of the position pool, used
+    ///        to determine the ratio required by its tick range
+    /// @param swapSqrtPrice Current sqrt price of the external route pool,
+    ///        used to quote the swap that produces that ratio
     /// @param lowerTick Lower bound of the position
     /// @param upperTick Upper bound of the position
     /// @param amount0 Desired amount of token0
     /// @param amount1 Desired amount of token1
     /// @param feeRate Fee rate in hundredths of a bip (e.g., 3000 = 0.3%)
     /// @return inputAmount Optimal swap input amount
-    /// @return outputAmount Expected swap output amount (before fees)
+    /// @return outputAmount Expected swap output amount (after fees)
     /// @return swapDir0to1 Direction: true for token0->token1, false for token1->token0
     function calculateSimple(
-        uint160 sqrtPrice,
+        uint160 positionSqrtPrice,
+        uint160 swapSqrtPrice,
         int24 lowerTick,
         int24 upperTick,
         uint256 amount0,
@@ -118,6 +127,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
         uint24 feeRate
     ) external pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) {
         if (amount0 == 0 && amount1 == 0) return (0, 0, false);
+        if (positionSqrtPrice == 0 || swapSqrtPrice == 0) revert Invalid_Pool();
+        if (feeRate >= MAX_FEE_PIPS) revert Invalid_Fee();
         if (lowerTick >= upperTick || lowerTick < TickMath.MIN_TICK || upperTick > TickMath.MAX_TICK) {
             revert Invalid_Tick_Range();
         }
@@ -126,83 +137,69 @@ contract LiquidityCalculator is ILiquidityCalculator {
         uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upperTick);
 
         // Determine swap direction
-        swapDir0to1 = _shouldSwap0to1(amount0, amount1, sqrtPrice, sqrtLower, sqrtUpper);
+        swapDir0to1 = _shouldSwap0to1(amount0, amount1, positionSqrtPrice, sqrtLower, sqrtUpper);
 
-        unchecked {
-            if (sqrtPrice <= sqrtLower) {
-                (inputAmount, outputAmount) = _calculateSwapBelowRange(amount0, amount1, sqrtPrice, sqrtLower, feeRate);
-            } else if (sqrtPrice >= sqrtUpper) {
-                (inputAmount, outputAmount) = _calculateSwapAboveRange(amount0, amount1, sqrtPrice, sqrtUpper, feeRate);
-            } else {
-                (inputAmount, outputAmount) = _calculateSwapInRange(
-                    amount0,
-                    amount1,
-                    sqrtPrice,
-                    sqrtLower,
-                    sqrtUpper,
-                    feeRate,
-                    swapDir0to1
-                );
-            }
+        if (positionSqrtPrice <= sqrtLower) {
+            (inputAmount, outputAmount) = _calculateSwapBelowRange(amount1, swapSqrtPrice, feeRate);
+        } else if (positionSqrtPrice >= sqrtUpper) {
+            (inputAmount, outputAmount) = _calculateSwapAboveRange(amount0, swapSqrtPrice, feeRate);
+        } else {
+            (inputAmount, outputAmount) = _calculateSwapInRange(
+                amount0,
+                amount1,
+                positionSqrtPrice,
+                swapSqrtPrice,
+                sqrtLower,
+                sqrtUpper,
+                feeRate,
+                swapDir0to1
+            );
         }
     }
 
     /// @notice Calculate swap when price is below range (need all token0)
     /// @param amount1 Current amount of token1
-    /// @param sqrtPrice Current sqrt price
-    /// @param sqrtLower Lower bound sqrt price
+    /// @param sqrtPrice Current external-route sqrt price
     /// @param feeRate Fee rate
     /// @return inputAmount Swap input amount
     /// @return outputAmount Swap output amount
     function _calculateSwapBelowRange(
-        uint256 /* amount0 */,
         uint256 amount1,
         uint160 sqrtPrice,
-        uint160 sqrtLower,
         uint24 feeRate
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
         if (amount1 == 0) return (0, 0);
 
-        // Swap all token1 -> token0
+        // Swap all token1 -> token0 at the external pool's spot price.
         inputAmount = amount1;
         uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
-        outputAmount = FullMath.mulDiv(
-            FullMath.mulDiv(amount1, sqrtPrice, sqrtLower),
-            feeMultiplier,
-            MAX_FEE_PIPS
-        );
+        outputAmount = _quote1To0(amount1, sqrtPrice, feeMultiplier);
     }
 
     /// @notice Calculate swap when price is above range (need all token1)
     /// @param amount0 Current amount of token0
-    /// @param sqrtPrice Current sqrt price
-    /// @param sqrtUpper Upper bound sqrt price
+    /// @param sqrtPrice Current external-route sqrt price
     /// @param feeRate Fee rate
     /// @return inputAmount Swap input amount
     /// @return outputAmount Swap output amount
     function _calculateSwapAboveRange(
         uint256 amount0,
-        uint256 /* amount1 */,
         uint160 sqrtPrice,
-        uint160 sqrtUpper,
         uint24 feeRate
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
         if (amount0 == 0) return (0, 0);
 
-        // Swap all token0 -> token1
+        // Swap all token0 -> token1 at the external pool's spot price.
         inputAmount = amount0;
         uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
-        outputAmount = FullMath.mulDiv(
-            FullMath.mulDiv(amount0, sqrtUpper, sqrtPrice),
-            feeMultiplier,
-            MAX_FEE_PIPS
-        );
+        outputAmount = _quote0To1(amount0, sqrtPrice, feeMultiplier);
     }
 
     /// @notice Calculate swap when price is in range (need optimal ratio)
     /// @param amount0 Current amount of token0
     /// @param amount1 Current amount of token1
-    /// @param sqrtPrice Current sqrt price
+    /// @param positionSqrtPrice Current position-pool sqrt price
+    /// @param swapSqrtPrice Current external-route sqrt price
     /// @param sqrtLower Lower bound sqrt price
     /// @param sqrtUpper Upper bound sqrt price
     /// @param feeRate Fee rate
@@ -212,21 +209,21 @@ contract LiquidityCalculator is ILiquidityCalculator {
     function _calculateSwapInRange(
         uint256 amount0,
         uint256 amount1,
-        uint160 sqrtPrice,
+        uint160 positionSqrtPrice,
+        uint160 swapSqrtPrice,
         uint160 sqrtLower,
         uint160 sqrtUpper,
         uint24 feeRate,
         bool swapDir0to1
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
-        uint256 requiredRatio = _calculateRequiredRatio(sqrtPrice, sqrtLower, sqrtUpper);
+        uint256 requiredRatio = _calculateRequiredRatio(positionSqrtPrice, sqrtLower, sqrtUpper);
         uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
 
         if (swapDir0to1) {
             (inputAmount, outputAmount) = _calculateSwap0to1InRange(
                 amount0,
                 amount1,
-                sqrtPrice,
-                sqrtUpper,
+                swapSqrtPrice,
                 requiredRatio,
                 feeMultiplier
             );
@@ -234,8 +231,7 @@ contract LiquidityCalculator is ILiquidityCalculator {
             (inputAmount, outputAmount) = _calculateSwap1to0InRange(
                 amount0,
                 amount1,
-                sqrtPrice,
-                sqrtLower,
+                swapSqrtPrice,
                 requiredRatio,
                 feeMultiplier
             );
@@ -266,7 +262,6 @@ contract LiquidityCalculator is ILiquidityCalculator {
     /// @param amount0 Current amount of token0
     /// @param amount1 Current amount of token1
     /// @param sqrtPrice Current sqrt price
-    /// @param sqrtUpper Upper bound sqrt price
     /// @param requiredRatio Required ratio scaled by Q96
     /// @param feeMultiplier Fee multiplier (MAX_FEE_PIPS - feeRate)
     /// @return inputAmount Swap input amount
@@ -275,7 +270,6 @@ contract LiquidityCalculator is ILiquidityCalculator {
         uint256 amount0,
         uint256 amount1,
         uint160 sqrtPrice,
-        uint160 sqrtUpper,
         uint256 requiredRatio,
         uint256 feeMultiplier
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
@@ -283,30 +277,23 @@ contract LiquidityCalculator is ILiquidityCalculator {
         if (amount0 <= requiredAmount0) return (0, 0);
 
         uint256 excess0 = amount0 - requiredAmount0;
-        uint256 swapRate = FullMath.mulDiv(
-            FullMath.mulDiv(requiredRatio, feeMultiplier, FixedPoint96.Q96),
-            sqrtPrice,
-            sqrtUpper
-        );
-        uint256 denominator = FixedPoint96.Q96 + swapRate;
+        uint256 ratioTimesPriceX96 = FullMath.mulDiv(requiredRatio, sqrtPrice, FixedPoint96.Q96);
+        ratioTimesPriceX96 = FullMath.mulDiv(ratioTimesPriceX96, sqrtPrice, FixedPoint96.Q96);
+        ratioTimesPriceX96 = FullMath.mulDiv(ratioTimesPriceX96, feeMultiplier, MAX_FEE_PIPS);
+        uint256 denominator = FixedPoint96.Q96 + ratioTimesPriceX96;
         inputAmount = FullMath.mulDiv(excess0, FixedPoint96.Q96, denominator);
 
         // Cap at available amount
         if (inputAmount > amount0) inputAmount = amount0;
 
         // Calculate output
-        outputAmount = FullMath.mulDiv(
-            FullMath.mulDiv(inputAmount, sqrtPrice, sqrtUpper),
-            feeMultiplier,
-            MAX_FEE_PIPS
-        );
+        outputAmount = _quote0To1(inputAmount, sqrtPrice, feeMultiplier);
     }
 
     /// @notice Calculate swap when swapping token1 -> token0 in range
     /// @param amount0 Current amount of token0
     /// @param amount1 Current amount of token1
     /// @param sqrtPrice Current sqrt price
-    /// @param sqrtLower Lower bound sqrt price
     /// @param requiredRatio Required ratio scaled by Q96
     /// @param feeMultiplier Fee multiplier (MAX_FEE_PIPS - feeRate)
     /// @return inputAmount Swap input amount
@@ -315,7 +302,6 @@ contract LiquidityCalculator is ILiquidityCalculator {
         uint256 amount0,
         uint256 amount1,
         uint160 sqrtPrice,
-        uint160 sqrtLower,
         uint256 requiredRatio,
         uint256 feeMultiplier
     ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
@@ -323,27 +309,45 @@ contract LiquidityCalculator is ILiquidityCalculator {
         if (requiredAmount0 <= amount0) return (0, 0);
 
         uint256 deficit0 = requiredAmount0 - amount0;
-        uint256 swapRate = FullMath.mulDiv(
-            FullMath.mulDiv(requiredRatio, feeMultiplier, FixedPoint96.Q96),
-            sqrtLower,
-            sqrtPrice
-        );
-        uint256 denominator = FullMath.mulDiv(feeMultiplier, sqrtLower, sqrtPrice) + swapRate;
-        inputAmount = FullMath.mulDiv(
-            FullMath.mulDiv(deficit0, sqrtPrice, sqrtLower),
-            MAX_FEE_PIPS,
-            denominator
-        );
+        uint256 price1To0X96 = _price1To0X96(sqrtPrice, feeMultiplier);
+        if (price1To0X96 == 0) revert Math_Overflow();
+        uint256 denominator = price1To0X96 + requiredRatio;
+        inputAmount = FullMath.mulDiv(deficit0, FixedPoint96.Q96, denominator);
 
         // Cap at available amount
         if (inputAmount > amount1) inputAmount = amount1;
 
         // Calculate output
-        outputAmount = FullMath.mulDiv(
-            FullMath.mulDiv(inputAmount, sqrtLower, sqrtPrice),
-            feeMultiplier,
-            MAX_FEE_PIPS
-        );
+        outputAmount = _quote1To0(inputAmount, sqrtPrice, feeMultiplier);
+    }
+
+    /// @dev Fee-adjusted token0 units received for one Q96-scaled token1 unit.
+    ///      Build the inverse from sqrtPrice directly instead of first rounding
+    ///      token0->token1 price to zero for low-priced token0 assets.
+    function _price1To0X96(uint160 sqrtPrice, uint256 feeMultiplier) private pure returns (uint256) {
+        uint256 inverseSqrtPriceX96 = FullMath.mulDiv(FixedPoint96.Q96, FixedPoint96.Q96, sqrtPrice);
+        uint256 priceX96 = FullMath.mulDiv(inverseSqrtPriceX96, inverseSqrtPriceX96, FixedPoint96.Q96);
+        return FullMath.mulDiv(priceX96, feeMultiplier, MAX_FEE_PIPS);
+    }
+
+    function _quote0To1(uint256 amount0, uint160 sqrtPrice, uint256 feeMultiplier)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 outputAmount = FullMath.mulDiv(amount0, sqrtPrice, FixedPoint96.Q96);
+        outputAmount = FullMath.mulDiv(outputAmount, sqrtPrice, FixedPoint96.Q96);
+        return FullMath.mulDiv(outputAmount, feeMultiplier, MAX_FEE_PIPS);
+    }
+
+    function _quote1To0(uint256 amount1, uint160 sqrtPrice, uint256 feeMultiplier)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 outputAmount = FullMath.mulDiv(amount1, FixedPoint96.Q96, sqrtPrice);
+        outputAmount = FullMath.mulDiv(outputAmount, FixedPoint96.Q96, sqrtPrice);
+        return FullMath.mulDiv(outputAmount, feeMultiplier, MAX_FEE_PIPS);
     }
 
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit
@@ -369,25 +373,23 @@ contract LiquidityCalculator is ILiquidityCalculator {
             revert Invalid_Tick_Range();
         }
         SwapState memory state;
+        uint24 packedProtocolFee;
+        uint24 lpFeeRate;
         // Populate state with liquidity, price, amounts, and fee
         {
             int24 tickValue;
-            uint24 protoFee;
-            uint24 lpFeeRate;
-            (sqrtPrice, tickValue, protoFee, lpFeeRate) = pool.poolMgr.getSlot0(pool.poolIdentifier);
+            (sqrtPrice, tickValue, packedProtocolFee, lpFeeRate) = pool.poolMgr.getSlot0(pool.poolIdentifier);
             if (sqrtPrice == 0) {
                 revert Invalid_Pool();
             }
             uint128 liquidity = pool.poolMgr.getLiquidity(pool.poolIdentifier);
             int24 tickSpacing = pool.tickSpacing;
-            uint256 feeRate = uint256(lpFeeRate + protoFee);
             assembly ("memory-safe") {
                 mstore(state, liquidity) // offset 0x00
                 mstore(add(state, 0x20), sqrtPrice) // offset 0x20
                 mstore(add(state, 0x40), tickValue) // offset 0x40
                 mstore(add(state, 0x60), amount0Target) // offset 0x60
                 mstore(add(state, 0x80), amount1Target) // offset 0x80
-                mstore(add(state, 0xe0), feeRate) // offset 0xe0
                 mstore(add(state, 0x100), tickSpacing) // offset 0x100
             }
         }
@@ -400,6 +402,10 @@ contract LiquidityCalculator is ILiquidityCalculator {
         }
         // Determine swap direction
         swapDir0to1 = _shouldSwap0to1(amount0Target, amount1Target, sqrtPrice, sqrtLower, sqrtUpper);
+        uint16 protocolFee = swapDir0to1
+            ? packedProtocolFee.getZeroForOneFee()
+            : packedProtocolFee.getOneForZeroFee();
+        state.feeRate = protocolFee == 0 ? lpFeeRate : protocolFee.calculateSwapFee(lpFeeRate);
         // Simulate optimal swap by crossing ticks until direction reverses
         _traverseTicks(TraverseTicksParams({pool: pool, state: state, sqrtPrice: sqrtPrice, swapDir0to1: swapDir0to1}));
         // Load final state after crossing ticks
