@@ -2610,6 +2610,38 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertTrue(baseTickAfter != baseTickBefore, "No-op auto-leverage should refresh its base tick");
     }
 
+    function test_AutoLeverageDoesNotRearmAfterLiquidityCallbackDeactivatesPosition() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        _configurePositionForAutoLeverage(hookedTokenId, 5000);
+        _alignLoanToTargetBps(hookedTokenId, 3500);
+
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
+        (,, uint32 lastActivatedBefore,,,,,) = revertHook.positionStates(hookedTokenId);
+        assertGt(lastActivatedBefore, 0, "Position should start active");
+
+        // loanInfo continues to use the lending asset quote, while the hook's
+        // post-add minimum-value check uses the native quote mocked below.
+        vm.mockCall(
+            address(v4Oracle),
+            abi.encodeWithSelector(v4Oracle.getValue.selector, hookedTokenId, address(0)),
+            abi.encode(uint256(0.001 ether), uint256(0), uint256(0), uint256(0))
+        );
+
+        _movePriceUp(hookedPoolKey);
+        vm.clearMockedCalls();
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        (,, uint32 lastActivatedAfter,,,,,) = revertHook.positionStates(hookedTokenId);
+
+        assertEq(lastActivatedAfter, 0, "Below-minimum position must remain deactivated");
+        assertEq(lowerAfter + 1, lowerBefore, "Lower trigger must remain removed after deactivation");
+        assertEq(upperAfter + 1, upperBefore, "Upper trigger must remain removed after deactivation");
+    }
+
     function test_AutoLeverageSwapFailure_RestoresDebtAndLiquidity() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_LEVERAGE), 500);

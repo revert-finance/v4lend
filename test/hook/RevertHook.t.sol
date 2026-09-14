@@ -1254,6 +1254,7 @@ contract RevertHookTest is BaseTest {
         uint256 balance0Before = currency0.balanceOf(address(this));
         uint256 balance1Before = currency1.balanceOf(address(this));
         V4Utils v4Utils = new V4Utils(positionManager, address(swapRouter), address(0), permit2);
+        v4Utils.setFeeCollectionHook(address(hook));
         IERC721(address(positionManager)).approve(address(v4Utils), token2Id);
 
         // Model the edge case where fees kept the position above the minimum,

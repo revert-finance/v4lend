@@ -74,7 +74,12 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         _removePositionTriggers(tokenId, poolKey);
         int24 newBaseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
         _positionStates[tokenId].autoLeverageBaseTick = newBaseTick;
-        _addPositionTriggers(tokenId, poolKey);
+        // The liquidity callback may deactivate a position that fell below the
+        // configured minimum. Preserve that decision instead of rearming a dust
+        // position after the callback removed its triggers.
+        if (_isActivated(tokenId)) {
+            _addPositionTriggers(tokenId, poolKey);
+        }
 
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
         emit AutoLeverage(tokenId, isUpperTrigger, currentDebt, newDebt);

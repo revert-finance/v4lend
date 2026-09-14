@@ -222,25 +222,15 @@ abstract contract Swapper is Constants {
         amount0 = currency0.balanceOfSelf();
         amount1 = currency1.balanceOfSelf();
 
-        // A zero-liquidity call is fee collection, not a removal. In particular,
-        // hooks with AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA may reject a zero-sized
-        // DECREASE_LIQUIDITY because there is no principal delta to cast/account.
-        // PositionManager supports collecting the fees through a zero-sized
-        // INCREASE_LIQUIDITY instead (the same route RevertHook uses internally).
-        bool feesOnly = liquidityRemove == 0;
-        bytes memory actions = abi.encodePacked(
-            feesOnly ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)
-        );
+        // V4 uses different approach - need to use modifyLiquidities with encoded actions
+        // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
+        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
         bytes[] memory paramsArray = new bytes[](2);
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
         // Uniswap v4 encodes amount minima as uint128. Callers/operators are trusted
         // to pass uint128-sized slippage minima; larger values intentionally narrow.
         paramsArray[0] = abi.encode(
-            tokenId,
-            uint256(liquidityRemove),
-            feesOnly ? type(uint128).max : uint128(amount0Min),
-            feesOnly ? type(uint128).max : uint128(amount1Min),
-            decreaseLiquidityHookData
+            tokenId, uint256(liquidityRemove), uint128(amount0Min), uint128(amount1Min), decreaseLiquidityHookData
         );
         paramsArray[1] = abi.encode(currency0, currency1, address(this));
 
@@ -249,10 +239,39 @@ abstract contract Swapper is Constants {
         // calculate delta
         amount0 = currency0.balanceOfSelf() - amount0;
         amount1 = currency1.balanceOfSelf() - amount1;
+    }
+
+    /// @dev Collects fees through a zero-sized increase. This is intentionally a
+    /// separate opt-in helper: arbitrary hooks may reject an add operation or
+    /// require different data for add and remove callbacks.
+    function _collectFeesViaIncrease(
+        uint256 tokenId,
+        uint256 amount0Min,
+        uint256 amount1Min,
+        uint256 deadline,
+        bytes memory increaseLiquidityHookData
+    ) internal returns (uint256 amount0, uint256 amount1) {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        Currency currency0 = poolKey.currency0;
+        Currency currency1 = poolKey.currency1;
+
+        amount0 = currency0.balanceOfSelf();
+        amount1 = currency1.balanceOfSelf();
+
+        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] =
+            abi.encode(tokenId, uint256(0), type(uint128).max, type(uint128).max, increaseLiquidityHookData);
+        paramsArray[1] = abi.encode(currency0, currency1, address(this));
+
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
+
+        amount0 = currency0.balanceOfSelf() - amount0;
+        amount1 = currency1.balanceOfSelf() - amount1;
 
         // INCREASE_LIQUIDITY interprets its amount fields as maxima rather than
         // collected-amount minima, so retain the caller's slippage guarantee here.
-        if (feesOnly && (amount0 < amount0Min || amount1 < amount1Min)) {
+        if (amount0 < amount0Min || amount1 < amount1Min) {
             revert SlippageError();
         }
     }

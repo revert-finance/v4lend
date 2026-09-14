@@ -358,6 +358,7 @@ contract DeployBase is Script {
 
         // Register V4Utils with vault as transformer
         v4Utils.setVault(address(vault));
+        v4Utils.setFeeCollectionHook(address(revertHook));
         vault.setTransformer(address(v4Utils), true);
         console.log("  V4Utils registered with vault");
 
