@@ -32,6 +32,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
 import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
 import {V4ForkTestBase} from "test/vault/support/V4ForkTestBase.sol";
@@ -2109,6 +2110,68 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
     }
 
+    function test_AutoLeverageImmediateExternalRouteRejectsOracleDivergence() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        revertHook.setMaxTicksFromOracle(100);
+
+        PoolKey memory routePoolKey = _createAdditionalRoutePool(hookedPoolKey, 500, 10);
+        routeController.setRoute(
+            address(usdc), address(weth), routePoolKey.fee, routePoolKey.tickSpacing, routePoolKey.hooks
+        );
+
+        (uint160 routeSqrtPriceX96, int24 routeTick,,) =
+            StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(routePoolKey));
+        assertGt(routeSqrtPriceX96, 0, "route fixture must be initialized");
+        uint160 divergentOraclePrice = TickMath.getSqrtPriceAtTick(routeTick + 101);
+        vm.mockCall(
+            address(v4Oracle),
+            abi.encodeWithSelector(v4Oracle.getPoolSqrtPriceX96.selector, address(usdc), address(weth)),
+            abi.encode(divergentOraclePrice)
+        );
+
+        (uint256 debtBefore,,,,) = vault.loanInfo(hookedTokenId);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(hookedTokenId);
+        RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 5000
+        });
+
+        vm.recordLogs();
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(hookedTokenId, config);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        vm.clearMockedCalls();
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(hookedTokenId);
+        assertTrue(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "oracle-divergent external route must fail the immediate action"
+        );
+        assertEq(debtAfter, debtBefore, "rejected route must preserve debt");
+        assertEq(
+            positionManager.getPositionLiquidity(hookedTokenId), liquidityBefore, "rejected route must preserve liquidity"
+        );
+        assertFalse(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "rejected route must not emit AutoLeverage"
+        );
+        _assertHookHasNoTokenDust();
+    }
+
     function test_AutoLeverageExecutesImmediatelyWhenConfiguredOffTarget() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
 
@@ -2874,7 +2937,13 @@ contract V4VaultHookTest is V4ForkTestBase {
         _configurePositionForAutoLeverage(leverageUpTokenId, 5000);
         _alignLoanToTargetBps(leverageUpTokenId, 3500);
 
-        routeController.setRoute(address(usdc), address(weth), invalidRoutePoolKey.fee, invalidRoutePoolKey.tickSpacing, invalidRoutePoolKey.hooks);
+        routeController.setRoute(
+            address(usdc),
+            address(weth),
+            invalidRoutePoolKey.fee,
+            invalidRoutePoolKey.tickSpacing,
+            invalidRoutePoolKey.hooks
+        );
         routeController.setRoute(
             address(weth),
             address(usdc),
@@ -2933,19 +3002,19 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         (uint256 debtAfterDown,,,,) = vault.loanInfo(leverageDownTokenId);
         uint128 liquidityAfterDown = positionManager.getPositionLiquidity(leverageDownTokenId);
-        assertTrue(
+        assertFalse(
             _sawHookEventTopic(
                 leverageDownLogs,
                 keccak256("HookSwapFailed((address,address,uint24,int24,address),(bool,int256,uint160),bytes)")
             ),
-            "leverage-down should attempt the configured reverse route"
+            "uninitialized reverse route should be rejected before swap"
         );
-        assertFalse(
+        assertTrue(
             _sawHookActionFailed(leverageDownLogs, leverageDownTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
-            "available lend-token proceeds should make leverage-down partially succeed"
+            "uninitialized reverse route should fail the full leverage-down action"
         );
-        assertLt(debtAfterDown, debtBeforeDown, "partial leverage-down should repay available lend-token proceeds");
-        assertLt(liquidityAfterDown, liquidityBeforeDown, "partial leverage-down should retain the liquidity removal");
+        assertEq(debtAfterDown, debtBeforeDown, "rejected leverage-down route should preserve debt");
+        assertEq(liquidityAfterDown, liquidityBeforeDown, "rejected leverage-down route should preserve liquidity");
     }
 
     /// @notice Test that disabling AUTO_LEVERAGE removes triggers

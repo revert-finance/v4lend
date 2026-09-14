@@ -27,12 +27,11 @@ contract RevertHookSwapActions is RevertHookState {
         hookFeeController = _hookFeeController;
     }
 
-    /// @dev Hook-managed swaps execute in the same pool the position lives in, against whatever
-    /// liquidity is available there at execution time — by design, with no oracle-based amountOutMin
-    /// floor (unlike the standalone automators' _routerSwapWithSlippageCheck). Trigger processing is
-    /// already gated to a pool price within _maxTicksFromOracle of the oracle price, and position
-    /// owners can opt into tighter per-swap bounds via setSwapProtectionConfig; beyond that, the swap
-    /// is intended to complete with what the pool offers rather than fail the automation.
+    /// @dev Hook-managed swaps may execute in the position pool or through a configured external route.
+    /// RevertHookActionBase validates an external execution pool against the oracle immediately before
+    /// delegatecalling this helper. Same-pool triggered actions inherit the traversal oracle window.
+    /// Within those bounds there is no amountOutMin floor by default (unlike the standalone automators'
+    /// _routerSwapWithSlippageCheck), though owners can configure a tighter per-swap price bound.
     function executeSwap(PoolKey memory poolKey, bool zeroForOne, uint256 amountIn, uint256 tokenId, Mode mode)
         external
         returns (BalanceDelta delta)
@@ -43,9 +42,9 @@ contract RevertHookSwapActions is RevertHookState {
         uint160 sqrtPriceLimitX96;
         if (priceMultiplier == 0) {
             // @custom:accepted-risk AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR
-            // No configured multiplier means no price limit. This is as designed: the swap runs in
-            // the position's own pool with the liquidity available there, bounded by the oracle
-            // trigger window; a slippage floor is intentionally not enforced here.
+            // No configured multiplier means no additional price limit. External pools are oracle-
+            // checked immediately before this call, while same-pool triggered actions inherit the
+            // traversal oracle window; a tighter position-specific floor is optional.
             sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
         } else {
             (uint160 currentSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());

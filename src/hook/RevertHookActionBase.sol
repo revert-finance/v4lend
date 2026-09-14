@@ -40,10 +40,13 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     using ProtocolFeeLibrary for uint24;
     using ProtocolFeeLibrary for uint16;
 
+    error SwapPoolPriceOutOfBounds(int24 swapTick, int24 oracleTick);
+
     struct SwapPlan {
         PoolKey poolKey;
         bool zeroForOne;
         uint256 amountIn;
+        bool isExternalRoute;
     }
 
     IPermit2 internal immutable permit2;
@@ -160,7 +163,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         SwapPlan memory swapPlan = _buildSwapPlan(poolKey, tickLower, tickUpper, amount0, amount1);
         if (swapPlan.amountIn > 0) {
             return _applyBalanceDelta(
-                _executeSwapResolved(swapPlan.poolKey, swapPlan.zeroForOne, swapPlan.amountIn, tokenId, mode),
+                _executeSwapResolved(
+                    swapPlan.poolKey,
+                    swapPlan.zeroForOne,
+                    swapPlan.amountIn,
+                    tokenId,
+                    mode,
+                    swapPlan.isExternalRoute
+                ),
                 amount0,
                 amount1
             );
@@ -180,6 +190,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         plan.zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
         bool isSamePool;
         (plan.poolKey, isSamePool) = _resolveSwapPool(poolKey, plan.zeroForOne);
+        plan.isExternalRoute = !isSamePool;
 
         if (isSamePool) {
             (plan.amountIn,, plan.zeroForOne,) = liquidityCalculator.calculateSamePool(
@@ -238,8 +249,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 tokenId,
         Mode mode
     ) internal returns (BalanceDelta delta) {
-        (PoolKey memory swapPool,) = _resolveSwapPool(poolKey, zeroForOne);
-        return _executeSwapResolved(swapPool, zeroForOne, amountIn, tokenId, mode);
+        (PoolKey memory swapPool, bool isSamePool) = _resolveSwapPool(poolKey, zeroForOne);
+        return _executeSwapResolved(swapPool, zeroForOne, amountIn, tokenId, mode, !isSamePool);
     }
 
     function _executeSwapResolved(
@@ -247,8 +258,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         bool zeroForOne,
         uint256 amountIn,
         uint256 tokenId,
-        Mode mode
+        Mode mode,
+        bool validateOracle
     ) internal returns (BalanceDelta delta) {
+        if (validateOracle) _validateSwapPoolPrice(swapPool);
         (bool success, bytes memory returndata) = address(swapActions).delegatecall(
             abi.encodeCall(RevertHookSwapActions.executeSwap, (swapPool, zeroForOne, amountIn, tokenId, mode))
         );
@@ -258,6 +271,25 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             }
         }
         delta = abi.decode(returndata, (BalanceDelta));
+    }
+
+    /// @dev Trigger traversal bounds the position pool against the oracle, but
+    ///      a configured external route is a different pool and is not covered
+    ///      by that check. Validate its spot price immediately before use.
+    function _validateSwapPoolPrice(PoolKey memory swapPool) internal view {
+        (uint160 swapSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, swapPool.toId());
+        if (swapSqrtPriceX96 == 0) revert ILiquidityCalculator.Invalid_Pool();
+
+        uint160 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(
+            Currency.unwrap(swapPool.currency0), Currency.unwrap(swapPool.currency1)
+        );
+        int24 swapTick = TickMath.getTickAtSqrtPrice(swapSqrtPriceX96);
+        int24 oracleTick = TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96);
+        int256 tickDifference = int256(swapTick) - int256(oracleTick);
+        if (tickDifference < 0) tickDifference = -tickDifference;
+        if (_maxTicksFromOracle < 0 || tickDifference > int256(_maxTicksFromOracle)) {
+            revert SwapPoolPriceOutOfBounds(swapTick, oracleTick);
+        }
     }
 
     // ==================== Liquidity Helpers ====================
