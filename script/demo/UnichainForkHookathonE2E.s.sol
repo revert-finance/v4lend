@@ -286,7 +286,6 @@ contract UnichainForkHookathonE2E is Script {
             new LeverageTransformer(POSITION_MANAGER, address(UNIVERSAL_ROUTER), address(0), PERMIT2);
 
         deployment.v4Utils.setVault(address(deployment.vault));
-        deployment.v4Utils.setFeeCollectionHook(address(deployment.revertHook));
         deployment.vault.setTransformer(address(deployment.v4Utils), true);
         deployment.leverageTransformer.setVault(address(deployment.vault));
         deployment.vault.setTransformer(address(deployment.leverageTransformer), true);

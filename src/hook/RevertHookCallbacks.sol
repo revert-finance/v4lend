@@ -3,11 +3,9 @@ pragma solidity ^0.8.30;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
@@ -175,13 +173,13 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
-        BalanceDelta,
+        BalanceDelta delta,
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
 
-        feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
+        feeDelta = _takeProtocolFees(tokenId, key, params.liquidityDelta, delta, feeDelta);
 
         // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
         // hook-internal operations run the logic below, which is idempotent by design
@@ -210,12 +208,12 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
-        BalanceDelta,
+        BalanceDelta delta,
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
-        feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
+        feeDelta = _takeProtocolFees(tokenId, key, params.liquidityDelta, delta, feeDelta);
 
         // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
         // hook-internal operations run the logic below, which is idempotent by design
@@ -234,76 +232,24 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
     }
 
-    function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta)
-        internal
-        returns (BalanceDelta newFeeDelta)
-    {
-        PositionState storage state = _positionStates[tokenId];
-        uint32 accumulatedActiveTime = state.accumulatedActiveTime;
-        uint32 lastActivated = state.lastActivated;
-        uint32 currentTime = uint32(block.timestamp);
-        if (lastActivated > 0) {
-            accumulatedActiveTime += currentTime - lastActivated;
-            state.lastActivated = currentTime;
-        }
-
-        uint32 lastCollect = state.lastCollect;
-        uint32 feeTime = lastCollect == 0 ? 0 : currentTime - lastCollect;
-        state.lastCollect = currentTime;
-        state.accumulatedActiveTime = 0;
-
-        if (feeTime == 0 || accumulatedActiveTime == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
-        }
-        if (accumulatedActiveTime > feeTime) {
-            accumulatedActiveTime = feeTime;
-        }
-
-        uint16 lpFeeBps = hookFeeController.lpFeeBps();
-        if (lpFeeBps == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
-        }
-
-        // Widen arithmetic to int256 so intermediate products cannot overflow once
-        // `feeTime` exceeds ~2.485 days (where `10000 * int32(feeTime)` exceeds int32.max).
-        int256 activeTimeSigned = int256(uint256(accumulatedActiveTime));
-        int256 feeTimeSigned = int256(uint256(feeTime));
-        int256 lpFeeBpsSigned = int256(uint256(lpFeeBps));
-        int256 denominator = int256(10000) * feeTimeSigned;
-
-        int128 protocolFee0 = SafeCast.toInt128(
-            activeTimeSigned * int256(feeDelta.amount0()) * lpFeeBpsSigned / denominator
+    /// @dev Implementation lives in RevertHookAutoLendActions (delegatecall, shared storage
+    ///      layout) to keep the hook's own bytecode under the EIP-170 limit. Reverts bubble up.
+    function _takeProtocolFees(
+        uint256 tokenId,
+        PoolKey calldata key,
+        int256 liquidityDelta,
+        BalanceDelta delta,
+        BalanceDelta feeDelta
+    ) internal returns (BalanceDelta newFeeDelta) {
+        bytes memory data = abi.encodeCall(
+            autoLendActions.takeProtocolFees, (tokenId, key, liquidityDelta, delta, feeDelta)
         );
-        int128 protocolFee1 = SafeCast.toInt128(
-            activeTimeSigned * int256(feeDelta.amount1()) * lpFeeBpsSigned / denominator
-        );
-
-        if (protocolFee0 == 0 && protocolFee1 == 0) {
-            return BalanceDeltaLibrary.ZERO_DELTA;
+        (bool success, bytes memory returndata) = address(autoLendActions).delegatecall(data);
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returndata, 0x20), mload(returndata))
+            }
         }
-
-        address feeRecipient = hookFeeController.protocolFeeRecipient();
-
-        if (protocolFee0 > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            poolManager.take(key.currency0, feeRecipient, uint256(int256(protocolFee0)));
-        }
-        if (protocolFee1 > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            poolManager.take(key.currency1, feeRecipient, uint256(int256(protocolFee1)));
-        }
-
-        emit SendProtocolFee(
-            tokenId,
-            key.currency0,
-            key.currency1,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256(int256(protocolFee0)),
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256(int256(protocolFee1)),
-            feeRecipient
-        );
-
-        newFeeDelta = toBalanceDelta(protocolFee0, protocolFee1);
+        newFeeDelta = abi.decode(returndata, (BalanceDelta));
     }
 }

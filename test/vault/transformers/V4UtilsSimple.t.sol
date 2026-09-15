@@ -21,26 +21,6 @@ import "test/vault/support/V4TestBase.sol";
  */
 contract V4UtilsSimpleTest is V4TestBase {
 
-    function testConfiguredFeeCollectionHookDoesNotChangeHooklessCollectionPath() public {
-        address unrelatedHook = makeAddr("unrelatedHook");
-        v4Utils.setFeeCollectionHook(unrelatedHook);
-        assertEq(v4Utils.feeCollectionHook(), unrelatedHook, "Configured hook should be stored");
-
-        uint256 tokenId = _createTestPosition(user1);
-        V4Utils.Instructions memory instructions = _createInstructions(
-            V4Utils.WhatToDo.WITHDRAW_AND_COLLECT_AND_SWAP,
-            address(token0),
-            0,
-            block.timestamp,
-            user1
-        );
-
-        _executeInstructions(tokenId, instructions, user1);
-
-        assertEq(IERC721(address(positionManager)).ownerOf(tokenId), user1, "Hookless NFT should remain owned");
-        assertGt(positionManager.getPositionLiquidity(tokenId), 0, "Fee collection must preserve liquidity");
-    }
-    
     function testExecuteCompoundFees() public {
         console.log("=== Testing COMPOUND_FEES ===");
         

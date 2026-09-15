@@ -156,12 +156,9 @@ contract DeployBaseHookUpgrade is Script {
         vault.setTransformer(address(revertHook), true);
         vault.setHookAllowList(address(revertHook), true);
 
-        // A separate utility keeps fee-only collection explicitly scoped to
-        // the replacement hook without mutating the old deployment's utility.
         v4Utils =
             new V4Utils(IPositionManager(POSITION_MANAGER), UNIVERSAL_ROUTER, zeroXAllowanceHolder, IPermit2(PERMIT2));
         v4Utils.setVault(address(vault));
-        v4Utils.setFeeCollectionHook(address(revertHook));
         vault.setTransformer(address(v4Utils), true);
 
         vm.stopBroadcast();

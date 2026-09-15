@@ -40,10 +40,6 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     /// @notice Permit2 contract
     IPermit2 public immutable permit2;
 
-    /// @notice The one hook whose fee-only collection requires a zero-sized increase.
-    /// @dev address(0) disables the hook-specific collection path.
-    address public feeCollectionHook;
-
     /// @dev Prevents callbacks from re-entering execute() while this contract has temporary NFT custody.
     bool private executing;
 
@@ -53,7 +49,6 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     event WithdrawAndCollectAndSwap(uint256 indexed tokenId, uint128 liquidity, address token, uint256 amount);
     event SwapAndMint(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
     event SwapAndIncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
-    event FeeCollectionHookSet(address indexed hook);
 
     /// @notice Action which should be executed on provided NFT
     enum WhatToDo {
@@ -198,13 +193,6 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         permit2 = _permit2;
     }
 
-    /// @notice Selects the exact hook that needs fee collection via INCREASE_LIQUIDITY.
-    /// @dev Other hooks and hookless positions continue to use DECREASE_LIQUIDITY.
-    function setFeeCollectionHook(address hook) external onlyOwner {
-        feeCollectionHook = hook;
-        emit FeeCollectionHookSet(hook);
-    }
-
     /// @notice Execute instruction accessing approved NFT instead of direct safeTransferFrom call from owner
     /// @dev This function can only be called by the position manager after NFT approval.
     ///      It decreases liquidity, collects fees, and executes the requested action (compound fees, change range, or withdraw and swap).
@@ -228,9 +216,15 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
 
-        // Decrease liquidity and collect fees/tokens. The zero-sized increase
-        // workaround is restricted to the explicitly configured hook.
-        (uint256 amount0, uint256 amount1) = _collectPositionTokens(tokenId, poolKey, instructions);
+        // Decrease liquidity and collect fees/tokens
+        (uint256 amount0, uint256 amount1) = _decreaseLiquidity(
+            tokenId,
+            instructions.liquidity,
+            instructions.amountRemoveMin0,
+            instructions.amountRemoveMin1,
+            instructions.deadline,
+            instructions.decreaseLiquidityHookData
+        );
 
         // Validate sufficient tokens for swaps
         if (amount0 < instructions.amountIn0 || amount1 < instructions.amountIn1) {
@@ -247,31 +241,6 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         } else {
             revert NotSupportedWhatToDo();
         }
-    }
-
-    function _collectPositionTokens(uint256 tokenId, PoolKey memory poolKey, Instructions memory instructions)
-        internal
-        returns (uint256 amount0, uint256 amount1)
-    {
-        address configuredHook = feeCollectionHook;
-        if (instructions.liquidity == 0 && configuredHook != address(0) && address(poolKey.hooks) == configuredHook) {
-            return _collectFeesViaIncrease(
-                tokenId,
-                instructions.amountRemoveMin0,
-                instructions.amountRemoveMin1,
-                instructions.deadline,
-                instructions.increaseLiquidityHookData
-            );
-        }
-
-        return _decreaseLiquidity(
-            tokenId,
-            instructions.liquidity,
-            instructions.amountRemoveMin0,
-            instructions.amountRemoveMin1,
-            instructions.deadline,
-            instructions.decreaseLiquidityHookData
-        );
     }
 
     /// @notice Execute compound fees operation - swap tokens and increase liquidity
@@ -673,21 +642,12 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         }
         executing = true;
 
+        // first fees must be removed
+        (uint256 fees0, uint256 fees1) =
+            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
+
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
-
-        // First fees must be removed. Restrict the zero-sized increase workaround
-        // to the configured hook and send the corresponding increase hook data.
-        uint256 fees0;
-        uint256 fees1;
-        address configuredHook = feeCollectionHook;
-        if (configuredHook != address(0) && address(poolKey.hooks) == configuredHook) {
-            (fees0, fees1) =
-                _collectFeesViaIncrease(params.tokenId, 0, 0, params.deadline, params.increaseLiquidityHookData);
-        } else {
-            (fees0, fees1) =
-                _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
-        }
 
         _prepareAddApproved(
             poolKey.currency0,

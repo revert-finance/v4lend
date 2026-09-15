@@ -254,10 +254,6 @@ Main entrypoints:
 - [DeployMainnet.s.sol](script/DeployMainnet.s.sol): full Ethereum mainnet deployment for oracle, vault, hook, and related contracts
 - [DeployV4Utils.s.sol](script/DeployV4Utils.s.sol): standalone deployment for `V4Utils`
 
-For a standalone V4Utils dedicated to RevertHook positions, set `FEE_COLLECTION_HOOK` to the exact deployed
-RevertHook address. The script records that hook during deployment; other hooks and hookless positions continue
-to use the standard fee-collection path.
-
 Example pattern:
 
 ```sh
