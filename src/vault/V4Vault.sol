@@ -19,6 +19,7 @@ import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {IVault} from "./interfaces/IVault.sol";
+import {IRemintMigrationHook} from "./interfaces/IRemintMigrationHook.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
 import {Constants} from "../shared/Constants.sol";
@@ -650,6 +651,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // if token has changed - and operator was approved for old token - take over for new token
         if (tokenId != newTokenId && transformApprovals[loanOwner][tokenId][msg.sender]) {
             transformApprovals[loanOwner][newTokenId][msg.sender] = true;
+        }
+
+        // a remint leaves pool-hook automation keyed by the retired token: let the hook follow the loan
+        if (tokenId != newTokenId) {
+            _migrateHookState(loanOwner, tokenId, newTokenId);
         }
 
         // check owner not changed (NEEDED because token could have been moved somewhere else in the meantime)
@@ -1581,6 +1587,25 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         ownedTokensIndex[tokenId] = ownedTokens[to].length;
         ownedTokens[to].push(tokenId);
         tokenOwner[tokenId] = to;
+    }
+
+    /// @dev When a transform replaces the NFT and both positions share an allowlisted hook, carry the
+    ///      loan owner's transform approval for that hook to the new token and let the hook move its
+    ///      token-id keyed state (configs, triggers). Doing this here covers every transformer that
+    ///      remints without per-transformer wiring. A hook revert fails the transform on purpose: it
+    ///      means the migrated automation is invalid for the new position, and the owner must
+    ///      reconfigure or disable it before moving range rather than end up unprotected.
+    function _migrateHookState(address loanOwner, uint256 oldTokenId, uint256 newTokenId) internal {
+        (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        address hook = address(newPoolKey.hooks);
+        if (hook == address(0) || hook != address(oldPoolKey.hooks) || !hookAllowList[hook]) {
+            return;
+        }
+        if (transformApprovals[loanOwner][oldTokenId][hook]) {
+            transformApprovals[loanOwner][newTokenId][hook] = true;
+        }
+        IRemintMigrationHook(hook).migrateVaultPosition(oldTokenId, newTokenId);
     }
 
     function _checkHookAllowed(uint256 tokenId) internal view {
