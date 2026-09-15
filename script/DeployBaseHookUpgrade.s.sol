@@ -46,6 +46,11 @@ contract DeployBaseHookUpgrade is Script {
     uint256 constant MIN_POSITION_VALUE_NATIVE = 0.01 ether;
     uint24 constant ETH_USDC_ROUTE_FEE = 500;
     int24 constant ETH_USDC_ROUTE_TICK_SPACING = 10;
+    // WETH is accepted as collateral too and _resolveSwapPool matches token addresses exactly, so
+    // WETH/USDC positions need their own route. Base's hookless WETH/USDC v4 liquidity sits in the
+    // 0.3% pool; the 0.05% one is roughly 400x shallower and unusable as a route.
+    uint24 constant WETH_USDC_ROUTE_FEE = 3000;
+    int24 constant WETH_USDC_ROUTE_TICK_SPACING = 60;
     uint256 constant MAX_LOOP = 500_000;
 
     function run()
@@ -137,6 +142,8 @@ contract DeployBaseHookUpgrade is Script {
         revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
         routeController.setRoute(ETH, USDC, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
         routeController.setRoute(USDC, ETH, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
+        routeController.setRoute(WETH, USDC, WETH_USDC_ROUTE_FEE, WETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
+        routeController.setRoute(USDC, WETH, WETH_USDC_ROUTE_FEE, WETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
 
         // Use the candidate's Base USDC feed-age configuration on the oracle
         // shared by the existing vault and the replacement hook.

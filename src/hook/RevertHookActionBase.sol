@@ -144,6 +144,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     /// @notice Migrates configuration from an old position to its reminted replacement
     function _migrateRemintedPosition(uint256 tokenId, uint256 newTokenId) internal {
         _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[tokenId];
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        _migratePendingProtocolFee(poolKey, tokenId, newTokenId);
         _copyPositionConfig(newTokenId, _positionConfigs[tokenId]);
         _disablePosition(tokenId);
     }
