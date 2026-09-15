@@ -192,17 +192,52 @@ contract V4VaultHookTest is V4ForkTestBase {
         PoolKey memory hookedPoolKey = _createHookedPool();
         uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
         _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        // Swap protection is independent of automation and must survive the remint on its own.
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
         (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
 
         uint256 newTokenId = _executeManualRangeMove(oldTokenId, positionManager.getPositionLiquidity(oldTokenId));
 
         (uint8 newModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
         assertEq(newModeFlags, PositionModeFlags.MODE_NONE, "no automation to migrate");
+        (uint128 priceMultiplier0, uint128 priceMultiplier1) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(priceMultiplier0, 0, "token0 swap protection should migrate without automation");
+        assertGt(priceMultiplier1, 0, "token1 swap protection should migrate without automation");
         (,, uint32 newLastActivated,,,,,) = revertHook.positionStates(newTokenId);
         assertEq(newLastActivated, 0, "unconfigured replacement must not start accruing active time");
         (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
         assertEq(lowerAfter, lowerBefore, "no lower triggers should appear");
         assertEq(upperAfter, upperBefore, "no upper triggers should appear");
+    }
+
+    function test_ChangeRangeRevertsWhenMigratedTriggerIsAlreadySatisfied() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+
+        // Relative auto-exit 600 ticks below the range: safely inactive for the current range.
+        RevertHookState.PositionConfig memory config = _manualRangeMigrationConfig();
+        config.modeFlags = PositionModeFlags.MODE_AUTO_EXIT;
+        config.autoCollectMode = RevertHookState.AutoCollectMode.NONE;
+        config.autoLeverageTargetBps = 0;
+        config.autoExitIsRelative = true;
+        config.autoExitTickLower = 600;
+        _setPositionConfigAtTarget(oldTokenId, config);
+
+        // Moving the range far above the current price puts the relative exit trigger above the
+        // price too: it is already satisfied, cannot run inside the transform, and must not be armed
+        // silently. The hook refuses (called by the vault itself, so its error surfaces directly)
+        // and the whole range move fails.
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 spacing = hookedPoolKey.tickSpacing;
+        int24 base = (currentTick / spacing) * spacing;
+        bytes memory data = _manualRangeMoveCalldata(
+            oldTokenId, positionManager.getPositionLiquidity(oldTokenId), base + 20 * spacing, base + 30 * spacing
+        );
+        vm.prank(WHALE_ACCOUNT);
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.transform(oldTokenId, address(v4Utils), data);
     }
 
     function test_MigrateVaultPositionRejectsCallsOutsideActiveTransform() public {
@@ -241,7 +276,25 @@ contract V4VaultHookTest is V4ForkTestBase {
     /// @dev Same-range CHANGE_RANGE through the vault: removes `liquidity` from oldTokenId and mints
     ///      the proceeds into a fresh vault-held position, exercising the remint path end to end.
     function _executeManualRangeMove(uint256 oldTokenId, uint128 liquidity) internal returns (uint256 newTokenId) {
-        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        return _executeManualRangeMoveTo(oldTokenId, liquidity, positionInfo.tickLower(), positionInfo.tickUpper());
+    }
+
+    function _executeManualRangeMoveTo(uint256 oldTokenId, uint128 liquidity, int24 newTickLower, int24 newTickUpper)
+        internal
+        returns (uint256 newTokenId)
+    {
+        bytes memory data = _manualRangeMoveCalldata(oldTokenId, liquidity, newTickLower, newTickUpper);
+        vm.prank(WHALE_ACCOUNT);
+        newTokenId = vault.transform(oldTokenId, address(v4Utils), data);
+    }
+
+    function _manualRangeMoveCalldata(uint256 oldTokenId, uint128 liquidity, int24 newTickLower, int24 newTickUpper)
+        internal
+        view
+        returns (bytes memory)
+    {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
         V4Utils.Instructions memory instructions = V4Utils.Instructions({
             whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
             targetToken: poolKey.currency0,
@@ -255,8 +308,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             swapData1: bytes(""),
             fee: poolKey.fee,
             tickSpacing: poolKey.tickSpacing,
-            tickLower: positionInfo.tickLower(),
-            tickUpper: positionInfo.tickUpper(),
+            tickLower: newTickLower,
+            tickUpper: newTickUpper,
             liquidity: liquidity,
             amountAddMin0: 0,
             amountAddMin1: 0,
@@ -269,10 +322,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             decreaseLiquidityHookData: bytes(""),
             increaseLiquidityHookData: bytes("")
         });
-
-        vm.prank(WHALE_ACCOUNT);
-        newTokenId =
-            vault.transform(oldTokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (oldTokenId, instructions)));
+        return abi.encodeCall(V4Utils.execute, (oldTokenId, instructions));
     }
 
     function _assertManualRangeMigration(
