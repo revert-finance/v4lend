@@ -355,6 +355,81 @@ contract RevertHookTest is BaseTest {
         assertEq(multiplier1After, multiplier1Before, "sqrtPriceMultiplier1 should copy on remint");
     }
 
+    function testAutoRangeRemintCarriesUnabsorbedProtocolFee() public {
+        assertGt(feeController.lpFeeBps(), 0, "lpFeeBps must be > 0 to reach protocol fee accounting");
+        hook.setMaxTicksFromOracle(1000);
+
+        // Activate without tick triggers first, so fee accrual and the fee-only collect cannot fire
+        // auto-range prematurely; the carried fee is independent of the mode that produced it.
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(
+                PositionModeFlags.MODE_AUTO_COLLECT, false, false, type(int24).min, type(int24).max
+            )
+        );
+        _swapHookedPoolBothWays(1e17);
+        vm.warp(block.timestamp + 1 days);
+        positionManager.decreaseLiquidity(token3Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
+        (uint128 carried0, uint128 carried1) = hook.pendingProtocolFees(token3Id);
+        assertGt(carried0, 0, "token0 fee should be carried");
+        assertGt(carried1, 0, "token1 fee should be carried");
+
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: 60,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        // Price leaves the range downwards: the position is all token0 when auto-range withdraws it,
+        // so the token1 fee cannot be absorbed by that withdrawal and must follow the replacement.
+        uint256 newTokenId = positionManager.nextTokenId();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        assertEq(positionManager.nextTokenId(), newTokenId + 1, "AUTO_RANGE should mint replacement token");
+
+        (uint128 old0, uint128 old1) = hook.pendingProtocolFees(token3Id);
+        assertEq(uint256(old0) + old1, 0, "retired token must not keep a carried fee");
+        (uint128 new0, uint128 new1) = hook.pendingProtocolFees(newTokenId);
+        assertEq(new0, 0, "token0 fee is absorbed by the one-sided withdrawal");
+        assertEq(new1, carried1, "unabsorbed token1 fee should follow the replacement");
+
+        // A later removal on the replacement settles the carried token1 fee.
+        uint256 recipient1Before = currency1.balanceOf(protocolFeeRecipient);
+        positionManager.decreaseLiquidity(
+            newTokenId,
+            positionManager.getPositionLiquidity(newTokenId) / 2,
+            0,
+            0,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        assertGe(currency1.balanceOf(protocolFeeRecipient) - recipient1Before, carried1, "carried fee settled");
+        (, uint128 after1) = hook.pendingProtocolFees(newTokenId);
+        assertEq(after1, 0, "carried token1 fee should be cleared");
+    }
+
     function testSingleSwap_CascadesAcrossMultipleTriggerTicks() public {
         hook.setMaxTicksFromOracle(1000);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);

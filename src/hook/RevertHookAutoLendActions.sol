@@ -75,11 +75,6 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             revert Unauthorized();
         }
 
-        PositionConfig memory config = _positionConfigs[oldTokenId];
-        if (PositionModeFlags.isNone(config.modeFlags)) {
-            return;
-        }
-
         (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
         (PoolKey memory newPoolKey, PositionInfo newPositionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
         if (
@@ -88,17 +83,38 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         ) {
             revert InvalidConfig();
         }
+
+        // Swap protection is set independently of automation and a carried protocol fee is owed
+        // regardless of it, so both follow the position even when there is no config to migrate.
+        _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[oldTokenId];
+        _migratePendingProtocolFee(newPoolKey, oldTokenId, newTokenId);
+
+        PositionConfig memory config = _positionConfigs[oldTokenId];
+        if (PositionModeFlags.isNone(config.modeFlags)) {
+            return;
+        }
         _validateRangeConfig(newPoolKey.tickSpacing, newPositionInfo.tickLower(), newPositionInfo.tickUpper(), config);
 
-        _removePositionTriggersWithConfig(oldTokenId, oldPoolKey, config);
-        _disablePosition(oldTokenId);
-
-        _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[oldTokenId];
-        _positionConfigs[newTokenId] = config;
+        // Base tick first: the trigger evaluation below reads it for auto-leverage triggers.
         if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
             _positionStates[newTokenId].autoLeverageBaseTick =
                 _getTickLower(_getCurrentTick(newPoolKey.toId()), newPoolKey.tickSpacing);
         }
+        // A trigger that is already satisfied for the new range cannot execute here (the vault's
+        // transform holds the reentrancy lock) and would sit behind the swap cursor until the price
+        // came back, leaving the replacement unprotected. Refuse the move instead; the owner
+        // reconfigures or disables automation before changing range.
+        (bool alreadyTriggered,,) = _checkTriggerConditions(
+            newTokenId, newPoolKey, config, newPositionInfo.tickLower(), newPositionInfo.tickUpper()
+        );
+        if (alreadyTriggered) {
+            revert InvalidConfig();
+        }
+
+        _removePositionTriggersWithConfig(oldTokenId, oldPoolKey, config);
+        _disablePosition(oldTokenId);
+
+        _positionConfigs[newTokenId] = config;
         // Same gate as the liquidity callbacks: only positions worth automating get armed.
         (uint256 positionValueNative,,,) = v4Oracle.getValue(newTokenId, address(0));
         if (positionValueNative >= _minPositionValueNative) {

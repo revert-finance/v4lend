@@ -183,6 +183,27 @@ abstract contract RevertHookTriggers is RevertHookState {
         return isUpperTrigger ? sameRangeBaseTick >= triggerTickInt : sameRangeBaseTick <= triggerTickInt;
     }
 
+    // ==================== Carried protocol fee ====================
+
+    /// @dev A carried protocol fee follows the position to its replacement. The retired token is an
+    ///      empty husk that may never see another liquidity operation, and a one-sided withdrawal can
+    ///      only ever absorb the fee owed in the currency it actually holds.
+    function _migratePendingProtocolFee(PoolKey memory poolKey, uint256 tokenId, uint256 newTokenId) internal {
+        PendingProtocolFee storage pending = _pendingProtocolFees[tokenId];
+        uint128 amount0 = pending.amount0;
+        uint128 amount1 = pending.amount1;
+        if (amount0 == 0 && amount1 == 0) {
+            return;
+        }
+        delete _pendingProtocolFees[tokenId];
+        emit ProtocolFeeDeferred(tokenId, poolKey.currency0, poolKey.currency1, 0, 0);
+
+        PendingProtocolFee storage target = _pendingProtocolFees[newTokenId];
+        target.amount0 += amount0;
+        target.amount1 += amount1;
+        emit ProtocolFeeDeferred(newTokenId, poolKey.currency0, poolKey.currency1, target.amount0, target.amount1);
+    }
+
     // ==================== Activation Helpers ====================
 
     /// @notice Marks position as activated (triggers are now active)

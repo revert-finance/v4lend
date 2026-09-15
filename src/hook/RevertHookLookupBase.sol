@@ -5,7 +5,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -16,6 +16,8 @@ import {RevertHookTriggers} from "./RevertHookTriggers.sol";
 /// @title RevertHookLookupBase
 /// @notice Shared lookup helpers used by both the hook and delegate targets
 abstract contract RevertHookLookupBase is RevertHookTriggers {
+    using PoolIdLibrary for PoolKey;
+
     function _positionManagerRef() internal view virtual returns (IPositionManager);
 
     function _poolManagerRef() internal view virtual returns (IPoolManager);
@@ -53,5 +55,74 @@ abstract contract RevertHookLookupBase is RevertHookTriggers {
 
     function _getCurrentTick(PoolId poolId) internal view override returns (int24 tick) {
         return _getTick(poolId);
+    }
+
+    // ==================== Trigger evaluation (shared with delegate targets) ====================
+
+    /// @dev Which configured trigger, if any, is already satisfied at the current tick. Used by the
+    ///      hook at config time (immediate execution) and by the sidecar when a vault remint migrates
+    ///      a config onto a position with a new range.
+    function _checkTriggerConditions(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        PositionConfig memory config,
+        int24 posTickLower,
+        int24 posTickUpper
+    ) internal view returns (bool shouldExecute, bool isUpperTrigger, int24 triggeredTick) {
+        PoolId poolId = poolKey.toId();
+        int24 currentTickLower = _getTickLower(_getTick(poolId), poolKey.tickSpacing);
+
+        int24[4] memory triggerTicks = _computeTriggerTicksMemory(tokenId, poolKey, config, posTickLower, posTickUpper);
+        int24 lowerTrigger = _getNearestSatisfiedLowerTrigger(currentTickLower, triggerTicks[0], triggerTicks[1]);
+        int24 upperTrigger = _getNearestSatisfiedUpperTrigger(currentTickLower, triggerTicks[2], triggerTicks[3]);
+
+        bool lowerSatisfied = lowerTrigger != type(int24).min;
+        bool upperSatisfied = upperTrigger != type(int24).max;
+
+        if (lowerSatisfied && upperSatisfied) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256 lowerDistance = uint256(int256(lowerTrigger) - int256(currentTickLower));
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256 upperDistance = uint256(int256(currentTickLower) - int256(upperTrigger));
+            return lowerDistance <= upperDistance ? (true, false, lowerTrigger) : (true, true, upperTrigger);
+        }
+        if (lowerSatisfied) {
+            return (true, false, lowerTrigger);
+        }
+        if (upperSatisfied) {
+            return (true, true, upperTrigger);
+        }
+
+        return (false, false, 0);
+    }
+
+    function _getNearestSatisfiedLowerTrigger(int24 currentTickLower, int24 first, int24 second)
+        internal
+        pure
+        returns (int24 lowerTrigger)
+    {
+        lowerTrigger = type(int24).min;
+
+        if (first != type(int24).min && currentTickLower <= first) {
+            lowerTrigger = first;
+        }
+        if (second != type(int24).min && currentTickLower <= second && second > lowerTrigger) {
+            lowerTrigger = second;
+        }
+    }
+
+    function _getNearestSatisfiedUpperTrigger(int24 currentTickLower, int24 first, int24 second)
+        internal
+        pure
+        returns (int24 upperTrigger)
+    {
+        upperTrigger = type(int24).max;
+
+        if (first != type(int24).max && currentTickLower >= first) {
+            upperTrigger = first;
+        }
+        if (second != type(int24).max && currentTickLower >= second && second < upperTrigger) {
+            upperTrigger = second;
+        }
     }
 }
