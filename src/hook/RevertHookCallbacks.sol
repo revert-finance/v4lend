@@ -252,13 +252,13 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
-        BalanceDelta,
+        BalanceDelta delta,
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
 
-        feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
+        feeDelta = _takeProtocolFees(tokenId, key, params.liquidityDelta, delta, feeDelta);
 
         // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
         // hook-internal operations run the logic below, which is idempotent by design
@@ -266,8 +266,14 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
 
-        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
-            if (_getPositionValueNative(tokenId) >= _minPositionValueNative) {
+        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags)) {
+            uint256 positionValueNative = _getPositionValueNative(tokenId);
+            if (_isActivated(tokenId) && positionValueNative < _minPositionValueNative) {
+                // An active position can sit below the minimum after a price move;
+                // any add re-evaluates it so stale triggers are not left armed.
+                _removePositionTriggers(tokenId, key);
+                _deactivatePosition(tokenId);
+            } else if (!_isActivated(tokenId) && positionValueNative >= _minPositionValueNative) {
                 _addPositionTriggers(tokenId, key);
                 _activatePosition(tokenId);
             }
@@ -280,12 +286,12 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
-        BalanceDelta,
+        BalanceDelta delta,
         BalanceDelta feeDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
-        feeDelta = _takeProtocolFees(tokenId, key, feeDelta);
+        feeDelta = _takeProtocolFees(tokenId, key, params.liquidityDelta, delta, feeDelta);
 
         // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
         // hook-internal operations run the logic below, which is idempotent by design
@@ -305,19 +311,17 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
     }
 
     /// @dev Implementation lives in RevertHookAutoLendActions (delegatecall, shared storage
-    ///      layout) to keep the hook's own bytecode under the EIP-170 limit.
-    function _takeProtocolFees(uint256 tokenId, PoolKey calldata key, BalanceDelta feeDelta)
-        internal
-        returns (BalanceDelta newFeeDelta)
-    {
-        (bool success, bytes memory returndata) = address(autoLendActions).delegatecall(
-            abi.encodeCall(RevertHookAutoLendActions.takeProtocolFees, (tokenId, key, feeDelta))
+    ///      layout) to keep the hook's own bytecode under the EIP-170 limit. Reverts bubble up.
+    function _takeProtocolFees(
+        uint256 tokenId,
+        PoolKey calldata key,
+        int256 liquidityDelta,
+        BalanceDelta delta,
+        BalanceDelta feeDelta
+    ) internal returns (BalanceDelta newFeeDelta) {
+        bytes memory data = abi.encodeCall(
+            RevertHookAutoLendActions.takeProtocolFees, (tokenId, key, liquidityDelta, delta, feeDelta)
         );
-        if (!success) {
-            assembly ("memory-safe") {
-                revert(add(returndata, 0x20), mload(returndata))
-            }
-        }
-        newFeeDelta = abi.decode(returndata, (BalanceDelta));
+        newFeeDelta = abi.decode(_delegatecallPassthrough(address(autoLendActions), data), (BalanceDelta));
     }
 }

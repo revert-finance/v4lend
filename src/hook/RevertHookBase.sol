@@ -87,8 +87,11 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         (value,,,) = v4Oracle.getValue(tokenId, address(0));
     }
 
-    function _delegatecallPassthrough(address target, bytes memory data) internal {
-        (bool success, bytes memory returndata) = target.delegatecall(data);
+    /// @dev Delegatecalls a sidecar, bubbling its revert data; returns the raw return data so
+    ///      callers that need a result can decode it without duplicating this routine.
+    function _delegatecallPassthrough(address target, bytes memory data) internal returns (bytes memory returndata) {
+        bool success;
+        (success, returndata) = target.delegatecall(data);
         if (!success) {
             assembly ("memory-safe") {
                 revert(add(returndata, 0x20), mload(returndata))

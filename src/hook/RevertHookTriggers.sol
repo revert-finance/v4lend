@@ -105,6 +105,84 @@ abstract contract RevertHookTriggers is RevertHookState {
         });
     }
 
+    // ==================== Config Validation (shared with delegate targets) ====================
+
+    /// @dev Auto-range settings must not be able to resolve a trigger back into the current range.
+    ///      Pure and range-dependent, so it is shared: the hook uses it in setPositionConfig and the
+    ///      sidecar re-runs it when a vault remint moves a config onto a position with a new range.
+    function _validateRangeConfig(
+        int24 tickSpacing,
+        int24 positionTickLower,
+        int24 positionTickUpper,
+        PositionConfig memory config
+    ) internal pure {
+        if (!PositionModeFlags.hasAutoRange(config.modeFlags)) {
+            return;
+        }
+
+        if (config.autoRangeLowerDelta >= config.autoRangeUpperDelta) {
+            revert InvalidConfig();
+        }
+
+        (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
+            positionTickLower,
+            positionTickUpper,
+            config.autoRangeLowerLimit,
+            config.autoRangeUpperLimit
+        );
+
+        if (
+            _rangeTriggerCanResolveToSamePosition(
+                positionTickLower,
+                positionTickUpper,
+                rangeLower,
+                config.autoRangeLowerDelta,
+                config.autoRangeUpperDelta,
+                tickSpacing,
+                false
+            )
+                || _rangeTriggerCanResolveToSamePosition(
+                    positionTickLower,
+                    positionTickUpper,
+                    rangeUpper,
+                    config.autoRangeLowerDelta,
+                    config.autoRangeUpperDelta,
+                    tickSpacing,
+                    true
+                )
+        ) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _rangeTriggerCanResolveToSamePosition(
+        int24 currentTickLower,
+        int24 currentTickUpper,
+        int24 triggerTick,
+        int24 lowerDelta,
+        int24 upperDelta,
+        int24 tickSpacing,
+        bool isUpperTrigger
+    ) internal pure returns (bool) {
+        if (triggerTick == type(int24).min || triggerTick == type(int24).max) {
+            return false;
+        }
+
+        int256 sameRangeBaseTickLower = int256(currentTickLower) - int256(lowerDelta);
+        int256 sameRangeBaseTickUpper = int256(currentTickUpper) - int256(upperDelta);
+        if (sameRangeBaseTickLower != sameRangeBaseTickUpper) {
+            return false;
+        }
+
+        int256 sameRangeBaseTick = sameRangeBaseTickLower;
+        if (sameRangeBaseTick % int256(tickSpacing) != 0) {
+            return false;
+        }
+
+        int256 triggerTickInt = int256(triggerTick);
+        return isUpperTrigger ? sameRangeBaseTick >= triggerTickInt : sameRangeBaseTick <= triggerTickInt;
+    }
+
     // ==================== Activation Helpers ====================
 
     /// @notice Marks position as activated (triggers are now active)

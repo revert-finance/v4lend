@@ -104,6 +104,12 @@ abstract contract RevertHookViews is RevertHookBase {
         );
     }
 
+    /// @notice Protocol fee owed by a position that is carried until a liquidity operation can absorb it
+    function pendingProtocolFees(uint256 tokenId) external view returns (uint128 amount0, uint128 amount1) {
+        PendingProtocolFee storage pending = _pendingProtocolFees[tokenId];
+        return (pending.amount0, pending.amount1);
+    }
+
     function autoLendVaults(address token) external view returns (IERC4626 vault) {
         return _autoLendVaults[token];
     }

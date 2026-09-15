@@ -91,6 +91,18 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         _setPositionConfig(tokenId, positionConfig, true);
     }
 
+    /// @notice Moves token-id keyed automation state from a vault position to the position that
+    ///         replaced it inside the vault's current transform (e.g. a V4Utils CHANGE_RANGE).
+    /// @dev Called by a registered vault. Implementation lives in RevertHookAutoLendActions
+    ///      (delegatecall, shared storage layout) to keep the hook under the EIP-170 limit; the
+    ///      authorization and validation rules are documented there. Reverts bubble up and fail
+    ///      the vault transform.
+    function migrateVaultPosition(uint256 oldTokenId, uint256 newTokenId) external {
+        _delegatecallPassthrough(
+            address(autoLendActions), abi.encodeCall(autoLendActions.migrateVaultPosition, (oldTokenId, newTokenId))
+        );
+    }
+
     function _calculateSqrtPriceMultiplier(uint32 maxPriceImpactBps, bool zeroForOne)
         internal
         pure
@@ -135,51 +147,6 @@ abstract contract RevertHookConfig is RevertHookImmediate {
                 || !_isValidTickConfig(config.autoRangeUpperDelta, tickSpacing, 0)
                 || !_isValidTickConfig(config.autoLendToleranceTick, tickSpacing, 0)
                 || config.autoLeverageTargetBps >= 10000
-        ) {
-            revert InvalidConfig();
-        }
-    }
-
-    function _validateRangeConfig(
-        int24 tickSpacing,
-        int24 positionTickLower,
-        int24 positionTickUpper,
-        PositionConfig memory config
-    ) internal pure {
-        if (!PositionModeFlags.hasAutoRange(config.modeFlags)) {
-            return;
-        }
-
-        if (config.autoRangeLowerDelta >= config.autoRangeUpperDelta) {
-            revert InvalidConfig();
-        }
-
-        (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
-            positionTickLower,
-            positionTickUpper,
-            config.autoRangeLowerLimit,
-            config.autoRangeUpperLimit
-        );
-
-        if (
-            _rangeTriggerCanResolveToSamePosition(
-                positionTickLower,
-                positionTickUpper,
-                rangeLower,
-                config.autoRangeLowerDelta,
-                config.autoRangeUpperDelta,
-                tickSpacing,
-                false
-            )
-                || _rangeTriggerCanResolveToSamePosition(
-                    positionTickLower,
-                    positionTickUpper,
-                    rangeUpper,
-                    config.autoRangeLowerDelta,
-                    config.autoRangeUpperDelta,
-                    tickSpacing,
-                    true
-                )
         ) {
             revert InvalidConfig();
         }
@@ -262,31 +229,4 @@ abstract contract RevertHookConfig is RevertHookImmediate {
             : int24(0);
     }
 
-    function _rangeTriggerCanResolveToSamePosition(
-        int24 currentTickLower,
-        int24 currentTickUpper,
-        int24 triggerTick,
-        int24 lowerDelta,
-        int24 upperDelta,
-        int24 tickSpacing,
-        bool isUpperTrigger
-    ) internal pure returns (bool) {
-        if (triggerTick == type(int24).min || triggerTick == type(int24).max) {
-            return false;
-        }
-
-        int256 sameRangeBaseTickLower = int256(currentTickLower) - int256(lowerDelta);
-        int256 sameRangeBaseTickUpper = int256(currentTickUpper) - int256(upperDelta);
-        if (sameRangeBaseTickLower != sameRangeBaseTickUpper) {
-            return false;
-        }
-
-        int256 sameRangeBaseTick = sameRangeBaseTickLower;
-        if (sameRangeBaseTick % int256(tickSpacing) != 0) {
-            return false;
-        }
-
-        int256 triggerTickInt = int256(triggerTick);
-        return isUpperTrigger ? sameRangeBaseTick >= triggerTickInt : sameRangeBaseTick <= triggerTickInt;
-    }
 }

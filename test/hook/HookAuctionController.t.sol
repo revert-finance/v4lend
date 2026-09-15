@@ -1473,6 +1473,8 @@ contract HookAuctionControllerTest is BaseTest {
         // takeProtocolFees is delegatecall-only; a direct call on the sidecar (which would run on
         // its own storage and could emit spoofed SendProtocolFee events) must revert.
         vm.expectRevert(); // Unauthorized (Constants.Unauthorized selector)
-        autoLendActionsRef.takeProtocolFees(1, auctionPoolKey, toBalanceDelta(int128(1), int128(1)));
+        autoLendActionsRef.takeProtocolFees(
+            1, auctionPoolKey, 0, toBalanceDelta(int128(1), int128(1)), toBalanceDelta(int128(1), int128(1))
+        );
     }
 }

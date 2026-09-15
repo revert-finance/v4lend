@@ -11,6 +11,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 
 // base contracts
 import {V4Vault} from "src/vault/V4Vault.sol";
@@ -33,6 +34,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
 import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
 import {V4ForkTestBase} from "test/vault/support/V4ForkTestBase.sol";
@@ -113,6 +115,10 @@ contract V4VaultHookTest is V4ForkTestBase {
         vault.setTransformer(address(revertHook), true);
         vault.setHookAllowList(address(revertHook), true);
 
+        // Manual range changes go through the shared V4Utils transformer (deployed by the fork base).
+        v4Utils.setVault(address(vault));
+        vault.setTransformer(address(v4Utils), true);
+
         // create tolerant oracle for testing
         v4Oracle.setMaxPoolPriceDifference(1000);
     }
@@ -131,6 +137,176 @@ contract V4VaultHookTest is V4ForkTestBase {
         (uint256 collateralValue, uint128 initialLiquidity) = _setupCollateralizedPosition(hookedTokenId);
         _generateFees(hookedPoolKey);
         _executeAndVerifyAutoCollect(hookedTokenId, collateralValue, initialLiquidity);
+    }
+
+    // ==================== Vault remint -> hook state migration ====================
+
+    function test_ChangeRangeThroughVaultMigratesHookAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        (uint32 lowerBaseline, uint32 upperBaseline) = _getTriggerListSizes(hookedPoolKey);
+
+        RevertHookState.PositionConfig memory expectedConfig = _manualRangeMigrationConfig();
+        _setPositionConfigAtTarget(oldTokenId, expectedConfig);
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+        assertGt(lowerConfigured + upperConfigured, lowerBaseline + upperBaseline, "config should arm triggers");
+        (uint256 debtBefore,,,,) = vault.loanInfo(oldTokenId);
+
+        uint256 newTokenId = _executeManualRangeMove(oldTokenId, positionManager.getPositionLiquidity(oldTokenId));
+
+        _assertManualRangeMigration(oldTokenId, newTokenId, debtBefore, expectedConfig);
+        (,, uint32 newLastActivated,,,,,) = revertHook.positionStates(newTokenId);
+        assertGt(newLastActivated, 0, "replacement position should be active");
+        (,, uint32 oldLastActivated,,,,,) = revertHook.positionStates(oldTokenId);
+        assertEq(oldLastActivated, 0, "retired position should be inactive");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerConfigured, "lower triggers should move, not duplicate");
+        assertEq(upperAfter, upperConfigured, "upper triggers should move, not duplicate");
+    }
+
+    function test_PartialChangeRangeRemovesRetiredTriggers() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        // Keep both halves above the activation threshold so the old position stays armed after
+        // the partial removal; the migration itself must clear its trigger nodes.
+        revertHook.setMinPositionValueNative(0);
+
+        _setPositionConfigAtTarget(oldTokenId, _manualRangeMigrationConfig());
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+
+        uint256 newTokenId =
+            _executeManualRangeMove(oldTokenId, positionManager.getPositionLiquidity(oldTokenId) / 2);
+
+        assertGt(positionManager.getPositionLiquidity(oldTokenId), 0, "old position should keep liquidity");
+        (uint8 oldModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldModeFlags, PositionModeFlags.MODE_NONE, "old hook config should be disabled");
+        (uint8 newModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
+        assertEq(newModeFlags, _manualRangeMigrationConfig().modeFlags, "config should follow the loan");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerConfigured, "retired lower triggers must be removed");
+        assertEq(upperAfter, upperConfigured, "retired upper triggers must be removed");
+    }
+
+    function test_ChangeRangeLeavesUnconfiguredPositionInactive() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
+
+        uint256 newTokenId = _executeManualRangeMove(oldTokenId, positionManager.getPositionLiquidity(oldTokenId));
+
+        (uint8 newModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
+        assertEq(newModeFlags, PositionModeFlags.MODE_NONE, "no automation to migrate");
+        (,, uint32 newLastActivated,,,,,) = revertHook.positionStates(newTokenId);
+        assertEq(newLastActivated, 0, "unconfigured replacement must not start accruing active time");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerBefore, "no lower triggers should appear");
+        assertEq(upperAfter, upperBefore, "no upper triggers should appear");
+    }
+
+    function test_MigrateVaultPositionRejectsCallsOutsideActiveTransform() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        uint256 newTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        // not a registered vault
+        vm.expectRevert(Constants.Unauthorized.selector);
+        revertHook.migrateVaultPosition(oldTokenId, newTokenId);
+
+        // registered vault, but no transform of newTokenId is running
+        vm.prank(address(vault));
+        vm.expectRevert(Constants.Unauthorized.selector);
+        revertHook.migrateVaultPosition(oldTokenId, newTokenId);
+    }
+
+    function _manualRangeMigrationConfig() internal pure returns (RevertHookState.PositionConfig memory config) {
+        config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
+            autoExitIsRelative: false,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 2500
+        });
+    }
+
+    /// @dev Same-range CHANGE_RANGE through the vault: removes `liquidity` from oldTokenId and mints
+    ///      the proceeds into a fresh vault-held position, exercising the remint path end to end.
+    function _executeManualRangeMove(uint256 oldTokenId, uint128 liquidity) internal returns (uint256 newTokenId) {
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        V4Utils.Instructions memory instructions = V4Utils.Instructions({
+            whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
+            targetToken: poolKey.currency0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            fee: poolKey.fee,
+            tickSpacing: poolKey.tickSpacing,
+            tickLower: positionInfo.tickLower(),
+            tickUpper: positionInfo.tickUpper(),
+            liquidity: liquidity,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            recipient: WHALE_ACCOUNT,
+            recipientNFT: address(vault),
+            returnData: bytes(""),
+            swapAndMintReturnData: bytes(""),
+            hook: address(revertHook),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        newTokenId =
+            vault.transform(oldTokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (oldTokenId, instructions)));
+    }
+
+    function _assertManualRangeMigration(
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        uint256 debtBefore,
+        RevertHookState.PositionConfig memory expectedConfig
+    ) internal view {
+        assertGt(newTokenId, oldTokenId, "range move should remint the position");
+        _assertVaultHookPositionConfigEq(newTokenId, expectedConfig);
+        (uint8 oldModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldModeFlags, PositionModeFlags.MODE_NONE, "old hook config should be disabled");
+
+        (uint128 priceMultiplier0, uint128 priceMultiplier1) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(priceMultiplier0, 0, "token0 swap protection should migrate");
+        assertGt(priceMultiplier1, 0, "token1 swap protection should migrate");
+        assertTrue(
+            vault.transformApprovals(WHALE_ACCOUNT, newTokenId, address(revertHook)),
+            "replacement position should preserve hook transform approval"
+        );
+
+        (uint256 oldDebt,,,,) = vault.loanInfo(oldTokenId);
+        (uint256 newDebt,,,,) = vault.loanInfo(newTokenId);
+        assertEq(oldDebt, 0, "old position debt should be cleared");
+        assertApproxEqAbs(newDebt, debtBefore, 1, "replacement position should preserve debt");
+        assertEq(vault.ownerOf(newTokenId), WHALE_ACCOUNT, "replacement loan owner should be preserved");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(newTokenId),
+            address(vault),
+            "replacement NFT should remain vault-held"
+        );
     }
 
     function test_CollateralizedPositionWithAutoRange() public {
@@ -1203,7 +1379,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         uint256 leverageTokenId = _createPositionInHookedPool(hookedPoolKey);
         (uint256 debtBefore,) = _setupCollateralizedPositionForAutoLeverage(leverageTokenId);
-        _configurePositionForAutoLeverage(leverageTokenId, 1500);
+        _configurePositionForAutoLeverage(leverageTokenId, 1000);
         (uint256 debtAfterConfig,,,,) = vault.loanInfo(leverageTokenId);
         if (debtAfterConfig < debtBefore) {
             vm.prank(WHALE_ACCOUNT);
@@ -2050,6 +2226,130 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("\nAutoLeverage configuration test completed successfully");
     }
 
+    /// @notice Regression for Base tx 0x9f63834e... where the config was saved
+    ///         but the immediate leverage-up emitted HookActionFailed.
+    /// @dev Route the hooked USDC/WETH position through its liquid hookless
+    ///      sibling. The external-route calculator must retain both assets for
+    ///      the in-range add instead of swapping the full borrowed USDC amount.
+    function test_AutoLeverageImmediateIncreaseThroughExternalRoute() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        (uint256 debtBefore,) = _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        (, , uint256 collateralBefore,,) = vault.loanInfo(hookedTokenId);
+        uint256 ratioBefore = debtBefore * 10_000 / collateralBefore;
+        routeController.setRoute(
+            address(usdc), address(weth), hookedPoolKey.fee, hookedPoolKey.tickSpacing, IHooks(address(0))
+        );
+        routeController.setRoute(
+            address(weth), address(usdc), hookedPoolKey.fee, hookedPoolKey.tickSpacing, IHooks(address(0))
+        );
+
+        RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 5000
+        });
+
+        vm.recordLogs();
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(hookedTokenId, config);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(hookedTokenId);
+        uint256 ratioAfter = debtAfter * 10_000 / collateralAfter;
+        assertFalse(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "external-route immediate leverage must not fail"
+        );
+        assertTrue(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "successful immediate leverage must emit AutoLeverage"
+        );
+        assertGt(debtAfter, debtBefore, "immediate leverage must increase debt toward target");
+        assertLt(
+            ratioAfter > 5000 ? ratioAfter - 5000 : 5000 - ratioAfter,
+            ratioBefore > 5000 ? ratioBefore - 5000 : 5000 - ratioBefore,
+            "immediate leverage must move the debt ratio closer to target"
+        );
+        assertGt(collateralAfter, debtAfter, "position must remain healthy");
+        assertGt(positionManager.getPositionLiquidity(hookedTokenId), 0, "position must retain liquidity");
+        _assertHookHasNoTokenDust();
+    }
+
+    function test_AutoLeverageImmediateExternalRouteRejectsOracleDivergence() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        revertHook.setMaxTicksFromOracle(100);
+
+        PoolKey memory routePoolKey = _createAdditionalRoutePool(hookedPoolKey, 500, 10);
+        routeController.setRoute(
+            address(usdc), address(weth), routePoolKey.fee, routePoolKey.tickSpacing, routePoolKey.hooks
+        );
+
+        (uint160 routeSqrtPriceX96, int24 routeTick,,) =
+            StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(routePoolKey));
+        assertGt(routeSqrtPriceX96, 0, "route fixture must be initialized");
+        uint160 divergentOraclePrice = TickMath.getSqrtPriceAtTick(routeTick + 101);
+        vm.mockCall(
+            address(v4Oracle),
+            abi.encodeWithSelector(v4Oracle.getPoolSqrtPriceX96.selector, address(usdc), address(weth)),
+            abi.encode(divergentOraclePrice)
+        );
+
+        (uint256 debtBefore,,,,) = vault.loanInfo(hookedTokenId);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(hookedTokenId);
+        RevertHookState.PositionConfig memory config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 5000
+        });
+
+        vm.recordLogs();
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setPositionConfig(hookedTokenId, config);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        vm.clearMockedCalls();
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(hookedTokenId);
+        assertTrue(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "oracle-divergent external route must fail the immediate action"
+        );
+        assertEq(debtAfter, debtBefore, "rejected route must preserve debt");
+        assertEq(
+            positionManager.getPositionLiquidity(hookedTokenId), liquidityBefore, "rejected route must preserve liquidity"
+        );
+        assertFalse(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "rejected route must not emit AutoLeverage"
+        );
+        _assertHookHasNoTokenDust();
+    }
+
     function test_AutoLeverageExecutesImmediatelyWhenConfiguredOffTarget() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
 
@@ -2572,7 +2872,80 @@ contract V4VaultHookTest is V4ForkTestBase {
         console.log("Expected new upper trigger:", expectedUpperTrigger);
     }
 
-    function test_AutoLeverageSwapFailure_RestoresDebtAndLiquidity() public {
+    function test_AutoLeverageNoOpRearmsConsumedTrigger() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        _configurePositionForAutoLeverage(hookedTokenId, 5000);
+
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
+        (,,,,,,, int24 baseTickBefore) = revertHook.positionStates(hookedTokenId);
+
+        // Model the rounding boundary where the reported ratio is exactly at target.
+        // The fired trigger has already been popped before autoLeverage runs, so a
+        // successful no-op must still refresh both trigger nodes at the new base tick.
+        vm.mockCall(
+            address(vault),
+            abi.encodeWithSelector(vault.loanInfo.selector, hookedTokenId),
+            abi.encode(uint256(5000), uint256(10000), uint256(10000), uint256(0), uint256(0))
+        );
+
+        vm.recordLogs();
+        _movePriceUp(hookedPoolKey);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        vm.clearMockedCalls();
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        (,,,,,,, int24 baseTickAfter) = revertHook.positionStates(hookedTokenId);
+
+        assertTrue(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "No-op auto-leverage should complete and emit its action event"
+        );
+        assertFalse(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "No-op auto-leverage should not fail after consuming its trigger"
+        );
+        assertEq(lowerAfter, lowerBefore, "No-op auto-leverage must re-arm the lower trigger");
+        assertEq(upperAfter, upperBefore, "No-op auto-leverage must re-arm the upper trigger");
+        assertTrue(baseTickAfter != baseTickBefore, "No-op auto-leverage should refresh its base tick");
+    }
+
+    function test_AutoLeverageDoesNotRearmAfterLiquidityCallbackDeactivatesPosition() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        _configurePositionForAutoLeverage(hookedTokenId, 5000);
+        _alignLoanToTargetBps(hookedTokenId, 3500);
+
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
+        (,, uint32 lastActivatedBefore,,,,,) = revertHook.positionStates(hookedTokenId);
+        assertGt(lastActivatedBefore, 0, "Position should start active");
+
+        // loanInfo continues to use the lending asset quote, while the hook's
+        // post-add minimum-value check uses the native quote mocked below.
+        vm.mockCall(
+            address(v4Oracle),
+            abi.encodeWithSelector(v4Oracle.getValue.selector, hookedTokenId, address(0)),
+            abi.encode(uint256(0.001 ether), uint256(0), uint256(0), uint256(0))
+        );
+
+        _movePriceUp(hookedPoolKey);
+        vm.clearMockedCalls();
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        (,, uint32 lastActivatedAfter,,,,,) = revertHook.positionStates(hookedTokenId);
+
+        assertEq(lastActivatedAfter, 0, "Below-minimum position must remain deactivated");
+        assertEq(lowerAfter + 1, lowerBefore, "Lower trigger must remain removed after deactivation");
+        assertEq(upperAfter + 1, upperBefore, "Upper trigger must remain removed after deactivation");
+    }
+
+    function test_AutoLeverageRoutePlanningFailure_RestoresDebtAndLiquidity() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_LEVERAGE), 500);
 
@@ -2584,8 +2957,13 @@ contract V4VaultHookTest is V4ForkTestBase {
         _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
         uint128 liquidityBefore = positionManager.getPositionLiquidity(hookedTokenId);
 
-        routeController.setRoute(address(usdc), address(weth), 123, hookedPoolKey.tickSpacing, IHooks(address(0)));
-        routeController.setRoute(address(weth), address(usdc), 123, hookedPoolKey.tickSpacing, IHooks(address(0)));
+        uint24 uninitializedFee = 999_999;
+        routeController.setRoute(
+            address(usdc), address(weth), uninitializedFee, hookedPoolKey.tickSpacing, IHooks(address(0))
+        );
+        routeController.setRoute(
+            address(weth), address(usdc), uninitializedFee, hookedPoolKey.tickSpacing, IHooks(address(0))
+        );
 
         _configurePositionForAutoLeverage(hookedTokenId, 5000);
         _alignLoanToTargetBps(hookedTokenId, 3500);
@@ -2615,11 +2993,11 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertHookHasNoTokenDust();
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertTrue(
+        assertFalse(
             _sawHookEventTopic(
                 logs, keccak256("HookSwapFailed((address,address,uint24,int24,address),(bool,int256,uint160),bytes)")
             ),
-            "Failed leverage-up should emit HookSwapFailed"
+            "An uninitialized route should be rejected during planning before a swap is attempted"
         );
         assertTrue(
             _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
@@ -2703,9 +3081,15 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(usdcAfterUp, usdcBefore, "leverage-up should not charge USDC on the WETH-buying swap");
         assertGt(wethAfterUp, wethBefore, "leverage-up should charge a swap fee on bought WETH");
 
+        // A lower pool price increases this position's USDC-denominated
+        // collateral value. Start sufficiently above target so the lower
+        // trigger exercises the deleverage path rather than leveraging up.
+        _alignLoanToTargetBps(hookedTokenId, 6500);
         _movePriceDown(hookedPoolKey);
 
-        assertGt(usdc.balanceOf(address(this)), usdcAfterUp, "leverage-down should charge a swap fee on lend token output");
+        assertGt(
+            usdc.balanceOf(address(this)), usdcAfterUp, "leverage-down should charge a swap fee on lend token output"
+        );
     }
 
     function testSwapRouting_AutoLeverageUsesAsymmetricRoutesAtRuntime() public {
@@ -2714,10 +3098,16 @@ contract V4VaultHookTest is V4ForkTestBase {
         PoolKey memory invalidRoutePoolKey = PoolKey({
             currency0: hookedPoolKey.currency0,
             currency1: hookedPoolKey.currency1,
-            fee: 123,
+            // Fee 123 is initialized on the pinned mainnet fork, so it is not
+            // a deterministic invalid route now that the calculator correctly
+            // reads the external pool's slot0. This pool is absent at the
+            // pinned block and therefore exercises the intended failure path.
+            fee: 999_999,
             tickSpacing: hookedPoolKey.tickSpacing,
             hooks: IHooks(address(0))
         });
+        (uint160 invalidRoutePrice,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(invalidRoutePoolKey));
+        assertEq(invalidRoutePrice, 0, "invalid-route fixture must be uninitialized");
         _createPositionInHookedPool(hookedPoolKey);
 
         uint256 leverageUpTokenId = _createPositionInHookedPool(hookedPoolKey);
@@ -2725,7 +3115,13 @@ contract V4VaultHookTest is V4ForkTestBase {
         _configurePositionForAutoLeverage(leverageUpTokenId, 5000);
         _alignLoanToTargetBps(leverageUpTokenId, 3500);
 
-        routeController.setRoute(address(usdc), address(weth), invalidRoutePoolKey.fee, invalidRoutePoolKey.tickSpacing, invalidRoutePoolKey.hooks);
+        routeController.setRoute(
+            address(usdc),
+            address(weth),
+            invalidRoutePoolKey.fee,
+            invalidRoutePoolKey.tickSpacing,
+            invalidRoutePoolKey.hooks
+        );
         routeController.setRoute(
             address(weth),
             address(usdc),
@@ -2784,12 +3180,19 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         (uint256 debtAfterDown,,,,) = vault.loanInfo(leverageDownTokenId);
         uint128 liquidityAfterDown = positionManager.getPositionLiquidity(leverageDownTokenId);
+        assertFalse(
+            _sawHookEventTopic(
+                leverageDownLogs,
+                keccak256("HookSwapFailed((address,address,uint24,int24,address),(bool,int256,uint160),bytes)")
+            ),
+            "uninitialized reverse route should be rejected before swap"
+        );
         assertTrue(
             _sawHookActionFailed(leverageDownLogs, leverageDownTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
-            "leverage-down should fail when the reverse route is invalid"
+            "uninitialized reverse route should fail the full leverage-down action"
         );
-        assertEq(debtAfterDown, debtBeforeDown, "failed leverage-down should preserve debt");
-        assertEq(liquidityAfterDown, liquidityBeforeDown, "failed leverage-down should preserve liquidity");
+        assertEq(debtAfterDown, debtBeforeDown, "rejected leverage-down route should preserve debt");
+        assertEq(liquidityAfterDown, liquidityBeforeDown, "rejected leverage-down route should preserve liquidity");
     }
 
     /// @notice Test that disabling AUTO_LEVERAGE removes triggers

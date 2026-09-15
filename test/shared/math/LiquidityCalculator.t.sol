@@ -52,7 +52,21 @@ contract LiquidityCalculatorHelper {
         uint256 amt1,
         uint24 feeRate
     ) external view returns (uint256 inAmt, uint256 outAmt, bool dir) {
-        return liquidityCalculator.calculateSimple(sqrtPrice, lower, upper, amt0, amt1, feeRate);
+        return liquidityCalculator.calculateSimple(sqrtPrice, sqrtPrice, lower, upper, amt0, amt1, feeRate);
+    }
+
+    function getSimpleSwapWithRoutePrice(
+        uint160 positionSqrtPrice,
+        uint160 swapSqrtPrice,
+        int24 lower,
+        int24 upper,
+        uint256 amt0,
+        uint256 amt1,
+        uint24 feeRate
+    ) external view returns (uint256 inAmt, uint256 outAmt, bool dir) {
+        return liquidityCalculator.calculateSimple(
+            positionSqrtPrice, swapSqrtPrice, lower, upper, amt0, amt1, feeRate
+        );
     }
 }
 
@@ -904,6 +918,124 @@ contract LiquidityCalculatorTest is Test {
         assertGt(inputAmount, 0, "Should have swap input");
     }
 
+    /// @notice Regression for the Base RevertHook WETH/USDC leverage failure.
+    /// @dev The old external-route formula mixed sqrt-price ratios with token
+    ///      amount ratios. With different token decimals it capped the swap at
+    ///      the full USDC balance, leaving no token1 for liquidity and causing
+    ///      Auto-Leverage to roll back with RestoreFailed().
+    function test_calculateSimple_BaseWethUsdc_OnlyUsdcDoesNotSwapAll() public view {
+        uint160 sqrtPrice = 3941941468696704008371436;
+        uint256 usdcAmount = 8_624_832;
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-210000);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(-190000);
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = helper.getSimpleSwap(
+            sqrtPrice,
+            -210000,
+            -190000,
+            0,
+            usdcAmount,
+            500
+        );
+
+        assertFalse(swapDir0to1, "USDC must swap to WETH");
+        assertGt(inputAmount, 0, "some USDC must be swapped");
+        assertLt(inputAmount, usdcAmount, "must retain USDC for two-sided liquidity");
+        assertGt(outputAmount, 0, "swap must produce WETH");
+
+        uint128 liquidityFromWeth = LiquidityAmounts.getLiquidityForAmount0(sqrtPrice, sqrtUpper, outputAmount);
+        uint128 liquidityFromUsdc =
+            LiquidityAmounts.getLiquidityForAmount1(sqrtLower, sqrtPrice, usdcAmount - inputAmount);
+        uint256 liquidityDifference = liquidityFromWeth > liquidityFromUsdc
+            ? liquidityFromWeth - liquidityFromUsdc
+            : liquidityFromUsdc - liquidityFromWeth;
+        assertLe(liquidityDifference * 10_000 / liquidityFromUsdc, 10, "post-swap amounts must be within 0.1%");
+    }
+
+    function test_calculateSimple_UsesExternalRoutePriceForSwapSizing() public view {
+        uint160 positionSqrtPrice = SQRT_PRICE_1_0;
+        uint160 routeSqrtPrice = TickMath.getSqrtPriceAtTick(100);
+        uint256 amount1 = 100 ether;
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = helper.getSimpleSwapWithRoutePrice(
+            positionSqrtPrice, routeSqrtPrice, -600, 600, 0, amount1, 0
+        );
+
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-600);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
+        uint128 liquidityFromToken0 =
+            LiquidityAmounts.getLiquidityForAmount0(positionSqrtPrice, sqrtUpper, outputAmount);
+        uint128 liquidityFromToken1 =
+            LiquidityAmounts.getLiquidityForAmount1(sqrtLower, positionSqrtPrice, amount1 - inputAmount);
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+
+        assertFalse(swapDir0to1, "token1-only input swaps token1 to token0");
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 10, "route-priced result must be balanced");
+    }
+
+    function test_calculateSimple_UsesExternalRoutePriceForReverseSwapSizing() public view {
+        uint160 positionSqrtPrice = SQRT_PRICE_1_0;
+        uint160 routeSqrtPrice = TickMath.getSqrtPriceAtTick(-100);
+        uint256 amount0 = 100 ether;
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = helper.getSimpleSwapWithRoutePrice(
+            positionSqrtPrice, routeSqrtPrice, -600, 600, amount0, 0, 0
+        );
+
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-600);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
+        uint128 liquidityFromToken0 =
+            LiquidityAmounts.getLiquidityForAmount0(positionSqrtPrice, sqrtUpper, amount0 - inputAmount);
+        uint128 liquidityFromToken1 =
+            LiquidityAmounts.getLiquidityForAmount1(sqrtLower, positionSqrtPrice, outputAmount);
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+
+        assertTrue(swapDir0to1, "token0-only input swaps token0 to token1");
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 10, "route-priced result must be balanced");
+    }
+
+    function test_calculateSimple_RejectsInvalidPoolPriceAndFee() public {
+        vm.expectRevert(ILiquidityCalculator.Invalid_Pool.selector);
+        liquidityCalculator.calculateSimple(SQRT_PRICE_1_0, 0, -600, 600, 1 ether, 0, 3000);
+
+        vm.expectRevert(ILiquidityCalculator.Invalid_Fee.selector);
+        liquidityCalculator.calculateSimple(
+            SQRT_PRICE_1_0, SQRT_PRICE_1_0, -600, 600, 1 ether, 0, 1_000_000
+        );
+    }
+
+    function test_calculateSimple_BelowRangeUsesSpotPrice() public view {
+        uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(-1200);
+        uint256 amount1 = 10 ether;
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) =
+            helper.getSimpleSwap(sqrtPrice, -600, 600, 0, amount1, 0);
+
+        uint256 expectedOutput = amount1 * SQRT_PRICE_1_0 / uint256(sqrtPrice) * SQRT_PRICE_1_0
+            / uint256(sqrtPrice);
+        assertFalse(swapDir0to1, "below range swaps token1 to token0");
+        assertEq(inputAmount, amount1, "all token1 is swapped below range");
+        assertApproxEqAbs(outputAmount, expectedOutput, 2, "output must use spot price, not lower boundary");
+    }
+
+    function test_calculateSimple_AboveRangeUsesSpotPrice() public view {
+        uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(1200);
+        uint256 amount0 = 10 ether;
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) =
+            helper.getSimpleSwap(sqrtPrice, -600, 600, amount0, 0, 0);
+
+        uint256 expectedOutput = amount0 * uint256(sqrtPrice) / SQRT_PRICE_1_0 * uint256(sqrtPrice)
+            / SQRT_PRICE_1_0;
+        assertTrue(swapDir0to1, "above range swaps token0 to token1");
+        assertEq(inputAmount, amount0, "all token0 is swapped above range");
+        assertApproxEqAbs(outputAmount, expectedOutput, 2, "output must use spot price, not upper boundary");
+    }
+
     /// @notice Test calculateSimple with different fee rates
     function test_calculateSimple_DifferentFeeRates() public view {
         uint24 feeRate1 = 100; // 0.01%
@@ -1162,7 +1294,7 @@ contract LiquidityCalculatorTest is Test {
         int24 tickUpper = 600;
         uint256 amount0 = 100 ether;
         uint256 amount1 = 10 ether;
-        uint24 feeRate = 0; // 0.3%
+        uint24 feeRate = 0; // no fee
         
         // Calculate expected sqrt prices
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
@@ -1203,9 +1335,11 @@ contract LiquidityCalculatorTest is Test {
         if (inputAmount > 0) {
             assertGt(outputAmount, 0, "Output amount should be positive when input is positive");
             
-            // Calculate expected output (simplified: output ≈ input * sqrtPrice / sqrtUpper * (1 - fee))
-            uint256 expectedOutputApprox = (inputAmount * sqrtPrice / sqrtUpper) * (1000000 - feeRate) / 1000000;
-            uint256 tolerance = expectedOutputApprox / 100; // 1% tolerance
+            // External-route output is valued at the current spot price, not
+            // at a position boundary. At price 1 and zero fee it is exactly
+            // one token1 unit per token0 unit.
+            uint256 expectedOutputApprox = inputAmount;
+            uint256 tolerance = 1;
             
             console.log("Expected Output (approx):", expectedOutputApprox);
             console.log("Tolerance:", tolerance);
