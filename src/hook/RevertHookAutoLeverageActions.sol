@@ -118,11 +118,9 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
 
         _approveToken(poolKey.currency0, amount0);
         _approveToken(poolKey.currency1, amount1);
-        (
-            uint256 used0,
-            uint256 used1
+        (uint256 used0, uint256 used1) =
             // forge-lint: disable-next-line(unsafe-typecast)
-        ) = _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+            _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
         if (used0 > 0 || used1 > 0) {
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, vault.ownerOf(tokenId));
             return true;
@@ -201,23 +199,26 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         return false;
     }
 
-    function _rollbackFailedIncrease(uint256 tokenId, PoolKey memory poolKey, IVault vault, Currency lendToken)
-        internal
-        returns (uint256 debtAfterRollback)
-    {
+    function _rollbackFailedIncrease(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        IVault vault,
+        Currency lendToken
+    ) internal returns (uint256 debtAfterRollback) {
         Currency currency0 = poolKey.currency0;
         Currency currency1 = poolKey.currency1;
 
-        uint256 lendAmount = _swapToLendToken(
-            tokenId,
-            poolKey,
-            lendToken,
-            currency0,
-            currency1,
-            currency0.balanceOfSelf(),
-            currency1.balanceOfSelf(),
-            Mode.AUTO_LEVERAGE
-        );
+        uint256 lendAmount =
+            _swapToLendToken(
+                tokenId,
+                poolKey,
+                lendToken,
+                currency0,
+                currency1,
+                currency0.balanceOfSelf(),
+                currency1.balanceOfSelf(),
+                Mode.AUTO_LEVERAGE
+            );
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
         _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);

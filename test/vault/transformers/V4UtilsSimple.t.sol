@@ -20,7 +20,7 @@ import "test/vault/support/V4TestBase.sol";
  * @dev Tests core functionality without mainnet forking
  */
 contract V4UtilsSimpleTest is V4TestBase {
-
+    
     function testExecuteCompoundFees() public {
         console.log("=== Testing COMPOUND_FEES ===");
         

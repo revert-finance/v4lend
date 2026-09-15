@@ -10,11 +10,11 @@ library AutoLeverageLib {
         return collateralValue > 0 ? currentDebt * BPS_DENOMINATOR / collateralValue : 0;
     }
 
-    function isWithinThreshold(uint256 currentRatioBps, uint256 targetRatioBps, uint256 thresholdBps)
-        internal
-        pure
-        returns (bool)
-    {
+    function isWithinThreshold(
+        uint256 currentRatioBps,
+        uint256 targetRatioBps,
+        uint256 thresholdBps
+    ) internal pure returns (bool) {
         uint256 lowerBound = targetRatioBps > thresholdBps ? targetRatioBps - thresholdBps : 0;
         return currentRatioBps > lowerBound && currentRatioBps < targetRatioBps + thresholdBps;
     }
@@ -92,11 +92,11 @@ library AutoLeverageLib {
         repayAmount = Math.mulDiv(currentDebtBps - targetCollateral, fullValue, denominator);
     }
 
-    function liquidityToRemove(uint128 currentLiquidity, uint256 removeValue, uint256 totalValue)
-        internal
-        pure
-        returns (uint128 liquidity)
-    {
+    function liquidityToRemove(
+        uint128 currentLiquidity,
+        uint256 removeValue,
+        uint256 totalValue
+    ) internal pure returns (uint128 liquidity) {
         if (currentLiquidity == 0 || removeValue == 0 || totalValue == 0) {
             return 0;
         }

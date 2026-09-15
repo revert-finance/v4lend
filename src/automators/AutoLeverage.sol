@@ -113,7 +113,9 @@ contract AutoLeverage is Automator {
             revert Unauthorized();
         }
 
-        IVault(params.vault).transform(params.tokenId, address(this), abi.encodeCall(this._execute, (params)));
+        IVault(params.vault).transform(
+            params.tokenId, address(this), abi.encodeCall(this._execute, (params))
+        );
     }
 
     /// @notice Internal execution called from vault.transform()
@@ -159,8 +161,9 @@ contract AutoLeverage is Automator {
 
         // Collect fees first and reserve protocol fees until the end of execution.
         // Note: fee == total since liquidity decrease is 0 (onlyFees is always true effectively).
-        (uint256 feeAmount0, uint256 feeAmount1) =
-            _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
+        (uint256 feeAmount0, uint256 feeAmount1) = _decreaseLiquidity(
+            params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData
+        );
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
         }
@@ -270,6 +273,7 @@ contract AutoLeverage is Automator {
                 revert InsufficientAmountAdded();
             }
         }
+
     }
 
     function _leverageDown(
@@ -287,9 +291,9 @@ contract AutoLeverage is Automator {
             );
 
             // Net fees that can be conservatively converted into the lend token reduce how much liquidity must be removed.
-            netFeeLendValue = _quoteConservativeLendValue(
-                ctx.token0, ctx.lendToken, state.netFee0, config.maxSwapSlippageBps
-            ) + _quoteConservativeLendValue(ctx.token1, ctx.lendToken, state.netFee1, config.maxSwapSlippageBps);
+            netFeeLendValue =
+                _quoteConservativeLendValue(ctx.token0, ctx.lendToken, state.netFee0, config.maxSwapSlippageBps)
+                + _quoteConservativeLendValue(ctx.token1, ctx.lendToken, state.netFee1, config.maxSwapSlippageBps);
             repayAmount = repayAmount > netFeeLendValue ? repayAmount - netFeeLendValue : 0;
 
             if (repayAmount > 0) {
@@ -349,6 +353,7 @@ contract AutoLeverage is Automator {
             // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
             SafeERC20.forceApprove(IERC20(Currency.unwrap(ctx.lendToken)), address(vault), 0);
         }
+
     }
 
     function _quoteConservativeLendValue(

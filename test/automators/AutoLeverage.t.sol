@@ -29,9 +29,8 @@ contract AutoLeverageTest is AutomatorTestBase {
     function setUp() public override {
         super.setUp();
 
-        autoLeverage = new AutoLeverage(
-            positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient
-        );
+        autoLeverage =
+            new AutoLeverage(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient);
         autoLeverage.setVault(address(vault));
         vault.setTransformer(address(autoLeverage), true);
 
@@ -137,7 +136,8 @@ contract AutoLeverageTest is AutomatorTestBase {
         vm.prank(WHALE_ACCOUNT);
         autoLeverage.configToken(tokenId, config);
 
-        (bool isActive, uint16 targetBps, uint16 threshold,,) = autoLeverage.positionConfigs(tokenId);
+        (bool isActive, uint16 targetBps, uint16 threshold,,) =
+            autoLeverage.positionConfigs(tokenId);
         assertTrue(isActive);
         assertEq(targetBps, 5000);
         assertEq(threshold, 500);
@@ -406,7 +406,8 @@ contract AutoLeverageTest is AutomatorTestBase {
         _addPositionToVault(tokenId);
 
         uint16 maxSwapSlippageBps = 100;
-        uint256 conservativeFeeRepayCapacity = _quoteTokenToUsdcWithHaircut(address(dai), fee0, maxSwapSlippageBps)
+        uint256 conservativeFeeRepayCapacity =
+            _quoteTokenToUsdcWithHaircut(address(dai), fee0, maxSwapSlippageBps)
             + _quoteTokenToUsdcWithHaircut(address(weth), fee1, maxSwapSlippageBps);
         (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
         uint256 repayAmountTarget = conservativeFeeRepayCapacity * 9 / 10;
@@ -415,9 +416,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         assertGt(fee0, 0, "expected DAI fees");
         assertGt(fee1, 0, "expected WETH fees");
         assertGt(conservativeFeeRepayCapacity, repayAmountTarget, "fees should cover deleverage target");
-        assertGt(
-            borrowAmount, conservativeFeeRepayCapacity, "position should remain leveraged after fee-only deleverage"
-        );
+        assertGt(borrowAmount, conservativeFeeRepayCapacity, "position should remain leveraged after fee-only deleverage");
 
         vm.prank(WHALE_ACCOUNT);
         vault.borrow(tokenId, borrowAmount);
@@ -955,9 +954,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         tokenId = _mintPosition(poolKey, -887220, 887220, 1e16);
     }
 
-    function _swapExactInputSingleDaiWeth(PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 minAmountOut)
-        internal
-    {
+    function _swapExactInputSingleDaiWeth(PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 minAmountOut) internal {
         _approveWhaleDaiAndWeth();
         vm.prank(WHALE_ACCOUNT);
         permit2.approve(address(dai), address(swapRouter), type(uint160).max, type(uint48).max);
@@ -966,8 +963,7 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         bytes memory commands = hex"10";
         bytes[] memory inputs = new bytes[](1);
-        bytes memory actions =
-            abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
+        bytes memory actions = abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
         bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(
             IV4Router.ExactInputSingleParams({
