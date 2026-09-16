@@ -8,6 +8,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -2966,15 +2967,17 @@ contract V4VaultHookTest is V4ForkTestBase {
         _createPositionInHookedPool(hookedPoolKey);
         uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
         _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
-        _configurePositionForAutoLeverage(hookedTokenId, 5000);
-        _alignLoanToTargetBps(hookedTokenId, 3500);
+        // Loan above target so the fired trigger deleverages: the DECREASE runs the remove
+        // callback, which deactivates a position whose native value is below the minimum.
+        _configurePositionForAutoLeverage(hookedTokenId, 3500);
+        _alignLoanToTargetBps(hookedTokenId, 5000);
 
         (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
         (,, uint32 lastActivatedBefore,,,,,) = revertHook.positionStates(hookedTokenId);
         assertGt(lastActivatedBefore, 0, "Position should start active");
 
         // loanInfo continues to use the lending asset quote, while the hook's
-        // post-add minimum-value check uses the native quote mocked below.
+        // post-remove minimum-value check uses the native quote mocked below.
         vm.mockCall(
             address(v4Oracle),
             abi.encodeWithSelector(v4Oracle.getValue.selector, hookedTokenId, address(0)),
@@ -2990,6 +2993,76 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(lastActivatedAfter, 0, "Below-minimum position must remain deactivated");
         assertEq(lowerAfter + 1, lowerBefore, "Lower trigger must remain removed after deactivation");
         assertEq(upperAfter + 1, upperBefore, "Upper trigger must remain removed after deactivation");
+    }
+
+    function test_AutoLeverageSwapFailure_RestoresDebtAndLiquidity() public {
+        feeController.setLpFeeBps(0);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_LEVERAGE), 500);
+
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        _createPositionInHookedPool(hookedPoolKey);
+        uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(hookedTokenId);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(hookedTokenId);
+
+        // A real, oracle-consistent external route that passes planning, whose swap is then
+        // forced to revert inside the PoolManager: exercises the swap-failure rollback path.
+        PoolKey memory routePoolKey = _createAdditionalRoutePool(hookedPoolKey, 500, 10);
+        routeController.setRoute(
+            address(usdc), address(weth), routePoolKey.fee, routePoolKey.tickSpacing, IHooks(address(0))
+        );
+        routeController.setRoute(
+            address(weth), address(usdc), routePoolKey.fee, routePoolKey.tickSpacing, IHooks(address(0))
+        );
+
+        _configurePositionForAutoLeverage(hookedTokenId, 5000);
+        _alignLoanToTargetBps(hookedTokenId, 3500);
+        (uint256 debtBeforeFailure,,,,) = vault.loanInfo(hookedTokenId);
+        (,,,,,,, int24 baseTickBefore) = revertHook.positionStates(hookedTokenId);
+        uint256 feeRecipientUsdcBefore = usdc.balanceOf(address(this));
+        uint256 feeRecipientWethBefore = weth.balanceOf(address(this));
+
+        vm.mockCallRevert(
+            address(poolManager),
+            abi.encodeWithSelector(IPoolManager.swap.selector, routePoolKey),
+            abi.encodeWithSignature("Error(string)", "forced swap failure")
+        );
+        vm.recordLogs();
+        _movePriceUp(hookedPoolKey);
+        vm.clearMockedCalls();
+
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(hookedTokenId);
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(hookedTokenId);
+        (,,,,,,, int24 baseTickAfter) = revertHook.positionStates(hookedTokenId);
+
+        assertEq(debtAfter, debtBeforeFailure, "Failed leverage-up must preserve debt");
+        assertEq(liquidityAfter, liquidityBefore, "Failed leverage-up must restore original liquidity");
+        assertGt(collateralAfter, debtAfter, "Restored position should remain healthy");
+        assertEq(baseTickAfter, baseTickBefore, "Failed leverage-up must keep the previous base tick");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(hookedTokenId),
+            address(vault),
+            "Position should remain in the vault"
+        );
+        assertEq(usdc.balanceOf(address(this)), feeRecipientUsdcBefore, "failed swap should not send USDC swap fees");
+        assertEq(weth.balanceOf(address(this)), feeRecipientWethBefore, "failed swap should not send WETH swap fees");
+        _assertHookHasNoTokenDust();
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(
+            _sawHookEventTopic(
+                logs, keccak256("HookSwapFailed((address,address,uint24,int24,address),(bool,int256,uint160),bytes)")
+            ),
+            "Failed leverage-up should emit HookSwapFailed"
+        );
+        assertTrue(
+            _sawHookActionFailed(logs, hookedTokenId, RevertHookState.Mode.AUTO_LEVERAGE),
+            "Failed leverage-up should emit HookActionFailed"
+        );
+        assertFalse(
+            _sawIndexedHookEvent(logs, keccak256("AutoLeverage(uint256,bool,uint256,uint256)"), hookedTokenId),
+            "Failed leverage-up must not emit AutoLeverage"
+        );
     }
 
     function test_AutoLeverageRoutePlanningFailure_RestoresDebtAndLiquidity() public {
