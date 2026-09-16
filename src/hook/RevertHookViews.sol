@@ -123,7 +123,7 @@ abstract contract RevertHookViews is RevertHookBase {
     }
 
     function tickLowerLasts(PoolId poolId) external view returns (int24) {
-        return _tickLowerLasts[poolId];
+        return _triggerCursors[poolId].tickLowerLast;
     }
 
     function lowerTriggerAfterSwap(PoolId poolId) external view returns (bool increasing, uint32 size, int24 head) {

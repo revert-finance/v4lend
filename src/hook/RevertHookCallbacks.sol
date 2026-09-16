@@ -45,7 +45,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
         int24 tickLower = _getTickLower(tick, key.tickSpacing);
-        _tickLowerLasts[key.toId()] = tickLower;
+        _triggerCursors[key.toId()].tickLowerLast = tickLower;
         return BaseHook.afterInitialize.selector;
     }
 
@@ -111,16 +111,17 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return (this.afterSwap.selector, 0);
         }
 
-        int24 cursor = _tickLowerLasts[poolId];
-        int24 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
-        if (cursor == liveTick) {
+        TriggerCursor storage triggerCursor = _triggerCursors[poolId];
+        int24 cursor = triggerCursor.tickLowerLast;
+        // No trigger has ever registered: skip the oracle bound, the list walks, and the cursor
+        // write entirely (the dominant per-swap costs), from the slot already loaded. The cursor
+        // is left stale on purpose - _addPositionTriggers re-baselines it when the first trigger
+        // registers, so pre-registration price movement can never fire a trigger.
+        if (!triggerCursor.hasTriggers) {
             return (this.afterSwap.selector, 0);
         }
-        // No registered triggers: skip the oracle bound, the list walks, and the cursor
-        // write entirely (the dominant per-swap costs). The cursor is left stale on
-        // purpose - _addPositionTriggers re-baselines it when the first trigger registers,
-        // so pre-registration price movement can never fire a trigger.
-        if (_lowerTriggerAfterSwap[poolId].size == 0 && _upperTriggerAfterSwap[poolId].size == 0) {
+        int24 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
+        if (cursor == liveTick) {
             return (this.afterSwap.selector, 0);
         }
 
@@ -212,7 +213,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             }
         }
 
-        _tickLowerLasts[poolId] = cursor;
+        triggerCursor.tickLowerLast = cursor;
         return (this.afterSwap.selector, 0);
     }
 

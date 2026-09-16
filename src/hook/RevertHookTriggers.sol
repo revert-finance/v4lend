@@ -239,12 +239,15 @@ abstract contract RevertHookTriggers is RevertHookState {
 
         PoolId poolId = poolKey.toId();
 
-        // The afterSwap loop leaves the tick cursor stale while a pool has no registered
-        // triggers (it skips all trigger bookkeeping for gas). Re-baseline the cursor to the
+        // The afterSwap loop leaves the tick cursor stale while a pool has never registered a
+        // trigger (it skips all trigger bookkeeping for gas). Re-baseline the cursor to the
         // current bucket when the first trigger registers, so price movement from before
-        // registration can never fire it.
-        if (_lowerTriggerAfterSwap[poolId].size == 0 && _upperTriggerAfterSwap[poolId].size == 0) {
-            _tickLowerLasts[poolId] = _getTickLower(_getCurrentTick(poolId), poolKey.tickSpacing);
+        // registration can never fire it. The flag is sticky: a pool that once had triggers keeps
+        // the full afterSwap path, which is the pre-gate behaviour.
+        TriggerCursor storage triggerCursor = _triggerCursors[poolId];
+        if (!triggerCursor.hasTriggers) {
+            triggerCursor.tickLowerLast = _getTickLower(_getCurrentTick(poolId), poolKey.tickSpacing);
+            triggerCursor.hasTriggers = true;
         }
 
         (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
