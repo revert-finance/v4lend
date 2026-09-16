@@ -2783,8 +2783,12 @@ contract V4VaultHookTest is V4ForkTestBase {
         // A real, oracle-consistent external route that passes planning, whose swap is then
         // forced to revert inside the PoolManager: exercises the swap-failure rollback path.
         PoolKey memory routePoolKey = _createAdditionalRoutePool(hookedPoolKey, 500, 10);
-        routeController.setRoute(address(usdc), address(weth), routePoolKey.fee, routePoolKey.tickSpacing, IHooks(address(0)));
-        routeController.setRoute(address(weth), address(usdc), routePoolKey.fee, routePoolKey.tickSpacing, IHooks(address(0)));
+        routeController.setRoute(
+            address(usdc), address(weth), routePoolKey.fee, routePoolKey.tickSpacing, IHooks(address(0))
+        );
+        routeController.setRoute(
+            address(weth), address(usdc), routePoolKey.fee, routePoolKey.tickSpacing, IHooks(address(0))
+        );
 
         _configurePositionForAutoLeverage(hookedTokenId, 5000);
         _alignLoanToTargetBps(hookedTokenId, 3500);
