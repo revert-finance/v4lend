@@ -55,9 +55,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ///         replaced it inside the vault's current transform (e.g. a V4Utils CHANGE_RANGE).
     ///         Reached through the hook via delegatecall, so msg.sender is the calling vault.
     /// @dev Only a registered vault may call this, and only while its `transformedTokenId` is the
-    ///      replacement, which binds the call to that transaction; both NFTs must sit in the vault.
-    ///      Both positions must be in this hook's pools for the same currency pair; automation
-    ///      itself only follows a remint inside the same pool. Because pool and owner are
+    ///      replacement, which binds the call to that transaction; both NFTs must sit in the vault
+    ///      and the old position must be in one of this hook's pools. If the replacement is not
+    ///      (another hook, no hook, another pair) the old token's automation is retired and nothing
+    ///      else happens; otherwise swap protection and the carried fee follow across the pair and
+    ///      automation itself only follows a remint inside the same pool. Because pool and owner are
     ///      unchanged, tick alignment and mode-flag validity carry over from when the config was set;
     ///      only the range-dependent auto-range rules are re-checked, and a config that no longer
     ///      fits reverts the whole transform so the owner reconfigures or disables automation before
@@ -78,12 +80,24 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
 
         (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
         (PoolKey memory newPoolKey, PositionInfo newPositionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
-        if (
-            address(newPoolKey.hooks) != address(this)
-                || Currency.unwrap(oldPoolKey.currency0) != Currency.unwrap(newPoolKey.currency0)
-                || Currency.unwrap(oldPoolKey.currency1) != Currency.unwrap(newPoolKey.currency1)
-        ) {
-            revert InvalidConfig();
+        if (address(oldPoolKey.hooks) != address(this)) {
+            revert Unauthorized();
+        }
+
+        PositionConfig memory config = _positionConfigs[oldTokenId];
+        bool replacementStaysHere = address(newPoolKey.hooks) == address(this)
+            && Currency.unwrap(oldPoolKey.currency0) == Currency.unwrap(newPoolKey.currency0)
+            && Currency.unwrap(oldPoolKey.currency1) == Currency.unwrap(newPoolKey.currency1);
+        if (!replacementStaysHere) {
+            // The loan moved to a pool this hook does not serve (another hook, no hook, or another
+            // pair), so nothing can follow it. Retire the old token's automation instead of leaving
+            // trigger nodes that would only fail authorization and burn the per-swap execution
+            // budget. The carried protocol fee stays on the retired token.
+            if (!PositionModeFlags.isNone(config.modeFlags)) {
+                _removePositionTriggersWithConfig(oldTokenId, oldPoolKey, config);
+                _disablePosition(oldTokenId);
+            }
+            return;
         }
 
         // Swap protection is set independently of automation and a carried protocol fee is owed
@@ -92,7 +106,6 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[oldTokenId];
         _migratePendingProtocolFee(newPoolKey, oldTokenId, newTokenId);
 
-        PositionConfig memory config = _positionConfigs[oldTokenId];
         if (PositionModeFlags.isNone(config.modeFlags)) {
             return;
         }
