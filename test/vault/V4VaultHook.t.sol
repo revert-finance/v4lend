@@ -302,6 +302,49 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertGt(priceMultiplier0, 0, "swap protection is per pair and follows the position");
     }
 
+    function test_PartialChangeRangeToHooklessPoolRetiresHookAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        revertHook.setMinPositionValueNative(0);
+        (uint32 lowerBaseline, uint32 upperBaseline) = _getTriggerListSizes(hookedPoolKey);
+
+        _setPositionConfigAtTarget(oldTokenId, _manualRangeMigrationConfig());
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+        assertGt(lowerConfigured + upperConfigured, lowerBaseline + upperBaseline, "config should arm triggers");
+
+        // Half the liquidity moves into the hookless 0.3% pool: the loan follows, the husk keeps
+        // liquidity, and the hook must retire the husk's automation instead of leaving trigger
+        // nodes that can never execute.
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        bytes memory data = _manualRangeMoveCalldataTo(
+            oldTokenId,
+            positionManager.getPositionLiquidity(oldTokenId) / 2,
+            positionInfo.tickLower(),
+            positionInfo.tickUpper(),
+            3000,
+            60,
+            address(0)
+        );
+        vm.prank(WHALE_ACCOUNT);
+        uint256 newTokenId = vault.transform(oldTokenId, address(v4Utils), data);
+
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        assertEq(address(newPoolKey.hooks), address(0), "replacement should live in the hookless pool");
+        assertGt(positionManager.getPositionLiquidity(oldTokenId), 0, "husk keeps the remaining liquidity");
+        (uint8 oldModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldModeFlags, PositionModeFlags.MODE_NONE, "retired position must be disabled");
+        (,, uint32 oldLastActivated,,,,,) = revertHook.positionStates(oldTokenId);
+        assertEq(oldLastActivated, 0, "retired position must be inactive");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerBaseline, "retired lower triggers must be removed");
+        assertEq(upperAfter, upperBaseline, "retired upper triggers must be removed");
+        assertFalse(
+            vault.transformApprovals(WHALE_ACCOUNT, newTokenId, address(revertHook)),
+            "hook approval must not carry to a position outside its pools"
+        );
+    }
+
     function test_MigrateVaultPositionRejectsCallsOutsideActiveTransform() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
@@ -357,6 +400,22 @@ contract V4VaultHookTest is V4ForkTestBase {
         returns (bytes memory)
     {
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        return _manualRangeMoveCalldataTo(
+            oldTokenId, liquidity, newTickLower, newTickUpper, poolKey.fee, poolKey.tickSpacing, address(revertHook)
+        );
+    }
+
+    /// @dev CHANGE_RANGE through the vault into an arbitrary target pool (fee, spacing, hook).
+    function _manualRangeMoveCalldataTo(
+        uint256 oldTokenId,
+        uint128 liquidity,
+        int24 newTickLower,
+        int24 newTickUpper,
+        uint24 fee,
+        int24 tickSpacing,
+        address hook
+    ) internal view returns (bytes memory) {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
         V4Utils.Instructions memory instructions = V4Utils.Instructions({
             whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
             targetToken: poolKey.currency0,
@@ -368,8 +427,8 @@ contract V4VaultHookTest is V4ForkTestBase {
             amountIn1: 0,
             amountOut1Min: 0,
             swapData1: bytes(""),
-            fee: poolKey.fee,
-            tickSpacing: poolKey.tickSpacing,
+            fee: fee,
+            tickSpacing: tickSpacing,
             tickLower: newTickLower,
             tickUpper: newTickUpper,
             liquidity: liquidity,
@@ -380,7 +439,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             recipientNFT: address(vault),
             returnData: bytes(""),
             swapAndMintReturnData: bytes(""),
-            hook: address(revertHook),
+            hook: hook,
             decreaseLiquidityHookData: bytes(""),
             increaseLiquidityHookData: bytes("")
         });

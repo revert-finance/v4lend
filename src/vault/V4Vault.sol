@@ -1593,23 +1593,26 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         tokenOwner[tokenId] = to;
     }
 
-    /// @dev When a transform replaces the NFT and both positions share an allowlisted hook, carry the
-    ///      loan owner's transform approval for that hook to the new token and let the hook move its
-    ///      token-id keyed state (configs, triggers). Doing this here covers every transformer that
-    ///      remints without per-transformer wiring. A hook revert fails the transform on purpose: it
-    ///      means the migrated automation is invalid for the new position, and the owner must
-    ///      reconfigure or disable it before moving range rather than end up unprotected.
+    /// @dev When a transform replaces the NFT, tell the old position's allowlisted hook so it can move
+    ///      its token-id keyed state (configs, triggers) to the replacement, or retire it when the
+    ///      replacement left the hook's pools (different hook, no hook): the loan has moved, so state
+    ///      left on the old token would only orphan trigger nodes. Doing this here covers every
+    ///      transformer that remints without per-transformer wiring. The loan owner's transform
+    ///      approval for the hook is carried over only when the new position is still in one of its
+    ///      pools. A hook revert fails the transform on purpose: it means the migrated automation is
+    ///      invalid for the new position, and the owner must reconfigure or disable it before moving
+    ///      range rather than end up unprotected.
     function _migrateHookState(address loanOwner, uint256 oldTokenId, uint256 newTokenId) internal {
         (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
-        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
-        address hook = address(newPoolKey.hooks);
-        if (hook == address(0) || hook != address(oldPoolKey.hooks) || !hookAllowList[hook]) {
+        address oldHook = address(oldPoolKey.hooks);
+        if (oldHook == address(0) || !hookAllowList[oldHook]) {
             return;
         }
-        if (transformApprovals[loanOwner][oldTokenId][hook]) {
-            transformApprovals[loanOwner][newTokenId][hook] = true;
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        if (oldHook == address(newPoolKey.hooks) && transformApprovals[loanOwner][oldTokenId][oldHook]) {
+            transformApprovals[loanOwner][newTokenId][oldHook] = true;
         }
-        IRemintMigrationHook(hook).migrateVaultPosition(oldTokenId, newTokenId);
+        IRemintMigrationHook(oldHook).migrateVaultPosition(oldTokenId, newTokenId);
     }
 
     function _checkHookAllowed(uint256 tokenId) internal view {
