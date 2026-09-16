@@ -241,6 +241,64 @@ contract V4VaultHookTest is V4ForkTestBase {
         vault.transform(oldTokenId, address(v4Utils), data);
     }
 
+    function test_ChangeRangeToOtherPoolOfSameHookAllowedWithoutAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
+
+        // Second RevertHook pool for the same pair, different fee tier.
+        PoolKey memory otherPoolKey = PoolKey({
+            currency0: hookedPoolKey.currency0,
+            currency1: hookedPoolKey.currency1,
+            fee: 500,
+            tickSpacing: 10,
+            hooks: hookedPoolKey.hooks
+        });
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        poolManager.initialize(otherPoolKey, sqrtPriceX96);
+
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        V4Utils.Instructions memory instructions = V4Utils.Instructions({
+            whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
+            targetToken: poolKey.currency0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            fee: otherPoolKey.fee,
+            tickSpacing: otherPoolKey.tickSpacing,
+            tickLower: positionInfo.tickLower(),
+            tickUpper: positionInfo.tickUpper(),
+            liquidity: positionManager.getPositionLiquidity(oldTokenId),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            recipient: WHALE_ACCOUNT,
+            recipientNFT: address(vault),
+            returnData: bytes(""),
+            swapAndMintReturnData: bytes(""),
+            hook: address(revertHook),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+        vm.prank(WHALE_ACCOUNT);
+        uint256 newTokenId =
+            vault.transform(oldTokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (oldTokenId, instructions)));
+
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        assertEq(newPoolKey.fee, otherPoolKey.fee, "position should live in the other fee tier");
+        (uint8 newModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
+        assertEq(newModeFlags, PositionModeFlags.MODE_NONE, "no automation to migrate");
+        (uint128 priceMultiplier0,) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(priceMultiplier0, 0, "swap protection is per pair and follows the position");
+    }
+
     function test_MigrateVaultPositionRejectsCallsOutsideActiveTransform() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
