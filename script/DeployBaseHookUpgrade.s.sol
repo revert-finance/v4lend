@@ -23,6 +23,13 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 /// @notice Deploys the corrected RevertHook stack against the existing funded
 /// Base vault. The old hook and its positions remain untouched.
+/// @dev LIMITATION: the existing vault predates `V4Vault._migrateHookState`, so a range
+///      change through V4Utils (`CHANGE_RANGE` via `vault.transform`) on that vault does NOT
+///      carry hook automation to the reminted position: the old NFT is drained and deactivated
+///      and the new one has no config or triggers until the owner reconfigures it. Only the
+///      hook's own auto-range remints self-migrate. Carrying automation across V4Utils remints on
+///      Base requires redeploying the vault from this codebase. The old hook also stays in the
+///      vault's hookAllowList; remove it once its positions have been unwound.
 contract DeployBaseHookUpgrade is Script {
     address constant POSITION_MANAGER = 0x7C5f5A4bBd8fD63184577525326123B519429bDc;
     address constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
@@ -187,6 +194,7 @@ contract DeployBaseHookUpgrade is Script {
         console.log("RevertHookAutoLeverageActions:", address(autoLeverageActions));
         console.log("RevertHookAutoLendActions:", address(autoLendActions));
         console.log("RevertHook:", address(revertHook));
+        console.log("NOTE: existing vault has no remint callback; V4Utils range changes do not migrate hook automation");
         console.log("V4Utils:", address(v4Utils));
     }
 

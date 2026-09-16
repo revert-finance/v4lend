@@ -266,14 +266,12 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
 
-        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags)) {
-            uint256 positionValueNative = _getPositionValueNative(tokenId);
-            if (_isActivated(tokenId) && positionValueNative < _minPositionValueNative) {
-                // An active position can sit below the minimum after a price move;
-                // any add re-evaluates it so stale triggers are not left armed.
-                _removePositionTriggers(tokenId, key);
-                _deactivatePosition(tokenId);
-            } else if (!_isActivated(tokenId) && positionValueNative >= _minPositionValueNative) {
+        // Only a not-yet-active configured position consults the oracle here. Adds only raise a
+        // position's value, so below-minimum deactivation belongs to the remove callback; reading
+        // the oracle on every add of an active position would make plain deposits depend on feed
+        // freshness.
+        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
+            if (_getPositionValueNative(tokenId) >= _minPositionValueNative) {
                 _addPositionTriggers(tokenId, key);
                 _activatePosition(tokenId);
             }

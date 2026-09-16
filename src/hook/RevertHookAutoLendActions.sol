@@ -56,7 +56,8 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ///         Reached through the hook via delegatecall, so msg.sender is the calling vault.
     /// @dev Only a registered vault may call this, and only while its `transformedTokenId` is the
     ///      replacement, which binds the call to that transaction; both NFTs must sit in the vault.
-    ///      Both positions must be in this hook's pool with the same key. Because pool and owner are
+    ///      Both positions must be in this hook's pools for the same currency pair; automation
+    ///      itself only follows a remint inside the same pool. Because pool and owner are
     ///      unchanged, tick alignment and mode-flag validity carry over from when the config was set;
     ///      only the range-dependent auto-range rules are re-checked, and a config that no longer
     ///      fits reverts the whole transform so the owner reconfigures or disables automation before
@@ -79,19 +80,26 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         (PoolKey memory newPoolKey, PositionInfo newPositionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
         if (
             address(newPoolKey.hooks) != address(this)
-                || PoolId.unwrap(oldPoolKey.toId()) != PoolId.unwrap(newPoolKey.toId())
+                || Currency.unwrap(oldPoolKey.currency0) != Currency.unwrap(newPoolKey.currency0)
+                || Currency.unwrap(oldPoolKey.currency1) != Currency.unwrap(newPoolKey.currency1)
         ) {
             revert InvalidConfig();
         }
 
         // Swap protection is set independently of automation and a carried protocol fee is owed
         // regardless of it, so both follow the position even when there is no config to migrate.
+        // Both are per currency pair, so they also carry across pools of the same pair.
         _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[oldTokenId];
         _migratePendingProtocolFee(newPoolKey, oldTokenId, newTokenId);
 
         PositionConfig memory config = _positionConfigs[oldTokenId];
         if (PositionModeFlags.isNone(config.modeFlags)) {
             return;
+        }
+        // Triggers are keyed by pool, so automation only follows a remint inside the same pool.
+        // A configured position moving to another fee tier must be reconfigured first.
+        if (PoolId.unwrap(oldPoolKey.toId()) != PoolId.unwrap(newPoolKey.toId())) {
+            revert InvalidConfig();
         }
         _validateRangeConfig(newPoolKey.tickSpacing, newPositionInfo.tickLower(), newPositionInfo.tickUpper(), config);
 

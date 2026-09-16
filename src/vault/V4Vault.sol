@@ -1052,6 +1052,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @notice Sets or updates the allow list for a hook (onlyOwner)
     /// @param hook Hook to configure (address(0) for positions without hooks)
     /// @param isAllowed Whether the hook is allowed
+    /// @dev Every allowlisted non-zero hook must implement IRemintMigrationHook: `transform`
+    ///      calls `migrateVaultPosition` on it whenever a transformer replaces the NFT inside one of
+    ///      its pools, and a hook without that function makes such remints revert. Remove a retired
+    ///      hook deployment from the allowlist once its positions are unwound.
     function setHookAllowList(address hook, bool isAllowed) external onlyOwner {
         hookAllowList[hook] = isAllowed;
         emit SetHookAllowList(hook, isAllowed);
