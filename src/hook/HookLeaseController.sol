@@ -481,9 +481,11 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
                 || config.protocolFeeBps > MAX_PROTOCOL_FEE_BPS || config.protocolFeeRecipient == address(0)
                 // fees credit protocolFeesAccrued[currency][recipient] and are pulled by the recipient
                 // via claimProtocolFees; the controller can never call that as itself, so crediting
-                // its own address would strand every protocol fee of the pool; the hook has no
-                // claim entry point either
+                // its own address would strand every protocol fee of the pool. The same holds for
+                // the other immutables of this system, hook and PoolManager; any other recipient is
+                // the owner's responsibility (a contract must be able to call claimProtocolFees)
                 || config.protocolFeeRecipient == address(this) || config.protocolFeeRecipient == hook
+                || config.protocolFeeRecipient == address(poolManager)
         ) {
             revert InvalidConfig();
         }

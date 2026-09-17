@@ -488,6 +488,10 @@ contract HookAuctionControllerTest is BaseTest {
         config.protocolFeeRecipient = auctionController.hook();
         vm.expectRevert(HookAuctionController.InvalidConfig.selector);
         auctionController.configurePool(auctionPoolKey, config);
+
+        config.protocolFeeRecipient = address(poolManager);
+        vm.expectRevert(HookAuctionController.InvalidConfig.selector);
+        auctionController.configurePool(auctionPoolKey, config);
     }
 
     function testConfigureRejectsZeroReserveOrBump() public {

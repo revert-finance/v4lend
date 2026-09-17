@@ -256,6 +256,10 @@ contract HookLeaseControllerTest is BaseTest {
         config.protocolFeeRecipient = leaseController.hook();
         vm.expectRevert(HookLeaseController.InvalidConfig.selector);
         leaseController.configurePool(leasePoolKey, config);
+
+        config.protocolFeeRecipient = address(poolManager);
+        vm.expectRevert(HookLeaseController.InvalidConfig.selector);
+        leaseController.configurePool(leasePoolKey, config);
     }
 
     function testConfigureValidation() public {
