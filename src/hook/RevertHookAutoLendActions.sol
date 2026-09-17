@@ -77,6 +77,14 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         if (nft.ownerOf(oldTokenId) != msg.sender || nft.ownerOf(newTokenId) != msg.sender) {
             revert Unauthorized();
         }
+        // Auto-lend accounting (shares, vault, amount) is keyed by token id and every redemption
+        // path authorizes through the position's owner. Once the loan has moved, nobody can force
+        // the old token's exit, so its ERC4626 shares would be stranded in the hook. Refuse the
+        // remint; the owner runs autoLendForceExit first. Migrating the lending state instead would
+        // mean redeeming inside the vault's reentrancy-locked transform.
+        if (_positionStates[oldTokenId].autoLendShares != 0) {
+            revert SharesOutstanding();
+        }
 
         (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
         (PoolKey memory newPoolKey, PositionInfo newPositionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
@@ -116,7 +124,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         }
         _validateRangeConfig(newPoolKey.tickSpacing, newPositionInfo.tickLower(), newPositionInfo.tickUpper(), config);
 
-        // Base tick first: the trigger evaluation below reads it for auto-leverage triggers.
+        // Base tick first: the trigger evaluation below reads it for auto-leverage triggers. The
+        // base is recentred on the current tick, so a correction that was about to fire on the
+        // old position is not carried over: the replacement waits for a fresh ten-spacing move.
+        // That is the regular price-path correction model; rejecting off-target migrations would
+        // block legitimate range changes on leveraged positions instead.
         if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
             _positionStates[newTokenId].autoLeverageBaseTick =
                 _getTickLower(_getCurrentTick(newPoolKey.toId()), newPoolKey.tickSpacing);
