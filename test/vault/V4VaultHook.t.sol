@@ -12,6 +12,7 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 
 // base contracts
 import {V4Vault} from "src/vault/V4Vault.sol";
@@ -112,6 +113,10 @@ contract V4VaultHookTest is V4ForkTestBase {
         vault.setTransformer(address(revertHook), true);
         vault.setHookAllowList(address(revertHook), true);
 
+        // Manual range changes go through the shared V4Utils transformer (deployed by the fork base).
+        v4Utils.setVault(address(vault));
+        vault.setTransformer(address(v4Utils), true);
+
         // create tolerant oracle for testing
         v4Oracle.setMaxPoolPriceDifference(1000);
     }
@@ -130,6 +135,343 @@ contract V4VaultHookTest is V4ForkTestBase {
         (uint256 collateralValue, uint128 initialLiquidity) = _setupCollateralizedPosition(hookedTokenId);
         _generateFees(hookedPoolKey);
         _executeAndVerifyAutoCollect(hookedTokenId, collateralValue, initialLiquidity);
+    }
+
+    // ==================== Vault remint -> hook state migration ====================
+
+    function test_ChangeRangeThroughVaultMigratesHookAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        (uint32 lowerBaseline, uint32 upperBaseline) = _getTriggerListSizes(hookedPoolKey);
+
+        RevertHookState.PositionConfig memory expectedConfig = _manualRangeMigrationConfig();
+        _setPositionConfigAtTarget(oldTokenId, expectedConfig);
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+        assertGt(lowerConfigured + upperConfigured, lowerBaseline + upperBaseline, "config should arm triggers");
+        (uint256 debtBefore,,,,) = vault.loanInfo(oldTokenId);
+
+        uint256 newTokenId = _executeManualRangeMove(oldTokenId, positionManager.getPositionLiquidity(oldTokenId));
+
+        _assertManualRangeMigration(oldTokenId, newTokenId, debtBefore, expectedConfig);
+        (,, uint32 newLastActivated,,,,,) = revertHook.positionStates(newTokenId);
+        assertGt(newLastActivated, 0, "replacement position should be active");
+        (,, uint32 oldLastActivated,,,,,) = revertHook.positionStates(oldTokenId);
+        assertEq(oldLastActivated, 0, "retired position should be inactive");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerConfigured, "lower triggers should move, not duplicate");
+        assertEq(upperAfter, upperConfigured, "upper triggers should move, not duplicate");
+    }
+
+    function test_PartialChangeRangeRemovesRetiredTriggers() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        // Keep both halves above the activation threshold so the old position stays armed after
+        // the partial removal; the migration itself must clear its trigger nodes.
+        revertHook.setMinPositionValueNative(0);
+
+        _setPositionConfigAtTarget(oldTokenId, _manualRangeMigrationConfig());
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+
+        uint256 newTokenId =
+            _executeManualRangeMove(oldTokenId, positionManager.getPositionLiquidity(oldTokenId) / 2);
+
+        assertGt(positionManager.getPositionLiquidity(oldTokenId), 0, "old position should keep liquidity");
+        (uint8 oldModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldModeFlags, PositionModeFlags.MODE_NONE, "old hook config should be disabled");
+        (uint8 newModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
+        assertEq(newModeFlags, _manualRangeMigrationConfig().modeFlags, "config should follow the loan");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerConfigured, "retired lower triggers must be removed");
+        assertEq(upperAfter, upperConfigured, "retired upper triggers must be removed");
+    }
+
+    function test_ChangeRangeLeavesUnconfiguredPositionInactive() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        // Swap protection is independent of automation and must survive the remint on its own.
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes(hookedPoolKey);
+
+        uint256 newTokenId = _executeManualRangeMove(oldTokenId, positionManager.getPositionLiquidity(oldTokenId));
+
+        (uint8 newModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
+        assertEq(newModeFlags, PositionModeFlags.MODE_NONE, "no automation to migrate");
+        (uint128 priceMultiplier0, uint128 priceMultiplier1) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(priceMultiplier0, 0, "token0 swap protection should migrate without automation");
+        assertGt(priceMultiplier1, 0, "token1 swap protection should migrate without automation");
+        (,, uint32 newLastActivated,,,,,) = revertHook.positionStates(newTokenId);
+        assertEq(newLastActivated, 0, "unconfigured replacement must not start accruing active time");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerBefore, "no lower triggers should appear");
+        assertEq(upperAfter, upperBefore, "no upper triggers should appear");
+    }
+
+    function test_ChangeRangeRevertsWhenMigratedTriggerIsAlreadySatisfied() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+
+        // Relative auto-exit 600 ticks below the range: safely inactive for the current range.
+        RevertHookState.PositionConfig memory config = _manualRangeMigrationConfig();
+        config.modeFlags = PositionModeFlags.MODE_AUTO_EXIT;
+        config.autoCollectMode = RevertHookState.AutoCollectMode.NONE;
+        config.autoLeverageTargetBps = 0;
+        config.autoExitIsRelative = true;
+        config.autoExitTickLower = 600;
+        _setPositionConfigAtTarget(oldTokenId, config);
+
+        // Moving the range far above the current price puts the relative exit trigger above the
+        // price too: it is already satisfied, cannot run inside the transform, and must not be armed
+        // silently. The hook refuses (called by the vault itself, so its error surfaces directly)
+        // and the whole range move fails.
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        int24 spacing = hookedPoolKey.tickSpacing;
+        int24 base = (currentTick / spacing) * spacing;
+        bytes memory data = _manualRangeMoveCalldata(
+            oldTokenId, positionManager.getPositionLiquidity(oldTokenId), base + 20 * spacing, base + 30 * spacing
+        );
+        vm.prank(WHALE_ACCOUNT);
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.transform(oldTokenId, address(v4Utils), data);
+    }
+
+    function test_ChangeRangeToOtherPoolOfSameHookAllowedWithoutAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
+
+        // Second RevertHook pool for the same pair, different fee tier.
+        PoolKey memory otherPoolKey = PoolKey({
+            currency0: hookedPoolKey.currency0,
+            currency1: hookedPoolKey.currency1,
+            fee: 500,
+            tickSpacing: 10,
+            hooks: hookedPoolKey.hooks
+        });
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(hookedPoolKey));
+        poolManager.initialize(otherPoolKey, sqrtPriceX96);
+
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        V4Utils.Instructions memory instructions = V4Utils.Instructions({
+            whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
+            targetToken: poolKey.currency0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            fee: otherPoolKey.fee,
+            tickSpacing: otherPoolKey.tickSpacing,
+            tickLower: positionInfo.tickLower(),
+            tickUpper: positionInfo.tickUpper(),
+            liquidity: positionManager.getPositionLiquidity(oldTokenId),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            recipient: WHALE_ACCOUNT,
+            recipientNFT: address(vault),
+            returnData: bytes(""),
+            swapAndMintReturnData: bytes(""),
+            hook: address(revertHook),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+        vm.prank(WHALE_ACCOUNT);
+        uint256 newTokenId =
+            vault.transform(oldTokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (oldTokenId, instructions)));
+
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        assertEq(newPoolKey.fee, otherPoolKey.fee, "position should live in the other fee tier");
+        (uint8 newModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
+        assertEq(newModeFlags, PositionModeFlags.MODE_NONE, "no automation to migrate");
+        (uint128 priceMultiplier0,) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(priceMultiplier0, 0, "swap protection is per pair and follows the position");
+    }
+
+    function test_PartialChangeRangeToHooklessPoolRetiresHookAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        revertHook.setMinPositionValueNative(0);
+        (uint32 lowerBaseline, uint32 upperBaseline) = _getTriggerListSizes(hookedPoolKey);
+
+        _setPositionConfigAtTarget(oldTokenId, _manualRangeMigrationConfig());
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+        assertGt(lowerConfigured + upperConfigured, lowerBaseline + upperBaseline, "config should arm triggers");
+
+        // Half the liquidity moves into the hookless 0.3% pool: the loan follows, the husk keeps
+        // liquidity, and the hook must retire the husk's automation instead of leaving trigger
+        // nodes that can never execute.
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        bytes memory data = _manualRangeMoveCalldataTo(
+            oldTokenId,
+            positionManager.getPositionLiquidity(oldTokenId) / 2,
+            positionInfo.tickLower(),
+            positionInfo.tickUpper(),
+            3000,
+            60,
+            address(0)
+        );
+        vm.prank(WHALE_ACCOUNT);
+        uint256 newTokenId = vault.transform(oldTokenId, address(v4Utils), data);
+
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        assertEq(address(newPoolKey.hooks), address(0), "replacement should live in the hookless pool");
+        assertGt(positionManager.getPositionLiquidity(oldTokenId), 0, "husk keeps the remaining liquidity");
+        (uint8 oldModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldModeFlags, PositionModeFlags.MODE_NONE, "retired position must be disabled");
+        (,, uint32 oldLastActivated,,,,,) = revertHook.positionStates(oldTokenId);
+        assertEq(oldLastActivated, 0, "retired position must be inactive");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerBaseline, "retired lower triggers must be removed");
+        assertEq(upperAfter, upperBaseline, "retired upper triggers must be removed");
+        assertFalse(
+            vault.transformApprovals(WHALE_ACCOUNT, newTokenId, address(revertHook)),
+            "hook approval must not carry to a position outside its pools"
+        );
+    }
+
+    function test_MigrateVaultPositionRejectsCallsOutsideActiveTransform() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        uint256 newTokenId = _createPositionInHookedPool(hookedPoolKey);
+
+        // not a registered vault
+        vm.expectRevert(Constants.Unauthorized.selector);
+        revertHook.migrateVaultPosition(oldTokenId, newTokenId);
+
+        // registered vault, but no transform of newTokenId is running
+        vm.prank(address(vault));
+        vm.expectRevert(Constants.Unauthorized.selector);
+        revertHook.migrateVaultPosition(oldTokenId, newTokenId);
+    }
+
+    function _manualRangeMigrationConfig() internal pure returns (RevertHookState.PositionConfig memory config) {
+        config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_COLLECT | PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
+            autoExitIsRelative: false,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoRangeLowerLimit: type(int24).min,
+            autoRangeUpperLimit: type(int24).max,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 2500
+        });
+    }
+
+    /// @dev Same-range CHANGE_RANGE through the vault: removes `liquidity` from oldTokenId and mints
+    ///      the proceeds into a fresh vault-held position, exercising the remint path end to end.
+    function _executeManualRangeMove(uint256 oldTokenId, uint128 liquidity) internal returns (uint256 newTokenId) {
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        return _executeManualRangeMoveTo(oldTokenId, liquidity, positionInfo.tickLower(), positionInfo.tickUpper());
+    }
+
+    function _executeManualRangeMoveTo(uint256 oldTokenId, uint128 liquidity, int24 newTickLower, int24 newTickUpper)
+        internal
+        returns (uint256 newTokenId)
+    {
+        bytes memory data = _manualRangeMoveCalldata(oldTokenId, liquidity, newTickLower, newTickUpper);
+        vm.prank(WHALE_ACCOUNT);
+        newTokenId = vault.transform(oldTokenId, address(v4Utils), data);
+    }
+
+    function _manualRangeMoveCalldata(uint256 oldTokenId, uint128 liquidity, int24 newTickLower, int24 newTickUpper)
+        internal
+        view
+        returns (bytes memory)
+    {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        return _manualRangeMoveCalldataTo(
+            oldTokenId, liquidity, newTickLower, newTickUpper, poolKey.fee, poolKey.tickSpacing, address(revertHook)
+        );
+    }
+
+    /// @dev CHANGE_RANGE through the vault into an arbitrary target pool (fee, spacing, hook).
+    function _manualRangeMoveCalldataTo(
+        uint256 oldTokenId,
+        uint128 liquidity,
+        int24 newTickLower,
+        int24 newTickUpper,
+        uint24 fee,
+        int24 tickSpacing,
+        address hook
+    ) internal view returns (bytes memory) {
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        V4Utils.Instructions memory instructions = V4Utils.Instructions({
+            whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
+            targetToken: poolKey.currency0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            fee: fee,
+            tickSpacing: tickSpacing,
+            tickLower: newTickLower,
+            tickUpper: newTickUpper,
+            liquidity: liquidity,
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            recipient: WHALE_ACCOUNT,
+            recipientNFT: address(vault),
+            returnData: bytes(""),
+            swapAndMintReturnData: bytes(""),
+            hook: hook,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes("")
+        });
+        return abi.encodeCall(V4Utils.execute, (oldTokenId, instructions));
+    }
+
+    function _assertManualRangeMigration(
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        uint256 debtBefore,
+        RevertHookState.PositionConfig memory expectedConfig
+    ) internal view {
+        assertGt(newTokenId, oldTokenId, "range move should remint the position");
+        _assertVaultHookPositionConfigEq(newTokenId, expectedConfig);
+        (uint8 oldModeFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldModeFlags, PositionModeFlags.MODE_NONE, "old hook config should be disabled");
+
+        (uint128 priceMultiplier0, uint128 priceMultiplier1) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(priceMultiplier0, 0, "token0 swap protection should migrate");
+        assertGt(priceMultiplier1, 0, "token1 swap protection should migrate");
+        assertTrue(
+            vault.transformApprovals(WHALE_ACCOUNT, newTokenId, address(revertHook)),
+            "replacement position should preserve hook transform approval"
+        );
+
+        (uint256 oldDebt,,,,) = vault.loanInfo(oldTokenId);
+        (uint256 newDebt,,,,) = vault.loanInfo(newTokenId);
+        assertEq(oldDebt, 0, "old position debt should be cleared");
+        assertApproxEqAbs(newDebt, debtBefore, 1, "replacement position should preserve debt");
+        assertEq(vault.ownerOf(newTokenId), WHALE_ACCOUNT, "replacement loan owner should be preserved");
+        assertEq(
+            IERC721(address(positionManager)).ownerOf(newTokenId),
+            address(vault),
+            "replacement NFT should remain vault-held"
+        );
     }
 
     function test_CollateralizedPositionWithAutoRange() public {

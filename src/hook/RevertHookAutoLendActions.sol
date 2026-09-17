@@ -4,10 +4,11 @@ pragma solidity ^0.8.30;
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
@@ -20,6 +21,7 @@ import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoLendLib} from "../shared/planning/AutoLendLib.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
@@ -45,6 +47,114 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {
         hookFeeController = _hookFeeController;
         _selfAddress = address(this);
+    }
+
+    // ==================== Vault remint migration ====================
+
+    /// @notice Moves token-id keyed automation state from a vault position to the position that
+    ///         replaced it inside the vault's current transform (e.g. a V4Utils CHANGE_RANGE).
+    ///         Reached through the hook via delegatecall, so msg.sender is the calling vault.
+    /// @dev Only a registered vault may call this, and only while its `transformedTokenId` is the
+    ///      replacement, which binds the call to that transaction; both NFTs must sit in the vault
+    ///      and the old position must be in one of this hook's pools. If the replacement is not
+    ///      (another hook, no hook, another pair) the old token's automation is retired and nothing
+    ///      else happens; otherwise swap protection and the carried fee follow across the pair and
+    ///      automation itself only follows a remint inside the same pool. Because pool and owner are
+    ///      unchanged, tick alignment and mode-flag validity carry over from when the config was set;
+    ///      only the range-dependent auto-range rules are re-checked, and a config that no longer
+    ///      fits reverts the whole transform so the owner reconfigures or disables automation before
+    ///      moving range instead of ending up unprotected. A position without automation has nothing
+    ///      to migrate and is left untouched, so it never starts accruing active time. Old trigger
+    ///      nodes are cleared explicitly because a partial removal leaves them armed.
+    function migrateVaultPosition(uint256 oldTokenId, uint256 newTokenId) external {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
+        if (!_vaults[msg.sender] || oldTokenId == newTokenId || IVault(msg.sender).transformedTokenId() != newTokenId) {
+            revert Unauthorized();
+        }
+        IERC721 nft = IERC721(address(positionManager));
+        if (nft.ownerOf(oldTokenId) != msg.sender || nft.ownerOf(newTokenId) != msg.sender) {
+            revert Unauthorized();
+        }
+        // Auto-lend accounting (shares, vault, amount) is keyed by token id and every redemption
+        // path authorizes through the position's owner. Once the loan has moved, nobody can force
+        // the old token's exit, so its ERC4626 shares would be stranded in the hook. Refuse the
+        // remint; the owner runs autoLendForceExit first. Migrating the lending state instead would
+        // mean redeeming inside the vault's reentrancy-locked transform.
+        if (_positionStates[oldTokenId].autoLendShares != 0) {
+            revert SharesOutstanding();
+        }
+
+        (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        (PoolKey memory newPoolKey, PositionInfo newPositionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
+        if (address(oldPoolKey.hooks) != address(this)) {
+            revert Unauthorized();
+        }
+
+        PositionConfig memory config = _positionConfigs[oldTokenId];
+        bool replacementStaysHere = address(newPoolKey.hooks) == address(this)
+            && Currency.unwrap(oldPoolKey.currency0) == Currency.unwrap(newPoolKey.currency0)
+            && Currency.unwrap(oldPoolKey.currency1) == Currency.unwrap(newPoolKey.currency1);
+        if (!replacementStaysHere) {
+            // The loan moved to a pool this hook does not serve (another hook, no hook, or another
+            // pair), so nothing can follow it. Retire the old token's automation instead of leaving
+            // trigger nodes that would only fail authorization and burn the per-swap execution
+            // budget. The carried protocol fee stays on the retired token.
+            if (!PositionModeFlags.isNone(config.modeFlags)) {
+                _removePositionTriggersWithConfig(oldTokenId, oldPoolKey, config);
+                _disablePosition(oldTokenId);
+            }
+            return;
+        }
+
+        // Swap protection is set independently of automation and a carried protocol fee is owed
+        // regardless of it, so both follow the position even when there is no config to migrate.
+        // Both are per currency pair, so they also carry across pools of the same pair.
+        _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[oldTokenId];
+        _migratePendingProtocolFee(newPoolKey, oldTokenId, newTokenId);
+
+        if (PositionModeFlags.isNone(config.modeFlags)) {
+            return;
+        }
+        // Triggers are keyed by pool, so automation only follows a remint inside the same pool.
+        // A configured position moving to another fee tier must be reconfigured first.
+        if (PoolId.unwrap(oldPoolKey.toId()) != PoolId.unwrap(newPoolKey.toId())) {
+            revert InvalidConfig();
+        }
+        _validateRangeConfig(newPoolKey.tickSpacing, newPositionInfo.tickLower(), newPositionInfo.tickUpper(), config);
+
+        // Base tick first: the trigger evaluation below reads it for auto-leverage triggers. The
+        // base is recentred on the current tick, so a correction that was about to fire on the
+        // old position is not carried over: the replacement waits for a fresh ten-spacing move.
+        // That is the regular price-path correction model; rejecting off-target migrations would
+        // block legitimate range changes on leveraged positions instead.
+        if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
+            _positionStates[newTokenId].autoLeverageBaseTick =
+                _getTickLower(_getCurrentTick(newPoolKey.toId()), newPoolKey.tickSpacing);
+        }
+        // A trigger that is already satisfied for the new range cannot execute here (the vault's
+        // transform holds the reentrancy lock) and would sit behind the swap cursor until the price
+        // came back, leaving the replacement unprotected. Refuse the move instead; the owner
+        // reconfigures or disables automation before changing range.
+        (bool alreadyTriggered,,) = _checkTriggerConditions(
+            newTokenId, newPoolKey, config, newPositionInfo.tickLower(), newPositionInfo.tickUpper()
+        );
+        if (alreadyTriggered) {
+            revert InvalidConfig();
+        }
+
+        _removePositionTriggersWithConfig(oldTokenId, oldPoolKey, config);
+        _disablePosition(oldTokenId);
+
+        _positionConfigs[newTokenId] = config;
+        // Same gate as the liquidity callbacks: only positions worth automating get armed.
+        (uint256 positionValueNative,,,) = v4Oracle.getValue(newTokenId, address(0));
+        if (positionValueNative >= _minPositionValueNative) {
+            _addPositionTriggers(newTokenId, newPoolKey);
+            _activatePosition(newTokenId);
+        }
+        emit SetPositionConfig(newTokenId, config);
     }
 
     // ==================== Protocol fee on collected LP fees ====================

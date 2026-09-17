@@ -19,6 +19,7 @@ import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {IVault} from "./interfaces/IVault.sol";
+import {IRemintMigrationHook} from "./interfaces/IRemintMigrationHook.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
 import {Constants} from "../shared/Constants.sol";
@@ -652,6 +653,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             transformApprovals[loanOwner][newTokenId][msg.sender] = true;
         }
 
+        // a remint leaves pool-hook automation keyed by the retired token: let the hook follow the loan
+        if (tokenId != newTokenId) {
+            _migrateHookState(loanOwner, tokenId, newTokenId);
+        }
+
         // check owner not changed (NEEDED because token could have been moved somewhere else in the meantime)
         address owner = IERC721(address(positionManager)).ownerOf(newTokenId);
         if (owner != address(this)) {
@@ -1046,6 +1052,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @notice Sets or updates the allow list for a hook (onlyOwner)
     /// @param hook Hook to configure (address(0) for positions without hooks)
     /// @param isAllowed Whether the hook is allowed
+    /// @dev Every allowlisted non-zero hook must implement IRemintMigrationHook: `transform`
+    ///      calls `migrateVaultPosition` on it whenever a transformer replaces the NFT inside one of
+    ///      its pools, and a hook without that function makes such remints revert. Remove a retired
+    ///      hook deployment from the allowlist once its positions are unwound.
     function setHookAllowList(address hook, bool isAllowed) external onlyOwner {
         hookAllowList[hook] = isAllowed;
         emit SetHookAllowList(hook, isAllowed);
@@ -1581,6 +1591,28 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         ownedTokensIndex[tokenId] = ownedTokens[to].length;
         ownedTokens[to].push(tokenId);
         tokenOwner[tokenId] = to;
+    }
+
+    /// @dev When a transform replaces the NFT, tell the old position's allowlisted hook so it can move
+    ///      its token-id keyed state (configs, triggers) to the replacement, or retire it when the
+    ///      replacement left the hook's pools (different hook, no hook): the loan has moved, so state
+    ///      left on the old token would only orphan trigger nodes. Doing this here covers every
+    ///      transformer that remints without per-transformer wiring. The loan owner's transform
+    ///      approval for the hook is carried over only when the new position is still in one of its
+    ///      pools. A hook revert fails the transform on purpose: it means the migrated automation is
+    ///      invalid for the new position, and the owner must reconfigure or disable it before moving
+    ///      range rather than end up unprotected.
+    function _migrateHookState(address loanOwner, uint256 oldTokenId, uint256 newTokenId) internal {
+        (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        address oldHook = address(oldPoolKey.hooks);
+        if (oldHook == address(0) || !hookAllowList[oldHook]) {
+            return;
+        }
+        (PoolKey memory newPoolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
+        if (oldHook == address(newPoolKey.hooks) && transformApprovals[loanOwner][oldTokenId][oldHook]) {
+            transformApprovals[loanOwner][newTokenId][oldHook] = true;
+        }
+        IRemintMigrationHook(oldHook).migrateVaultPosition(oldTokenId, newTokenId);
     }
 
     function _checkHookAllowed(uint256 tokenId) internal view {
