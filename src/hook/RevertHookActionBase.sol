@@ -143,6 +143,11 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
     /// @notice Migrates configuration from an old position to its reminted replacement
     function _migrateRemintedPosition(uint256 tokenId, uint256 newTokenId) internal {
+        // auto-lend accounting never follows a remint (see migrateVaultPosition); callers reset or
+        // never hold shares here, so this only guards against a future path stranding them
+        if (_positionStates[tokenId].autoLendShares != 0) {
+            revert SharesOutstanding();
+        }
         _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[tokenId];
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(newTokenId);
         _migratePendingProtocolFee(poolKey, tokenId, newTokenId);

@@ -29,7 +29,11 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 ///      and the new one has no config or triggers until the owner reconfigures it. Only the
 ///      hook's own auto-range remints self-migrate. Carrying automation across V4Utils remints on
 ///      Base requires redeploying the vault from this codebase. The old hook also stays in the
-///      vault's hookAllowList; remove it once its positions have been unwound.
+///      vault's hookAllowList; remove it once its positions have been unwound. RUNBOOK TRAP: as
+///      soon as a vault built from this codebase is live, a transform that remints a position
+///      on the OLD hook reverts while that hook is still allowlisted (it does not implement
+///      migrateVaultPosition). Decide old-hook handling (unwind its positions, or de-allowlist
+///      it) in the same upgrade batch.
 contract DeployBaseHookUpgrade is Script {
     address constant POSITION_MANAGER = 0x7C5f5A4bBd8fD63184577525326123B519429bDc;
     address constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;

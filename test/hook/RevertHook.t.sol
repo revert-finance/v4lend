@@ -1540,6 +1540,46 @@ contract RevertHookTest is BaseTest {
         assertGt(pendingAfter1, pending1, "new token1 period fee should be added to the carried amount");
     }
 
+    /// @dev Auto-lend accounting is keyed by token id and cannot follow a remint. A vault remint
+    ///      of a position that still holds ERC4626 shares must be refused so the owner exits the
+    ///      lend first; afterwards the same remint goes through.
+    function testMigrateVaultPositionRefusesOutstandingAutoLendShares() public {
+        uint256 oldTokenId = _createActiveAutoLendPosition();
+        (uint256 newTokenId,) = positionManager.mint(
+            poolKey,
+            tickLower2,
+            tickUpper2,
+            1e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        // stand in for a lending vault mid-transform: registered, owns both NFTs, transforming new
+        address fakeVault = makeAddr("fakeVault");
+        hook.setVault(fakeVault);
+        IERC721(address(positionManager)).transferFrom(address(this), fakeVault, oldTokenId);
+        IERC721(address(positionManager)).transferFrom(address(this), fakeVault, newTokenId);
+        vm.mockCall(fakeVault, abi.encodeWithSignature("transformedTokenId()"), abi.encode(newTokenId));
+        vm.mockCall(
+            fakeVault, abi.encodeWithSignature("ownerOf(uint256)", oldTokenId), abi.encode(address(this))
+        );
+
+        vm.prank(fakeVault);
+        vm.expectRevert(abi.encodeWithSignature("SharesOutstanding()"));
+        hook.migrateVaultPosition(oldTokenId, newTokenId);
+
+        // the position owner (resolved through the vault) exits the lend, then the remint is fine
+        hook.autoLendForceExit(oldTokenId);
+        (,,,, uint256 sharesAfterExit,,,) = hook.positionStates(oldTokenId);
+        assertEq(sharesAfterExit, 0, "force exit redeems the shares");
+        vm.prank(fakeVault);
+        hook.migrateVaultPosition(oldTokenId, newTokenId);
+        vm.clearMockedCalls();
+    }
+
     function testTakeProtocolFeesRejectsDirectCall() public {
         RevertHookSwapActions swapActions = new RevertHookSwapActions(v4Oracle.poolManager(), feeController);
         RevertHookAutoLendActions sidecar = new RevertHookAutoLendActions(

@@ -44,31 +44,28 @@ library AutoLeverageLib {
         borrowAmount = Math.mulDiv(targetCollateral - currentDebtBps, fullValue, denominator);
     }
 
+    /// @notice Post-condition for one leverage adjustment.
+    /// @dev Deleverage is a risk improvement whenever it lowers the debt ratio, even if execution
+    ///      lands below target. Leverage-up must raise the ratio and must not cross the target by
+    ///      more than `overshootToleranceBps`: overshoot means more leverage than the user asked
+    ///      for, and since hook-managed swaps have no default price floor a bad fill is not bounded
+    ///      to rounding dust. The tolerance keeps 1-wei landings above target from reverting.
     function improvesTowardTarget(
         uint256 debtBefore,
         uint256 collateralBefore,
         uint256 debtAfter,
         uint256 collateralAfter,
-        uint256 targetRatioBps
+        uint256 targetRatioBps,
+        uint256 overshootToleranceBps
     ) internal pure returns (bool) {
         if (collateralBefore == 0 || collateralAfter == 0) return false;
         uint256 ratioBefore = currentRatio(debtBefore, collateralBefore);
         uint256 ratioAfter = currentRatio(debtAfter, collateralAfter);
 
-        // Leverage-up must move closer to the target without crossing through
-        // it into a worse position. Deleverage is always a risk improvement
-        // when it lowers the debt ratio, even if execution lands below target.
         if (ratioBefore > targetRatioBps) {
             return ratioAfter < ratioBefore;
         }
-        if (ratioAfter <= ratioBefore) {
-            return false;
-        }
-
-        uint256 distanceBefore =
-            ratioBefore > targetRatioBps ? ratioBefore - targetRatioBps : targetRatioBps - ratioBefore;
-        uint256 distanceAfter = ratioAfter > targetRatioBps ? ratioAfter - targetRatioBps : targetRatioBps - ratioAfter;
-        return distanceAfter < distanceBefore;
+        return ratioAfter > ratioBefore && ratioAfter <= targetRatioBps + overshootToleranceBps;
     }
 
     function repayAmountToTarget(
