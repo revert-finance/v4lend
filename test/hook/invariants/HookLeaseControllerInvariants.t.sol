@@ -295,16 +295,18 @@ contract HookLeaseControllerInvariantTest is BaseTest {
         }
         assertEq(executor == address(0), lessee == address(0), "executor/lessee vacancy diverged");
         if (lessee != address(0)) {
-            uint256 expected = uint256(lastAccrualTime) + rentBalance / controller.rentPerSecond(poolId);
+            uint256 rps = controller.rentPerSecond(poolId);
+            uint256 expected = uint256(lastAccrualTime) + rentBalance / rps;
             if (expected > type(uint40).max) {
                 expected = type(uint40).max;
             }
             // never a discount beyond the actual rent runway...
             assertLe(paidThrough, uint40(expected), "paidThrough grants more than the rent runway");
-            // ...and exactly the runway while rent remains (once rentBalance hits 0,
-            // lastAccrualTime keeps advancing on touches while paidThrough correctly stays
-            // frozen at the true runout, so equality only holds with rent left)
-            if (rentBalance != 0) {
+            // ...and exactly the runway while at least one more second is prepaid (once the balance
+            // drops below one second of rent - zero or the unspent sub-second remainder -
+            // lastAccrualTime keeps advancing on touches while paidThrough correctly stays frozen
+            // at the true runout, so equality only holds while the lease is still served)
+            if (rentBalance >= rps) {
                 assertEq(paidThrough, uint40(expected), "paidThrough short-changes the rent runway");
             }
             assertGt(price, 0, "active lease must have a price deposit");

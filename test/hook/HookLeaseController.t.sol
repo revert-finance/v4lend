@@ -940,8 +940,33 @@ contract HookLeaseControllerTest is BaseTest {
         leaseController.exitLease(leasePoolKey);
     }
 
+    /// @notice Codex P2: the sub-second remainder of a rent deposit (rentBalance % rps) never buys
+    ///         discount time (paidThrough floors), so an accrual after the lease ran out must not
+    ///         sweep it; it stays refundable.
+    function testInsolventAccrualPreservesSubSecondRemainder() public {
+        // rps for price 1e18 is fixed by the config; a deposit of k whole seconds plus 40 wei
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId);
+        vm.prank(lesseeA);
+        leaseController.exitLease(leasePoolKey);
+        uint256 deposit = rps * MIN_RENT_SECONDS + 40;
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, deposit);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+
+        // first accrual two seconds after the runway ended: charge only the covered seconds
+        vm.warp(uint256(paidThrough) + 2);
+        leaseController.drip(leasePoolKey);
+        (,,, uint256 rentBalance,,,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(rentBalance, 40, "the remainder that bought no time stays in the balance");
+
+        vm.prank(lesseeA);
+        uint256 refund = leaseController.exitLease(leasePoolKey);
+        assertEq(refund, 1e18 + 40, "deposit plus the unspent remainder refunded");
+    }
+
     function testEvictOnlyDisabledAndInsolvent() public {
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId); // price is cleared by the eviction
 
         // enabled -> cannot evict at all
         vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
@@ -960,7 +985,8 @@ contract HookLeaseControllerTest is BaseTest {
         vm.expectEmit(true, false, false, false, address(leaseController));
         emit RentDripped(leasePoolId, 0);
         uint256 refund = leaseController.evictLease(leasePoolKey);
-        assertEq(refund, 1e18, "price deposit refunded (all rent consumed)");
+        uint256 remainder = 0.2e18 % rps;
+        assertEq(refund, 1e18 + remainder, "price deposit plus the sub-second rent remainder refunded");
         assertEq(leaseController.refunds(currency1, lesseeA), refund, "escrowed, not pushed");
         (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
         assertEq(lessee, address(0), "slot vacated");

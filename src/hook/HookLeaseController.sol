@@ -839,9 +839,17 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (rentBalance == 0) {
             return 0;
         }
-        uint256 owed = _rentPerSecond(config, state.price) * elapsed;
-        if (owed > rentBalance) {
-            owed = rentBalance;
+        // Rent is charged only for whole seconds the slot was actually served. paidThrough floors
+        // rentBalance / rps, so the sub-second remainder never bought discount time; it must stay
+        // refundable rather than be swept into the first accrual after the lease ran out.
+        uint256 rps = _rentPerSecond(config, state.price);
+        uint256 coveredSeconds = rentBalance / rps;
+        if (elapsed > coveredSeconds) {
+            elapsed = coveredSeconds;
+        }
+        uint256 owed = rps * elapsed;
+        if (owed == 0) {
+            return 0;
         }
         state.rentBalance = uint128(rentBalance - owed);
 
