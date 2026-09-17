@@ -587,7 +587,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (lessee == address(0)) {
             revert NoActiveLease();
         }
-        _addPending(state, _accrue(poolId, config, state));
+        // the final accrual is delivered to the LPs who were in range while it accrued, exactly
+        // like every other lease action; it is parked only inside a throttle window
+        _settleAccrualForLeaseAction(key, poolId, config, state);
         // same strict boundary as the discount: at paidThrough the lease no longer covers rent
         if (block.timestamp < state.paidThrough) {
             revert LeaseStillSolvent();
@@ -856,7 +858,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         return owed - protocolFee;
     }
 
-    /// @dev Lease actions (buyout, fundRent, setPrice, exitLease) accrue outside the hook callbacks.
+    /// @dev Lease actions (buyout, fundRent, setPrice, exitLease, evictLease) accrue outside the hook
+    ///      callbacks.
     ///      The rent accrued since the last touch belongs to the LPs currently in range (the set has
     ///      been constant since that touch), so deliver it the regular way - through our own unlock
     ///      into `_accrueAndDrip`, which donates fresh rent directly - whenever the shared throttle

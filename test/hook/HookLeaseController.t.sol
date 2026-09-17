@@ -953,14 +953,19 @@ contract HookLeaseControllerTest is BaseTest {
         vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
         leaseController.evictLease(leasePoolKey);
 
-        // insolvent -> evictable; the price deposit goes to the lessee's escrow
+        // insolvent -> evictable; the price deposit goes to the lessee's escrow, and the final
+        // accrual is delivered to the LP in range rather than parked for later LPs or the sweep
         (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
         vm.warp(uint256(paidThrough) + 1);
+        vm.expectEmit(true, false, false, false, address(leaseController));
+        emit RentDripped(leasePoolId, 0);
         uint256 refund = leaseController.evictLease(leasePoolKey);
         assertEq(refund, 1e18, "price deposit refunded (all rent consumed)");
         assertEq(leaseController.refunds(currency1, lesseeA), refund, "escrowed, not pushed");
         (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
         assertEq(lessee, address(0), "slot vacated");
+        (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(pending, 0, "eviction delivered the final accrual instead of parking it");
     }
 
     function testSweepRequiresWindDownAndVacancy() public {
