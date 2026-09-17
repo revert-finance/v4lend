@@ -343,5 +343,5 @@ Highest-value review areas:
 - dynamic-fee hook routes are intentionally unsupported
 - controllers are governed by `hook.owner()`
 - hook automation migrates across a position remint only for vault-held positions; a direct `V4Utils` range change intentionally leaves the replacement without automation (`AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS`)
-- hook-managed swaps intentionally have no default `amountOutMin` floor; the oracle trigger window and the oracle pool-deviation guard are the bound, with per-position price limits available opt-in (`AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR`, which now states the assumed parameters and worst case)
+- hook-managed swaps intentionally have no default `amountOutMin` floor; the oracle window and the oracle pool-deviation guard are the bound, with per-position price limits available opt-in (`AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR`, which states the assumed parameters and worst case). Trigger-driven actions inherit the window from swap traversal; the permissionless `autoCollect` entry point is price-checked directly in `_executeSwapResolved` because it never traverses
 

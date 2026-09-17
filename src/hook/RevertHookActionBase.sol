@@ -268,7 +268,12 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         Mode mode,
         bool validateOracle
     ) internal returns (BalanceDelta delta) {
-        if (validateOracle) _validateSwapPoolPrice(swapPool);
+        // AUTO_COLLECT is the one mode that never arms a trigger (PositionModeFlags.hasTriggers
+        // ignores it), so its swaps are only ever reached through the permissionless `autoCollect`
+        // entry point, outside the oracle-bounded traversal in _afterSwap. Price-check them here
+        // too - both the same-pool ratio swap and the HARVEST single-side swap - so a caller cannot
+        // manipulate the pool first and force a position's collected fees through it.
+        if (validateOracle || mode == Mode.AUTO_COLLECT) _validateSwapPoolPrice(swapPool);
         (bool success, bytes memory returndata) = address(swapActions).delegatecall(
             abi.encodeCall(RevertHookSwapActions.executeSwap, (swapPool, zeroForOne, amountIn, tokenId, mode))
         );
@@ -280,9 +285,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         delta = abi.decode(returndata, (BalanceDelta));
     }
 
-    /// @dev Trigger traversal bounds the position pool against the oracle, but
-    ///      a configured external route is a different pool and is not covered
-    ///      by that check. Validate its spot price immediately before use.
+    /// @dev Trigger traversal bounds the position pool against the oracle, but a configured external
+    ///      route is a different pool and is not covered by that check, and permissionless
+    ///      `autoCollect` swaps never pass through traversal at all. Validate the execution pool's
+    ///      spot price immediately before use in both cases.
     function _validateSwapPoolPrice(PoolKey memory swapPool) internal view {
         (uint160 swapSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, swapPool.toId());
         if (swapSqrtPriceX96 == 0) revert ILiquidityCalculator.Invalid_Pool();

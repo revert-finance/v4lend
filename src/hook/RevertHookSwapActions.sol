@@ -62,9 +62,16 @@ contract RevertHookSwapActions is RevertHookState {
             // bounds. Extractable value is therefore on the order of (1% + own impact) x swap size,
             // and is only profitable when that exceeds the attacker's round trip - the pool fee twice
             // on the size needed to reach the window edge, plus their own impact and the risk of an
-            // unrelated swap landing between the two legs. It does not compound across actions: each
-            // one re-checks the window, and the 2% oracle guard caps how far the pool can be pushed
-            // before automation stops entirely.
+            // unrelated swap landing between the two legs. It does not compound across actions: the
+            // window is re-established for every one, and the 2% oracle guard caps how far the pool
+            // can be pushed before automation stops entirely.
+            //
+            // Where the window comes from differs by entry point, and both are covered:
+            //   - trigger-driven actions (AUTO_RANGE / AUTO_EXIT / AUTO_LEVERAGE / AUTO_LEND) only
+            //     run inside _afterSwap, whose traversal is already clamped to the oracle window;
+            //   - AUTO_COLLECT arms no trigger and is invoked through the permissionless
+            //     `autoCollect`, so traversal never bounds it; `_executeSwapResolved` price-checks
+            //     its swaps explicitly instead (same bound, applied immediately before the swap).
             // Levers that tighten this without a code change: per-position setSwapProtectionConfig
             // (a real price limit for that position), a lower owner-set setMaxTicksFromOracle, and
             // HookRouteController routes pointing actions at deeper pools.

@@ -66,6 +66,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ///      moving range instead of ending up unprotected. A position without automation has nothing
     ///      to migrate and is left untouched, so it never starts accruing active time. Old trigger
     ///      nodes are cleared explicitly because a partial removal leaves them armed.
+    /// @dev Scope: vault-held positions only. A direct (non-vault) V4Utils `CHANGE_RANGE` runs no
+    ///      vault transform, so nothing calls this and the replacement NFT starts without automation
+    ///      - see AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS in V4Utils for why that is accepted.
     function migrateVaultPosition(uint256 oldTokenId, uint256 newTokenId) external {
         if (address(this) == _selfAddress) {
             revert Unauthorized();
@@ -168,9 +171,6 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ///      SafeCastOverflow if anything is taken. The fee is therefore capped at what the current
     ///      operation can absorb (see `_protocolFeeCaps`) and the shortfall is carried per position,
     ///      to be settled on a later operation with room.
-    /// @dev Scope: vault-held positions only. A direct (non-vault) V4Utils `CHANGE_RANGE` runs no
-    ///      vault transform, so nothing calls this and the replacement NFT starts without automation
-    ///      - see AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS in V4Utils for why that is accepted.
     /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
     /// @param liquidityDelta Signed liquidity change of the operation (0 for fee-only collections)
     /// @param delta Full caller delta (principal + accrued fees) reported by the pool
