@@ -933,8 +933,10 @@ contract HookLeaseControllerTest is BaseTest {
         (uint256 outLessee, uint256 outOther) = _swapOutcomes(1e18);
         assertGt(outLessee, outOther, "discount honored during wind-down");
 
-        // reducing exposure stays possible: lowering the price and exiting
+        // lowering the price would stretch the prepaid runway at the lower rate, so it is refused
+        // too during wind-down; reducing exposure is done by exiting, which always works
         vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
         leaseController.setPrice(leasePoolKey, 0.5e18);
         vm.prank(lesseeA);
         leaseController.exitLease(leasePoolKey);
@@ -962,6 +964,30 @@ contract HookLeaseControllerTest is BaseTest {
         vm.prank(lesseeA);
         uint256 refund = leaseController.exitLease(leasePoolKey);
         assertEq(refund, 1e18 + 40, "deposit plus the unspent remainder refunded");
+    }
+
+    /// @notice Codex P2: while leasing is disabled a lessee must not revive a run-out lease by
+    ///         lowering the price (a lower rent rate stretches the remaining balance into a longer
+    ///         runway), which would block the owner's eviction and wind-down.
+    function testDisabledLeaseCannotExtendRunwayByLoweringPrice() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        leaseController.setLeasingEnabled(leasePoolKey, false);
+
+        // solvent: lowering would push paidThrough out at the lower rate -> refused
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
+        leaseController.setPrice(leasePoolKey, 0.5e18);
+
+        // run out, then try to revive from the sub-second remainder -> refused, eviction works
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        vm.warp(uint256(paidThrough) + 1);
+        leaseController.drip(leasePoolKey); // accrues the runway; the remainder stays in the balance
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
+        leaseController.setPrice(leasePoolKey, 1);
+        leaseController.evictLease(leasePoolKey);
+        (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, address(0), "owner wind-down not blocked");
     }
 
     function testEvictOnlyDisabledAndInsolvent() public {

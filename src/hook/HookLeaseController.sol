@@ -345,8 +345,10 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @notice Changes the caller's self-assessed price. Raising it pulls the difference into
     ///         escrow (and raises the rent); lowering it refunds the difference (and lowers the
     ///         rent, but also the buyout threshold - the Harberger honesty incentive).
-    /// @dev Lowering stays allowed while leasing is disabled (it only reduces the lessee's
-    ///      exposure); raising requires leasing to be enabled.
+    /// @dev Raising requires leasing to be enabled. Lowering stays allowed while leasing is
+    ///      disabled only as long as it does not stretch the prepaid runway: a lower rent rate
+    ///      would otherwise revive a run-out lease from its remaining balance and block the
+    ///      owner's wind-down, since evictLease requires insolvency.
     function setPrice(PoolKey calldata key, uint256 newPrice) external nonReentrant {
         PoolId poolId = key.toId();
         PoolLeaseConfig storage config = _poolConfigs[poolId];
@@ -361,13 +363,15 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         _checkPrice(newPrice);
 
         _settleAccrualForLeaseAction(key, poolId, config, state);
+        uint40 newPaidThrough =
+            _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, newPrice));
+        if (!config.leasingEnabled && (newPrice > oldPrice || newPaidThrough > state.paidThrough)) {
+            revert LeasingDisabled();
+        }
         state.price = uint128(newPrice);
-        state.paidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, newPrice));
+        state.paidThrough = newPaidThrough;
 
         if (newPrice > oldPrice) {
-            if (!config.leasingEnabled) {
-                revert LeasingDisabled();
-            }
             _pullExact(config.auctionCurrency, newPrice - oldPrice);
         } else {
             _transferOutExact(config.auctionCurrency, msg.sender, oldPrice - newPrice);
