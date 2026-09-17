@@ -196,8 +196,9 @@ contract AutoLeverage is Automator {
         _sendRemainingBalances(owner, ctx.token0, ctx.token1);
 
         (uint256 newDebt,, uint256 newCollateralValue,,) = vault.loanInfo(params.tokenId);
+        // the user's rebalance band doubles as the accepted overshoot above target
         if (!AutoLeverageLib.improvesTowardTarget(
-                ctx.currentDebt, ctx.collateralValue, newDebt, newCollateralValue, targetRatio
+                ctx.currentDebt, ctx.collateralValue, newDebt, newCollateralValue, targetRatio, threshold
             )) revert NoImprovement();
         emit AutoLeverageExecuted(params.tokenId, params.leverageUp, ctx.currentDebt, newDebt);
     }
