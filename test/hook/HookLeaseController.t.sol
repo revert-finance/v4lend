@@ -247,6 +247,13 @@ contract HookLeaseControllerTest is BaseTest {
 
     // ==================== Configuration ====================
 
+    function testConfigureRejectsControllerAsProtocolFeeRecipient() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.protocolFeeRecipient = address(leaseController);
+        vm.expectRevert(HookLeaseController.InvalidConfig.selector);
+        leaseController.configurePool(leasePoolKey, config);
+    }
+
     function testConfigureValidation() public {
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
 

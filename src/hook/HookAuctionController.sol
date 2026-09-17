@@ -415,6 +415,10 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (
             config.normalLpFee > LPFeeLibrary.MAX_LP_FEE || config.feeDiscountPpm > PPM
                 || config.protocolFeeBps > MAX_PROTOCOL_FEE_BPS || config.protocolFeeRecipient == address(0)
+                // fees credit protocolFeesAccrued[currency][recipient] and are pulled by the recipient
+                // via claimProtocolFees; the controller can never call that as itself, so crediting
+                // its own address would strand every protocol fee of the pool
+                || config.protocolFeeRecipient == address(this)
         ) {
             revert InvalidConfig();
         }

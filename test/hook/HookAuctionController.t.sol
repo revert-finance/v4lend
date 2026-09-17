@@ -479,6 +479,13 @@ contract HookAuctionControllerTest is BaseTest {
         assertGt(outWinner, outOther, "auction fully live after enabling");
     }
 
+    function testConfigureRejectsControllerAsProtocolFeeRecipient() public {
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.protocolFeeRecipient = address(auctionController);
+        vm.expectRevert(HookAuctionController.InvalidConfig.selector);
+        auctionController.configurePool(auctionPoolKey, config);
+    }
+
     function testConfigureRejectsZeroReserveOrBump() public {
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
         config.openingBidReserve = 0;
