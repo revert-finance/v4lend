@@ -133,6 +133,10 @@ contract V4VaultHookTest is V4ForkTestBase {
 
     function test_CollateralizedPositionWithAutoCollect() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
+        // This pool is created fresh with ~1e14 liquidity, so the fee-generating swaps below move it
+        // far from the Chainlink-derived oracle price - further than a real pool would drift. Widen
+        // the oracle window for this scenario, since auto-collect now price-checks its swap.
+        revertHook.setMaxTicksFromOracle(10000);
         uint256 hookedTokenId = _createPositionInHookedPool(hookedPoolKey);
         _configurePositionForAutoCollect(hookedTokenId);
         (uint256 collateralValue, uint128 initialLiquidity) = _setupCollateralizedPosition(hookedTokenId);

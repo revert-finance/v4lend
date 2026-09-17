@@ -1610,6 +1610,45 @@ contract RevertHookTest is BaseTest {
         });
     }
 
+    /// @notice AUTO_COLLECT arms no trigger, so it never passes through the oracle-bounded traversal
+    ///         in afterSwap; `autoCollect` is permissionless, so its swap is price-checked directly.
+    ///         A pool pushed outside the window must make the action decline rather than swap there.
+    function testAutoCollectRefusesSwapWhilePoolIsOffOracle() public {
+        uint128 token2Liquidity = _setupAutoCollectTest(RevertHookState.AutoCollectMode.AUTO_COLLECT);
+
+        // Point the oracle at the hookless twin of this pair so the hooked pool can be moved on its
+        // own, then push the hooked pool well past _maxTicksFromOracle (100 ticks).
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey);
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 5e18,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        uint256[] memory params = new uint256[](1);
+        params[0] = token2Id;
+        hook.autoCollect(params); // fails open: no revert, but nothing is swapped or compounded
+        assertEq(
+            positionManager.getPositionLiquidity(token2Id),
+            token2Liquidity,
+            "off-oracle pool must not compound through a manipulated price"
+        );
+
+        // Control: with the oracle back on this pool the same call compounds as usual, so the
+        // price check is what declined above.
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), poolKey);
+        hook.autoCollect(params);
+        assertGt(
+            positionManager.getPositionLiquidity(token2Id),
+            token2Liquidity,
+            "in-window pool should compound normally"
+        );
+    }
+
     function testBasicAutoHarvestToken0() public {
         uint128 token2Liquidity = _setupAutoCollectTest(RevertHookState.AutoCollectMode.HARVEST_TOKEN_0);
         BalanceSnapshot memory before = _recordBalancesBeforeAutoCollect();
