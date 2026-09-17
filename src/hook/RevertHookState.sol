@@ -165,6 +165,10 @@ abstract contract RevertHookState is RevertHookAccess {
     // auto-leverage triggers at baseTick ± (LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing)
     int24 internal constant _LEVERAGE_TICK_OFFSET_MULTIPLIER = 10;
 
+    // a hook leverage-up may land at most this far above the configured target ratio; beyond it the
+    // action is rolled back as NoImprovement (bad fills must not hand the user more leverage)
+    uint256 internal constant _LEVERAGE_OVERSHOOT_TOLERANCE_BPS = 100;
+
     // oracle price validation
     int24 internal _maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
     // Bound automation processing for one external swap. If the cap is hit, remaining executions stay registered

@@ -66,7 +66,12 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         if (
             !loanUnchanged
                 && !AutoLeverageLib.improvesTowardTarget(
-                    currentDebt, collateralValue, checkedDebt, checkedCollateral, targetRatioBps
+                    currentDebt,
+                    collateralValue,
+                    checkedDebt,
+                    checkedCollateral,
+                    targetRatioBps,
+                    _LEVERAGE_OVERSHOOT_TOLERANCE_BPS
                 )
         ) revert NoImprovement();
 
