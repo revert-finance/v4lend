@@ -22,6 +22,7 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 /// @title DeployBase
 /// @notice Deployment script for RevertHook and all related contracts on Base
@@ -66,7 +67,11 @@ contract DeployBase is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 1 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 1 hours;
+    // Base's USDC/USD feed has a materially slower heartbeat than ETH/USD.
+    // A shared one-hour limit made otherwise healthy vault reads revert when
+    // the stablecoin price had not moved enough to publish a new round.
+    uint32 constant USDC_MAX_FEED_AGE = 25 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
@@ -85,6 +90,17 @@ contract DeployBase is Script {
     uint16 constant PROTOCOL_FEE_BPS = 100; // 1% protocol fee
     int24 constant MAX_TICKS_FROM_ORACLE = 100; // Max tick deviation from oracle price
     uint256 constant MIN_POSITION_VALUE_NATIVE = 0.01 ether; // Minimum position value
+
+    // Deep hookless Base ETH/USDC v4 pool used for hook action swaps. Without
+    // this bidirectional route, hook actions fall back to swapping inside the
+    // much shallower RevertHook pool and can fail the oracle deviation check.
+    uint24 constant ETH_USDC_ROUTE_FEE = 500;
+    int24 constant ETH_USDC_ROUTE_TICK_SPACING = 10;
+    // WETH is accepted as collateral too and _resolveSwapPool matches token addresses exactly, so
+    // WETH/USDC positions need their own route. Base's hookless WETH/USDC v4 liquidity sits in the
+    // 0.3% pool; the 0.05% one is roughly 400x shallower and unusable as a route.
+    uint24 constant WETH_USDC_ROUTE_FEE = 3000;
+    int24 constant WETH_USDC_ROUTE_TICK_SPACING = 60;
 
     // Vault configuration
     uint256 constant MIN_LOAN_SIZE = 100000; // 0.1 USDC (6 decimals)
@@ -193,7 +209,7 @@ contract DeployBase is Script {
         oracle.setTokenConfig(
             WETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -203,7 +219,7 @@ contract DeployBase is Script {
         oracle.setTokenConfig(
             ETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -216,7 +232,7 @@ contract DeployBase is Script {
         oracle.setTokenConfig(
             USDC,
             AggregatorV3Interface(CHAINLINK_USDC_USD),
-            MAX_FEED_AGE,
+            USDC_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
             USDC,
             ORACLE_TWAP_SECONDS,
@@ -303,6 +319,12 @@ contract DeployBase is Script {
         revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
         console.log("  RevertHook configured");
+
+        routeController.setRoute(ETH, USDC, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
+        routeController.setRoute(USDC, ETH, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
+        routeController.setRoute(WETH, USDC, WETH_USDC_ROUTE_FEE, WETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
+        routeController.setRoute(USDC, WETH, WETH_USDC_ROUTE_FEE, WETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
+        console.log("  Configured bidirectional hookless ETH/USDC and WETH/USDC swap routes");
 
         // ==================== Step 5: Deploy V4Vault (USDC lending) ====================
 

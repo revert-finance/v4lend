@@ -4,12 +4,15 @@ pragma solidity ^0.8.30;
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
+import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
 
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
@@ -29,6 +32,8 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     using TickLinkedList for TickLinkedList.List;
 
     IHookFeeController internal immutable hookFeeController;
+    /// @dev Deploy address of this sidecar; differs from address(this) under delegatecall.
+    address private immutable _selfAddress;
 
     constructor(
         IPermit2 _permit2,
@@ -39,6 +44,142 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         RevertHookSwapActions _swapActions
     ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {
         hookFeeController = _hookFeeController;
+        _selfAddress = address(this);
+    }
+
+    // ==================== Protocol fee on collected LP fees ====================
+
+    /// @notice Time-weighted protocol fee on the LP fees a position collects. Called by the hook via
+    ///         delegatecall from its after-liquidity callbacks (shared storage layout); hosted here
+    ///         to keep the hook bytecode under the EIP-170 limit.
+    /// @dev PositionManager derives the caller's principal as `callerDelta - feesAccrued`, so every
+    ///      unit this hook takes is attributed to principal. On DECREASE/BURN it casts that to uint128
+    ///      (SlippageCheck.validateMinOut): a fee-only DECREASE_LIQUIDITY(0) reverts with
+    ///      SafeCastOverflow if anything is taken. The fee is therefore capped at what the current
+    ///      operation can absorb (see `_protocolFeeCaps`) and the shortfall is carried per position,
+    ///      to be settled on a later operation with room.
+    /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
+    /// @param liquidityDelta Signed liquidity change of the operation (0 for fee-only collections)
+    /// @param delta Full caller delta (principal + accrued fees) reported by the pool
+    /// @param feeDelta Accrued LP fees reported by the pool
+    /// @return newFeeDelta Amount taken by the hook, returned to the pool as the hook delta
+    function takeProtocolFees(
+        uint256 tokenId,
+        PoolKey calldata key,
+        int256 liquidityDelta,
+        BalanceDelta delta,
+        BalanceDelta feeDelta
+    ) external returns (BalanceDelta newFeeDelta) {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
+
+        (uint256 fee0, uint256 fee1) = _accrueProtocolFee(tokenId, feeDelta);
+
+        PendingProtocolFee storage pending = _pendingProtocolFees[tokenId];
+        uint256 pending0 = pending.amount0;
+        uint256 pending1 = pending.amount1;
+        uint256 owed0 = fee0 + pending0;
+        uint256 owed1 = fee1 + pending1;
+        if (owed0 == 0 && owed1 == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+
+        (uint256 cap0, uint256 cap1) = _protocolFeeCaps(liquidityDelta, delta, feeDelta, fee0, fee1);
+        uint256 take0 = owed0 > cap0 ? cap0 : owed0;
+        uint256 take1 = owed1 > cap1 ? cap1 : owed1;
+        uint256 newPending0 = owed0 - take0;
+        uint256 newPending1 = owed1 - take1;
+
+        if (newPending0 != pending0 || newPending1 != pending1) {
+            pending.amount0 = SafeCast.toUint128(newPending0);
+            pending.amount1 = SafeCast.toUint128(newPending1);
+            emit ProtocolFeeDeferred(tokenId, key.currency0, key.currency1, newPending0, newPending1);
+        }
+
+        if (take0 == 0 && take1 == 0) {
+            return BalanceDeltaLibrary.ZERO_DELTA;
+        }
+
+        address feeRecipient = hookFeeController.protocolFeeRecipient();
+        if (take0 > 0) {
+            poolManager.take(key.currency0, feeRecipient, take0);
+        }
+        if (take1 > 0) {
+            poolManager.take(key.currency1, feeRecipient, take1);
+        }
+        emit SendProtocolFee(tokenId, key.currency0, key.currency1, take0, take1, feeRecipient);
+
+        newFeeDelta = toBalanceDelta(SafeCast.toInt128(int256(take0)), SafeCast.toInt128(int256(take1)));
+    }
+
+    /// @dev Consumes the position's active-time accounting and returns this period's protocol fee.
+    function _accrueProtocolFee(uint256 tokenId, BalanceDelta feeDelta) internal returns (uint256 fee0, uint256 fee1) {
+        PositionState storage state = _positionStates[tokenId];
+        uint32 accumulatedActiveTime = state.accumulatedActiveTime;
+        uint32 lastActivated = state.lastActivated;
+        uint32 currentTime = uint32(block.timestamp);
+        if (lastActivated > 0) {
+            accumulatedActiveTime += currentTime - lastActivated;
+            state.lastActivated = currentTime;
+        }
+
+        uint32 lastCollect = state.lastCollect;
+        uint32 feeTime = lastCollect == 0 ? 0 : currentTime - lastCollect;
+        state.lastCollect = currentTime;
+        state.accumulatedActiveTime = 0;
+
+        if (feeTime == 0 || accumulatedActiveTime == 0) {
+            return (0, 0);
+        }
+        if (accumulatedActiveTime > feeTime) {
+            accumulatedActiveTime = feeTime;
+        }
+
+        uint16 lpFeeBps = hookFeeController.lpFeeBps();
+        if (lpFeeBps == 0) {
+            return (0, 0);
+        }
+
+        // Accrued LP fees are never negative; guard anyway so a hostile delta cannot underflow.
+        uint256 fees0 = feeDelta.amount0() > 0 ? uint256(int256(feeDelta.amount0())) : 0;
+        uint256 fees1 = feeDelta.amount1() > 0 ? uint256(int256(feeDelta.amount1())) : 0;
+        // uint128 * uint32 * uint16 cannot overflow uint256.
+        uint256 denominator = 10000 * uint256(feeTime);
+        fee0 = fees0 * accumulatedActiveTime * lpFeeBps / denominator;
+        fee1 = fees1 * accumulatedActiveTime * lpFeeBps / denominator;
+    }
+
+    /// @dev Largest hook delta the current PositionManager operation can absorb without reverting.
+    ///      - DECREASE/BURN (liquidityDelta < 0): validateMinOut casts (principal - hookDelta) to
+    ///        uint128, so at most the principal being removed.
+    ///      - Fee-only (liquidityDelta == 0): a DECREASE(0) has no principal and tolerates nothing.
+    ///        A zero-sized INCREASE also lands here (the pool routes liquidityDelta <= 0 to the
+    ///        remove callback); only the hook's own collection is known to be one, and its TAKE_PAIR
+    ///        needs a non-negative caller delta, so it can absorb up to the fees being collected.
+    ///      - INCREASE/MINT (liquidityDelta > 0): validateMaxIn against a caller-chosen amountMax that
+    ///        is unknown here, so keep the pre-existing charge of the current period only.
+    function _protocolFeeCaps(
+        int256 liquidityDelta,
+        BalanceDelta delta,
+        BalanceDelta feeDelta,
+        uint256 fee0,
+        uint256 fee1
+    ) internal view returns (uint256 cap0, uint256 cap1) {
+        if (liquidityDelta < 0) {
+            int256 principal0 = int256(delta.amount0()) - int256(feeDelta.amount0());
+            int256 principal1 = int256(delta.amount1()) - int256(feeDelta.amount1());
+            cap0 = principal0 > 0 ? uint256(principal0) : 0;
+            cap1 = principal1 > 0 ? uint256(principal1) : 0;
+        } else if (liquidityDelta == 0) {
+            if (IMsgSender(address(positionManager)).msgSender() == address(this)) {
+                cap0 = feeDelta.amount0() > 0 ? uint256(int256(feeDelta.amount0())) : 0;
+                cap1 = feeDelta.amount1() > 0 ? uint256(int256(feeDelta.amount1())) : 0;
+            }
+        } else {
+            cap0 = fee0;
+            cap1 = fee1;
+        }
     }
 
     /// @notice Forces exit from auto-lend position (called by position owner)

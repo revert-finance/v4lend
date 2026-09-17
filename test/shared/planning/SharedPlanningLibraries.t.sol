@@ -30,20 +30,47 @@ contract SharedPlanningLibrariesHarness {
         return AutoLeverageLib.isWithinThreshold(currentRatioBps, targetRatioBps, thresholdBps);
     }
 
-    function borrowAmountToTarget(uint256 currentDebt, uint256 collateralValue, uint256 targetRatioBps)
-        external
-        pure
-        returns (uint256)
-    {
-        return AutoLeverageLib.borrowAmountToTarget(currentDebt, collateralValue, targetRatioBps);
+    function borrowAmountToTarget(
+        uint256 currentDebt,
+        uint256 fullValue,
+        uint256 collateralValue,
+        uint256 targetRatioBps
+    ) external pure returns (uint256) {
+        return AutoLeverageLib.borrowAmountToTarget(currentDebt, fullValue, collateralValue, targetRatioBps);
     }
 
-    function repayAmountToTarget(uint256 currentDebt, uint256 collateralValue, uint256 targetRatioBps)
-        external
-        pure
-        returns (uint256)
-    {
-        return AutoLeverageLib.repayAmountToTarget(currentDebt, collateralValue, targetRatioBps);
+    function repayAmountToTarget(
+        uint256 currentDebt,
+        uint256 fullValue,
+        uint256 collateralValue,
+        uint256 targetRatioBps
+    ) external pure returns (uint256) {
+        return AutoLeverageLib.repayAmountToTarget(currentDebt, fullValue, collateralValue, targetRatioBps);
+    }
+
+    function improvesTowardTarget(
+        uint256 debtBefore,
+        uint256 collateralBefore,
+        uint256 debtAfter,
+        uint256 collateralAfter,
+        uint256 targetRatioBps
+    ) external pure returns (bool) {
+        return AutoLeverageLib.improvesTowardTarget(
+            debtBefore, collateralBefore, debtAfter, collateralAfter, targetRatioBps, 100
+        );
+    }
+
+    function improvesTowardTargetWithTolerance(
+        uint256 debtBefore,
+        uint256 collateralBefore,
+        uint256 debtAfter,
+        uint256 collateralAfter,
+        uint256 targetRatioBps,
+        uint256 toleranceBps
+    ) external pure returns (bool) {
+        return AutoLeverageLib.improvesTowardTarget(
+            debtBefore, collateralBefore, debtAfter, collateralAfter, targetRatioBps, toleranceBps
+        );
     }
 
     function liquidityToRemove(uint128 currentLiquidity, uint256 removeValue, uint256 totalValue)
@@ -111,22 +138,51 @@ contract SharedPlanningLibrariesTest is Test {
     }
 
     function testAutoLeverageLibBorrowAmountToTarget() public view {
-        assertEq(harness.borrowAmountToTarget(2_000, 10_000, 5_000), 6_000);
-        assertEq(harness.borrowAmountToTarget(5_000, 10_000, 5_000), 0);
+        assertEq(harness.borrowAmountToTarget(2_000, 10_000, 10_000, 5_000), 6_000);
+        assertEq(harness.borrowAmountToTarget(5_000, 10_000, 10_000, 5_000), 0);
+        // 80% effective collateral factor: borrowing 3,333 grows collateral
+        // by about 2,666, landing debt/collateral at the 50% target.
+        assertEq(harness.borrowAmountToTarget(2_000, 10_000, 8_000, 5_000), 3_333);
     }
 
     function testAutoLeverageLibRepayAmountAndLiquidityToRemove() public view {
-        assertEq(harness.repayAmountToTarget(7_000, 10_000, 5_000), 4_000);
+        assertEq(harness.repayAmountToTarget(7_000, 10_000, 10_000, 5_000), 4_000);
+        assertEq(harness.repayAmountToTarget(7_000, 10_000, 8_000, 5_000), 5_000);
         assertEq(harness.liquidityToRemove(1_000, 4_000, 10_000), 400);
         assertEq(harness.liquidityToRemove(1_000, 10_000, 1), 1_000);
     }
 
+    function testAutoLeverageLibRequiresMonotonicImprovement() public view {
+        assertTrue(harness.improvesTowardTarget(2_000, 8_000, 4_000, 9_000, 5_000));
+        assertTrue(harness.improvesTowardTarget(6_000, 10_000, 5_000, 10_000, 5_000));
+        assertTrue(harness.improvesTowardTarget(6_000, 10_000, 100, 10_000, 5_000));
+        assertFalse(harness.improvesTowardTarget(2_000, 8_000, 8_000, 9_000, 5_000));
+        assertFalse(harness.improvesTowardTarget(6_000, 10_000, 6_100, 10_000, 5_000));
+        assertFalse(harness.improvesTowardTarget(2_000, 8_000, 2_000, 8_000, 5_000));
+    }
+
+    /// @notice Leverage-up may not cross the target by more than the tolerance: overshoot hands the
+    ///         user more leverage than configured, and a closer-but-above landing is not "better".
+    function testAutoLeverageLibLeverageUpRejectsOvershoot() public view {
+        // target 50%: 30% -> 68% is closer in distance terms but overshoots -> rejected
+        assertFalse(harness.improvesTowardTargetWithTolerance(3_000, 10_000, 6_800, 10_000, 5_000, 100));
+        // boundary: exactly target + tolerance passes, one bp more fails
+        assertTrue(harness.improvesTowardTargetWithTolerance(3_000, 10_000, 5_100, 10_000, 5_000, 100));
+        assertFalse(harness.improvesTowardTargetWithTolerance(3_000, 10_000, 5_101, 10_000, 5_000, 100));
+        // landing exactly on or below target is fine; not moving is not
+        assertTrue(harness.improvesTowardTargetWithTolerance(3_000, 10_000, 5_000, 10_000, 5_000, 0));
+        assertTrue(harness.improvesTowardTargetWithTolerance(3_000, 10_000, 4_000, 10_000, 5_000, 0));
+        assertFalse(harness.improvesTowardTargetWithTolerance(3_000, 10_000, 3_000, 10_000, 5_000, 0));
+        // deleverage keeps its "any reduction" rule regardless of tolerance
+        assertTrue(harness.improvesTowardTargetWithTolerance(8_000, 10_000, 1_000, 10_000, 5_000, 0));
+    }
+
     function testAutoLeverageLibDegenerateInputsReturnZero() public view {
         assertEq(harness.currentRatio(1, 0), 0);
-        assertEq(harness.borrowAmountToTarget(6_000, 10_000, 5_000), 0);
-        assertEq(harness.borrowAmountToTarget(1, 1, 10_000), 0);
-        assertEq(harness.repayAmountToTarget(4_000, 10_000, 5_000), 0);
-        assertEq(harness.repayAmountToTarget(1, 1, 10_000), 0);
+        assertEq(harness.borrowAmountToTarget(6_000, 10_000, 10_000, 5_000), 0);
+        assertEq(harness.borrowAmountToTarget(1, 1, 1, 10_000), 0);
+        assertEq(harness.repayAmountToTarget(4_000, 10_000, 10_000, 5_000), 0);
+        assertEq(harness.repayAmountToTarget(1, 1, 1, 10_000), 0);
         assertEq(harness.liquidityToRemove(1_000, 0, 10_000), 0);
         assertEq(harness.liquidityToRemove(1_000, 10_000, 0), 0);
     }

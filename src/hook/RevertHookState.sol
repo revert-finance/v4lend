@@ -50,6 +50,14 @@ abstract contract RevertHookState is RevertHookAccess {
         int24 autoLeverageBaseTick; // Base tick for auto-leverage triggers (triggers at baseTick ± 10 * tickSpacing)
     }
 
+    /// @notice Protocol fee owed by a position that could not be taken inside a liquidity callback.
+    /// @dev PositionManager attributes every hook delta to principal, so a fee-only removal cannot
+    ///      carry a fee. The shortfall is parked here and settled on a later operation with room.
+    struct PendingProtocolFee {
+        uint128 amount0;
+        uint128 amount1;
+    }
+
     struct SwapProtectionConfig {
         // sqrt price multipliers for max price impact (pre-calculated from basis points)
         // For zeroForOne swaps: sqrtPriceLimit = currentSqrtPrice * sqrtPriceMultiplier0 / Q64
@@ -129,6 +137,11 @@ abstract contract RevertHookState is RevertHookAccess {
         address recipient
     );
 
+    /// @notice Emitted whenever a position's carried (not yet taken) protocol fee changes.
+    event ProtocolFeeDeferred(
+        uint256 indexed tokenId, Currency currency0, Currency currency1, uint256 amount0, uint256 amount1
+    );
+
     // Special events for swap failures / modifyLiquidities failures
     event HookActionFailed(uint256 indexed tokenId, Mode mode);
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
@@ -152,6 +165,10 @@ abstract contract RevertHookState is RevertHookAccess {
     // auto-leverage triggers at baseTick ± (LEVERAGE_TICK_OFFSET_MULTIPLIER * tickSpacing)
     int24 internal constant _LEVERAGE_TICK_OFFSET_MULTIPLIER = 10;
 
+    // a hook leverage-up may land at most this far above the configured target ratio; beyond it the
+    // action is rolled back as NoImprovement (bad fills must not hand the user more leverage)
+    uint256 internal constant _LEVERAGE_OVERSHOOT_TOLERANCE_BPS = 100;
+
     // oracle price validation
     int24 internal _maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
     // Bound automation processing for one external swap. If the cap is hit, remaining executions stay registered
@@ -168,4 +185,7 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // Permit2 approval tracking
     mapping(address => bool) internal _permit2Approved;
+
+    // Protocol fee carried per position until a liquidity operation can absorb it
+    mapping(uint256 tokenId => PendingProtocolFee pendingProtocolFee) internal _pendingProtocolFees;
 }

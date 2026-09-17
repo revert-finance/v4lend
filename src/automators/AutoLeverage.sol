@@ -21,6 +21,8 @@ import {Automator} from "./Automator.sol";
 /// @notice Automatically rebalances leverage ratio when price moves.
 /// Operator-triggered, works through vault.transform() for vault-owned positions.
 contract AutoLeverage is Automator {
+    error NoImprovement();
+
     event AutoLeverageExecuted(uint256 indexed tokenId, bool leverageUp, uint256 debtBefore, uint256 debtAfter);
     event PositionConfigured(
         uint256 indexed tokenId,
@@ -57,6 +59,7 @@ contract AutoLeverage is Automator {
         Currency token1;
         Currency lendToken;
         uint256 currentDebt;
+        uint256 fullValue;
         uint256 collateralValue;
         bool isThirdToken;
     }
@@ -125,7 +128,7 @@ contract AutoLeverage is Automator {
         }
 
         IVault vault = IVault(msg.sender);
-        (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(params.tokenId);
+        (uint256 currentDebt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(params.tokenId);
 
         // Check if rebalancing is needed
         uint256 currentRatio = AutoLeverageLib.currentRatio(currentDebt, collateralValue);
@@ -150,6 +153,7 @@ contract AutoLeverage is Automator {
         ctx.token1 = ctx.poolKey.currency1;
         ctx.lendToken = Currency.wrap(vault.asset());
         ctx.currentDebt = currentDebt;
+        ctx.fullValue = fullValue;
         ctx.collateralValue = collateralValue;
         ctx.isThirdToken = !(ctx.lendToken == ctx.token0) && !(ctx.lendToken == ctx.token1);
 
@@ -170,8 +174,10 @@ contract AutoLeverage is Automator {
 
         // Adjust collateral: deduct only the protocol fee value because net fees are reused.
         {
+            uint256 postFullValue;
             uint256 postCollateral;
-            (ctx.currentDebt,, postCollateral,,) = vault.loanInfo(params.tokenId);
+            (ctx.currentDebt, postFullValue, postCollateral,,) = vault.loanInfo(params.tokenId);
+            ctx.fullValue = postFullValue + (ctx.fullValue - postFullValue) * (Q64 - params.rewardX64) / Q64;
             ctx.collateralValue =
                 postCollateral + (ctx.collateralValue - postCollateral) * (Q64 - params.rewardX64) / Q64;
         }
@@ -189,7 +195,11 @@ contract AutoLeverage is Automator {
         }
         _sendRemainingBalances(owner, ctx.token0, ctx.token1);
 
-        (uint256 newDebt,,,,) = vault.loanInfo(params.tokenId);
+        (uint256 newDebt,, uint256 newCollateralValue,,) = vault.loanInfo(params.tokenId);
+        // the user's rebalance band doubles as the accepted overshoot above target
+        if (!AutoLeverageLib.improvesTowardTarget(
+                ctx.currentDebt, ctx.collateralValue, newDebt, newCollateralValue, targetRatio, threshold
+            )) revert NoImprovement();
         emit AutoLeverageExecuted(params.tokenId, params.leverageUp, ctx.currentDebt, newDebt);
     }
 
@@ -204,8 +214,9 @@ contract AutoLeverage is Automator {
         uint256 amount1;
 
         {
-            uint256 borrowAmount =
-                AutoLeverageLib.borrowAmountToTarget(ctx.currentDebt, ctx.collateralValue, config.targetLeverageBps);
+            uint256 borrowAmount = AutoLeverageLib.borrowAmountToTarget(
+                ctx.currentDebt, ctx.fullValue, ctx.collateralValue, config.targetLeverageBps
+            );
             if (borrowAmount == 0) revert NotReady();
 
             // Borrow from vault
@@ -276,8 +287,9 @@ contract AutoLeverage is Automator {
         uint128 liquidityToRemove;
         uint256 netFeeLendValue;
         {
-            uint256 repayAmount =
-                AutoLeverageLib.repayAmountToTarget(ctx.currentDebt, ctx.collateralValue, config.targetLeverageBps);
+            uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(
+                ctx.currentDebt, ctx.fullValue, ctx.collateralValue, config.targetLeverageBps
+            );
 
             // Net fees that can be conservatively converted into the lend token reduce how much liquidity must be removed.
             netFeeLendValue =
@@ -289,9 +301,12 @@ contract AutoLeverage is Automator {
                 uint128 currentLiquidity = positionManager.getPositionLiquidity(params.tokenId);
                 if (currentLiquidity == 0) revert NoLiquidity();
 
-                // Calculate proportional liquidity to remove
-                // Use collateralValue as proxy for total position value
-                liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, ctx.collateralValue);
+                // repayAmount is denominated in full position value, so use
+                // the oracle's undiscounted position value here. Dividing by
+                // collateralValue would remove too much liquidity whenever
+                // the vault applies a collateral-factor haircut.
+                (uint256 positionValue,,,) = v4Oracle.getValue(params.tokenId, Currency.unwrap(ctx.lendToken));
+                liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
             }
             if (liquidityToRemove == 0 && netFeeLendValue == 0) revert NotReady();
         }

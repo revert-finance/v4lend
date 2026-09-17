@@ -21,6 +21,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
     using PoolIdLibrary for PoolKey;
 
     error RestoreFailed();
+    error NoImprovement();
 
     constructor(
         IPermit2 _permit2,
@@ -40,7 +41,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         _requireAuthorization(tokenId);
 
         IVault vault = IVault(msg.sender);
-        (uint256 currentDebt,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        (uint256 currentDebt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(tokenId);
 
         uint16 targetRatioBps = _positionConfigs[tokenId].autoLeverageTargetBps;
         uint256 currentRatio = AutoLeverageLib.currentRatio(currentDebt, collateralValue);
@@ -48,9 +49,11 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
 
         // Adjust leverage based on current vs target ratio
         if (currentRatio < targetRatioBps) {
-            success = _increaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
+            success =
+                _increaseLeverage(poolKey, tokenId, vault, currentDebt, fullValue, collateralValue, targetRatioBps);
         } else if (currentRatio > targetRatioBps) {
-            success = _decreaseLeverage(poolKey, tokenId, vault, currentDebt, collateralValue, targetRatioBps);
+            success =
+                _decreaseLeverage(poolKey, tokenId, vault, currentDebt, fullValue, collateralValue, targetRatioBps);
         }
 
         if (!success) {
@@ -58,11 +61,30 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             return;
         }
 
+        (uint256 checkedDebt,, uint256 checkedCollateral,,) = vault.loanInfo(tokenId);
+        bool loanUnchanged = checkedDebt == currentDebt && checkedCollateral == collateralValue;
+        if (
+            !loanUnchanged
+                && !AutoLeverageLib.improvesTowardTarget(
+                    currentDebt,
+                    collateralValue,
+                    checkedDebt,
+                    checkedCollateral,
+                    targetRatioBps,
+                    _LEVERAGE_OVERSHOOT_TOLERANCE_BPS
+                )
+        ) revert NoImprovement();
+
         // Update triggers for new base tick
         _removePositionTriggers(tokenId, poolKey);
         int24 newBaseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
         _positionStates[tokenId].autoLeverageBaseTick = newBaseTick;
-        _addPositionTriggers(tokenId, poolKey);
+        // The liquidity callback may deactivate a position that fell below the
+        // configured minimum. Preserve that decision instead of rearming a dust
+        // position after the callback removed its triggers.
+        if (_isActivated(tokenId)) {
+            _addPositionTriggers(tokenId, poolKey);
+        }
 
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
         emit AutoLeverage(tokenId, isUpperTrigger, currentDebt, newDebt);
@@ -74,10 +96,13 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         uint256 tokenId,
         IVault vault,
         uint256 currentDebt,
+        uint256 fullValue,
         uint256 collateralValue,
         uint16 targetRatioBps
     ) internal returns (bool) {
-        uint256 borrowAmount = AutoLeverageLib.borrowAmountToTarget(currentDebt, collateralValue, targetRatioBps);
+        uint256 borrowAmount = AutoLeverageLib.borrowAmountToTarget(
+            currentDebt, fullValue, collateralValue, targetRatioBps
+        );
         if (borrowAmount == 0) return true;
 
         // Borrow from vault
@@ -120,10 +145,13 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         uint256 tokenId,
         IVault vault,
         uint256 currentDebt,
+        uint256 fullValue,
         uint256 collateralValue,
         uint16 targetRatioBps
     ) internal returns (bool) {
-        uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(currentDebt, collateralValue, targetRatioBps);
+        uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(
+            currentDebt, fullValue, collateralValue, targetRatioBps
+        );
 
         address lendAsset = vault.asset();
         Currency lendToken = Currency.wrap(lendAsset);

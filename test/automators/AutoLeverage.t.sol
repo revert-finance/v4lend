@@ -5,13 +5,18 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {AutoLeverage} from "../../src/automators/AutoLeverage.sol";
+import {AutoLeverageLib} from "../../src/shared/planning/AutoLeverageLib.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {Swapper} from "src/shared/swap/Swapper.sol";
 import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
@@ -37,6 +42,43 @@ contract AutoLeverageTest is AutomatorTestBase {
         vm.prank(operator);
         autoLeverage.execute(params);
         _assertNoAutomatorDust(address(autoLeverage), "AutoLeverage");
+    }
+
+    /// @dev Half of the borrow a leverage-up will take, in lend-token units: swapped into the other
+    ///      position token so a full-range position receives balanced liquidity.
+    function _leverageUpSwapAmount(uint256 tokenId, uint16 targetRatioBps) internal view returns (uint256) {
+        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        return AutoLeverageLib.borrowAmountToTarget(debt, fullValue, collateralValue, targetRatioBps) / 2;
+    }
+
+    /// @dev Universal Router data for USDC -> native ETH: v3 exact-in to WETH held by the router,
+    ///      sweep leftover USDC back, then unwrap the WETH to the recipient.
+    function _createSwapDataToEth(uint256 amountIn, address recipient) internal view returns (bytes memory) {
+        bytes[] memory inputs = new bytes[](3);
+        inputs[0] = abi.encode(
+            address(2), amountIn, uint256(0), abi.encodePacked(address(usdc), uint24(500), address(weth)), false
+        );
+        inputs[1] = abi.encode(address(usdc), recipient, uint256(0));
+        inputs[2] = abi.encode(recipient, uint256(0));
+        return abi.encode(
+            address(swapRouter), abi.encode(Swapper.UniversalRouterData(hex"00040c", inputs, block.timestamp))
+        );
+    }
+
+    function _wethToUsdcAmountForDeleverage(uint256 tokenId, PoolKey memory poolKey, uint16 targetRatioBps)
+        internal
+        view
+        returns (uint256 amount1)
+    {
+        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(debt, fullValue, collateralValue, targetRatioBps);
+        uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
+        (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, address(usdc));
+        uint128 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+        (, amount1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtPriceX96, TickMath.getSqrtPriceAtTick(-887220), TickMath.getSqrtPriceAtTick(887220), liquidityToRemove
+        );
     }
 
     // --- Access Control ---
@@ -202,7 +244,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
             isActive: true,
             targetLeverageBps: 5000,
-            rebalanceThresholdBps: 100, // 1% threshold - easily triggered
+            rebalanceThresholdBps: 500, // 5% band: also the accepted overshoot above target
             maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
@@ -218,6 +260,10 @@ contract AutoLeverageTest is AutomatorTestBase {
         (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
 
         // Execute leverage up
+        // half of the borrow is swapped into the other position token so the leverage-up actually
+        // adds balanced liquidity; without a swap the borrow would just increase debt and the
+        // post-condition rejects the overshoot
+        uint256 swapIn = _leverageUpSwapAmount(tokenId, 5000);
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
             vault: address(vault),
@@ -225,9 +271,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: bytes(""),
-            amountIn1: 0,
+            amountIn1: swapIn,
             amountOut1Min: 0,
-            swapData1: bytes(""),
+            swapData1: _createSwapDataWithFee(swapIn, 0, address(usdc), address(weth), 500, address(autoLeverage)),
             amountAddMin0: 0,
             amountAddMin1: 0,
             amountRemoveMin0: 0,
@@ -241,8 +287,11 @@ contract AutoLeverageTest is AutomatorTestBase {
         _execute(params);
 
         // Debt should have increased
-        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
         assertGt(debtAfter, debtBefore, "Debt should increase after leverage up");
+        uint256 ratioAfter = debtAfter * 10_000 / collateralAfter;
+        assertLe(ratioAfter, 5_500, "leverage-up must not overshoot the target by more than the band");
+        assertGt(ratioAfter, 4_000, "leverage-up should land near the target");
 
         // Position should still be owned by vault
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId), address(vault));
@@ -279,6 +328,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         vault.approveTransform(tokenId, address(autoLeverage), true);
 
         (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+        uint256 amountIn1 = _wethToUsdcAmountForDeleverage(tokenId, poolKey, 3000);
 
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
@@ -287,9 +337,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: bytes(""),
-            amountIn1: 0,
+            amountIn1: amountIn1,
             amountOut1Min: 0,
-            swapData1: bytes(""),
+            swapData1: _createSwapDataWithFee(amountIn1, 0, address(weth), address(usdc), 500, address(autoLeverage)),
             amountAddMin0: 0,
             amountAddMin1: 0,
             amountRemoveMin0: 0,
@@ -302,8 +352,14 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         _execute(params);
 
-        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
         assertLt(debtAfter, debtBefore, "Debt should decrease after leverage down");
+        assertApproxEqAbs(
+            debtAfter * 10000 / collateralAfter,
+            3000,
+            25,
+            "deleverage should land near target without excess liquidity removal"
+        );
     }
 
     function test_LeverageDownSweepsDustedBalances() public {
@@ -334,6 +390,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         uint256 dustAmount = 111;
         deal(address(weth), address(autoLeverage), dustAmount);
         uint256 ownerWethBefore = weth.balanceOf(WHALE_ACCOUNT);
+        uint256 amountIn1 = _wethToUsdcAmountForDeleverage(tokenId, poolKey, 3000);
 
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
@@ -342,9 +399,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: bytes(""),
-            amountIn1: 0,
+            amountIn1: amountIn1,
             amountOut1Min: 0,
-            swapData1: bytes(""),
+            swapData1: _createSwapDataWithFee(amountIn1, 0, address(weth), address(usdc), 500, address(autoLeverage)),
             amountAddMin0: 0,
             amountAddMin1: 0,
             amountRemoveMin0: 0,
@@ -461,7 +518,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
             isActive: true,
             targetLeverageBps: 5000,
-            rebalanceThresholdBps: 100,
+            rebalanceThresholdBps: 500,
             maxSwapSlippageBps: 10000,
             maxRewardX64: 0
         });
@@ -473,13 +530,17 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
 
+        // half of the borrow is swapped into the other position token so the leverage-up actually
+        // adds balanced liquidity; without a swap the borrow would just increase debt and the
+        // post-condition rejects the overshoot
+        uint256 swapIn = _leverageUpSwapAmount(tokenId, 5000);
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
             vault: address(vault),
             leverageUp: true,
-            amountIn0: 0,
+            amountIn0: swapIn,
             amountOut0Min: 0,
-            swapData0: bytes(""),
+            swapData0: _createSwapDataToEth(swapIn, address(autoLeverage)),
             amountIn1: 0,
             amountOut1Min: 0,
             swapData1: bytes(""),
@@ -500,7 +561,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId), address(vault));
     }
 
-    function test_LeverageDownETH() public {
+    function test_RevertWhenLeverageDownETHOmitsRequiredSwap() public {
         PoolKey memory poolKey = _createEthPool();
         _createFullRangePositionEth(poolKey);
         uint256 tokenId = _createFullRangePositionEth(poolKey);
@@ -550,10 +611,12 @@ contract AutoLeverageTest is AutomatorTestBase {
             rewardX64: 0
         });
 
-        _execute(params);
+        vm.prank(operator);
+        vm.expectRevert(Constants.TransformFailed.selector);
+        autoLeverage.execute(params);
 
         (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
-        assertLt(debtAfter, debtBefore, "Debt should decrease after ETH leverage down");
+        assertEq(debtAfter, debtBefore, "failed deleverage must leave debt unchanged");
     }
 
     function test_RewardSentToProtocolFeeRecipientInETH() public {
@@ -565,7 +628,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         _addPositionToVault(tokenId);
 
         (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        uint256 borrowAmount = collateralValue * 70 / 100;
+        uint256 borrowAmount = collateralValue * 10 / 100;
         vm.prank(WHALE_ACCOUNT);
         vault.borrow(tokenId, borrowAmount);
 
@@ -574,8 +637,8 @@ contract AutoLeverageTest is AutomatorTestBase {
         uint64 maxReward = uint64(Q64 * 50 / 100);
         AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
             isActive: true,
-            targetLeverageBps: 3000,
-            rebalanceThresholdBps: 100,
+            targetLeverageBps: 5000,
+            rebalanceThresholdBps: 500,
             maxSwapSlippageBps: 10000,
             maxRewardX64: maxReward
         });
@@ -587,13 +650,17 @@ contract AutoLeverageTest is AutomatorTestBase {
 
         uint256 recipientEthBefore = protocolFeeRecipient.balance;
 
+        // half of the borrow is swapped into the other position token so the leverage-up actually
+        // adds balanced liquidity; without a swap the borrow would just increase debt and the
+        // post-condition rejects the overshoot
+        uint256 swapIn = _leverageUpSwapAmount(tokenId, 5000);
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
             vault: address(vault),
-            leverageUp: false,
-            amountIn0: 0,
+            leverageUp: true,
+            amountIn0: swapIn,
             amountOut0Min: 0,
-            swapData0: bytes(""),
+            swapData0: _createSwapDataToEth(swapIn, address(autoLeverage)),
             amountIn1: 0,
             amountOut1Min: 0,
             swapData1: bytes(""),
@@ -755,6 +822,7 @@ contract AutoLeverageTest is AutomatorTestBase {
         vault.approveTransform(tokenId, address(autoLeverage), true);
 
         (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+        uint256 amountIn1 = _wethToUsdcAmountForDeleverage(tokenId, poolKey, targetBps);
 
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
@@ -763,9 +831,9 @@ contract AutoLeverageTest is AutomatorTestBase {
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: bytes(""),
-            amountIn1: 0,
+            amountIn1: amountIn1,
             amountOut1Min: 0,
-            swapData1: bytes(""),
+            swapData1: _createSwapDataWithFee(amountIn1, 0, address(weth), address(usdc), 500, address(autoLeverage)),
             amountAddMin0: 0,
             amountAddMin1: 0,
             amountRemoveMin0: 0,
@@ -789,13 +857,13 @@ contract AutoLeverageTest is AutomatorTestBase {
         _createFullRangePosition(poolKey);
         uint256 tokenId = _createFullRangePosition(poolKey);
 
-        // Setup vault position with high leverage
+        // Setup a low-leverage vault position so reward handling is exercised
+        // on a complete leverage-up route without requiring off-chain swap data.
         _depositToVault(50000000000, WHALE_ACCOUNT);
         _addPositionToVault(tokenId);
 
         (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
-        // Borrow 70% of collateral — above the 30% target, triggers leverage down
-        uint256 borrowAmount = collateralValue * 70 / 100;
+        uint256 borrowAmount = collateralValue * 10 / 100;
         vm.prank(WHALE_ACCOUNT);
         vault.borrow(tokenId, borrowAmount);
 
@@ -805,12 +873,12 @@ contract AutoLeverageTest is AutomatorTestBase {
         _swapExactInputSingle(poolKey, true, 100e6, 0);
         _swapExactInputSingle(poolKey, false, 0.1e18, 0);
 
-        // Configure for 30% target (current ~70% → need leverage down) with 50% reward
+        // Configure for 50% target (current ~10% → need leverage up) with 50% reward
         uint64 maxReward = uint64(Q64 * 50 / 100);
         AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
             isActive: true,
-            targetLeverageBps: 3000,
-            rebalanceThresholdBps: 100,
+            targetLeverageBps: 5000,
+            rebalanceThresholdBps: 500,
             maxSwapSlippageBps: 10000,
             maxRewardX64: maxReward
         });
@@ -824,16 +892,20 @@ contract AutoLeverageTest is AutomatorTestBase {
         uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
         uint256 recipientWethBefore = weth.balanceOf(protocolFeeRecipient);
 
+        // half of the borrow is swapped into the other position token so the leverage-up actually
+        // adds balanced liquidity; without a swap the borrow would just increase debt and the
+        // post-condition rejects the overshoot
+        uint256 swapIn = _leverageUpSwapAmount(tokenId, 5000);
         AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
             tokenId: tokenId,
             vault: address(vault),
-            leverageUp: false,
+            leverageUp: true,
             amountIn0: 0,
             amountOut0Min: 0,
             swapData0: bytes(""),
-            amountIn1: 0,
+            amountIn1: swapIn,
             amountOut1Min: 0,
-            swapData1: bytes(""),
+            swapData1: _createSwapDataWithFee(swapIn, 0, address(usdc), address(weth), 500, address(autoLeverage)),
             amountAddMin0: 0,
             amountAddMin1: 0,
             amountRemoveMin0: 0,
