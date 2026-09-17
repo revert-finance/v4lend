@@ -252,6 +252,10 @@ contract HookLeaseControllerTest is BaseTest {
         config.protocolFeeRecipient = address(leaseController);
         vm.expectRevert(HookLeaseController.InvalidConfig.selector);
         leaseController.configurePool(leasePoolKey, config);
+
+        config.protocolFeeRecipient = leaseController.hook();
+        vm.expectRevert(HookLeaseController.InvalidConfig.selector);
+        leaseController.configurePool(leasePoolKey, config);
     }
 
     function testConfigureValidation() public {
@@ -619,12 +623,15 @@ contract HookLeaseControllerTest is BaseTest {
         vm.warp(block.timestamp + MIN_DRIP + 1);
         leaseController.drip(leasePoolKey); // direct stream: clock set, nothing pending
 
-        // a long quiet stretch, then the lessee exits: the exit's accrual is PARKED
+        // liquidity leaves, then a long quiet stretch: the lessee's exit accrues with nobody in
+        // range, so the final accrual is PARKED (an action with LPs present would deliver directly)
+        _removeAllFullRangeLiquidity();
         vm.warp(block.timestamp + 3 * DRIP_HORIZON);
         vm.prank(lesseeA);
         leaseController.exitLease(leasePoolKey);
         (,,,,,, uint256 bucket) = leaseController.getPoolLeaseState(leasePoolId);
         assertGt(bucket, 0, "exit parked the final accrual");
+        _mintFullRangeLiquidity(10e18); // same block: this touch is throttled by the fresh clock
 
         // a drip at the very same timestamp is throttled by the bucket's own fresh clock -
         // the 3-horizon-stale interval must not release everything
@@ -651,12 +658,14 @@ contract HookLeaseControllerTest is BaseTest {
         vm.warp(t0);
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 1e18);
 
-        // 10 seconds of rent (10 wei, 1 wei protocol fee) parked by the exit
+        // 10 seconds of rent (10 wei, 1 wei protocol fee) parked by the exit at zero liquidity
+        _removeAllFullRangeLiquidity();
         vm.warp(t0 + 10);
         vm.prank(lesseeA);
         leaseController.exitLease(leasePoolKey);
         (,,,,,, uint256 bucket) = leaseController.getPoolLeaseState(leasePoolId);
         assertEq(bucket, 9, "9 wei parked (10 wei rent minus 10% fee)");
+        _mintFullRangeLiquidity(10e18); // same block: throttled, releases nothing yet
 
         // 9 * 61 / 3600 rounds to zero proportionally: release exactly ONE unit, not the bucket
         vm.warp(t0 + 10 + MIN_DRIP + 1);
@@ -666,6 +675,62 @@ contract HookLeaseControllerTest is BaseTest {
     }
 
     event RentDripped(PoolId indexed poolId, uint256 amount);
+
+    /// @notice Codex P2 (action front-run): a lessee cannot starve a departing LP by parking the
+    ///         accrued rent with a 1-wei fundRent right before the LP's removal. The action itself
+    ///         delivers the accrual to the LPs in range, so the removal has nothing left to lose.
+    function testLeaseActionDeliversAccruedRentBeforeLPRemoval() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId);
+        vm.warp(block.timestamp + 1800); // rent accrues; no touches in between
+
+        // the front-running top-up: must donate the tenure's rent, not park it
+        vm.expectEmit(true, false, false, false, address(leaseController));
+        emit RentDripped(leasePoolId, 0);
+        vm.prank(lesseeA);
+        leaseController.fundRent(leasePoolKey, 1);
+        (,,, uint256 rentBalance,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(pending, 0, "action accrual delivered to the LPs in range, not parked");
+        uint256 accrued = 0.2e18 + 1 - rentBalance;
+        assertEq(accrued, rps * 1800, "the whole tenure accrued in the action");
+
+        // the LP leaves in the same block: nothing is owed to it any more, and nothing is parked
+        _removeAllFullRangeLiquidity();
+        (,,, rentBalance,,, pending) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(pending, 0, "removal parks nothing");
+        uint256 fee = accrued * PROTOCOL_FEE_BPS / 10_000;
+        assertEq(
+            token1.balanceOf(address(leaseController)),
+            1e18 + rentBalance + fee,
+            "controller keeps only deposit + unaccrued rent + protocol fee"
+        );
+    }
+
+    function _removeAllFullRangeLiquidity() internal {
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId,
+            positionManager.getPositionLiquidity(fullRangeTokenId),
+            0,
+            0,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+    }
+
+    function _mintFullRangeLiquidity(uint128 liquidity) internal returns (uint256 tokenId) {
+        (tokenId,) = positionManager.mint(
+            leasePoolKey,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            liquidity,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+    }
 
     /// @notice Codex P2 (departing LP): beforeRemoveLiquidity delivers the rent accrued during
     ///         the departing LP's tenure to the in-range set that includes them, BEFORE their
@@ -909,7 +974,12 @@ contract HookLeaseControllerTest is BaseTest {
         vm.expectRevert(HookLeaseController.LeaseAlreadyActive.selector);
         leaseController.sweepPendingDonation(leasePoolKey, address(this));
 
-        // the exit parks its final accrual into the pending bucket (an action-created bucket)
+        // the removal touch pays the departing LP its rent; what accrues afterwards with nobody in
+        // range is parked by the exit into the pending bucket
+        _removeAllFullRangeLiquidity();
+        // via-IR treats block.timestamp as invariant within a call, so a second identical relative
+        // warp would re-use the first value; read the current time through the cheatcode instead
+        vm.warp(vm.getBlockTimestamp() + 1000);
         vm.prank(lesseeA);
         leaseController.exitLease(leasePoolKey);
         (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);

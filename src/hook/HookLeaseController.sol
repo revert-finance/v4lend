@@ -285,7 +285,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (oldLessee == address(0)) {
             revert NoActiveLease();
         }
-        _addPending(state, _accrue(poolId, config, state));
+        _settleAccrualForLeaseAction(key, poolId, config, state);
 
         if (newPrice < minBuyoutPrice(poolId)) {
             revert InvalidPrice();
@@ -335,7 +335,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             revert InvalidRentDeposit();
         }
 
-        _addPending(state, _accrue(poolId, config, state));
+        _settleAccrualForLeaseAction(key, poolId, config, state);
         state.rentBalance += uint128(amount);
         state.paidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, state.price));
         _pullExact(config.auctionCurrency, amount);
@@ -360,7 +360,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         }
         _checkPrice(newPrice);
 
-        _addPending(state, _accrue(poolId, config, state));
+        _settleAccrualForLeaseAction(key, poolId, config, state);
         state.price = uint128(newPrice);
         state.paidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, newPrice));
 
@@ -386,7 +386,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         PoolLeaseState storage state = _requireLessee(poolId);
 
         // a lease can only exist once startTime has passed, so accrual is always safe here
-        _addPending(state, _accrue(poolId, config, state));
+        _settleAccrualForLeaseAction(key, poolId, config, state);
         refund = uint256(state.price) + state.rentBalance;
         _clearLease(state);
         if (refund != 0) {
@@ -477,8 +477,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
                 || config.protocolFeeBps > MAX_PROTOCOL_FEE_BPS || config.protocolFeeRecipient == address(0)
                 // fees credit protocolFeesAccrued[currency][recipient] and are pulled by the recipient
                 // via claimProtocolFees; the controller can never call that as itself, so crediting
-                // its own address would strand every protocol fee of the pool
-                || config.protocolFeeRecipient == address(this)
+                // its own address would strand every protocol fee of the pool; the hook has no
+                // claim entry point either
+                || config.protocolFeeRecipient == address(this) || config.protocolFeeRecipient == hook
         ) {
             revert InvalidConfig();
         }
@@ -817,8 +818,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
     /// @dev Moves rent owed since lastAccrualTime out of the lease: the protocol-fee share to
     ///      protocolFeesAccrued, the rest RETURNED for the caller to deliver - _accrueAndDrip
-    ///      donates it directly to the in-range LPs who earned it, lease actions park it into
-    ///      the pending bucket (`_addPending(state, _accrue(...))`).
+    ///      donates it directly to the in-range LPs who earned it; lease actions reach it the
+    ///      same way via _settleAccrualForLeaseAction and only park a throttled slice.
     function _accrue(PoolId poolId, PoolLeaseConfig storage config, PoolLeaseState storage state)
         internal
         returns (uint256 netAccrued)
@@ -853,6 +854,30 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         emit RentAccrued(poolId, owed, protocolFee, state.rentBalance);
         // protocolFee <= owed always (bps <= 2000, carry < 10000: even owed == 1 yields fee <= 1)
         return owed - protocolFee;
+    }
+
+    /// @dev Lease actions (buyout, fundRent, setPrice, exitLease) accrue outside the hook callbacks.
+    ///      The rent accrued since the last touch belongs to the LPs currently in range (the set has
+    ///      been constant since that touch), so deliver it the regular way - through our own unlock
+    ///      into `_accrueAndDrip`, which donates fresh rent directly - whenever the shared throttle
+    ///      allows. Parking it instead would let a lessee front-run an LP's removal with a 1-wei
+    ///      fundRent: the parked bucket re-inits the drip clock, the removal's touch is throttled,
+    ///      and the departing LP loses the rent of its whole tenure. Inside a throttle window the
+    ///      slice (at most minDripSeconds of rent) is parked, the granularity accepted everywhere.
+    function _settleAccrualForLeaseAction(
+        PoolKey calldata key,
+        PoolId poolId,
+        PoolLeaseConfig storage config,
+        PoolLeaseState storage state
+    ) internal {
+        uint40 last = state.lastDripTime;
+        if (last == 0 || block.timestamp >= uint256(last) + config.minDripSeconds) {
+            // unthrottled: unlockCallback -> _accrueAndDrip accrues and donates to the current LPs
+            // (or parks at zero liquidity / failed donate, re-initialising the clock as usual)
+            poolManager.unlock(abi.encode(key));
+            return;
+        }
+        _addPending(state, _accrue(poolId, config, state));
     }
 
     /// @dev Adds to the pending bucket, maintaining the hasPending slot-0 mirror and
