@@ -25,6 +25,8 @@ abstract contract RevertHookTriggers is RevertHookState {
     /// @notice Returns the owner of the position - must be implemented by child
     function _getOwner(uint256 tokenId, bool resolveVaultOwner) internal view virtual returns (address);
 
+    function _getCurrentTick(PoolId poolId) internal view virtual returns (int24);
+
     // ==================== Tick Helpers ====================
 
     /// @notice Calculates the tick lower for a given tick and spacing
@@ -236,6 +238,18 @@ abstract contract RevertHookTriggers is RevertHookState {
         }
 
         PoolId poolId = poolKey.toId();
+
+        // The afterSwap loop leaves the tick cursor stale while a pool has never registered a
+        // trigger (it skips all trigger bookkeeping for gas). Re-baseline the cursor to the
+        // current bucket when the first trigger registers, so price movement from before
+        // registration can never fire it. The flag is sticky: a pool that once had triggers keeps
+        // the full afterSwap path, which is the pre-gate behaviour.
+        TriggerCursor storage triggerCursor = _triggerCursors[poolId];
+        if (!triggerCursor.hasTriggers) {
+            triggerCursor.tickLowerLast = _getTickLower(_getCurrentTick(poolId), poolKey.tickSpacing);
+            triggerCursor.hasTriggers = true;
+        }
+
         (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
         int24[4] memory ticks = _computeTriggerTicks(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
         _insertTriggerTicks(poolId, tokenId, ticks);

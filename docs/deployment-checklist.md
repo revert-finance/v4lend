@@ -30,6 +30,18 @@ This checklist captures deployment gates that should be completed before a produ
 - Confirm automation routes have slippage protection and that any `10000` slippage bypass is intentional for that specific flow.
 - Confirm `MAX_EXECUTIONS_PER_SWAP` is acceptable for the target chain gas budget and expected trigger density.
 
+## Arbitrage Auction
+
+- Auctioned pools must be initialized with `LPFeeLibrary.DYNAMIC_FEE_FLAG`; a dynamic-fee pool on the hook charges 0% LP fee until `HookAuctionController.configurePool(...)` mirrors the baseline, so configure before advertising the pool.
+- Recommended launch sequence per flagship pool: initialize the pool and `configurePool` with `biddingEnabled: false` in the same script (the pool then trades at `normalLpFee` like a normal pool, no bids accepted), and `setBiddingEnabled(true)` once the floor bidder / bidder ecosystem is ready. The lease controller stages identically via `leasingEnabled: false`.
+- Configure per-pool parameters from the backtest recommendations: Base ~4h epochs at 25-50% `feeDiscountPpm`, Arbitrum ~1d epochs at 50%; opening reserve around $25 in the auction currency; `minBidBumpPpm = 50_000` (5%); `minDripSeconds` small (~12-60s).
+- The auction currency must be an ERC20 side of the pool (use `currency1` for native pools) and should be a reputable token - a currency that later blocks transfers from the controller pauses dripping (isolated, never blocking swaps or liquidations) until wind-down + `sweepPendingDonation`.
+- Deploy scripts seed the executor denylist with the chain's UniversalRouter; extend it with every other shared router/aggregator with meaningful flow on the chain (`setExecutorDenied`). Bidders' executors must call `PoolManager.swap` directly.
+- Fee changes (`setNormalLpFee`) only work while no bid is active or queued; plan them between epochs.
+- Wind-down runbook: `setBiddingEnabled(pool, false)` stops new bids and refunds the queued bid; the running epoch is honored; after it ends and dripping finishes, `sweepPendingDonation` (credits the refund escrow) clears any stuck remainder and unblocks `configurePool`.
+- Monitor `DonateFailed` (drip problems), `EpochMaterialized`/`EpochDripped` (auction health), and bid activity per epoch; run a floor bidder via `AuctionArbExecutor` on flagship pools at launch.
+- Mechanism choice: `HookLeaseController` (continuous Harberger lease) is a drop-in alternative implementing the same `IHookAuctionController` interface. The hook takes exactly ONE controller at deploy time - decide the mechanism per chain BEFORE mining the hook address (the controller address is a constructor arg and part of the CREATE2 mining). The deploy scripts wire the epoch auction by default; to use the lease instead, deploy `HookLeaseController` at the sidecar nonce and pass it to the hook. Lease-specific wind-down: `setLeasingEnabled(pool, false)`, wait for rent insolvency (or lessee exit), `evictLease` if needed, then `sweepPendingDonation`.
+
 ## Emergency Runbook
 
 - Set `emergencyAdmin` to the intended operational signer or multisig.

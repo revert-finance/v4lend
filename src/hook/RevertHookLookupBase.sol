@@ -53,7 +53,7 @@ abstract contract RevertHookLookupBase is RevertHookTriggers {
         (, tick,,) = StateLibrary.getSlot0(_poolManagerRef(), poolId);
     }
 
-    function _getCurrentTick(PoolId poolId) internal view returns (int24 tick) {
+    function _getCurrentTick(PoolId poolId) internal view override returns (int24 tick) {
         return _getTick(poolId);
     }
 

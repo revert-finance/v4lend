@@ -6,6 +6,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {IVault} from "../vault/interfaces/IVault.sol";
@@ -26,7 +27,25 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         emit SetAutoLendVault(token, vault);
     }
 
+    /// @notice Mirrors a baseline fee into a pool's stored dynamic LP fee. The PoolManager
+    ///         only accepts dynamic fee updates from the pool's hook, so the auction
+    ///         controller (which owns the fee configuration) goes through this passthrough.
+    /// @dev Controller-only. The owner changes a pool's baseline via the controller's
+    ///      setNormalLpFee, which updates config.normalLpFee and re-mirrors atomically, so the
+    ///      stored fee and the winner's _winnerLpFee can never drift apart.
+    function updateDynamicLPFee(PoolKey calldata key, uint24 newDynamicLPFee) external payable {
+        if (msg.sender != address(hookAuctionController)) {
+            revert Unauthorized();
+        }
+        poolManager.updateDynamicLPFee(key, newDynamicLPFee);
+    }
+
     function setMaxTicksFromOracle(int24 newMaxTicksFromOracle) external payable onlyOwner {
+        // (0, MAX_TICK] so oracleTick ± _maxTicksFromOracle can never overflow int24 inside
+        // _tryOracleMaxEndTick, whose try/catch isolates only the oracle call itself
+        if (newMaxTicksFromOracle <= 0 || newMaxTicksFromOracle > TickMath.MAX_TICK) {
+            revert InvalidConfig();
+        }
         _maxTicksFromOracle = newMaxTicksFromOracle;
         emit SetMaxTicksFromOracle(newMaxTicksFromOracle);
     }

@@ -178,8 +178,15 @@ abstract contract RevertHookState is RevertHookAccess {
     // minimum position value in native token (address(0)) to be configurable
     uint256 internal _minPositionValueNative = 0.01 ether;
 
+    /// @notice Per-pool afterSwap cursor packed with a "has ever registered a trigger" flag so the
+    ///         swap hot path decides whether to walk the trigger lists from the slot it already reads.
+    struct TriggerCursor {
+        int24 tickLowerLast; // last processed tick bucket
+        bool hasTriggers; // set when the first trigger registers; gates the afterSwap list walk
+    }
+
     // Position trigger mappings
-    mapping(PoolId => int24) internal _tickLowerLasts;
+    mapping(PoolId => TriggerCursor) internal _triggerCursors;
     mapping(PoolId poolId => TickLinkedList.List) internal _lowerTriggerAfterSwap;
     mapping(PoolId poolId => TickLinkedList.List) internal _upperTriggerAfterSwap;
 

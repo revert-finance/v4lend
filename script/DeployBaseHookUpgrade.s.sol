@@ -9,6 +9,7 @@ import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {RevertHook} from "src/RevertHook.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
+import {HookAuctionController} from "src/hook/HookAuctionController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
@@ -103,11 +104,13 @@ contract DeployBaseHookUpgrade is Script {
         address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
         address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
         address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
+        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
             oracle,
             HookFeeController(predictedFeeController),
+            HookAuctionController(predictedAuctionController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
             RevertHookAutoLendActions(predictedAutoLendActions)
@@ -144,13 +147,19 @@ contract DeployBaseHookUpgrade is Script {
         );
         require(address(autoLendActions) == predictedAutoLendActions, "auto lend address mismatch");
 
+        HookAuctionController auctionController = new HookAuctionController(expectedHookAddress, oracle.poolManager());
+        require(address(auctionController) == predictedAuctionController, "auction controller address mismatch");
+
         revertHook = new RevertHook{salt: salt}(
-            deployer, oracle, feeController, positionActions, autoLeverageActions, autoLendActions
+            deployer, oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
         );
         require(address(revertHook) == expectedHookAddress, "hook address mismatch");
 
         revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);
+        // Same executor denylist seeding as DeployBase: a bidder must not be able to register the
+        // shared router as its executor and hand the discounted fee to all of its traffic.
+        auctionController.setExecutorDenied(UNIVERSAL_ROUTER, true);
         routeController.setRoute(ETH, USDC, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
         routeController.setRoute(USDC, ETH, ETH_USDC_ROUTE_FEE, ETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
         routeController.setRoute(WETH, USDC, WETH_USDC_ROUTE_FEE, WETH_USDC_ROUTE_TICK_SPACING, IHooks(address(0)));
@@ -196,7 +205,8 @@ contract DeployBaseHookUpgrade is Script {
     function _hookFlags() private pure returns (uint160) {
         return uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
         );
     }
