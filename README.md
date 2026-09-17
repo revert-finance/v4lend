@@ -384,6 +384,8 @@ Relevant admin calls:
 - The hook and the automators are intentionally separate execution models. The hook is for swap-time automation; the automators are for operator-triggered workflows.
 - Delegatecall targets under [src/hook](src/hook) are execution helpers for the hook, not standalone products.
 - Auction executors must call `PoolManager.swap` directly. Registering a shared router as an executor would give every trader routing through it the discounted fee; deploy scripts seed the denylist with each chain's UniversalRouter, and operators should extend it with other shared routers or aggregators used on the chain.
+- Hook automation follows a reminted position only when the range change runs through `V4Vault.transform`. A position owner who changes range directly with `V4Utils` receives a replacement NFT with no automation config and must call `RevertHook.setPositionConfig(...)` on it; the old NFT stays with the owner, so its config and any auto-lend shares remain reachable.
+- Hook-managed swaps have no default output floor. They are bounded by the oracle trigger window (`setMaxTicksFromOracle`, 100 ticks at deploy) and by the oracle's own pool-deviation guard, not by an `amountOutMin`; owners of large positions should set `RevertHook.setSwapProtectionConfig(...)`. The assumptions and worst case are recorded at `AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR` in [src/hook/RevertHookSwapActions.sol](src/hook/RevertHookSwapActions.sol).
 - The auction's drip distribution is point-in-time to in-range liquidity (like v4 swap fees), with throttled release bounding JIT capture; it is not time-weighted per position.
 
 ## Security model

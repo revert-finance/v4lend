@@ -348,6 +348,22 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
 
         (newTokenId, liquidity, amount0, amount1) = _swapAndMint(mintParams);
 
+        // @custom:accepted-risk AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS
+        // A range change made directly by a position owner (not through `V4Vault.transform`) does
+        // not carry RevertHook automation to the replacement NFT: only the vault notifies the hook
+        // (`IRemintMigrationHook.migrateVaultPosition`), so the new token starts with no position
+        // config and no triggers, and the owner must call `setPositionConfig` on it to re-enable
+        // automation. Accepted as fail-safe rather than wired up here:
+        //   - the outcome is "no automation", never automation running against the wrong position;
+        //   - the owner initiated the remint and ends up holding both NFTs, so nothing becomes
+        //     unreachable - this contract never burns the old token, and its config plus any
+        //     auto-lend ERC4626 shares stay addressable (`autoLendForceExit` and
+        //     `setPositionConfig` authorize through `ownerOf`; auto-lend is only permitted on
+        //     non-vault positions in the first place);
+        //   - the drained old position has its triggers removed and is deactivated by the hook's
+        //     `afterRemoveLiquidity`, so no stale nodes are left in the pool's tick lists.
+        // Vault-held positions are the case that must not silently lose protection, because the
+        // loan moves to the replacement; that is why only that path is wired through the hook.
         emit ChangeRange(tokenId, newTokenId, liquidity, amount0, amount1);
     }
 

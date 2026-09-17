@@ -32,6 +32,7 @@ contract RevertHookSwapActions is RevertHookState {
     /// delegatecalling this helper. Same-pool triggered actions inherit the traversal oracle window.
     /// Within those bounds there is no amountOutMin floor by default (unlike the standalone automators'
     /// _routerSwapWithSlippageCheck), though owners can configure a tighter per-swap price bound.
+    /// The assumptions and worst case behind that decision are stated at the accepted-risk marker below.
     function executeSwap(PoolKey memory poolKey, bool zeroForOne, uint256 amountIn, uint256 tokenId, Mode mode)
         external
         returns (BalanceDelta delta)
@@ -45,6 +46,28 @@ contract RevertHookSwapActions is RevertHookState {
             // No configured multiplier means no additional price limit. External pools are oracle-
             // checked immediately before this call, while same-pool triggered actions inherit the
             // traversal oracle window; a tighter position-specific floor is optional.
+            //
+            // Accepted with the following assumptions (deployed values, see script/Deploy*.s.sol):
+            //   - _maxTicksFromOracle = 100 ticks, so a trigger is only processed while the pool
+            //     price is within ~1.0% of the oracle price (1.0001^100), and a configured external
+            //     route is re-checked against the same bound immediately before its swap;
+            //   - V4Oracle.maxPoolPriceDifference = 200 bps, so a manipulation that leaves the pool
+            //     more than 2% from the oracle makes position valuation revert and the action aborts
+            //     instead of swapping;
+            //   - action swap sizes are small next to pool depth: collected fees (AUTO_COLLECT), one
+            //     position's rebalance delta (AUTO_RANGE), or one leverage/exit step.
+            // Worst case per action: an attacker moves the pool to the far edge of the oracle window
+            // to force the trigger, so the swap starts up to ~1% away from the oracle price and
+            // additionally pays its own impact against the remaining liquidity, which nothing here
+            // bounds. Extractable value is therefore on the order of (1% + own impact) x swap size,
+            // and is only profitable when that exceeds the attacker's round trip - the pool fee twice
+            // on the size needed to reach the window edge, plus their own impact and the risk of an
+            // unrelated swap landing between the two legs. It does not compound across actions: each
+            // one re-checks the window, and the 2% oracle guard caps how far the pool can be pushed
+            // before automation stops entirely.
+            // Levers that tighten this without a code change: per-position setSwapProtectionConfig
+            // (a real price limit for that position), a lower owner-set setMaxTicksFromOracle, and
+            // HookRouteController routes pointing actions at deeper pools.
             sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
         } else {
             (uint160 currentSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
