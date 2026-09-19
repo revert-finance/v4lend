@@ -349,11 +349,14 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         (newTokenId, liquidity, amount0, amount1) = _swapAndMint(mintParams);
 
         // @custom:accepted-risk AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS
-        // A range change made directly by a position owner (not through `V4Vault.transform`) does
-        // not carry RevertHook automation to the replacement NFT: only the vault notifies the hook
-        // (`IRemintMigrationHook.migrateVaultPosition`), so the new token starts with no position
-        // config and no triggers, and the owner must call `setPositionConfig` on it to re-enable
-        // automation. Accepted as fail-safe rather than wired up here:
+        // A range change made directly by a position owner (not through `V4Vault.transform`) carries
+        // RevertHook automation to the replacement only when the caller opts in: this contract
+        // forwards `increaseLiquidityHookData` as the mint hookData, and a 32-byte value naming the
+        // old token id (`abi.encode(tokenId)`) makes the hook migrate config, swap protection,
+        // carried fee and triggers under the same ERC721 authority that allowed this removal (see
+        // RevertHookAutoLeverageActions.afterAddLiquidity). Without it the new token starts with no
+        // position config and no triggers, and the owner re-enables automation with
+        // `setPositionConfig`. That default is accepted as fail-safe rather than made implicit:
         //   - the outcome is "no automation", never automation running against the wrong position;
         //   - the owner initiated the remint and ends up holding both NFTs, so nothing becomes
         //     unreachable - this contract never burns the old token, and its config plus any

@@ -172,6 +172,221 @@ contract V4VaultHookTest is V4ForkTestBase {
         assertEq(upperAfter, upperConfigured, "upper triggers should move, not duplicate");
     }
 
+    function test_ChangeRangeThroughVaultWithHookDataMigratesOnce() public {
+        // A vault transform whose V4Utils instructions also carry the old token id in the mint
+        // hookData: the callback path defers to the vault notification, so the migration runs once
+        // and the trigger lists end up exactly where the plain vault path leaves them.
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
+        _setupCollateralizedPositionForAutoLeverage(oldTokenId);
+        RevertHookState.PositionConfig memory expectedConfig = _manualRangeMigrationConfig();
+        _setPositionConfigAtTarget(oldTokenId, expectedConfig);
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(oldTokenId, 100, 200);
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+        (uint256 debtBefore,,,,) = vault.loanInfo(oldTokenId);
+
+        (, PositionInfo info) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        V4Utils.Instructions memory instructions = _rangeMoveInstructions(
+            oldTokenId, hookedPoolKey, info.tickLower(), info.tickUpper(), address(vault), abi.encode(oldTokenId)
+        );
+        instructions.recipient = WHALE_ACCOUNT; // leftovers to the loan owner, NFT to the vault
+        vm.prank(WHALE_ACCOUNT);
+        uint256 newTokenId =
+            vault.transform(oldTokenId, address(v4Utils), abi.encodeCall(V4Utils.execute, (oldTokenId, instructions)));
+
+        _assertManualRangeMigration(oldTokenId, newTokenId, debtBefore, expectedConfig);
+        (,, uint32 newLastActivated,,,,,) = revertHook.positionStates(newTokenId);
+        assertGt(newLastActivated, 0, "replacement position should be active");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerConfigured, "lower triggers should move once, not duplicate");
+        assertEq(upperAfter, upperConfigured, "upper triggers should move once, not duplicate");
+    }
+
+    // ==================== Direct (non-vault) V4Utils range change ====================
+
+    function _autoRangeExpectedConfig(int24 tickSpacing) internal pure returns (RevertHookState.PositionConfig memory) {
+        // Mirrors _configurePositionForAutoRange.
+        return RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: -tickSpacing,
+            autoRangeUpperDelta: tickSpacing,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+    }
+
+    /// @dev V4Utils CHANGE_RANGE of the whole position into the same pool at a new range. The mint
+    ///      hookData is what V4Utils forwards from `increaseLiquidityHookData`.
+    function _rangeMoveInstructions(
+        uint256 oldTokenId,
+        PoolKey memory poolKey,
+        int24 newTickLower,
+        int24 newTickUpper,
+        address recipient,
+        bytes memory mintHookData
+    ) internal view returns (V4Utils.Instructions memory) {
+        return V4Utils.Instructions({
+            whatToDo: V4Utils.WhatToDo.CHANGE_RANGE,
+            targetToken: poolKey.currency0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            fee: poolKey.fee,
+            tickSpacing: poolKey.tickSpacing,
+            tickLower: newTickLower,
+            tickUpper: newTickUpper,
+            liquidity: positionManager.getPositionLiquidity(oldTokenId),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            deadline: block.timestamp,
+            recipient: recipient,
+            recipientNFT: recipient,
+            returnData: bytes(""),
+            swapAndMintReturnData: bytes(""),
+            hook: address(poolKey.hooks),
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: mintHookData
+        });
+    }
+
+    /// @dev Non-vault position configured for auto-range and active, with swap protection set, then
+    ///      handed to a plain EOA: V4Utils returns NFTs with safeTransferFrom, which the whale (a
+    ///      contract without onERC721Received) cannot receive. Returns the owner, the id and the
+    ///      trigger list sizes once configured.
+    function _activeAutoRangePosition(PoolKey memory hookedPoolKey)
+        internal
+        returns (address owner, uint256 tokenId, uint32 lowerConfigured, uint32 upperConfigured)
+    {
+        tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
+        _configurePositionForAutoRange(tokenId, hookedPoolKey);
+        vm.prank(WHALE_ACCOUNT);
+        revertHook.setSwapProtectionConfig(tokenId, 100, 200);
+        (,, uint32 activated,,,,,) = revertHook.positionStates(tokenId);
+        assertGt(activated, 0, "position should start active");
+        (lowerConfigured, upperConfigured) = _getTriggerListSizes(hookedPoolKey);
+
+        owner = makeAddr("lp");
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).transferFrom(WHALE_ACCOUNT, owner, tokenId);
+    }
+
+    function _assertDirectMoveMigrated(
+        PoolKey memory hookedPoolKey,
+        address owner,
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        uint32 lowerConfigured,
+        uint32 upperConfigured
+    ) internal view {
+        assertGt(newTokenId, oldTokenId, "range move should remint the position");
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), owner, "replacement goes to the owner");
+        assertEq(IERC721(address(positionManager)).ownerOf(oldTokenId), owner, "old NFT stays with the owner");
+        assertEq(positionManager.getPositionLiquidity(oldTokenId), 0, "old position drained");
+        _assertVaultHookPositionConfigEq(newTokenId, _autoRangeExpectedConfig(hookedPoolKey.tickSpacing));
+        (,, uint32 newActivated,,,,,) = revertHook.positionStates(newTokenId);
+        assertGt(newActivated, 0, "replacement should be armed and active");
+        (uint8 oldFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldFlags, PositionModeFlags.MODE_NONE, "old config should be disabled");
+        (,, uint32 oldActivated,,,,,) = revertHook.positionStates(oldTokenId);
+        assertEq(oldActivated, 0, "old position should be inactive");
+        (uint128 multiplier0, uint128 multiplier1) = revertHook.swapProtectionConfigs(newTokenId);
+        assertGt(multiplier0, 0, "token0 swap protection should follow");
+        assertGt(multiplier1, 0, "token1 swap protection should follow");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes(hookedPoolKey);
+        assertEq(lowerAfter, lowerConfigured, "lower triggers should move, not duplicate or vanish");
+        assertEq(upperAfter, upperConfigured, "upper triggers should move, not duplicate or vanish");
+    }
+
+    function test_DirectV4UtilsRangeMoveCarriesHookAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        (address owner, uint256 oldTokenId, uint32 lowerConfigured, uint32 upperConfigured) =
+            _activeAutoRangePosition(hookedPoolKey);
+        (, PositionInfo info) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        int24 spacing = hookedPoolKey.tickSpacing;
+
+        // Approval path: the owner approves V4Utils for the old token and calls execute directly,
+        // naming the old token in the mint hookData.
+        V4Utils.Instructions memory instructions = _rangeMoveInstructions(
+            oldTokenId,
+            hookedPoolKey,
+            info.tickLower() + spacing,
+            info.tickUpper() + spacing,
+            owner,
+            abi.encode(oldTokenId)
+        );
+        vm.prank(owner);
+        IERC721(address(positionManager)).approve(address(v4Utils), oldTokenId);
+        vm.prank(owner);
+        uint256 newTokenId = v4Utils.execute(oldTokenId, instructions);
+
+        _assertDirectMoveMigrated(hookedPoolKey, owner, oldTokenId, newTokenId, lowerConfigured, upperConfigured);
+    }
+
+    function test_DirectV4UtilsRangeMoveViaSafeTransferCarriesHookAutomation() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        (address owner, uint256 oldTokenId, uint32 lowerConfigured, uint32 upperConfigured) =
+            _activeAutoRangePosition(hookedPoolKey);
+        (, PositionInfo info) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        int24 spacing = hookedPoolKey.tickSpacing;
+
+        // safeTransferFrom path: V4Utils holds the old NFT while it executes and hands it back, so
+        // at mint time both tokens sit with the locker.
+        V4Utils.Instructions memory instructions = _rangeMoveInstructions(
+            oldTokenId,
+            hookedPoolKey,
+            info.tickLower() + spacing,
+            info.tickUpper() + spacing,
+            owner,
+            abi.encode(oldTokenId)
+        );
+        vm.prank(owner);
+        IERC721(address(positionManager)).safeTransferFrom(
+            owner, address(v4Utils), oldTokenId, abi.encode(instructions)
+        );
+        uint256 newTokenId = positionManager.nextTokenId() - 1;
+
+        _assertDirectMoveMigrated(hookedPoolKey, owner, oldTokenId, newTokenId, lowerConfigured, upperConfigured);
+    }
+
+    function test_DirectV4UtilsRangeMoveWithoutHookDataLeavesAutomationBehind() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        (address owner, uint256 oldTokenId,,) = _activeAutoRangePosition(hookedPoolKey);
+        (, PositionInfo info) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        int24 spacing = hookedPoolKey.tickSpacing;
+
+        V4Utils.Instructions memory instructions = _rangeMoveInstructions(
+            oldTokenId, hookedPoolKey, info.tickLower() + spacing, info.tickUpper() + spacing, owner, bytes("")
+        );
+        vm.prank(owner);
+        IERC721(address(positionManager)).approve(address(v4Utils), oldTokenId);
+        vm.prank(owner);
+        uint256 newTokenId = v4Utils.execute(oldTokenId, instructions);
+
+        // The documented default (AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS): nothing follows.
+        (uint8 newFlags,,,,,,,,,,,,) = revertHook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_NONE, "no opt-in: replacement starts unautomated");
+        (uint8 oldFlags,,,,,,,,,,,,) = revertHook.positionConfigs(oldTokenId);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_RANGE, "no opt-in: old config stays on the drained token");
+        (,, uint32 oldActivated,,,,,) = revertHook.positionStates(oldTokenId);
+        assertEq(oldActivated, 0, "drained position is inactive");
+        (uint128 multiplier0,) = revertHook.swapProtectionConfigs(newTokenId);
+        assertEq(multiplier0, 0, "no opt-in: swap protection does not follow either");
+    }
+
     function test_PartialChangeRangeRemovesRetiredTriggers() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
         uint256 oldTokenId = _createPositionInHookedPool(hookedPoolKey);
