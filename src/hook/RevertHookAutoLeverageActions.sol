@@ -194,13 +194,14 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
 
     /// @notice The hook's after-add-liquidity handling past protocol fee settlement, hosted here to
     ///         keep the hook under the EIP-170 limit: optional remint migration, then activation.
-    /// @dev Remint migration protocol: a mint whose `hookData` is exactly 32 bytes names the token id
-    ///      this position replaces (`abi.encode(oldTokenId)`). V4Utils forwards the caller's
+    /// @dev Remint migration protocol: a mint whose `hookData` is `abi.encodePacked(REMINT_MIGRATION_TAG,
+    ///      oldTokenId)` (36 bytes) names the token id this position replaces. V4Utils forwards the caller's
     ///      `increaseLiquidityHookData` as the mint hookData, so a direct range change opts in without
     ///      any transformer change; the standalone AutoRange has a `mintHookData` field for the same
     ///      purpose. Authority is checked in _migrateMintedPosition; a claim that cannot be honoured
     ///      reverts the mint, so the owner learns about it instead of minting an unautomated position.
-    ///      Any other hookData length is ignored. Hook-internal operations (sender == hook) do nothing
+    ///      Any other hookData - including an untagged 32-byte word another integrator may pass for its
+    ///      own purposes - is ignored. Hook-internal operations (sender == hook) do nothing
     ///      here: their own flows migrate and activate explicitly.
     /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
     function afterAddLiquidity(address sender, PoolKey calldata key, uint256 tokenId, bytes calldata hookData)
@@ -214,10 +215,10 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         if (sender == address(this)) {
             return;
         }
-        if (hookData.length == 32) {
+        if (hookData.length == 36 && bytes4(hookData[:4]) == REMINT_MIGRATION_TAG) {
             // The shared migration arms and activates the replacement itself, behind the same
             // value gate as the block below.
-            _migrateMintedPosition(abi.decode(hookData, (uint256)), tokenId);
+            _migrateMintedPosition(uint256(bytes32(hookData[4:])), tokenId);
             return;
         }
         // Only a not-yet-active configured position consults the oracle here. Adds only raise a

@@ -342,6 +342,6 @@ Highest-value review areas:
 - hook swap fees are direct-send, not retained
 - dynamic-fee hook routes are intentionally unsupported
 - controllers are governed by `hook.owner()`
-- hook automation migrates across a position remint for vault-held positions (vault notification) and for direct range changes whose mint `hookData` names the old token id, checked against the minter's ERC721 authority over it; a direct range change without that opt-in intentionally leaves the replacement without automation (`AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS`)
+- hook automation migrates across a position remint for vault-held positions (vault notification) and for direct range changes whose mint `hookData` carries the tagged old token id (`REMINT_MIGRATION_TAG`), checked against the minter's ERC721 authority over it; a direct range change without that opt-in intentionally leaves the replacement without automation (`AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS`)
 - hook-managed swaps intentionally have no default `amountOutMin` floor; the oracle window and the oracle pool-deviation guard are the bound, with per-position price limits available opt-in (`AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR`, which states the assumed parameters and worst case). Trigger-driven actions inherit the window from swap traversal; the permissionless `autoCollect` entry point is price-checked directly in `_executeSwapResolved` because it never traverses
 

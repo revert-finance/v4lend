@@ -1664,6 +1664,10 @@ contract RevertHookTest is BaseTest {
         );
     }
 
+    function _migrationHookData(uint256 oldTokenId) internal pure returns (bytes memory) {
+        return abi.encodePacked(bytes4(keccak256("RevertHookRemintMigration(uint256)")), oldTokenId);
+    }
+
     function _relativeExitConfig() internal view returns (RevertHookState.PositionConfig memory) {
         return RevertHookState.PositionConfig({
             modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
@@ -1721,7 +1725,7 @@ contract RevertHookTest is BaseTest {
         assertGt(activatedBefore, 0, "old position should start active");
         (uint128 oldMultiplier0, uint128 oldMultiplier1) = hook.swapProtectionConfigs(token2Id);
 
-        uint256 newTokenId = _drainAndRemint(abi.encode(token2Id), address(this));
+        uint256 newTokenId = _drainAndRemint(_migrationHookData(token2Id), address(this));
 
         _assertPositionConfigEq(newTokenId, config);
         (,, uint32 newActivated,,,,,) = hook.positionStates(newTokenId);
@@ -1760,11 +1764,24 @@ contract RevertHookTest is BaseTest {
         assertEq(oldActivated, 0, "drained position should be inactive");
     }
 
-    function testManualRemintHookDataOfOtherLengthIsIgnored() public {
+    function testManualRemintUntaggedHookDataIsIgnored() public {
         hook.setPositionConfig(token2Id, _relativeExitConfig());
-        uint256 newTokenId = _drainAndRemint(hex"01", address(this));
+        // An integrator's own 32-byte payload - here even a valid token id, and below a word that is
+        // no token at all - is not a migration claim: the mint succeeds, unautomated, with no revert
+        // from ownerOf or from the authority checks.
+        uint256 newTokenId = _drainAndRemint(abi.encode(token2Id), address(this));
         (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
-        assertEq(newFlags, PositionModeFlags.MODE_NONE, "only a 32-byte hookData is a migration claim");
+        assertEq(newFlags, PositionModeFlags.MODE_NONE, "untagged 32-byte hookData is not a claim");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "old config untouched");
+
+        uint256 unrelated = _mintRaw(tickLower2, tickUpper2, 1e18, address(this), abi.encode(type(uint256).max));
+        (uint8 flags,,,,,,,,,,,,) = hook.positionConfigs(unrelated);
+        assertEq(flags, PositionModeFlags.MODE_NONE, "arbitrary 32-byte word: mint succeeds, nothing migrates");
+
+        uint256 other = _mintRaw(tickLower2, tickUpper2, 1e18, address(this), hex"01");
+        (uint8 otherFlags,,,,,,,,,,,,) = hook.positionConfigs(other);
+        assertEq(otherFlags, PositionModeFlags.MODE_NONE, "other lengths ignored too");
     }
 
     function testManualRemintWithHookDataRequiresAuthorityOverOldToken() public {
@@ -1777,16 +1794,16 @@ contract RevertHookTest is BaseTest {
         // Old position belongs to alice; this contract is neither its owner nor approved for it.
         IERC721(address(positionManager)).transferFrom(address(this), alice, token2Id);
         vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
-        _mintRaw(newLower, newUpper, 10e18, address(this), abi.encode(token2Id));
+        _mintRaw(newLower, newUpper, 10e18, address(this), _migrationHookData(token2Id));
 
         // Approved for the old token, but minting the replacement to a third party: refused.
         vm.prank(alice);
         IERC721(address(positionManager)).approve(address(this), token2Id);
         vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
-        _mintRaw(newLower, newUpper, 10e18, bob, abi.encode(token2Id));
+        _mintRaw(newLower, newUpper, 10e18, bob, _migrationHookData(token2Id));
 
         // Approved operator minting the replacement to the old owner is the V4Utils shape: accepted.
-        uint256 newTokenId = _mintRaw(newLower, newUpper, 10e18, alice, abi.encode(token2Id));
+        uint256 newTokenId = _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
         assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), alice, "replacement goes to the owner");
         (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
         assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "config should follow");
@@ -1808,7 +1825,7 @@ contract RevertHookTest is BaseTest {
             tickUpper2 + poolKey.tickSpacing,
             10e18,
             address(this),
-            abi.encode(token2Id)
+            _migrationHookData(token2Id)
         );
         (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
         assertEq(newFlags, PositionModeFlags.MODE_NONE, "vault-owned old token: no callback migration");
@@ -1824,7 +1841,7 @@ contract RevertHookTest is BaseTest {
             tickUpper2 + poolKey.tickSpacing,
             10e18,
             address(this),
-            abi.encode(lentTokenId)
+            _migrationHookData(lentTokenId)
         );
     }
 
@@ -1835,7 +1852,7 @@ contract RevertHookTest is BaseTest {
         // An increase on an already-configured position may not claim another position's config.
         bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
         bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(token3Id, uint128(1e18), type(uint128).max, type(uint128).max, abi.encode(token2Id));
+        params[0] = abi.encode(token3Id, uint128(1e18), type(uint128).max, type(uint128).max, _migrationHookData(token2Id));
         params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
         vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);

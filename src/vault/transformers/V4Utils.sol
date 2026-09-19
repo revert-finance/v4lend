@@ -351,8 +351,8 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         // @custom:accepted-risk AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS
         // A range change made directly by a position owner (not through `V4Vault.transform`) carries
         // RevertHook automation to the replacement only when the caller opts in: this contract
-        // forwards `increaseLiquidityHookData` as the mint hookData, and a 32-byte value naming the
-        // old token id (`abi.encode(tokenId)`) makes the hook migrate config, swap protection,
+        // forwards `increaseLiquidityHookData` as the mint hookData, and a tagged value naming the old
+        // token id (`abi.encodePacked(REMINT_MIGRATION_TAG, tokenId)`) makes the hook migrate config, swap protection,
         // carried fee and triggers under the same ERC721 authority that allowed this removal (see
         // RevertHookAutoLeverageActions.afterAddLiquidity). Without it the new token starts with no
         // position config and no triggers, and the owner re-enables automation with

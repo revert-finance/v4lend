@@ -188,7 +188,7 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         (, PositionInfo info) = positionManager.getPoolAndPositionInfo(oldTokenId);
         V4Utils.Instructions memory instructions = _rangeMoveInstructions(
-            oldTokenId, hookedPoolKey, info.tickLower(), info.tickUpper(), address(vault), abi.encode(oldTokenId)
+            oldTokenId, hookedPoolKey, info.tickLower(), info.tickUpper(), address(vault), _migrationHookData(oldTokenId)
         );
         instructions.recipient = WHALE_ACCOUNT; // leftovers to the loan owner, NFT to the vault
         vm.prank(WHALE_ACCOUNT);
@@ -204,6 +204,10 @@ contract V4VaultHookTest is V4ForkTestBase {
     }
 
     // ==================== Direct (non-vault) V4Utils range change ====================
+
+    function _migrationHookData(uint256 oldTokenId) internal pure returns (bytes memory) {
+        return abi.encodePacked(bytes4(keccak256("RevertHookRemintMigration(uint256)")), oldTokenId);
+    }
 
     function _autoRangeExpectedConfig(int24 tickSpacing) internal pure returns (RevertHookState.PositionConfig memory) {
         // Mirrors _configurePositionForAutoRange.
@@ -326,7 +330,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             info.tickLower() + spacing,
             info.tickUpper() + spacing,
             owner,
-            abi.encode(oldTokenId)
+            _migrationHookData(oldTokenId)
         );
         vm.prank(owner);
         IERC721(address(positionManager)).approve(address(v4Utils), oldTokenId);
@@ -351,7 +355,7 @@ contract V4VaultHookTest is V4ForkTestBase {
             info.tickLower() + spacing,
             info.tickUpper() + spacing,
             owner,
-            abi.encode(oldTokenId)
+            _migrationHookData(oldTokenId)
         );
         vm.prank(owner);
         IERC721(address(positionManager)).safeTransferFrom(
