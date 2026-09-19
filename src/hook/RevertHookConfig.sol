@@ -99,7 +99,8 @@ abstract contract RevertHookConfig is RevertHookImmediate {
     ///      the vault transform.
     function migrateVaultPosition(uint256 oldTokenId, uint256 newTokenId) external {
         _delegatecallPassthrough(
-            address(autoLendActions), abi.encodeCall(autoLendActions.migrateVaultPosition, (oldTokenId, newTokenId))
+            address(autoLeverageActions),
+            abi.encodeCall(autoLeverageActions.migrateVaultPosition, (oldTokenId, newTokenId))
         );
     }
 

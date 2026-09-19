@@ -170,6 +170,12 @@ abstract contract RevertHookState is RevertHookAccess {
     uint256 internal constant _LEVERAGE_OVERSHOOT_TOLERANCE_BPS = 100;
 
     // oracle price validation
+    /// @notice Tag that opens a remint-migration claim in a mint's hookData:
+    ///         `abi.encodePacked(REMINT_MIGRATION_TAG, oldTokenId)` (36 bytes). Any other hookData is
+    ///         ignored by the add-liquidity callback, so unrelated 32-byte payloads never enter that path.
+    ///         Value: bytes4(keccak256("RevertHookRemintMigration(uint256)")).
+    bytes4 internal constant REMINT_MIGRATION_TAG = bytes4(keccak256("RevertHookRemintMigration(uint256)"));
+
     int24 internal _maxTicksFromOracle = 100; // Maximum number of ticks allowed from oracle tick (1%)
     // Bound automation processing for one external swap. If the cap is hit, remaining executions stay registered
     // and can be picked up by a later external swap; they are not guaranteed to run on the immediately following swap.
