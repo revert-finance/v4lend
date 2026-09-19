@@ -262,14 +262,23 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
         feeDelta = _takeProtocolFees(tokenId, key, params.liquidityDelta, delta, feeDelta);
 
-        // The remint migration a mint may name in hookData, and activation, live in the auto-leverage
-        // sidecar (EIP-170). See RevertHookAutoLeverageActions.afterAddLiquidity.
-        _delegatecallPassthrough(
-            address(autoLeverageActions),
-            abi.encodeCall(
-                RevertHookAutoLeverageActions.afterAddLiquidity, (sender, key, tokenId, params.liquidityDelta, hookData)
-            )
-        );
+        // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
+        // hook-internal operations run the logic below, which is idempotent by design
+        if (sender == address(this)) {
+            return (BaseHook.afterAddLiquidity.selector, feeDelta);
+        }
+
+        // Activation of a configured position and the remint migration a tagged mint may name are
+        // handled in the auto-leverage sidecar (EIP-170); a plain deposit to an unconfigured position
+        // stops here. See RevertHookAutoLeverageActions.afterAddLiquidity.
+        if (hookData.length == 36 || !PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags)) {
+            _delegatecallPassthrough(
+                address(autoLeverageActions),
+                abi.encodeCall(
+                    RevertHookAutoLeverageActions.afterAddLiquidity, (key, tokenId, params.liquidityDelta, hookData)
+                )
+            );
+        }
 
         return (BaseHook.afterAddLiquidity.selector, feeDelta);
     }

@@ -34,6 +34,7 @@ import {Constants} from "src/shared/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
@@ -364,6 +365,38 @@ contract V4VaultHookTest is V4ForkTestBase {
         uint256 newTokenId = positionManager.nextTokenId() - 1;
 
         _assertDirectMoveMigrated(hookedPoolKey, owner, oldTokenId, newTokenId, lowerConfigured, upperConfigured);
+    }
+
+    function test_DirectV4UtilsPartialRangeMoveWithHookDataIsRefused() public {
+        PoolKey memory hookedPoolKey = _createHookedPool();
+        (address owner, uint256 oldTokenId,,) = _activeAutoRangePosition(hookedPoolKey);
+        (, PositionInfo info) = positionManager.getPoolAndPositionInfo(oldTokenId);
+        int24 spacing = hookedPoolKey.tickSpacing;
+
+        // Moving only part of the liquidity leaves the old position live, so the claim is refused and
+        // the whole range change fails rather than parking the old token's state on a partial copy.
+        V4Utils.Instructions memory instructions = _rangeMoveInstructions(
+            oldTokenId,
+            hookedPoolKey,
+            info.tickLower() + spacing,
+            info.tickUpper() + spacing,
+            owner,
+            _migrationHookData(oldTokenId)
+        );
+        instructions.liquidity = positionManager.getPositionLiquidity(oldTokenId) / 2;
+        vm.prank(owner);
+        IERC721(address(positionManager)).approve(address(v4Utils), oldTokenId);
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(revertHook),
+                IHooks.afterAddLiquidity.selector,
+                abi.encodeWithSelector(Constants.InvalidConfig.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        v4Utils.execute(oldTokenId, instructions);
     }
 
     function test_DirectV4UtilsRangeMoveWithoutHookDataLeavesAutomationBehind() public {

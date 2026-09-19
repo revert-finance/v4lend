@@ -49,8 +49,9 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
     ///      replacement, which binds the call to that transaction; both NFTs must sit in the vault
     ///      and the old position must be in one of this hook's pools. If the replacement is not
     ///      (another hook, no hook, another pair) the old token's automation is retired and nothing
-    ///      else happens; otherwise swap protection and the carried fee follow across the pair and
-    ///      automation itself only follows a remint inside the same pool. Because pool and owner are
+    ///      else happens; otherwise swap protection follows across the pair, the carried protocol fee
+    ///      follows only once the old position is drained (a partial remint keeps it owed by the
+    ///      liquidity that stays behind), and automation itself only follows a remint inside the same pool. Because pool and owner are
     ///      unchanged, tick alignment and mode-flag validity carry over from when the config was set;
     ///      only the range-dependent auto-range rules are re-checked, and a config that no longer
     ///      fits reverts the whole transform so the owner reconfigures or disables automation before
@@ -72,20 +73,58 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         if (nft.ownerOf(oldTokenId) != msg.sender || nft.ownerOf(newTokenId) != msg.sender) {
             revert Unauthorized();
         }
-        _migratePositionState(oldTokenId, newTokenId);
+        _migratePositionState(oldTokenId, newTokenId, false);
     }
 
-    /// @dev Mint-callback entry to the shared migration. The minter names the position it is
-    ///      replacing in the mint's `hookData` (see afterAddLiquidity) and the claim is checked with
-    ///      the same ERC721 authority that let it remove the old liquidity: the locker must own or be
-    ///      approved for the old token, and the new token must be in the locker's custody (V4Utils
-    ///      mints to itself before forwarding) or already with the old owner. The callback also fires for
-    ///      increases, so the target must be a blank slate the way a fresh mint is: no liquidity before
-    ///      this add, no config, no swap protection and no carried fee of its own, so nothing of an
-    ///      existing position can be overwritten or re-attributed. An address approved for a token can therefore move its config
-    ///      onto a position it controls, which is no escalation: such an address can already transfer
-    ///      the NFT away entirely. Vault-held positions are skipped here so the vault's own
-    ///      notification (migrateVaultPosition, bound to the running transform) handles them once.
+    /// @notice The hook's after-add-liquidity handling past protocol fee settlement, hosted here to
+    ///         keep the hook under the EIP-170 limit: the remint migration a tagged mint names, else
+    ///         activation of a configured, not-yet-active position. The hook only delegates here for
+    ///         a configured position or a 36-byte hookData, so plain deposits pay nothing extra.
+    /// @dev Remint migration protocol: a mint whose hookData is
+    ///      `abi.encodePacked(REMINT_MIGRATION_TAG, oldTokenId)` names the token id this position
+    ///      replaces. V4Utils forwards the caller's `increaseLiquidityHookData` as the mint hookData,
+    ///      so a direct range change opts in without any transformer change; the standalone AutoRange
+    ///      has a `mintHookData` field for the same purpose. Any other hookData - including an untagged
+    ///      word another integrator may pass for its own purposes - is ignored. A claim that cannot be
+    ///      honoured reverts the mint, so the owner learns about it instead of minting an unautomated
+    ///      position.
+    /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
+    function afterAddLiquidity(PoolKey calldata key, uint256 tokenId, int256 liquidityDelta, bytes calldata hookData)
+        external
+    {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
+        if (hookData.length == 36 && bytes4(hookData[:4]) == REMINT_MIGRATION_TAG) {
+            // The migration arms and activates the replacement itself, behind the same value gate.
+            _migrateMintedPosition(uint256(bytes32(hookData[4:])), tokenId, liquidityDelta);
+            return;
+        }
+        // Only a not-yet-active configured position consults the oracle here. Adds only raise a
+        // position's value, so below-minimum deactivation belongs to the remove callback; reading
+        // the oracle on every add of an active position would make plain deposits depend on feed
+        // freshness.
+        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
+            (uint256 positionValueNative,,,) = v4Oracle.getValue(tokenId, address(0));
+            if (positionValueNative >= _minPositionValueNative) {
+                _addPositionTriggers(tokenId, key);
+                _activatePosition(tokenId);
+            }
+        }
+    }
+
+    /// @dev Mint-callback entry to the shared migration (see afterAddLiquidity for the protocol).
+    ///      Authority is the one that let the locker remove the old liquidity: the locker
+    ///      (`positionManager.msgSender()`) must own the old token or hold its per-token approval
+    ///      (blanket operators are deliberately not enough: they would be able to claim across all of
+    ///      an owner's positions), and the new token must be in the locker's custody (V4Utils mints to
+    ///      itself before forwarding) or already with the old owner. The callback also fires for
+    ///      increases, so the target must be a blank slate the way a fresh mint is - no liquidity
+    ///      before this add, no config and no swap protection of its own - and the old position must
+    ///      already be drained, so the claim is bound to a real replacement rather than a dust mint
+    ///      that would park the old token's owed fee and switch off automation that keeps running.
+    ///      Vault-held positions are skipped here so the vault's own notification
+    ///      (migrateVaultPosition, bound to the running transform) handles them once.
     function _migrateMintedPosition(uint256 oldTokenId, uint256 newTokenId, int256 liquidityDelta) internal {
         IERC721 nft = IERC721(address(positionManager));
         address oldOwner = nft.ownerOf(oldTokenId);
@@ -93,37 +132,37 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             return;
         }
         address locker = IMsgSender(address(positionManager)).msgSender();
-        bool lockerControlsOld = oldOwner == locker || nft.getApproved(oldTokenId) == locker
-            || nft.isApprovedForAll(oldOwner, locker);
-        if (oldTokenId == newTokenId || !lockerControlsOld) {
+        if (oldOwner != locker && nft.getApproved(oldTokenId) != locker) {
             revert Unauthorized();
         }
         address newOwner = nft.ownerOf(newTokenId);
         if (newOwner != locker && newOwner != oldOwner) {
             revert Unauthorized();
         }
-        // Blank-slate target: the position held no liquidity before this add (a mint, or an emptied
-        // position) and carries no hook state that a migration would clobber. An increase on a live
-        // position is never a "replacement", whoever is authorized for it.
-        PendingProtocolFee storage pending = _pendingProtocolFees[newTokenId];
+        // liquidityDelta is positive here: the pool routes non-positive deltas to the remove callback.
         SwapProtectionConfig storage protection = _swapProtectionConfigs[newTokenId];
         if (
-            liquidityDelta <= 0 || positionManager.getPositionLiquidity(newTokenId) != uint128(uint256(liquidityDelta))
+            positionManager.getPositionLiquidity(newTokenId) != uint128(uint256(liquidityDelta))
                 || !PositionModeFlags.isNone(_positionConfigs[newTokenId].modeFlags)
-                || protection.sqrtPriceMultiplier0 != 0 || protection.sqrtPriceMultiplier1 != 0 || pending.amount0 != 0
-                || pending.amount1 != 0
+                || protection.sqrtPriceMultiplier0 != 0 || protection.sqrtPriceMultiplier1 != 0
         ) {
             revert InvalidConfig();
         }
-        _migratePositionState(oldTokenId, newTokenId);
+        _migratePositionState(oldTokenId, newTokenId, true);
     }
 
     /// @dev Shared remint migration used by the vault path and the mint-callback path once each has
     ///      authorized the pair. Refuses outstanding auto-lend shares, retires the old automation
-    ///      when the replacement left this hook's pools, otherwise carries swap protection and the
-    ///      deferred fee, re-validates the config for the new range, refuses an already-satisfied
-    ///      trigger, disables the old token and arms the replacement above the value minimum.
-    function _migratePositionState(uint256 oldTokenId, uint256 newTokenId) internal {
+    ///      when the replacement left this hook's pools, otherwise carries swap protection and - only
+    ///      once the old position holds no liquidity - the deferred fee, re-validates the config for the
+    ///      new range, refuses an already-satisfied trigger, disables the old token and arms the
+    ///      replacement above the value minimum. `requireOldDrained` makes a live old position a
+    ///      refusal instead of a partial migration.
+    function _migratePositionState(uint256 oldTokenId, uint256 newTokenId, bool requireOldDrained) internal {
+        bool oldDrained = positionManager.getPositionLiquidity(oldTokenId) == 0;
+        if (requireOldDrained && !oldDrained) {
+            revert InvalidConfig();
+        }
         // Auto-lend accounting (shares, vault, amount) is keyed by token id and every redemption
         // path authorizes through the position's owner. Once the loan has moved, nobody can force
         // the old token's exit, so its ERC4626 shares would be stranded in the hook. Refuse the
@@ -157,9 +196,13 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
 
         // Swap protection is set independently of automation and a carried protocol fee is owed
         // regardless of it, so both follow the position even when there is no config to migrate.
-        // Both are per currency pair, so they also carry across pools of the same pair.
+        // Both are per currency pair, so they also carry across pools of the same pair. The fee only
+        // moves once nothing is left on the old position to collect it from; while liquidity stays
+        // behind it remains owed there and is taken on that position's next removal.
         _swapProtectionConfigs[newTokenId] = _swapProtectionConfigs[oldTokenId];
-        _migratePendingProtocolFee(newPoolKey, oldTokenId, newTokenId);
+        if (oldDrained) {
+            _migratePendingProtocolFee(newPoolKey, oldTokenId, newTokenId);
+        }
 
         if (PositionModeFlags.isNone(config.modeFlags)) {
             return;
@@ -202,52 +245,6 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             _activatePosition(newTokenId);
         }
         emit SetPositionConfig(newTokenId, config);
-    }
-
-    /// @notice The hook's after-add-liquidity handling past protocol fee settlement, hosted here to
-    ///         keep the hook under the EIP-170 limit: optional remint migration, then activation.
-    /// @dev Remint migration protocol: a mint whose `hookData` is `abi.encodePacked(REMINT_MIGRATION_TAG,
-    ///      oldTokenId)` (36 bytes) names the token id this position replaces. V4Utils forwards the caller's
-    ///      `increaseLiquidityHookData` as the mint hookData, so a direct range change opts in without
-    ///      any transformer change; the standalone AutoRange has a `mintHookData` field for the same
-    ///      purpose. Authority is checked in _migrateMintedPosition; a claim that cannot be honoured
-    ///      reverts the mint, so the owner learns about it instead of minting an unautomated position.
-    ///      Any other hookData - including an untagged 32-byte word another integrator may pass for its
-    ///      own purposes - is ignored. Hook-internal operations (sender == hook) do nothing
-    ///      here: their own flows migrate and activate explicitly.
-    /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
-    function afterAddLiquidity(
-        address sender,
-        PoolKey calldata key,
-        uint256 tokenId,
-        int256 liquidityDelta,
-        bytes calldata hookData
-    ) external {
-        if (address(this) == _selfAddress) {
-            revert Unauthorized();
-        }
-        // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
-        // hook-internal operations run the logic below, which is idempotent by design
-        if (sender == address(this)) {
-            return;
-        }
-        if (hookData.length == 36 && bytes4(hookData[:4]) == REMINT_MIGRATION_TAG) {
-            // The shared migration arms and activates the replacement itself, behind the same
-            // value gate as the block below.
-            _migrateMintedPosition(uint256(bytes32(hookData[4:])), tokenId, liquidityDelta);
-            return;
-        }
-        // Only a not-yet-active configured position consults the oracle here. Adds only raise a
-        // position's value, so below-minimum deactivation belongs to the remove callback; reading
-        // the oracle on every add of an active position would make plain deposits depend on feed
-        // freshness.
-        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
-            (uint256 positionValueNative,,,) = v4Oracle.getValue(tokenId, address(0));
-            if (positionValueNative >= _minPositionValueNative) {
-                _addPositionTriggers(tokenId, key);
-                _activatePosition(tokenId);
-            }
-        }
     }
 
     // ==================== Auto Leverage ====================

@@ -1796,13 +1796,24 @@ contract RevertHookTest is BaseTest {
         vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
         _mintRaw(newLower, newUpper, 10e18, address(this), _migrationHookData(token2Id));
 
-        // Approved for the old token, but minting the replacement to a third party: refused.
+        // A blanket operator approval is deliberately not enough: it would let one operator claim
+        // across every position of the owner.
+        vm.prank(alice);
+        IERC721(address(positionManager)).setApprovalForAll(address(this), true);
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
+        _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
+
+        // Per-token approval, but minting the replacement to a third party: refused.
         vm.prank(alice);
         IERC721(address(positionManager)).approve(address(this), token2Id);
         vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
         _mintRaw(newLower, newUpper, 10e18, bob, _migrationHookData(token2Id));
 
-        // Approved operator minting the replacement to the old owner is the V4Utils shape: accepted.
+        // Per-token-approved operator draining the old position and minting the replacement to the
+        // old owner is the V4Utils shape: accepted.
+        positionManager.decreaseLiquidity(
+            token2Id, positionManager.getPositionLiquidity(token2Id), 0, 0, alice, block.timestamp, Constants.ZERO_BYTES
+        );
         uint256 newTokenId = _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
         assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), alice, "replacement goes to the owner");
         (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
@@ -1843,6 +1854,33 @@ contract RevertHookTest is BaseTest {
             address(this),
             _migrationHookData(lentTokenId)
         );
+    }
+
+    function testManualRemintWithHookDataRequiresDrainedOldPosition() public {
+        // Old position active and owing a carried protocol fee (fee-only collection cannot take it).
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        _swapHookedPoolBothWays(1e17);
+        vm.warp(block.timestamp + 1 days);
+        positionManager.decreaseLiquidity(token2Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
+        (uint128 owed0, uint128 owed1) = hook.pendingProtocolFees(token2Id);
+        assertGt(owed0 + owed1, 0, "old position should carry a protocol fee");
+
+        // A tagged mint that names the still-live position is not a replacement: refused, so the owed
+        // fee cannot be parked on a dust NFT and the live position keeps its automation.
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
+        _mintRaw(tickLower2, tickUpper2, 1e18, address(this), _migrationHookData(token2Id));
+        (uint128 still0, uint128 still1) = hook.pendingProtocolFees(token2Id);
+        assertEq(still0, owed0, "carried token0 fee stays owed by the live position");
+        assertEq(still1, owed1, "carried token1 fee stays owed by the live position");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "live position keeps its automation");
+
+        // Once drained the same claim is a replacement and goes through.
+        uint256 newTokenId = _drainAndRemint(_migrationHookData(token2Id), address(this));
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "drained: config follows");
+        (uint128 left0, uint128 left1) = hook.pendingProtocolFees(token2Id);
+        assertEq(left0 + left1, 0, "nothing stays owed by the drained position");
     }
 
     function testManualRemintHookDataRefusesExistingTarget() public {
