@@ -1845,15 +1845,32 @@ contract RevertHookTest is BaseTest {
         );
     }
 
-    function testManualRemintHookDataRefusesConfiguredTarget() public {
+    function testManualRemintHookDataRefusesExistingTarget() public {
         hook.setPositionConfig(token2Id, _relativeExitConfig());
-        hook.setPositionConfig(token3Id, _relativeExitConfig());
+        hook.setSwapProtectionConfig(token3Id, 50, 60); // the target's own protection must survive
 
-        // An increase on an already-configured position may not claim another position's config.
+        // The claim is only honoured on the token minted by the running operation. An increase on an
+        // existing position - even one this owner controls and even an unconfigured one - is refused,
+        // so old automation cannot be attached to a position that was never its replacement and the
+        // target's own swap protection is never overwritten.
         bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
         bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(token3Id, uint128(1e18), type(uint128).max, type(uint128).max, _migrationHookData(token2Id));
+        params[0] =
+            abi.encode(token3Id, uint128(1e18), type(uint128).max, type(uint128).max, _migrationHookData(token2Id));
         params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+
+        (uint128 protection0,) = hook.swapProtectionConfigs(token3Id);
+        assertGt(protection0, 0, "target's own swap protection untouched");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "old automation still on the old token");
+
+        // Emptied first, so the liquidity test alone would pass: the target's own swap protection
+        // still marks it as an existing position, not a blank replacement.
+        positionManager.decreaseLiquidity(
+            token3Id, positionManager.getPositionLiquidity(token3Id), 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
         vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
     }

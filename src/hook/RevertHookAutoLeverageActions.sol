@@ -79,12 +79,14 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
     ///      replacing in the mint's `hookData` (see afterAddLiquidity) and the claim is checked with
     ///      the same ERC721 authority that let it remove the old liquidity: the locker must own or be
     ///      approved for the old token, and the new token must be in the locker's custody (V4Utils
-    ///      mints to itself before forwarding) or already with the old owner. The new token may not
-    ///      carry a config of its own. An address approved for a token can therefore move its config
+    ///      mints to itself before forwarding) or already with the old owner. The callback also fires for
+    ///      increases, so the target must be a blank slate the way a fresh mint is: no liquidity before
+    ///      this add, no config, no swap protection and no carried fee of its own, so nothing of an
+    ///      existing position can be overwritten or re-attributed. An address approved for a token can therefore move its config
     ///      onto a position it controls, which is no escalation: such an address can already transfer
     ///      the NFT away entirely. Vault-held positions are skipped here so the vault's own
     ///      notification (migrateVaultPosition, bound to the running transform) handles them once.
-    function _migrateMintedPosition(uint256 oldTokenId, uint256 newTokenId) internal {
+    function _migrateMintedPosition(uint256 oldTokenId, uint256 newTokenId, int256 liquidityDelta) internal {
         IERC721 nft = IERC721(address(positionManager));
         address oldOwner = nft.ownerOf(oldTokenId);
         if (_vaults[oldOwner]) {
@@ -100,7 +102,17 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         if (newOwner != locker && newOwner != oldOwner) {
             revert Unauthorized();
         }
-        if (!PositionModeFlags.isNone(_positionConfigs[newTokenId].modeFlags)) {
+        // Blank-slate target: the position held no liquidity before this add (a mint, or an emptied
+        // position) and carries no hook state that a migration would clobber. An increase on a live
+        // position is never a "replacement", whoever is authorized for it.
+        PendingProtocolFee storage pending = _pendingProtocolFees[newTokenId];
+        SwapProtectionConfig storage protection = _swapProtectionConfigs[newTokenId];
+        if (
+            liquidityDelta <= 0 || positionManager.getPositionLiquidity(newTokenId) != uint128(uint256(liquidityDelta))
+                || !PositionModeFlags.isNone(_positionConfigs[newTokenId].modeFlags)
+                || protection.sqrtPriceMultiplier0 != 0 || protection.sqrtPriceMultiplier1 != 0 || pending.amount0 != 0
+                || pending.amount1 != 0
+        ) {
             revert InvalidConfig();
         }
         _migratePositionState(oldTokenId, newTokenId);
@@ -204,9 +216,13 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
     ///      own purposes - is ignored. Hook-internal operations (sender == hook) do nothing
     ///      here: their own flows migrate and activate explicitly.
     /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
-    function afterAddLiquidity(address sender, PoolKey calldata key, uint256 tokenId, bytes calldata hookData)
-        external
-    {
+    function afterAddLiquidity(
+        address sender,
+        PoolKey calldata key,
+        uint256 tokenId,
+        int256 liquidityDelta,
+        bytes calldata hookData
+    ) external {
         if (address(this) == _selfAddress) {
             revert Unauthorized();
         }
@@ -218,7 +234,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         if (hookData.length == 36 && bytes4(hookData[:4]) == REMINT_MIGRATION_TAG) {
             // The shared migration arms and activates the replacement itself, behind the same
             // value gate as the block below.
-            _migrateMintedPosition(uint256(bytes32(hookData[4:])), tokenId);
+            _migrateMintedPosition(uint256(bytes32(hookData[4:])), tokenId, liquidityDelta);
             return;
         }
         // Only a not-yet-active configured position consults the oracle here. Adds only raise a

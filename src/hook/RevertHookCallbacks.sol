@@ -266,7 +266,9 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         // sidecar (EIP-170). See RevertHookAutoLeverageActions.afterAddLiquidity.
         _delegatecallPassthrough(
             address(autoLeverageActions),
-            abi.encodeCall(RevertHookAutoLeverageActions.afterAddLiquidity, (sender, key, tokenId, hookData))
+            abi.encodeCall(
+                RevertHookAutoLeverageActions.afterAddLiquidity, (sender, key, tokenId, params.liquidityDelta, hookData)
+            )
         );
 
         return (BaseHook.afterAddLiquidity.selector, feeDelta);
