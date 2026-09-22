@@ -5,7 +5,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
@@ -840,5 +842,200 @@ contract AutoLendTest is AutomatorTestBase {
 
         assertEq(usdc.balanceOf(address(autoLend)), 0, "contract should not retain protocol fees");
         assertGt(usdc.balanceOf(protocolFeeRecipient), 0, "recipient should receive protocol fees");
+    }
+
+    // --- H-02: share-token pools and custodied share isolation ---
+
+    /// @dev Initializes a fresh (idleToken, otherToken) pool at tick 0 and mints a position for `owner` whose
+    ///      range lies entirely on the `idleToken` side, so it is out of range and holds only `idleToken`.
+    ///      `owner` must already hold enough `idleToken`.
+    function _mintOneSidedOutOfRangePosition(address owner, address idleToken, address otherToken)
+        internal
+        returns (PoolKey memory key, uint256 tokenId)
+    {
+        bool idleIs0 = idleToken < otherToken;
+        key = PoolKey({
+            currency0: Currency.wrap(idleIs0 ? idleToken : otherToken),
+            currency1: Currency.wrap(idleIs0 ? otherToken : idleToken),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(key, uint160(Q96)); // tick 0
+        // token0-only range sits above the current tick, token1-only range below it
+        (int24 lo, int24 hi) = idleIs0 ? (int24(60), int24(120)) : (int24(-120), int24(-60));
+
+        vm.startPrank(owner);
+        IERC20(idleToken).approve(address(permit2), type(uint256).max);
+        permit2.approve(idleToken, address(positionManager), type(uint160).max, type(uint48).max);
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory p = new bytes[](2);
+        p[0] = abi.encode(key, lo, hi, uint128(1e12), type(uint256).max, type(uint256).max, owner, bytes(""));
+        p[1] = abi.encode(key.currency0, key.currency1, owner);
+        positionManager.modifyLiquidities(abi.encode(actions, p), block.timestamp);
+        tokenId = positionManager.nextTokenId() - 1;
+        IERC721(address(positionManager)).setApprovalForAll(address(autoLend), true);
+        vm.stopPrank();
+    }
+
+    function _fundUsdc(address account, uint256 amount) internal {
+        vm.prank(WHALE_ACCOUNT);
+        usdc.transfer(account, amount);
+    }
+
+    /// @dev Lends the whale's USDC/WETH narrow position (token0 lent) and returns the custodied shares.
+    function _lendWhaleUsdcPosition() internal returns (uint256 tokenId, uint256 shares, address lendVault) {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        tokenId = _createNarrowPosition(poolKey);
+        _configureAndApprove(tokenId, _defaultConfig(0));
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+        (, shares,, lendVault) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0, "whale position should be lent");
+    }
+
+    function test_CustodiedSharesTrackLentShares() public {
+        (uint256 tokenId, uint256 shares, address lendVault) = _lendWhaleUsdcPosition();
+        assertEq(lendVault, address(usdcLendVault));
+        assertEq(autoLend.custodiedShares(address(usdcLendVault)), shares, "deposit should custody shares");
+        assertEq(usdcLendVault.balanceOf(address(autoLend)), shares, "balance equals custodied shares");
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(tokenId);
+        assertEq(autoLend.custodiedShares(address(usdcLendVault)), 0, "exit should release custody");
+        assertEq(usdcLendVault.balanceOf(address(autoLend)), 0, "no shares left");
+    }
+
+    /// @dev Regression for H-02: a config on a (USDC, shareToken) pool stored before the share token was
+    ///      registered must not be executable afterwards, otherwise the whole-balance sweep of the share
+    ///      token hands every custodied share to that position's owner.
+    function test_RevertWhenDepositOnShareTokenPoolRegisteredAfterConfig() public {
+        // 1. New USDC vault exists but is not yet registered in AutoLend.
+        MockERC4626Vault newUsdcVault = new MockERC4626Vault(usdc, "Lend USDC v2", "lUSDC2");
+
+        // 2. Attacker configures a one-sided USDC position in the (USDC, lUSDC2) pool; accepted because
+        //    isKnownVault[lUSDC2] is still false.
+        address attacker = makeAddr("attacker");
+        _fundUsdc(attacker, 10_000e6);
+        (, uint256 atkTokenId) = _mintOneSidedOutOfRangePosition(attacker, address(usdc), address(newUsdcVault));
+        vm.prank(attacker);
+        autoLend.configToken(atkTokenId, _defaultConfig(0));
+
+        // 3. Owner registers the new vault. Re-configuring is now rejected, but the stored config remains.
+        autoLend.setAutoLendVault(address(usdc), IERC4626(address(newUsdcVault)));
+        vm.prank(attacker);
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        autoLend.configToken(atkTokenId, _defaultConfig(0));
+
+        // 4. Victim's idle USDC is lent into lUSDC2 and custodied by AutoLend.
+        (uint256 victimTokenId, uint256 victimShares, address victimVault) = _lendWhaleUsdcPosition();
+        assertEq(victimVault, address(newUsdcVault));
+        assertEq(newUsdcVault.balanceOf(address(autoLend)), victimShares, "autolend custodies victim shares");
+
+        // 5. Legitimately triggered deposit on the attacker's position must be refused at execution time.
+        vm.prank(operator);
+        vm.expectRevert(AutoLend.ShareTokenPool.selector);
+        autoLend.deposit(_depositParams(atkTokenId));
+
+        // 6. Nothing moved; the victim can still exit.
+        assertEq(newUsdcVault.balanceOf(address(autoLend)), victimShares, "custodied shares untouched");
+        assertEq(newUsdcVault.balanceOf(attacker), 0, "attacker received no shares");
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(victimTokenId);
+        assertEq(newUsdcVault.balanceOf(address(autoLend)), 0);
+    }
+
+    /// @dev A position lent BEFORE its pool currency became a registered share token can no longer be
+    ///      withdrawn by the operator (pool-key sweep path), but the owner's escape hatch must keep working.
+    function test_WithdrawBlockedButForceExitWorksWhenShareTokenRegisteredAfterLend() public {
+        MockERC4626Vault newUsdcVault = new MockERC4626Vault(usdc, "Lend USDC v2", "lUSDC2");
+
+        address user = makeAddr("user");
+        _fundUsdc(user, 10_000e6);
+        (, uint256 tokenId) = _mintOneSidedOutOfRangePosition(user, address(usdc), address(newUsdcVault));
+        vm.prank(user);
+        autoLend.configToken(tokenId, _defaultConfig(0));
+
+        // Lent while lUSDC2 is still unknown: idle USDC goes to the currently registered usdcLendVault.
+        vm.prank(operator);
+        autoLend.deposit(_depositParams(tokenId));
+        (, uint256 shares, uint256 principal, address lendVault) = autoLend.lendStates(tokenId);
+        assertEq(lendVault, address(usdcLendVault));
+        assertGt(shares, 0);
+
+        autoLend.setAutoLendVault(address(usdc), IERC4626(address(newUsdcVault)));
+
+        vm.prank(operator);
+        vm.expectRevert(AutoLend.ShareTokenPool.selector);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        uint256 userUsdcBefore = usdc.balanceOf(user);
+        vm.prank(user);
+        autoLend.forceExit(tokenId);
+        assertGe(usdc.balanceOf(user) - userUsdcBefore, principal, "owner gets lent principal back");
+        assertEq(autoLend.custodiedShares(address(usdcLendVault)), 0);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+    }
+
+    /// @dev Proves the sweep itself is safe even when a share token legitimately IS the lent currency
+    ///      (vault-of-vault: lUSDC lent into a meta vault). Position A's forceExit sweeps lUSDC, but only
+    ///      the amount above the shares custodied for position B.
+    function test_ForceExitDoesNotSweepOtherPositionsCustodiedShares() public {
+        // Fresh instance so registration order can be controlled: meta vault (asset lUSDC) first.
+        AutoLend lend2 =
+            new AutoLend(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, protocolFeeRecipient);
+        lend2.setVault(address(vault));
+        MockERC4626Vault metaVault = new MockERC4626Vault(IERC20(address(usdcLendVault)), "Meta lUSDC", "mlUSDC");
+        lend2.setAutoLendVault(address(usdcLendVault), IERC4626(address(metaVault)));
+        assertFalse(lend2.isKnownVault(address(usdcLendVault)), "lUSDC not yet a known vault");
+
+        // Position A: one-sided lUSDC in a (USDC, lUSDC) pool, lent into the meta vault.
+        address userA = makeAddr("userA");
+        _fundUsdc(userA, 5_000e6);
+        vm.startPrank(userA);
+        usdc.approve(address(usdcLendVault), type(uint256).max);
+        usdcLendVault.deposit(5_000e6, userA);
+        vm.stopPrank();
+        AutoLend autoLendSaved = autoLend;
+        autoLend = lend2; // helpers approve / act on `autoLend`
+        (, uint256 tokenA) = _mintOneSidedOutOfRangePosition(userA, address(usdcLendVault), address(usdc));
+        vm.prank(userA);
+        lend2.configToken(tokenA, _defaultConfig(0));
+        vm.prank(operator);
+        lend2.deposit(_depositParams(tokenA));
+        (address lentA, uint256 sharesA, uint256 principalA, address vaultA) = lend2.lendStates(tokenA);
+        assertEq(lentA, address(usdcLendVault));
+        assertEq(vaultA, address(metaVault));
+        assertEq(lend2.custodiedShares(address(metaVault)), sharesA);
+
+        // Now register usdcLendVault for USDC: lUSDC becomes a known share token.
+        lend2.setAutoLendVault(address(usdc), IERC4626(address(usdcLendVault)));
+
+        // Position B (whale): USDC lent into usdcLendVault, so lend2 custodies lUSDC shares.
+        (uint256 tokenB, uint256 sharesB, address vaultB) = _lendWhaleUsdcPosition();
+        autoLend = autoLendSaved;
+        assertEq(vaultB, address(usdcLendVault));
+        assertEq(usdcLendVault.balanceOf(address(lend2)), sharesB, "lend2 custodies B's lUSDC shares");
+        assertEq(lend2.custodiedShares(address(usdcLendVault)), sharesB);
+
+        // A exits: meta vault redeems into lUSDC held by lend2, whose lUSDC balance now also contains B's shares.
+        uint256 userALusdcBefore = usdcLendVault.balanceOf(userA);
+        vm.prank(userA);
+        lend2.forceExit(tokenA);
+
+        assertEq(usdcLendVault.balanceOf(userA) - userALusdcBefore, principalA, "A receives exactly its own lUSDC");
+        assertEq(usdcLendVault.balanceOf(address(lend2)), sharesB, "B's custodied shares were not swept");
+        assertEq(lend2.custodiedShares(address(metaVault)), 0);
+
+        // B can still exit and gets its principal.
+        (,, uint256 principalB,) = lend2.lendStates(tokenB);
+        uint256 whaleUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+        vm.prank(WHALE_ACCOUNT);
+        lend2.forceExit(tokenB);
+        assertGe(usdc.balanceOf(WHALE_ACCOUNT) - whaleUsdcBefore, principalB);
+        assertEq(usdcLendVault.balanceOf(address(lend2)), 0);
+        assertEq(lend2.custodiedShares(address(usdcLendVault)), 0);
     }
 }

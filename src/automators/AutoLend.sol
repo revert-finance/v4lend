@@ -24,6 +24,9 @@ import {Automator} from "./Automator.sol";
 /// When near range again, withdraws and re-enters liquidity (or mints one-sided position if range changed too much).
 /// Only supports non-vault-owned positions.
 contract AutoLend is Automator {
+    /// @notice A pool currency is a registered lend vault share token; executing on it could sweep custodied shares
+    error ShareTokenPool();
+
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event AutoLendDeposit(uint256 indexed tokenId, address token, uint256 amount, uint256 shares);
     event AutoLendWithdraw(uint256 indexed tokenId, uint256 newTokenId, address token, uint256 amount, uint256 shares);
@@ -62,6 +65,11 @@ contract AutoLend is Automator {
 
     /// @notice Set of all addresses ever registered as lend vaults (never cleared)
     mapping(address => bool) public isKnownVault;
+
+    /// @notice Total vault shares held on behalf of lent positions, per vault (share token)
+    /// @dev Sum of `lendStates[*].shares` for each vault. Balance sweeps never touch this amount, so the
+    /// shares custodied for one position can never be paid out as leftovers of another execution.
+    mapping(address => uint256) public custodiedShares;
 
     /// @notice Per-position configuration
     mapping(uint256 => PositionConfig) public positionConfigs;
@@ -145,6 +153,7 @@ contract AutoLend is Automator {
         address posOwner = _requireNonVaultPosition(params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
+        _requireNoShareTokenPool(poolKey);
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
 
         bool isAbove = _validateDepositTrigger(config, positionInfo.tickLower(), positionInfo.tickUpper(), currentTick);
@@ -204,9 +213,10 @@ contract AutoLend is Automator {
         lendStates[params.tokenId] =
             LendState({lentToken: idleTokenAddr, shares: shares, amount: idleAmount, vault: address(lendVault)});
         vaultPositionCount[address(lendVault)]++;
+        custodiedShares[address(lendVault)] += shares;
 
         _sendProtocolFees(poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1);
-        _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
+        _sendSweepableBalances(posOwner, poolKey.currency0, poolKey.currency1);
 
         emit AutoLendDeposit(params.tokenId, idleTokenAddr, idleAmount, shares);
     }
@@ -228,6 +238,7 @@ contract AutoLend is Automator {
         address posOwner = _requireNonVaultPosition(params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
+        _requireNoShareTokenPool(poolKey);
         int24 tickLower = positionInfo.tickLower();
         int24 tickUpper = positionInfo.tickUpper();
         (uint160 sqrtPriceX96, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
@@ -238,6 +249,7 @@ contract AutoLend is Automator {
         // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
         // Standalone AutoLend withdraw accepts current ERC4626 redeem value without a
         // minimum-assets guard; operator/vault selection is trusted for this path.
+        custodiedShares[state.vault] -= state.shares;
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
 
         if (params.rewardX64 > config.maxRewardX64) {
@@ -304,7 +316,7 @@ contract AutoLend is Automator {
         }
 
         _sendProtocolFee(lendCurrency, protocolFee);
-        _sendRemainingBalances(posOwner, poolKey.currency0, poolKey.currency1);
+        _sendSweepableBalances(posOwner, poolKey.currency0, poolKey.currency1);
 
         emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
     }
@@ -317,6 +329,9 @@ contract AutoLend is Automator {
     /// the position may have changed hands after the deposit, and paying a stale depositor would misdirect funds
     /// that belong to the current owner. Consequently, burning a lent position locks its vault shares
     /// (self-inflicted) - owners must forceExit or withdraw before burning the empty position NFT.
+    /// @dev Deliberately NOT gated by `_requireNoShareTokenPool`: the escape hatch must stay callable for
+    /// positions whose pool currency became a registered share token after they were lent (their `withdraw`
+    /// is blocked). It never reads the pool key and only sweeps the lent currency net of custodied shares.
     function forceExit(uint256 tokenId) external nonReentrant {
         LendState memory state = lendStates[tokenId];
         if (state.shares == 0) {
@@ -333,6 +348,7 @@ contract AutoLend is Automator {
         // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
         // Accepts current ERC4626 redeem value without a minimum-assets guard; the owner
         // explicitly opts into exiting at the vault's current rate.
+        custodiedShares[state.vault] -= state.shares;
         uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
 
         uint256 protocolFee;
@@ -356,7 +372,7 @@ contract AutoLend is Automator {
         // Redemption only produces the lent currency, so sweeping it covers all proceeds without
         // depending on the position's pool key.
         _sendProtocolFee(lendCurrency, protocolFee);
-        _sendRemainingBalance(posOwner, lendCurrency);
+        _sendSweepableBalance(posOwner, lendCurrency);
 
         emit AutoLendForceExit(tokenId, state.lentToken, redeemedAmount, state.shares);
         emit PositionConfigured(tokenId, false, 0, 0, 0, 0, 0);
@@ -367,6 +383,36 @@ contract AutoLend is Automator {
         if (vaults[posOwner]) {
             revert Unauthorized();
         }
+    }
+
+    /// @dev Execution-time twin of the `configToken` share-token check. A config stored before its pool
+    /// currency was registered via `setAutoLendVault` stays in storage, so the pool must be re-checked
+    /// on every pool-key-based execution (deposit / withdraw), not only when the config is written.
+    function _requireNoShareTokenPool(PoolKey memory poolKey) internal view {
+        if (isKnownVault[Currency.unwrap(poolKey.currency0)] || isKnownVault[Currency.unwrap(poolKey.currency1)]) {
+            revert ShareTokenPool();
+        }
+    }
+
+    /// @dev Sweepable balance of `token`: the whole self-balance, minus the shares custodied for lent
+    /// positions when `token` is a registered lend vault share token. Keeps the whole-balance sweep model
+    /// while guaranteeing custodied shares are never paid out.
+    function _sweepableBalance(Currency token) internal view returns (uint256 amount) {
+        amount = token.balanceOfSelf();
+        address tokenAddr = Currency.unwrap(token);
+        if (isKnownVault[tokenAddr]) {
+            uint256 reserved = custodiedShares[tokenAddr];
+            amount = amount > reserved ? amount - reserved : 0;
+        }
+    }
+
+    function _sendSweepableBalance(address recipient, Currency token) internal {
+        _transferToken(recipient, token, _sweepableBalance(token));
+    }
+
+    function _sendSweepableBalances(address recipient, Currency token0, Currency token1) internal {
+        _sendSweepableBalance(recipient, token0);
+        _sendSweepableBalance(recipient, token1);
     }
 
     function _validateDepositTrigger(PositionConfig memory config, int24 tickLower, int24 tickUpper, int24 currentTick)

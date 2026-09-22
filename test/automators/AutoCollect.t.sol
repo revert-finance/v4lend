@@ -657,4 +657,36 @@ contract AutoCollectTest is AutomatorTestBase {
         // Owner should receive harvested tokens (ETH and/or USDC)
         assertTrue(ethAfter > ethBefore || usdcAfter > usdcBefore, "Owner should receive harvested ETH/USDC tokens");
     }
+
+    /// @dev L-04: like AutoExit / AutoRange / AutoLend, a direct operator `execute` on a vault-owned
+    ///      position is refused; it must go through `executeWithVault` so the vault runs its checks.
+    function test_RevertWhenOperatorExecutesDirectlyOnVaultOwnedPosition() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+        _generateFees(poolKey);
+
+        _depositToVault(200000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoCollect), true);
+
+        AutoCollect.ExecuteParams memory params = AutoCollect.ExecuteParams({
+            tokenId: tokenId,
+            mode: AutoCollect.CollectMode.AUTO_COLLECT,
+            swap0To1: false,
+            amountIn: 0,
+            amountOutMin: 0,
+            swapData: bytes(""),
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoCollect.execute(params);
+
+        // the vault path still works for the same position
+        _executeWithVault(params);
+    }
 }
