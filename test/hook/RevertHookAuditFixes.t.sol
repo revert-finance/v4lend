@@ -322,6 +322,105 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(currency1.balanceOf(address(hook)), 0, "hook flat in token1");
     }
 
+    /// @dev While dispatch is deferred the cursor lags the live bucket. A trigger registered then
+    ///      would sit on the far side of the pending walk and be missed by the direction the next
+    ///      in-window swap infers, so registration is refused until the pool has caught up.
+    function testSetPositionConfigRefusedWhileTriggerCursorIsStale() public {
+        hook.setPositionConfig(token2Id, _autoExitConfig(tickLower2, tickUpper2 + poolKey.tickSpacing));
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey);
+
+        _swap(poolKey, true, 25e18); // off-window: nothing dispatched, cursor left behind
+        assertLt(_currentTick(poolKey), -100, "pool must be outside the oracle window");
+
+        vm.expectRevert(abi.encodeWithSignature("TriggerCursorStale()"));
+        hook.setPositionConfig(token3Id, _autoExitConfig(tickLower3 - poolKey.tickSpacing * 100, tickUpper3));
+
+        // configs without triggers are unaffected
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_COLLECT,
+                autoCollectMode: RevertHookState.AutoCollectMode.AUTO_COLLECT,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        // back inside the window the pending walk runs (exiting token2) and registration works again
+        _swap(poolKey, false, 25e18);
+        for (uint256 i; i < 400 && positionManager.getPositionLiquidity(token2Id) != 0; i++) {
+            _swap(poolKey, true, 5e16);
+        }
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "deferred exit runs in-window");
+        hook.setPositionConfig(token3Id, _autoExitConfig(tickLower3 - poolKey.tickSpacing * 100, tickUpper3));
+    }
+
+    /// @dev Two positions share a trigger tick. The first exit's own swap carries the pool past the
+    ///      oracle bound, so the second must be put back rather than executed at that price, and it
+    ///      runs on the next swap that ends inside the window.
+    function testSecondActionAtSameTickIsRequeuedWhenFirstLeavesOracleWindow() public {
+        uint128 bigLiquidity = 1500e18;
+        (uint256 a,) = positionManager.mint(
+            poolKey,
+            tickLower2,
+            tickUpper2,
+            bigLiquidity,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        (uint256 b,) = positionManager.mint(
+            poolKey,
+            tickLower2,
+            tickUpper2,
+            bigLiquidity,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        // trigger one spacing below the range: when it fires both positions are out of range and
+        // only the 100e18 full-range liquidity absorbs the exit swaps
+        hook.setPositionConfig(a, _autoExitConfig(tickLower2 - poolKey.tickSpacing, tickUpper2));
+        hook.setPositionConfig(b, _autoExitConfig(tickLower2 - poolKey.tickSpacing, tickUpper2));
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey);
+        // window wide enough that the crossing step (which overshoots once the big positions leave
+        // range) still lands inside it, while one exit's ~4.5e18 swap into the 100e18 full-range
+        // liquidity does not
+        hook.setMaxTicksFromOracle(300);
+
+        // walk down until the shared trigger fires (bucket -120, i.e. price below the range)
+        for (uint256 i; i < 400 && _currentTick(poolKey) > tickLower2 - 1; i++) {
+            _swap(poolKey, true, 5e17);
+        }
+        assertLt(_currentTick(poolKey), -300, "first exit must have carried the pool out of the window");
+        uint128 liqA = positionManager.getPositionLiquidity(a);
+        uint128 liqB = positionManager.getPositionLiquidity(b);
+        assertTrue((liqA == 0) != (liqB == 0), "exactly one of the two exits must have run");
+        uint256 pending = liqA == 0 ? b : a;
+
+        // bring the pool back inside the window (still below the trigger): the requeued exit runs
+        for (uint256 i; i < 400 && _currentTick(poolKey) < -300; i++) {
+            _swap(poolKey, false, 5e17);
+        }
+        assertLt(_currentTick(poolKey), tickLower2, "pool must still be below the trigger");
+        assertEq(positionManager.getPositionLiquidity(pending), 0, "requeued exit runs once the price is bounded");
+    }
+
     // ==================== M-01: custodied auto-lend shares are never swept ====================
 
     function testCustodiedSharesSurviveActionsInShareTokenPool() public {

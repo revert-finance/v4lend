@@ -49,9 +49,11 @@ contract RevertHookSwapActions is RevertHookState {
             // entry point:
             //   - trigger-driven actions (AUTO_RANGE / AUTO_EXIT / AUTO_LEVERAGE / AUTO_LEND) run
             //     only from _afterSwap, which dispatches nothing while the live tick is outside
-            //     [oracleTick - _maxTicksFromOracle, oracleTick + _maxTicksFromOracle] and re-checks
-            //     after every executed action; a swap that overshoots the window leaves the
-            //     triggers armed for a later swap that ends inside it (M-03);
+            //     [oracleTick - _maxTicksFromOracle, oracleTick + _maxTicksFromOracle], re-checks
+            //     after every executed action and requeues the rest of a tick when an action's own
+            //     swap leaves the window; a swap that overshoots leaves the triggers armed for a
+            //     later swap that ends inside it, and registration is refused while the cursor lags
+            //     so no trigger can land where the resumed walk would miss it (M-03);
             //   - the hook's own action entry points are reachable from a vault only during a
             //     transform the hook itself started (RevertHookActionBase._requireAuthorization), so
             //     a borrower cannot fire them at an arbitrary price (C-01);

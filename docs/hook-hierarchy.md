@@ -81,6 +81,8 @@ graph TD
     S --> SW["RevertHookSwapActions"]
 ```
 
+`RevertHookConfig._setPositionConfig` delegatecalls `RevertHookAutoLeverageActions.validatePositionConfig` for the tick-alignment, mode-flag and range validation (moved there for bytecode room; reverts bubble up).
+
 `RevertHookSwapActions` is delegatecalled from `RevertHookActionBase._executeSwapResolved` (and so runs with the hook's storage) but inherits only up to `RevertHookState`; it reads `_swapProtectionConfigs`. It declares no storage of its own and must never do so.
 
 ## Why The Split Exists

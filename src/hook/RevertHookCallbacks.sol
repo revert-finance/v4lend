@@ -149,6 +149,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
             bool increasing = cursor < liveTick;
             int24 tickEnd = liveTick;
+            int24 oracleBound;
             {
                 // single _tryOracleMaxEndTick call site: its inlined tick-math body must exist
                 // exactly once in the bytecode (one copy per call site would blow EIP-170)
@@ -170,7 +171,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 // the window while the pool has overshot it would execute them at the overshot
                 // price (M-03). They stay armed and the cursor stays put: the next swap that ends
                 // inside the window walks from the cursor and processes them at a bounded price.
-                int24 oracleBound = increasing ? upperOracleMaxEndTick : lowerOracleMaxEndTick;
+                oracleBound = increasing ? upperOracleMaxEndTick : lowerOracleMaxEndTick;
                 if (increasing ? liveTick > oracleBound : liveTick < oracleBound) {
                     break;
                 }
@@ -209,11 +210,20 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 }
 
                 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
-                if (_hasDirectionReversed(previousLiveTick, liveTick, increasing)) {
+                directionReversed = _hasDirectionReversed(previousLiveTick, liveTick, increasing);
+                // The action's own swap may also have carried the pool past the oracle bound in
+                // the traversal direction; the positions still queued at this tick would execute
+                // at that price. Either way put them back. A reversal continues the walk from this
+                // tick; leaving the window stops it with the cursor before the tick, so the next
+                // in-window swap finds them again (same bookkeeping as the per-swap cap).
+                bool leftWindow = !directionReversed && (increasing ? liveTick > oracleBound : liveTick < oracleBound);
+                if (directionReversed || leftWindow) {
                     if (i < length) {
                         _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i);
                     }
-                    directionReversed = true;
+                    if (leftWindow) {
+                        tickDrained = false;
+                    }
                     break;
                 }
                 previousLiveTick = liveTick;

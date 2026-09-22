@@ -1890,6 +1890,10 @@ contract V4VaultHookTest is V4ForkTestBase {
 
     function testAutoLeverageReconfiguration_ReplacesOldTriggerNodes() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
+        // Same fresh-pool artefact as the auto-collect/auto-range scenarios: moving this 1e14
+        // liquidity pool two spacings puts it far outside the default 100-tick oracle window, where
+        // dispatch is deferred and setPositionConfig refuses new triggers (TriggerCursorStale).
+        revertHook.setMaxTicksFromOracle(10000);
         _createPositionInHookedPool(hookedPoolKey);
 
         uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);

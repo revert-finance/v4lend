@@ -164,6 +164,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         // Same gate as the liquidity callbacks: only positions worth automating get armed.
         (uint256 positionValueNative,,,) = v4Oracle.getValue(newTokenId, address(0));
         if (positionValueNative >= _minPositionValueNative) {
+            _requireTriggerCursorFresh(newPoolKey.toId(), newPoolKey.tickSpacing);
             _addPositionTriggers(newTokenId, newPoolKey);
             _activatePosition(newTokenId);
         }
