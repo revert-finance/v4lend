@@ -81,7 +81,24 @@ contract DeployArbitrum is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 1 hours;
+    // Chainlink max feed ages, one per feed. Each value must be >= the feed's heartbeat plus a
+    // margin: a too-low value makes borrow, transform AND liquidate revert on every valuation
+    // once the price has not moved enough to publish a new round (see DeployBase, where a shared
+    // one-hour limit took the USDC vault down). The fee-deviation trigger keeps rounds frequent
+    // in normal markets; the heartbeat is the only guarantee in a flat one.
+    //
+    // Assumed heartbeats (Arbitrum One, https://docs.chain.link/data-feeds/price-feeds/addresses?network=arbitrum):
+    //   USDC/USD 0x50834F31...  86400 s     USDT/USD 0x3f3f5dF8...  86400 s     DAI/USD 0xc5C8E77B...  86400 s
+    //   ETH/USD  0x639Fe6ab...  86400 s     BTC/USD  0x6ce18586...  86400 s     ARB/USD 0xb2A82404...  86400 s
+    // TODO(deployer): verify every heartbeat above before broadcasting. Arbitrum's ETH/USD,
+    // BTC/USD and ARB/USD feeds are believed to run a 24 h heartbeat with a 0.05% deviation
+    // trigger; tighten ETH/BTC/ARB to 1-2 hours only if the live heartbeat is 3600 s.
+    uint32 constant USDC_MAX_FEED_AGE = 25 hours; // also used for USDC.e (same feed)
+    uint32 constant USDT_MAX_FEED_AGE = 25 hours;
+    uint32 constant DAI_MAX_FEED_AGE = 25 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 25 hours;
+    uint32 constant BTC_MAX_FEED_AGE = 25 hours;
+    uint32 constant ARB_MAX_FEED_AGE = 25 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
@@ -187,7 +204,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             USDC,
             AggregatorV3Interface(CHAINLINK_USDC_USD),
-            MAX_FEED_AGE,
+            USDC_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
             USDC,
             ORACLE_TWAP_SECONDS,
@@ -197,7 +214,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             USDC_E,
             AggregatorV3Interface(CHAINLINK_USDC_USD),
-            MAX_FEED_AGE,
+            USDC_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_USDC_E_WETH),
             USDC_E,
             ORACLE_TWAP_SECONDS,
@@ -207,7 +224,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             USDT,
             AggregatorV3Interface(CHAINLINK_USDT_USD),
-            MAX_FEED_AGE,
+            USDT_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_USDT_WETH),
             USDT,
             ORACLE_TWAP_SECONDS,
@@ -217,7 +234,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             DAI,
             AggregatorV3Interface(CHAINLINK_DAI_USD),
-            MAX_FEED_AGE,
+            DAI_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_DAI_WETH),
             DAI,
             ORACLE_TWAP_SECONDS,
@@ -227,7 +244,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             WETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -237,7 +254,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             ETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -247,7 +264,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             WBTC,
             AggregatorV3Interface(CHAINLINK_BTC_USD),
-            MAX_FEED_AGE,
+            BTC_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_WBTC_WETH),
             WBTC,
             ORACLE_TWAP_SECONDS,
@@ -257,7 +274,7 @@ contract DeployArbitrum is Script {
         oracle.setTokenConfig(
             ARB,
             AggregatorV3Interface(CHAINLINK_ARB_USD),
-            MAX_FEED_AGE,
+            ARB_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_ARB_WETH),
             ARB,
             ORACLE_TWAP_SECONDS,

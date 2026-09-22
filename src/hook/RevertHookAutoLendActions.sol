@@ -88,6 +88,16 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         if (_positionStates[oldTokenId].autoLendShares != 0) {
             revert SharesOutstanding();
         }
+        // The vault forwards borrower-chosen calldata to any allowlisted transformer, so nothing
+        // above ties `oldTokenId` to the transform in progress. A remint keeps the vault-side loan
+        // owner: the old token's owner record is the account that now owns the replacement. A
+        // different owner means a borrower is pointing at someone else's position (M-02). The old
+        // token may keep liquidity (partial range changes leave some behind), so liquidity is not
+        // part of the check.
+        IVault vault = IVault(msg.sender);
+        if (vault.ownerOf(oldTokenId) != vault.ownerOf(newTokenId)) {
+            revert Unauthorized();
+        }
 
         (PoolKey memory oldPoolKey,) = positionManager.getPoolAndPositionInfo(oldTokenId);
         (PoolKey memory newPoolKey, PositionInfo newPositionInfo) = positionManager.getPoolAndPositionInfo(newTokenId);
@@ -154,6 +164,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         // Same gate as the liquidity callbacks: only positions worth automating get armed.
         (uint256 positionValueNative,,,) = v4Oracle.getValue(newTokenId, address(0));
         if (positionValueNative >= _minPositionValueNative) {
+            _requireTriggerCursorFresh(newPoolKey.toId(), newPoolKey.tickSpacing);
             _addPositionTriggers(newTokenId, newPoolKey);
             _activatePosition(newTokenId);
         }
@@ -373,6 +384,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
 
             PositionState storage state = _positionStates[tokenId];
             state.autoLendShares = shares;
+            _custodiedShares[address(lendVault)] += shares;
             state.autoLendToken = tokenAddress;
             state.autoLendAmount = lendAmount;
             state.autoLendVault = address(lendVault);
@@ -500,9 +512,12 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         }
     }
 
-    function _sendLendingProtocolFee(uint256 tokenId, PoolKey memory poolKey, Currency lendCurrency, uint256 protocolFee)
-        internal
-    {
+    function _sendLendingProtocolFee(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        Currency lendCurrency,
+        uint256 protocolFee
+    ) internal {
         if (protocolFee == 0) return;
 
         address protocolFeeRecipient = hookFeeController.protocolFeeRecipient();
@@ -520,8 +535,13 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     }
 
     /// @notice Resets the auto-lend state for a position
+    /// @dev Every caller has already redeemed the recorded shares, so the custody total drops with
+    ///      the position's record (see RevertHookState._custodiedShares).
     function _resetAutoLendState(uint256 tokenId) internal {
         PositionState storage state = _positionStates[tokenId];
+        uint256 custodied = _custodiedShares[state.autoLendVault];
+        uint256 shares = state.autoLendShares;
+        _custodiedShares[state.autoLendVault] = custodied > shares ? custodied - shares : 0;
         state.autoLendShares = 0;
         state.autoLendToken = address(0);
         state.autoLendAmount = 0;
@@ -541,9 +561,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ) internal {
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
-        (uint256 restored0, uint256 restored1) =
+        (
+            uint256 restored0,
+            uint256 restored1
             // forge-lint: disable-next-line(unsafe-typecast)
-            _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        ) = _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
         _sendLeftoverTokens(tokenId, currency0, currency1, owner);
 
         if (restored0 == 0 && restored1 == 0) {

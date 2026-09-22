@@ -9,6 +9,7 @@ This checklist captures deployment gates that should be completed before a produ
 - Use `TWAP_CHAINLINK_VERIFY`, `CHAINLINK`, or `TWAP` only as an explicit emergency or non-production decision.
 - Set `twapSeconds = 30 minutes` for production TWAPs. `0` uses v3 pool spot price and should be limited to explicit emergency or non-production use.
 - Use a Chainlink-compatible feed with a nonzero `maxFeedAge` and verify feed decimals.
+- Verify each Chainlink (or RedStone) feed's heartbeat on the provider's feed page and set that token's `maxFeedAge >= heartbeat + margin` (25 hours for the usual 86400 s stablecoin feeds, 2 hours for a 3600 s feed). A too-low value makes borrow, transform AND liquidate revert on every valuation as soon as the price has not moved enough to publish a new round. Each deploy script carries per-feed `*_MAX_FEED_AGE` constants with the assumed heartbeat in a comment; resolve every `TODO(deployer): verify heartbeat` before broadcasting.
 - Use a Uniswap v3 TWAP pool that contains the oracle `referenceToken` and the configured token alias.
 - Use WETH as `twapTokenAlias` for native ETH.
 - Set source deviation to `200` unless the token needs a stricter bound.
@@ -29,6 +30,8 @@ This checklist captures deployment gates that should be completed before a produ
 - Confirm `maxTicksFromOracle`, minimum position value, route controller entries, and fee controller parameters.
 - Confirm automation routes have slippage protection and that any `10000` slippage bypass is intentional for that specific flow.
 - Confirm `MAX_EXECUTIONS_PER_SWAP` is acceptable for the target chain gas budget and expected trigger density.
+- Hook upgrade: de-allowlist the old hook (`setHookAllowList(old, false)` and `setTransformer(old, false)`) and every old transformer it replaces (old V4Utils, LeverageTransformer, ...) in the same batch that allowlists the new ones. The hook stack is redeploy-oriented: a new hook address means new hooked pools, and a remint on a still-allowlisted old hook reverts mid-transform because it does not implement `migrateVaultPosition`. `DeployBaseHookUpgrade` requires `OLD_HOOK` / `OLD_V4UTILS` and retires them itself; a manual upgrade must do the same.
+- Only `DeployBase` / `DeployBaseHookUpgrade` configure `HookRouteController` routes (ETH/USDC and WETH/USDC). Arbitrum, Mainnet and Unichain deploy an empty route controller, so hook action swaps there fall back to the hooked pool itself. Configure routes with `script/configure-route.sh` once a deep hookless pool exists, or accept the hooked-pool fallback explicitly per chain.
 
 ## Arbitrage Auction
 
@@ -44,6 +47,20 @@ This checklist captures deployment gates that should be completed before a produ
 
 ## Emergency Runbook
 
-- Set `emergencyAdmin` to the intended operational signer or multisig.
+- Set `emergencyAdmin` to the intended operational signer or multisig. No deploy script does this; it is a manual post-deploy call on both `V4Vault.setEmergencyAdmin` and `V4Oracle.setEmergencyAdmin`.
+- Ownership handoff is manual. No deploy script transfers ownership: the deployer EOA owns the oracle, vault, hook, controllers and transformers, and is the fee recipient. `V4Vault` and `V4Oracle` are `Ownable2Step`, so the handoff is `transferOwnership(newOwner)` from the deployer followed by `acceptOwnership()` from the new owner; check the other contracts' ownership model before the same handoff. Do this in the launch batch, not later.
 - Document who may switch a token into `CHAINLINK`, `TWAP`, or `TWAP_CHAINLINK_VERIFY`, why, and how it is switched back.
 - Do not leave production collateral in a single-source mode after the source incident is resolved.
+
+## Known Deployments
+
+Addresses recorded in `broadcast/` (`transactions[].contractAddress` for `contractName == "V4Utils"`). `DeployV4Utils*` only deploys the contract; `setVault` / `setTransformer` wiring is a separate owner call.
+
+| Chain | Contract | Address | Source |
+| --- | --- | --- | --- |
+| Base (8453) | V4Utils | `0xb23f54B586a5C02F350d37A696894FdBbA7C1067` | `broadcast/DeployV4UtilsBase.s.sol/8453/run-latest.json` |
+| Arbitrum One (42161) | V4Utils | `0xb541D37B6F328EF93908f80e5983B8F989A5FCe8` | `broadcast/DeployV4UtilsArbitrum.s.sol/42161/run-latest.json` |
+| Base (8453) | V4Oracle (existing) | `0x94C9bDeDB05358A98d95520205879d438419AB41` | `DeployBaseHookUpgrade.DEFAULT_ORACLE` |
+| Base (8453) | V4Vault (existing, USDC) | `0xaf98803a1f43afC14335360e089F6B12947924ED` | `DeployBaseHookUpgrade.DEFAULT_VAULT` |
+
+The full-stack `Deploy{Base,Arbitrum,Mainnet,Unichain}` broadcasts in the repo are dry runs only.

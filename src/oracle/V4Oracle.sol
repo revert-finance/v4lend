@@ -685,6 +685,16 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     /// @notice Helper function to calculate uncollected fees using FullMath precision math
     /// @dev Internal function that implements the core fee calculation formula: liquidity * (feeGrowth - feeGrowthLast) / Q128
+    /// @dev The subtraction MUST be unchecked, mirroring Uniswap v4 `Position.update`. `feeGrowthInside` is a
+    ///      modular (mod 2^256) accumulator: `Pool.getFeeGrowthInside` derives it from `feeGrowthGlobal` minus the
+    ///      `feeGrowthOutside` snapshots of both ticks, each written with `unchecked` arithmetic, so both the live
+    ///      value and the position's `feeGrowthInsideLast` snapshot can wrap and be numerically smaller than the
+    ///      other while the true accrued growth (their difference mod 2^256) stays small and positive. A common
+    ///      trigger is a position whose upper tick was initialized before its lower tick while the price sat
+    ///      above both. With checked arithmetic that wrapped state panics, which would block `getValue` and every
+    ///      vault health check and liquidation of the position. The final narrowing stays checked: Uniswap
+    ///      narrows the same product with `toInt128()` in `Pool.modifyLiquidity`, so a fee amount that does not
+    ///      fit is uncollectable there as well.
     /// @param feeGrowthInsideX128 Current fee growth accumulator inside the position range (Q128 format)
     /// @param feeGrowthInsideLastX128 Last fee growth accumulator when fees were collected (Q128 format)
     /// @param liquidity Current liquidity amount in the position
@@ -698,11 +708,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             return 0;
         }
 
-        uint256 deltaFeeGrowth = feeGrowthInsideX128 - feeGrowthInsideLastX128;
+        uint256 deltaFeeGrowth;
+        unchecked {
+            deltaFeeGrowth = feeGrowthInsideX128 - feeGrowthInsideLastX128;
+        }
         if (deltaFeeGrowth == 0) {
             return 0;
         }
 
-        return uint128(FullMath.mulDiv(deltaFeeGrowth, liquidity, FixedPoint128.Q128));
+        return SafeCast.toUint128(FullMath.mulDiv(deltaFeeGrowth, liquidity, FixedPoint128.Q128));
     }
 }

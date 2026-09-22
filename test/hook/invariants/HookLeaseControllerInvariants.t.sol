@@ -196,7 +196,13 @@ contract HookLeaseControllerHandler is BaseTest {
         try leaseController.setLeasingEnabled(poolKey, enabled) {} catch {}
     }
 
-    function evict(uint256) external {
+    /// @dev Eviction is permissionless (L-05): exercised from the actors, from an unrelated
+    ///      address and from the owner (this handler), so the escrow accounting is checked for
+    ///      every kind of caller.
+    function evict(uint256 callerSeed) external {
+        uint256 pick = bound(callerSeed, 0, 4);
+        address caller = pick < 3 ? actors[pick] : (pick == 3 ? sweepSink : address(this));
+        vm.prank(caller);
         try leaseController.evictLease(poolKey) {} catch {}
     }
 

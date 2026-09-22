@@ -69,4 +69,5 @@ abstract contract Constants {
     error HookNotAllowed();
     error PositionValueTooLow();
     error SharesOutstanding();
+    error TriggerCursorStale();
 }

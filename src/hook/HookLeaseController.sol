@@ -190,6 +190,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @dev Non-reverting by construction (the hook calls it directly): early-returns for idle
     ///      pools, and the donate leg is isolated in _donate's own try/catch. Runs inside the
     ///      hook's beforeSwap, i.e. while the PoolManager is unlocked, so donations settle directly.
+    ///      Integration note: that settlement re-syncs the PoolManager's single synced-currency
+    ///      slot inside the caller's unlock - see donateExternal (AUDIT-ACCEPTED-CONTROLLER-DRIP-SYNC).
     function beforeSwap(PoolKey calldata key, address sender) external onlyHook returns (uint24 lpFeeOverride) {
         PoolId poolId = key.toId();
         // single cold SLOAD to skip the many pools that never run a lease
@@ -226,6 +228,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     }
 
     /// @inheritdoc IHookAuctionController
+    /// @dev Same integration note as beforeSwap: the drip may sync/settle inside the caller's
+    ///      unlock (AUDIT-ACCEPTED-CONTROLLER-DRIP-SYNC, see donateExternal).
     function beforeLiquidityChange(PoolKey calldata key) external onlyHook {
         PoolId poolId = key.toId();
         if (_poolConfigs[poolId].minDripSeconds == 0 || block.timestamp < _poolConfigs[poolId].startTime) {
@@ -251,6 +255,11 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @notice Starts a lease on a vacant pool: escrows the self-assessed `price` as a deposit
     ///         and prepays `rentDeposit` of rent. The registered executor gets the fee discount
     ///         while the rent balance covers the current time.
+    /// @dev A rent-INSOLVENT incumbent (now >= paidThrough: no discount, no rent accruing) does not
+    ///      count as active: it is evicted first (final accrual delivered, deposit and rent dust
+    ///      escrowed for pull-refund, see evictLease) and the caller enters at their own price - no
+    ///      buyout bump, since a lapsed lease has no claim on the slot. A solvent lease can only be
+    ///      taken via buyout.
     function startLease(PoolKey calldata key, address executor, uint256 price, uint256 rentDeposit)
         external
         nonReentrant
@@ -261,8 +270,12 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         _checkExecutor(executor);
 
         PoolLeaseState storage state = _poolStates[poolId];
-        if (state.lessee != address(0)) {
-            revert LeaseAlreadyActive();
+        address incumbent = state.lessee;
+        if (incumbent != address(0)) {
+            if (block.timestamp < state.paidThrough) {
+                revert LeaseAlreadyActive();
+            }
+            _evictInsolvent(key, poolId, config, state, incumbent);
         }
         _installLease(config, state, executor, price, rentDeposit);
         emit LeaseStarted(poolId, msg.sender, executor, price, rentDeposit);
@@ -348,7 +361,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @dev Raising requires leasing to be enabled. Lowering stays allowed while leasing is
     ///      disabled only as long as it does not stretch the prepaid runway: a lower rent rate
     ///      would otherwise revive a run-out lease from its remaining balance and block the
-    ///      owner's wind-down, since evictLease requires insolvency.
+    ///      owner's wind-down, since evictLease requires insolvency. (While leasing is enabled a
+    ///      lapsed lessee may revive this way - it is a race against eviction / startLease, and
+    ///      the deposit is theirs either way.)
     function setPrice(PoolKey calldata key, uint256 newPrice) external nonReentrant {
         PoolId poolId = key.toId();
         PoolLeaseConfig storage config = _poolConfigs[poolId];
@@ -457,8 +472,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @notice Configures (or reconfigures) the lease for a pool. The pool must be initialized,
     ///         use the dynamic fee flag and this controller's hook.
     /// @dev Reconfiguration requires a clean state: no active lease and no undistributed
-    ///      donations. Use setLeasingEnabled(false) first to wind down (and evictLease once the
-    ///      running lease is rent-insolvent, if the lessee never exits).
+    ///      donations. Use setLeasingEnabled(false) first to wind down (and evictLease - open to
+    ///      anyone - once the running lease is rent-insolvent, if the lessee never exits).
     function configurePool(PoolKey calldata key, PoolLeaseConfig memory config) external {
         _checkOwner();
 
@@ -574,33 +589,47 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         emit NormalLpFeeSet(poolId, newNormalLpFee);
     }
 
-    /// @notice Owner wind-down step for a lease whose prepaid rent has run out but whose lessee
-    ///         never exits: refunds the price deposit (plus any rent dust) to the lessee's
-    ///         pull-refund escrow and frees the slot. Only once leasing is disabled and the
-    ///         lease is rent-insolvent, so an actively paying lessee can never be evicted.
+    /// @notice Frees the slot of a lease whose prepaid rent has run out (now >= paidThrough) but
+    ///         whose lessee never exits: refunds the price deposit (plus any rent dust) to the
+    ///         lessee's pull-refund escrow. Permissionless and independent of leasingEnabled: an
+    ///         insolvent lessee gets no discount and pays no rent, so eviction takes nothing from
+    ///         them, while leaving them in place would let them squat the slot at zero carrying
+    ///         cost (blocking startLease and forcing entrants through a buyout at price + bump, or
+    ///         forcing the owner to freeze the pool's market to remove them). An actively paying
+    ///         lessee can never be evicted; a lapsed one can re-enter via startLease. Doubles as
+    ///         the owner's wind-down step once leasing is disabled.
     function evictLease(PoolKey calldata key) external nonReentrant returns (uint256 refund) {
-        _checkOwner();
         PoolId poolId = key.toId();
         PoolLeaseConfig storage config = _poolConfigs[poolId];
         if (!_isConfigured(config)) {
             revert PoolNotConfigured();
-        }
-        if (config.leasingEnabled) {
-            revert LeasingDisabled();
         }
         PoolLeaseState storage state = _poolStates[poolId];
         address lessee = state.lessee;
         if (lessee == address(0)) {
             revert NoActiveLease();
         }
-        // the final accrual is delivered to the LPs who were in range while it accrued, exactly
-        // like every other lease action; it is parked only inside a throttle window
-        _settleAccrualForLeaseAction(key, poolId, config, state);
-        // same strict boundary as the discount: at paidThrough the lease no longer covers rent
+        // same strict boundary as the discount: at paidThrough the lease no longer covers rent.
+        // paidThrough is invariant under accrual, so checking it before the settlement is exact
         if (block.timestamp < state.paidThrough) {
             revert LeaseStillSolvent();
         }
+        refund = _evictInsolvent(key, poolId, config, state, lessee);
+    }
 
+    /// @dev Shared eviction tail of evictLease and startLease-over-an-insolvent-incumbent; callers
+    ///      have verified `lessee` is the current lessee and now >= paidThrough. The final accrual
+    ///      is delivered to the LPs who were in range while it accrued, exactly like every other
+    ///      lease action (parked only inside a throttle window); the deposit plus the sub-second
+    ///      rent remainder go to the lessee's pull-refund escrow and the slot is cleared.
+    function _evictInsolvent(
+        PoolKey calldata key,
+        PoolId poolId,
+        PoolLeaseConfig storage config,
+        PoolLeaseState storage state,
+        address lessee
+    ) internal returns (uint256 refund) {
+        _settleAccrualForLeaseAction(key, poolId, config, state);
         refund = uint256(state.price) + state.rentBalance;
         _clearLease(state);
         if (refund != 0) {
@@ -1024,6 +1053,13 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @dev Self-only executor for a single donation, so `_donate` can wrap it in try/catch.
     ///      Runs inside the same PoolManager unlock as the caller. Verifies BOTH sides of the
     ///      transfer exactly - see HookAuctionController.donateExternal for the full rationale.
+    ///
+    ///      @custom:accepted-risk AUDIT-ACCEPTED-CONTROLLER-DRIP-SYNC
+    ///      Same accepted constraint as HookAuctionController.donateExternal: the sync -> transfer
+    ///      -> settle here overwrites and clears the PoolManager's single synced-currency record
+    ///      inside the integrator's unlock, so a caller that PRE-paid with `sync -> transfer -> swap
+    ///      -> settle` reverts CurrencyNotSettled (atomically; no funds at risk). Assumed: integrators
+    ///      sync immediately before paying, as every standard router and this hook do.
     function donateExternal(PoolKey calldata key, Currency currency, uint256 amount) external {
         if (msg.sender != address(this)) {
             revert Unauthorized();

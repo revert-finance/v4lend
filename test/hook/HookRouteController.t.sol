@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {HookRouteController} from "src/hook/HookRouteController.sol";
 import {HookOwnedControllerBase} from "src/hook/HookOwnedControllerBase.sol";
@@ -108,6 +109,13 @@ contract HookRouteControllerTest is Test {
 
         vm.expectRevert(HookRouteController.InvalidConfig.selector);
         controller.setRoute(TOKEN0, TOKEN1, 3000, -60, IHooks(address(0xBEEF)));
+
+        // above the PoolManager's initialize bound fails here rather than on the first routed swap
+        vm.expectRevert(HookRouteController.InvalidConfig.selector);
+        controller.setRoute(TOKEN0, TOKEN1, 3000, TickMath.MAX_TICK_SPACING + 1, IHooks(address(0xBEEF)));
+        controller.setRoute(TOKEN0, TOKEN1, 3000, TickMath.MAX_TICK_SPACING, IHooks(address(0xBEEF)));
+        (,, int24 maxTickSpacing,) = controller.route(TOKEN0, TOKEN1);
+        assertEq(maxTickSpacing, TickMath.MAX_TICK_SPACING, "the bound itself is accepted");
 
         vm.expectRevert(HookRouteController.InvalidConfig.selector);
         controller.setRoute(TOKEN0, TOKEN1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(address(0xBEEF)));

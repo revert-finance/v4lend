@@ -127,6 +127,11 @@ contract AutoCollect is Automator {
 
     function _validateExecuteCaller(uint256 tokenId) internal view {
         if (operators[msg.sender]) {
+            // Vault-owned positions must use executeWithVault so the vault runs its health check
+            address posOwner = IERC721(address(positionManager)).ownerOf(tokenId);
+            if (vaults[posOwner]) {
+                revert Unauthorized();
+            }
             return;
         }
         if (!vaults[msg.sender]) {

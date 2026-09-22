@@ -22,18 +22,20 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 /// @notice Deploys the corrected RevertHook stack against the existing funded
-/// Base vault. The old hook and its positions remain untouched.
+/// Base vault. Positions on the old hook remain untouched; the old hook and V4Utils are
+/// de-allowlisted from the vault.
 /// @dev LIMITATION: the existing vault predates `V4Vault._migrateHookState`, so a range
 ///      change through V4Utils (`CHANGE_RANGE` via `vault.transform`) on that vault does NOT
 ///      carry hook automation to the reminted position: the old NFT is drained and deactivated
 ///      and the new one has no config or triggers until the owner reconfigures it. Only the
 ///      hook's own auto-range remints self-migrate. Carrying automation across V4Utils remints on
-///      Base requires redeploying the vault from this codebase. The old hook also stays in the
-///      vault's hookAllowList; remove it once its positions have been unwound. RUNBOOK TRAP: as
-///      soon as a vault built from this codebase is live, a transform that remints a position
-///      on the OLD hook reverts while that hook is still allowlisted (it does not implement
-///      migrateVaultPosition). Decide old-hook handling (unwind its positions, or de-allowlist
-///      it) in the same upgrade batch.
+///      Base requires redeploying the vault from this codebase. RUNBOOK TRAP: as soon as a vault
+///      built from this codebase is live, a transform that remints a position on the OLD hook
+///      reverts while that hook is still allowlisted (it does not implement
+///      migrateVaultPosition). This script therefore de-allowlists the old hook (transformer and
+///      hookAllowList) and the old V4Utils in the same broadcast as it allowlists the new ones;
+///      positions still sitting on the old hook keep trading but can no longer be used as new
+///      vault collateral or transformed. Unwind them before or right after the upgrade.
 contract DeployBaseHookUpgrade is Script {
     address constant POSITION_MANAGER = 0x7C5f5A4bBd8fD63184577525326123B519429bDc;
     address constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
@@ -49,6 +51,14 @@ contract DeployBaseHookUpgrade is Script {
 
     address constant DEFAULT_ORACLE = 0x94C9bDeDB05358A98d95520205879d438419AB41;
     address constant DEFAULT_VAULT = 0xaf98803a1f43afC14335360e089F6B12947924ED;
+
+    // Old hook stack being replaced. Both are removed from the vault allowlists in the same
+    // broadcast that allowlists their replacements (see the RUNBOOK TRAP above). Override via
+    // the OLD_HOOK / OLD_V4UTILS env vars; the script refuses to run with a zero address.
+    // TODO(deployer): set OLD_HOOK to the RevertHook currently allowlisted on DEFAULT_VAULT.
+    address constant OLD_HOOK = address(0);
+    // broadcast/DeployV4UtilsBase.s.sol/8453/run-latest.json
+    address constant OLD_V4UTILS = 0xb23f54B586a5C02F350d37A696894FdBbA7C1067;
 
     uint32 constant USDC_MAX_FEED_AGE = 25 hours;
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
@@ -85,9 +95,16 @@ contract DeployBaseHookUpgrade is Script {
         V4Oracle oracle = V4Oracle(vm.envOr("EXISTING_V4_ORACLE", DEFAULT_ORACLE));
         V4Vault vault = V4Vault(payable(vm.envOr("EXISTING_V4_VAULT", DEFAULT_VAULT)));
         address zeroXAllowanceHolder = vm.envOr("ZEROX_ALLOWANCE_HOLDER", ZEROX_ALLOWANCE_HOLDER);
+        address oldHook = vm.envOr("OLD_HOOK", OLD_HOOK);
+        address oldV4Utils = vm.envOr("OLD_V4UTILS", OLD_V4UTILS);
 
         require(address(oracle).code.length > 0, "DeployBaseHookUpgrade: oracle missing");
         require(address(vault).code.length > 0, "DeployBaseHookUpgrade: vault missing");
+        require(oldHook != address(0), "DeployBaseHookUpgrade: OLD_HOOK not set");
+        require(oldV4Utils != address(0), "DeployBaseHookUpgrade: OLD_V4UTILS not set");
+        // The old hook must be the one the vault currently trusts; anything else is a typo.
+        require(vault.hookAllowList(oldHook), "DeployBaseHookUpgrade: OLD_HOOK not allowlisted on vault");
+        require(oldV4Utils.code.length > 0, "DeployBaseHookUpgrade: OLD_V4UTILS has no code");
         require(oracle.owner() == deployer, "DeployBaseHookUpgrade: deployer not oracle owner");
         require(vault.owner() == deployer, "DeployBaseHookUpgrade: deployer not vault owner");
         require(address(oracle.positionManager()) == POSITION_MANAGER, "DeployBaseHookUpgrade: wrong position manager");
@@ -188,6 +205,15 @@ contract DeployBaseHookUpgrade is Script {
         v4Utils.setVault(address(vault));
         vault.setTransformer(address(v4Utils), true);
 
+        // Retire the old stack in the same batch. Leaving the old hook allowlisted lets a
+        // remint on it revert mid-transform and keeps a superseded transformer live against
+        // the vault (audit L-09).
+        require(oldHook != address(revertHook), "DeployBaseHookUpgrade: OLD_HOOK is the new hook");
+        require(oldV4Utils != address(v4Utils), "DeployBaseHookUpgrade: OLD_V4UTILS is the new V4Utils");
+        vault.setHookAllowList(oldHook, false);
+        vault.setTransformer(oldHook, false);
+        vault.setTransformer(oldV4Utils, false);
+
         vm.stopBroadcast();
 
         console.log("LiquidityCalculator:", address(liquidityCalculator));
@@ -200,6 +226,8 @@ contract DeployBaseHookUpgrade is Script {
         console.log("RevertHook:", address(revertHook));
         console.log("NOTE: existing vault has no remint callback; V4Utils range changes do not migrate hook automation");
         console.log("V4Utils:", address(v4Utils));
+        console.log("De-allowlisted old RevertHook (hook + transformer):", oldHook);
+        console.log("De-allowlisted old V4Utils (transformer):", oldV4Utils);
     }
 
     function _hookFlags() private pure returns (uint160) {

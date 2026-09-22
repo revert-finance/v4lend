@@ -14,6 +14,7 @@ import {AutoLeverageLib} from "../shared/planning/AutoLeverageLib.sol";
 import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {RevertHookActionBase} from "./RevertHookActionBase.sol";
 import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 
 /// @title RevertHookAutoLeverageActions
 /// @notice Contains auto-leverage functions for RevertHook (called via delegatecall)
@@ -31,6 +32,92 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         RevertHookSwapActions _swapActions
     ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {}
 
+    // ==================== Position config validation ====================
+
+    /// @notice Validates a position configuration against the position's pool, range and owner.
+    ///         Hosted here (delegatecall from RevertHookConfig._setPositionConfig, shared storage)
+    ///         to keep the hook's own bytecode under the EIP-170 limit. Pure validation: no state
+    ///         is written, so a direct call is harmless.
+    function validatePositionConfig(uint256 tokenId, PositionConfig calldata config) external view {
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _validateTickAlignedConfig(config, poolKey.tickSpacing);
+        _validateModeFlags(config.modeFlags, tokenId, poolKey);
+        _validateRangeConfig(poolKey.tickSpacing, positionInfo.tickLower(), positionInfo.tickUpper(), config);
+    }
+
+    function _validateTickAlignedConfig(PositionConfig memory config, int24 tickSpacing) internal pure {
+        if (
+            !_isValidTickConfig(config.autoExitTickLower, tickSpacing, type(int24).min)
+                || !_isValidTickConfig(config.autoExitTickUpper, tickSpacing, type(int24).max)
+                || !_isValidTickConfig(config.autoRangeLowerLimit, tickSpacing, type(int24).min)
+                || !_isValidTickConfig(config.autoRangeUpperLimit, tickSpacing, type(int24).max)
+                || !_isValidTickConfig(config.autoRangeLowerDelta, tickSpacing, 0)
+                || !_isValidTickConfig(config.autoRangeUpperDelta, tickSpacing, 0)
+                || !_isValidTickConfig(config.autoLendToleranceTick, tickSpacing, 0)
+                || config.autoLeverageTargetBps >= 10000
+        ) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _validateModeFlags(uint8 modeFlags, uint256 tokenId, PoolKey memory poolKey) internal view {
+        if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoLeverage(modeFlags)) {
+            revert InvalidConfig();
+        }
+        if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoExit(modeFlags)) {
+            revert InvalidConfig();
+        }
+
+        _validateAutoLendMode(tokenId, poolKey, modeFlags);
+        _validateAutoLeverageMode(tokenId, poolKey, modeFlags);
+    }
+
+    function _validateAutoLendMode(uint256 tokenId, PoolKey memory poolKey, uint8 modeFlags) internal view {
+        if (!PositionModeFlags.hasAutoLend(modeFlags)) {
+            return;
+        }
+
+        address tokenOwner = _getOwner(tokenId, false);
+        if (_vaults[tokenOwner]) {
+            revert InvalidConfig();
+        }
+        if (
+            !_hasAutoLendVault(Currency.unwrap(poolKey.currency0))
+                || !_hasAutoLendVault(Currency.unwrap(poolKey.currency1))
+        ) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _hasAutoLendVault(address token) internal view returns (bool) {
+        if (address(_autoLendVaults[token]) != address(0)) {
+            return true;
+        }
+        return token == address(0) && address(_autoLendVaults[address(weth)]) != address(0);
+    }
+
+    function _validateAutoLeverageMode(uint256 tokenId, PoolKey memory poolKey, uint8 modeFlags) internal view {
+        address tokenOwner = _getOwner(tokenId, false);
+        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
+        bool hasAutoExit = PositionModeFlags.hasAutoExit(modeFlags);
+
+        if (hasAutoLeverage || hasAutoExit) {
+            bool isVault = _vaults[tokenOwner];
+
+            if (hasAutoLeverage && !isVault) {
+                revert InvalidConfig();
+            }
+
+            if (isVault) {
+                address lendAsset = IVault(tokenOwner).asset();
+                if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset)
+                {
+                    revert InvalidConfig();
+                }
+            }
+        }
+    }
+
     // ==================== Auto Leverage ====================
 
     /// @notice Adjusts leverage for a vault-owned position based on current vs target debt ratio
@@ -38,7 +125,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick
     function autoLeverage(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
-        _requireAuthorization(tokenId);
+        _requireAuthorization(poolKey, tokenId);
 
         IVault vault = IVault(msg.sender);
         (uint256 currentDebt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(tokenId);
@@ -123,9 +210,11 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
 
         _approveToken(poolKey.currency0, amount0);
         _approveToken(poolKey.currency1, amount1);
-        (uint256 used0, uint256 used1) =
+        (
+            uint256 used0,
+            uint256 used1
             // forge-lint: disable-next-line(unsafe-typecast)
-            _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        ) = _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
         if (used0 > 0 || used1 > 0) {
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, vault.ownerOf(tokenId));
             return true;
@@ -183,8 +272,8 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             return true;
         }
 
-        uint256 balance0 = currency0.balanceOfSelf();
-        uint256 balance1 = currency1.balanceOfSelf();
+        uint256 balance0 = _sweepableBalance(currency0);
+        uint256 balance1 = _sweepableBalance(currency1);
         _approveToken(currency0, balance0);
         _approveToken(currency1, balance1);
         _increaseLiquidity(
@@ -204,26 +293,23 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         return false;
     }
 
-    function _rollbackFailedIncrease(
-        uint256 tokenId,
-        PoolKey memory poolKey,
-        IVault vault,
-        Currency lendToken
-    ) internal returns (uint256 debtAfterRollback) {
+    function _rollbackFailedIncrease(uint256 tokenId, PoolKey memory poolKey, IVault vault, Currency lendToken)
+        internal
+        returns (uint256 debtAfterRollback)
+    {
         Currency currency0 = poolKey.currency0;
         Currency currency1 = poolKey.currency1;
 
-        uint256 lendAmount =
-            _swapToLendToken(
-                tokenId,
-                poolKey,
-                lendToken,
-                currency0,
-                currency1,
-                currency0.balanceOfSelf(),
-                currency1.balanceOfSelf(),
-                Mode.AUTO_LEVERAGE
-            );
+        uint256 lendAmount = _swapToLendToken(
+            tokenId,
+            poolKey,
+            lendToken,
+            currency0,
+            currency1,
+            _sweepableBalance(currency0),
+            _sweepableBalance(currency1),
+            Mode.AUTO_LEVERAGE
+        );
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
         _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);

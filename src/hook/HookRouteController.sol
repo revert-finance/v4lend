@@ -3,6 +3,7 @@ pragma solidity ^0.8.30;
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {IHookRouteController} from "./interfaces/IHookRouteController.sol";
 import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
@@ -35,7 +36,12 @@ contract HookRouteController is HookOwnedControllerBase, IHookRouteController {
 
     function setRoute(address tokenIn, address tokenOut, uint24 fee, int24 tickSpacing, IHooks hooks) external {
         _checkOwner();
-        if (tokenIn == tokenOut || tickSpacing <= 0 || fee > LPFeeLibrary.MAX_LP_FEE) {
+        // the PoolManager's own initialize bounds, checked here so a typo fails at configuration
+        // time rather than as an un-initialized pool on the first routed swap
+        if (
+            tokenIn == tokenOut || tickSpacing <= 0 || tickSpacing > TickMath.MAX_TICK_SPACING
+                || fee > LPFeeLibrary.MAX_LP_FEE
+        ) {
             revert InvalidConfig();
         }
 

@@ -20,6 +20,14 @@ abstract contract RevertHookAccess is Constants {
     address internal _owner;
     mapping(address => bool) internal _vaults;
 
+    /// @dev Transient slot (EIP-1153, cleared after every transaction) naming the token whose vault
+    ///      transform the hook itself started; 0 outside one. The sidecars' vault-caller
+    ///      authorization requires it, so the hook cannot serve as a generic borrower-callable
+    ///      transformer (C-01). Not part of the storage layout shared with the sidecars.
+    // keccak256("RevertHook.transformTokenId") - inline assembly needs a literal
+    bytes32 internal constant _HOOK_TRANSFORM_TOKEN_SLOT =
+        0x28657997ef2591c3603c18ba4a0c47cd42fc5d57008b1bc5321aa5a3a894bcc3;
+
     modifier onlyOwner() {
         _checkOwner();
         _;
@@ -40,6 +48,18 @@ abstract contract RevertHookAccess is Constants {
     function _setVault(address vault) internal {
         emit VaultSet(vault);
         _vaults[vault] = true;
+    }
+
+    function _setHookTransformToken(uint256 tokenId) internal {
+        assembly ("memory-safe") {
+            tstore(_HOOK_TRANSFORM_TOKEN_SLOT, tokenId)
+        }
+    }
+
+    function _hookTransformToken() internal view returns (uint256 tokenId) {
+        assembly ("memory-safe") {
+            tokenId := tload(_HOOK_TRANSFORM_TOKEN_SLOT)
+        }
     }
 
     // validates if caller is owner (direct or indirect for a given position)

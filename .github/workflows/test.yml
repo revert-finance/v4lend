@@ -1,12 +1,21 @@
 name: Test Suite
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
-  # push:
-  # pull_request:
 
 env:
-  FOUNDRY_PROFILE: ci
+  # Pinned to the forge release the gas snapshots (snapshots/*.json) and the gasleft()-based
+  # gas ceilings in the controller tests were recorded with. Bump deliberately, regenerating
+  # the snapshots in the same change.
+  FOUNDRY_VERSION: v1.5.0
+  # Fork suites (test/automators, test/oracle/V4OracleTest, test/vault except invariants) fork
+  # mainnet at a fixed block and need an archive RPC. Public endpoints rate-limit a fresh runner,
+  # so those suites run only when the MAINNET_RPC_URL secret is configured.
+  MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+  FORK_SUITES: "{test/automators/**,test/oracle/V4OracleTest.t.sol,test/vault/V4Vault.t.sol,test/vault/V4VaultHook.t.sol,test/vault/transformers/**}"
 
 jobs:
   test:
@@ -20,7 +29,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: ${{ env.FOUNDRY_VERSION }}
 
       - name: Build
         run: |
@@ -28,7 +37,15 @@ jobs:
           forge build --sizes
         id: build
 
-      - name: Test
-        run: |
-          forge test -vvv
+      - name: Test (mock suites)
+        run: forge test --no-match-path "$FORK_SUITES" -vvv
         id: test
+
+      - name: Test (mainnet fork suites)
+        if: env.MAINNET_RPC_URL != ''
+        run: forge test --match-path "$FORK_SUITES" -vvv
+        id: test-fork
+
+      - name: Fork suites skipped
+        if: env.MAINNET_RPC_URL == ''
+        run: echo "::warning::MAINNET_RPC_URL secret not set - mainnet fork suites were skipped"

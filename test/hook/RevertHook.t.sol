@@ -1566,6 +1566,9 @@ contract RevertHookTest is BaseTest {
         vm.mockCall(
             fakeVault, abi.encodeWithSignature("ownerOf(uint256)", oldTokenId), abi.encode(address(this))
         );
+        vm.mockCall(
+            fakeVault, abi.encodeWithSignature("ownerOf(uint256)", newTokenId), abi.encode(address(this))
+        );
 
         vm.prank(fakeVault);
         vm.expectRevert(abi.encodeWithSignature("SharesOutstanding()"));

@@ -63,6 +63,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
 
     /// @notice Maximum fee in hundredths of a bip (1e6 = 100%)
     uint256 internal constant MAX_FEE_PIPS = 1e6;
+    /// @dev Gas bound for a single next-tick search across the tick bitmap (one word = 256 tick spacings)
+    uint256 internal constant MAX_BITMAP_WORDS_PER_SEARCH = 100;
 
     /// @notice Parameters for finding the next initialized tick in the tick bitmap
     struct NextInitializedTickParams {
@@ -494,9 +496,15 @@ contract LiquidityCalculator is ILiquidityCalculator {
     }
 
     /// @notice Find the next initialized tick in the given direction
-    /// @dev Searches through tick bitmap words to find the next initialized tick
+    /// @dev Mirrors TickBitmap.nextInitializedTickWithinOneWord across word boundaries: the left search
+    ///      starts at the current compressed tick, the right search at the one after it. Words further out
+    ///      are entered at bit 255 (left) or bit 0 (right) so no bit is skipped. When the cached word
+    ///      matches the word the search starts in, it is reused instead of reloaded. At most
+    ///      MAX_BITMAP_WORDS_PER_SEARCH words are examined per call; if none holds an initialized tick,
+    ///      the uninitialized tick at the far edge of the last examined word is returned so the caller
+    ///      keeps making progress (crossing it changes no liquidity) and the next call resumes from there.
     /// @param params Search parameters including current tick, direction, and cached bitmap word
-    /// @return result Next initialized tick and updated search state
+    /// @return result Next initialized tick and the word it was found in
     function _locateNextTick(NextInitializedTickParams memory params)
         private
         view
@@ -504,117 +512,62 @@ contract LiquidityCalculator is ILiquidityCalculator {
     {
         bool searchLeft = params.swapDir0to1;
         int24 compressedTick = TickBitmap.compress(params.tickValue, params.tickSpacing);
-        (int16 currentWordPosition, uint8 bitPosition) = TickBitmap.position(compressedTick);
-        // Check cached word first if it's the current word
-        if (params.wordPosition == currentWordPosition && params.tickBitmap != 0) {
-            result.nextTick =
-                _findTickInWord(params.tickBitmap, compressedTick, bitPosition, params.tickSpacing, searchLeft);
-            if (result.nextTick != params.tickValue) {
-                result.wordPosition = currentWordPosition;
-                result.tickBitmap = params.tickBitmap;
-                return result;
-            }
-        }
-        // Start searching from cached position or current position
-        int16 searchWordPosition = params.wordPosition == type(int16).min ? currentWordPosition : params.wordPosition;
-        uint256 tickBitmap = params.tickBitmap;
-        bool firstIteration = true;
-        while (true) {
-            if (searchLeft) {
-                // Search left (decreasing ticks)
-                // Limit search to 100 words to prevent excessive gas usage
-                if (searchWordPosition < currentWordPosition - 100) {
-                    result.nextTick = (compressedTick - int24(uint24(type(uint8).max))) * params.tickSpacing;
-                    result.wordPosition = searchWordPosition;
-                    result.tickBitmap = 0;
-                    return result;
-                }
-                // Load bitmap word if needed
-                if (searchWordPosition == currentWordPosition && firstIteration && tickBitmap == 0) {
-                    tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition);
-                    firstIteration = false;
-                } else if (searchWordPosition < currentWordPosition) {
-                    searchWordPosition--;
-                    tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition);
-                } else {
-                    searchWordPosition--;
-                    if (searchWordPosition >= currentWordPosition - 100) {
-                        tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition);
-                    } else {
-                        result.nextTick = (compressedTick - int24(uint24(type(uint8).max))) * params.tickSpacing;
-                        result.wordPosition = searchWordPosition;
-                        result.tickBitmap = 0;
-                        return result;
-                    }
-                }
-            } else {
-                // Search right (increasing ticks)
-                // Limit search to 100 words to prevent excessive gas usage
-                if (searchWordPosition > currentWordPosition + 100) {
-                    result.nextTick = (compressedTick + int24(uint24(type(uint8).max))) * params.tickSpacing;
-                    result.wordPosition = searchWordPosition;
-                    result.tickBitmap = 0;
-                    return result;
-                }
-                // Load bitmap word if needed
-                if (searchWordPosition == currentWordPosition && tickBitmap == 0) {
-                    tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition + 1);
-                    searchWordPosition++;
-                } else if (searchWordPosition <= currentWordPosition) {
-                    searchWordPosition = currentWordPosition + 1;
-                    tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition);
-                } else {
-                    searchWordPosition++;
-                    if (searchWordPosition <= currentWordPosition + 100) {
-                        tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, searchWordPosition);
-                    } else {
-                        result.nextTick = (compressedTick + int24(uint24(type(uint8).max))) * params.tickSpacing;
-                        result.wordPosition = searchWordPosition;
-                        result.tickBitmap = 0;
-                        return result;
-                    }
-                }
-            }
-            // If we found a word with initialized ticks, search within it
-            if (tickBitmap != 0) {
-                int24 searchCompressedTick = searchLeft ? compressedTick : compressedTick + 1;
-                if (searchWordPosition != currentWordPosition) {
-                    searchCompressedTick = int24(searchWordPosition) * 256;
-                    if (!searchLeft) searchCompressedTick++;
-                }
-                // forge-lint: disable-next-line(unsafe-typecast)
-                uint8 searchBitPosition = uint8(uint24(searchCompressedTick) & 0xff);
-                result.nextTick = _findTickInWord(
-                    tickBitmap, searchCompressedTick, searchBitPosition, params.tickSpacing, searchLeft
-                );
-                result.wordPosition = searchWordPosition;
+        if (!searchLeft) compressedTick++;
+        (int16 wordPosition, uint8 bitPosition) = TickBitmap.position(compressedTick);
+        uint256 tickBitmap = params.wordPosition == wordPosition
+            ? params.tickBitmap
+            : params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, wordPosition);
+        for (uint256 wordsExamined = 1;; wordsExamined++) {
+            (bool initialized, int24 nextTick) =
+                _findTickInWord(tickBitmap, compressedTick, bitPosition, params.tickSpacing, searchLeft);
+            if (initialized || wordsExamined == MAX_BITMAP_WORDS_PER_SEARCH) {
+                result.nextTick = nextTick;
+                result.wordPosition = wordPosition;
                 result.tickBitmap = tickBitmap;
                 return result;
             }
+            unchecked {
+                if (searchLeft) {
+                    // Continue from the highest bit of the previous word
+                    compressedTick -= int24(uint24(bitPosition)) + 1;
+                    wordPosition--;
+                    bitPosition = type(uint8).max;
+                } else {
+                    // Continue from the lowest bit of the next word
+                    compressedTick += int24(uint24(type(uint8).max - bitPosition)) + 1;
+                    wordPosition++;
+                    bitPosition = 0;
+                }
+            }
+            tickBitmap = params.pool.poolMgr.getTickBitmap(params.pool.poolIdentifier, wordPosition);
         }
     }
 
     /// @notice Find the next initialized tick within a single bitmap word
-    /// @dev Uses bit manipulation to efficiently find the next set bit
+    /// @dev Uses bit manipulation to efficiently find the next set bit. `compressedTick` and
+    ///      `bitPosition` describe the first candidate: the current compressed tick when searching left,
+    ///      the one after it when searching right.
     /// @param word The 256-bit tick bitmap word
-    /// @param compressedTick The compressed tick value
-    /// @param bitPosition Current bit position in the word
+    /// @param compressedTick The compressed tick the search starts at (inclusive)
+    /// @param bitPosition Bit position of `compressedTick` in the word
     /// @param tickSpacing The tick spacing
     /// @param searchLeft Whether to search left (true) or right (false)
-    /// @return nextTick The next initialized tick
+    /// @return initialized Whether an initialized tick was found in the word
+    /// @return nextTick The next initialized tick, or the far edge of the word if none is set
     function _findTickInWord(
         uint256 word,
         int24 compressedTick,
         uint8 bitPosition,
         int24 tickSpacing,
         bool searchLeft
-    ) private pure returns (int24 nextTick) {
+    ) private pure returns (bool initialized, int24 nextTick) {
         unchecked {
             if (searchLeft) {
                 // Mask all bits at or to the right of current position
                 uint256 bitMask = type(uint256).max >> (uint256(type(uint8).max) - bitPosition);
                 uint256 maskedWord = word & bitMask;
-                if (maskedWord != 0) {
+                initialized = maskedWord != 0;
+                if (initialized) {
                     // Found initialized tick - find the most significant set bit
                     uint8 mostSigBit = BitMath.mostSignificantBit(maskedWord);
                     nextTick = (compressedTick - int24(uint24(bitPosition - mostSigBit))) * tickSpacing;
@@ -623,14 +576,11 @@ contract LiquidityCalculator is ILiquidityCalculator {
                     nextTick = (compressedTick - int24(uint24(bitPosition))) * tickSpacing;
                 }
             } else {
-                // Search right: start from next compressed tick
-                compressedTick++;
-                // forge-lint: disable-next-line(unsafe-typecast)
-                bitPosition = uint8(uint24(compressedTick) & 0xff);
                 // Mask all bits at or to the left of current position
                 uint256 bitMask = type(uint256).max << bitPosition;
                 uint256 maskedWord = word & bitMask;
-                if (maskedWord != 0) {
+                initialized = maskedWord != 0;
+                if (initialized) {
                     // Found initialized tick - find the least significant set bit
                     uint8 leastSigBit = BitMath.leastSignificantBit(maskedWord);
                     nextTick = (compressedTick + int24(uint24(leastSigBit - bitPosition))) * tickSpacing;

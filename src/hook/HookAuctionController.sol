@@ -199,6 +199,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     /// @dev Non-reverting by construction (the hook calls it directly): early-returns for idle
     ///      pools, and the donate leg is isolated in _donate's own try/catch. Runs inside the
     ///      hook's beforeSwap, i.e. while the PoolManager is unlocked, so donations settle directly.
+    ///      Integration note: that settlement re-syncs the PoolManager's single synced-currency
+    ///      slot inside the caller's unlock - see donateExternal (AUDIT-ACCEPTED-CONTROLLER-DRIP-SYNC).
     function beforeSwap(PoolKey calldata key, address sender) external onlyHook returns (uint24 lpFeeOverride) {
         PoolId poolId = key.toId();
         // single cold SLOAD to skip the full struct copy on the many pools that never run an auction
@@ -238,6 +240,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     }
 
     /// @inheritdoc IHookAuctionController
+    /// @dev Same integration note as beforeSwap: the drip may sync/settle inside the caller's
+    ///      unlock (AUDIT-ACCEPTED-CONTROLLER-DRIP-SYNC, see donateExternal).
     function beforeLiquidityChange(PoolKey calldata key) external onlyHook {
         PoolId poolId = key.toId();
         if (_poolConfigs[poolId].epochLengthSeconds == 0 || block.timestamp < _poolConfigs[poolId].epochStartTime) {
@@ -730,7 +734,11 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             return config.openingBidReserve; // validated nonzero in configurePool
         }
         uint256 bump = uint256(currentBid) * config.minBidBumpPpm / PPM;
-        return uint256(currentBid) + (bump > 0 ? bump : 1);
+        // saturate at the bid cap (same as HookLeaseController.minBuyoutPrice): a standing bid at
+        // or bumped past the cap stays contestable at the cap itself - equal amount - so no bid
+        // can make the next epoch un-outbiddable
+        uint256 required = uint256(currentBid) + (bump > 0 ? bump : 1);
+        return required > MAX_BID_AMOUNT ? MAX_BID_AMOUNT : required;
     }
 
     /// @dev Rolls the stored epoch state forward to the current epoch. Fully vests and
@@ -1001,6 +1009,24 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     /// @dev Self-only executor for a single donation, so `_donate` can wrap it in try/catch.
     ///      Runs inside the same PoolManager unlock as the caller.
+    ///
+    ///      @custom:accepted-risk AUDIT-ACCEPTED-CONTROLLER-DRIP-SYNC
+    ///      The drip pays its donate debt with sync -> transfer -> settle INSIDE the integrator's
+    ///      unlock (reached from the hook's beforeSwap / beforeAddLiquidity / beforeRemoveLiquidity).
+    ///      PoolManager.sync records ONE synced currency plus its reserves in transient storage and
+    ///      settle() consumes and clears that record. A caller using the PRE-payment ordering
+    ///      `sync(X) -> transfer X -> swap/modifyLiquidity -> settle()` finds its record overwritten
+    ///      and cleared by the drip: its settle() then runs the native branch (paid = msg.value = 0),
+    ///      its X delta stays open and the unlock reverts CurrencyNotSettled. Failure mode: that
+    ///      caller's transaction reverts atomically - no funds move, nothing is stranded, and the
+    ///      pool is not blocked for anyone else (the drip is throttled per pool and memoized per
+    ///      transaction, so a retry with the standard ordering succeeds).
+    ///      Assumption accepted: integrators sync immediately before paying (the post-action
+    ///      ordering `swap -> sync -> transfer -> settle`, or ERC-6909 burn / native value), which is
+    ///      what every Uniswap router, the PositionManager and this hook's own actions do.
+    ///      Not restructured: donate() needs its delta settled within the same unlock, and paying it
+    ///      from ERC-6909 claims instead of sync/settle would require pre-minted claim inventory per
+    ///      auction currency - a larger surface than the documented constraint.
     function donateExternal(PoolKey calldata key, Currency currency, uint256 amount) external {
         if (msg.sender != address(this)) {
             revert Unauthorized();

@@ -12,6 +12,13 @@ import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol"
 import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IUniversalRouter} from "src/shared/swap/IUniversalRouter.sol";
+import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 
 // base contracts
 import {V4Vault} from "src/vault/V4Vault.sol";
@@ -2277,6 +2284,219 @@ contract V4VaultTest is V4ForkTestBase {
             address(transformer),
             abi.encodeCall(DecreaseLiquidityDuringTransformTransformer.attemptDecrease, (params))
         );
+    }
+
+    // ============ Fee-only partial liquidation (L-02) ============
+
+    /// @notice Fee-only branch (liquidationValue <= feeValue): no liquidity is removed, the collected fees
+    ///         are split by value share - the liquidator gets `collected * liquidationValue / feeValue` of
+    ///         each token and the owner the remainder.
+    function test_Liquidate_FeeOnlySplitsCollectedFeesByValueShare() public {
+        _runFeeOnlyLiquidation(false);
+    }
+
+    /// @notice L-02 regression: the liquidator's share must be derived from the amounts actually received
+    ///         by the DECREASE, never from the oracle's gross fee estimate. Here the oracle's
+    ///         `getLiquidityAndFees` is mocked to overstate the fees 2x while the pool pays out the real
+    ///         amount, so the estimate exceeds what is received. Pre-fix the vault took
+    ///         `liquidationValue * fees0 / feeValue` of the *estimate* (here ~180% of the received amount)
+    ///         and reverted with Panic(0x11) on `amount0 - fees0`, leaving the loan unliquidatable.
+    ///         (A hook cannot cause this through PositionManager: `SlippageCheck.validateMinOut` rejects a
+    ///         negative principal delta on a zero-liquidity decrease, so any hook skim on a fee-only
+    ///         collect reverts there - RevertHook caps its protocol fee accordingly.)
+    function test_Liquidate_FeeOnlyIgnoresGrossOracleFeeEstimate() public {
+        _runFeeOnlyLiquidation(true);
+    }
+
+    struct FeeOnlyState {
+        uint256 tokenId;
+        uint128 liquidity;
+        uint128 fees0;
+        uint128 fees1;
+        uint256 feeValue;
+        uint256 liquidationCost;
+        uint256 liquidationValue;
+        uint256 ownerUsdc;
+        uint256 ownerWeth;
+        uint256 liquidatorUsdc;
+        uint256 liquidatorWeth;
+        uint256 vaultUsdc;
+        uint256 vaultWeth;
+    }
+
+    function _runFeeOnlyLiquidation(bool overstateGrossFees) internal {
+        // Fresh USDC/WETH pool (non-standard 0.25% / 50 tier so it cannot collide with a live mainnet pool),
+        // initialized exactly at the oracle price so the pool/oracle deviation guard is neutral. The
+        // whale's position is the pool's only liquidity, so it earns every swap fee.
+        PoolKey memory key =
+            PoolKey(Currency.wrap(address(usdc)), Currency.wrap(address(weth)), 2500, 50, IHooks(address(0)));
+        (uint160 existingSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(key));
+        assertEq(existingSqrtPriceX96, 0, "test pool must not exist on the fork");
+        poolManager.initialize(key, v4Oracle.getPoolSqrtPriceX96(address(usdc), address(weth)));
+
+        FeeOnlyState memory st;
+        st.tokenId = _mintWhalePosition(key, 5e14);
+
+        // Trade back and forth so the position accrues fees in both tokens.
+        for (uint256 i = 0; i < 4; i++) {
+            _swapTestPool(key, true, 500e6);
+            _swapTestPool(key, false, 0.1 ether);
+        }
+
+        _deposit(500000000, WHALE_ACCOUNT);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(vault), st.tokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.create(st.tokenId, WHALE_ACCOUNT);
+
+        (st.liquidity, st.fees0, st.fees1) = v4Oracle.getLiquidityAndFees(st.tokenId);
+        (, st.feeValue,,) = v4Oracle.getValue(st.tokenId, address(usdc));
+        assertGt(st.fees0, 0, "position must have token0 fees");
+        assertGt(st.fees1, 0, "position must have token1 fees");
+        assertLt(st.feeValue, 400000000, "fee value must stay below the lent amount");
+
+        // Borrow so that the max-penalty liquidation value lands at ~90% of the fee value, then make the
+        // loan liquidatable at max penalty (collateral factor 0 -> liquidationValue = debt * 1.1).
+        uint256 borrowAmount = st.feeValue * 9 / 10 * Q32 / (Q32 + vault.MAX_LIQUIDATION_PENALTY_X32());
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(st.tokenId, borrowAmount);
+        vault.setTokenConfig(address(usdc), 0, type(uint32).max);
+
+        uint256 debt;
+        (debt,,, st.liquidationCost, st.liquidationValue) = vault.loanInfo(st.tokenId);
+        assertEq(st.liquidationCost, debt, "liquidator pays the full debt");
+        assertGt(st.liquidationValue, 0);
+        assertLe(st.liquidationValue, st.feeValue, "must be the fee-only branch");
+        assertGt(st.liquidationValue * 10000, st.feeValue * 8500, "value share must be ~90% of the fees");
+
+        if (overstateGrossFees) {
+            // Gross estimate 2x the collectable fees: the pre-fix liquidator share (~180% of received)
+            // could not be paid. getValue (and thus feeValue / liquidationValue) is left untouched.
+            vm.mockCall(
+                address(v4Oracle),
+                abi.encodeCall(IV4Oracle.getLiquidityAndFees, (st.tokenId)),
+                abi.encode(st.liquidity, uint128(st.fees0) * 2, uint128(st.fees1) * 2)
+            );
+            (, uint128 mockedFees0,) = v4Oracle.getLiquidityAndFees(st.tokenId);
+            assertEq(mockedFees0, uint256(st.fees0) * 2, "oracle estimate must be overstated");
+        }
+
+        address liquidator = makeAddr("liquidator");
+        vm.prank(WHALE_ACCOUNT);
+        usdc.transfer(liquidator, st.liquidationCost);
+        vm.prank(liquidator);
+        usdc.approve(address(vault), st.liquidationCost);
+
+        st.ownerUsdc = usdc.balanceOf(WHALE_ACCOUNT);
+        st.ownerWeth = weth.balanceOf(WHALE_ACCOUNT);
+        st.liquidatorUsdc = usdc.balanceOf(liquidator);
+        st.liquidatorWeth = weth.balanceOf(liquidator);
+        st.vaultUsdc = usdc.balanceOf(address(vault));
+        st.vaultWeth = weth.balanceOf(address(vault));
+
+        vm.prank(liquidator);
+        (uint256 amount0, uint256 amount1) =
+            vault.liquidate(IVault.LiquidateParams(st.tokenId, 0, 0, liquidator, block.timestamp, ""));
+        vm.clearMockedCalls();
+
+        // Liquidator share = received * liquidationValue / feeValue; owner gets the remainder.
+        uint256 share0 = Math.mulDiv(st.fees0, st.liquidationValue, st.feeValue);
+        uint256 share1 = Math.mulDiv(st.fees1, st.liquidationValue, st.feeValue);
+        assertEq(amount0, share0, "returned amount0 is the liquidator share");
+        assertEq(amount1, share1, "returned amount1 is the liquidator share");
+        assertLt(share0, st.fees0, "liquidator never receives more than what was collected");
+        assertEq(usdc.balanceOf(liquidator), st.liquidatorUsdc - st.liquidationCost + share0, "liquidator usdc");
+        assertEq(weth.balanceOf(liquidator), st.liquidatorWeth + share1, "liquidator weth");
+        assertEq(usdc.balanceOf(WHALE_ACCOUNT), st.ownerUsdc + st.fees0 - share0, "owner usdc remainder");
+        assertEq(weth.balanceOf(WHALE_ACCOUNT), st.ownerWeth + st.fees1 - share1, "owner weth remainder");
+
+        // The vault kept only the repaid debt, no liquidity was removed and the loan is closed.
+        assertEq(usdc.balanceOf(address(vault)), st.vaultUsdc + st.liquidationCost, "vault keeps only the debt");
+        assertEq(weth.balanceOf(address(vault)), st.vaultWeth, "vault keeps no fee tokens");
+        assertEq(positionManager.getPositionLiquidity(st.tokenId), st.liquidity, "liquidity untouched");
+        assertEq(vault.loans(st.tokenId), 0);
+        assertEq(vault.debtSharesTotal(), 0);
+        (, uint128 fees0After, uint128 fees1After) = v4Oracle.getLiquidityAndFees(st.tokenId);
+        assertEq(fees0After, 0);
+        assertEq(fees1After, 0);
+    }
+
+    function _mintWhalePosition(PoolKey memory key, uint128 liquidity) internal returns (uint256 tokenId) {
+        (, int24 tick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(key));
+        int24 base = (tick / key.tickSpacing) * key.tickSpacing;
+
+        // the whale holds USDC but (at this block) no WETH - wrap some ETH for the WETH leg
+        vm.deal(WHALE_ACCOUNT, WHALE_ACCOUNT.balance + 5 ether);
+        vm.startPrank(WHALE_ACCOUNT);
+        weth.deposit{value: 5 ether}();
+        usdc.approve(address(permit2), type(uint256).max);
+        weth.approve(address(permit2), type(uint256).max);
+        permit2.approve(address(usdc), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(weth), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(usdc), address(swapRouter), type(uint160).max, type(uint48).max);
+        permit2.approve(address(weth), address(swapRouter), type(uint160).max, type(uint48).max);
+
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory params = new bytes[](2);
+        params[0] = abi.encode(
+            key, base - 20 * key.tickSpacing, base + 20 * key.tickSpacing, liquidity, type(uint256).max,
+            type(uint256).max, WHALE_ACCOUNT, bytes("")
+        );
+        params[1] = abi.encode(key.currency0, key.currency1, WHALE_ACCOUNT);
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+        vm.stopPrank();
+
+        tokenId = positionManager.nextTokenId() - 1;
+    }
+
+    function _swapTestPool(PoolKey memory key, bool zeroForOne, uint128 amountIn) internal {
+        bytes memory actions =
+            abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(
+            IV4Router.ExactInputSingleParams({
+                poolKey: key,
+                zeroForOne: zeroForOne,
+                amountIn: amountIn,
+                amountOutMinimum: 0,
+                hookData: bytes("")
+            })
+        );
+        params[1] = abi.encode(zeroForOne ? key.currency0 : key.currency1, amountIn);
+        params[2] = abi.encode(zeroForOne ? key.currency1 : key.currency0, uint256(0));
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(actions, params);
+
+        vm.prank(WHALE_ACCOUNT);
+        IUniversalRouter(address(swapRouter)).execute(hex"10", inputs, block.timestamp);
+    }
+
+    // ============ Config bounds ============
+
+    function test_SetReserveProtectionFactor_Bounds() public {
+        uint32 minFactor = vault.MIN_RESERVE_PROTECTION_FACTOR_X32();
+        uint32 maxFactor = vault.MAX_RESERVE_PROTECTION_FACTOR_X32();
+        assertEq(maxFactor, uint32(Q32 / 2), "upper bound is 50%");
+
+        vault.setReserveProtectionFactor(maxFactor);
+        assertEq(vault.reserveProtectionFactorX32(), maxFactor, "max factor accepted");
+        vault.setReserveProtectionFactor(minFactor);
+        assertEq(vault.reserveProtectionFactorX32(), minFactor, "min factor accepted");
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.setReserveProtectionFactor(maxFactor + 1);
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        vault.setReserveProtectionFactor(minFactor - 1);
+        assertEq(vault.reserveProtectionFactorX32(), minFactor, "rejected values leave the factor unchanged");
+    }
+
+    function test_TransferLoan_ToVaultItselfReverts() public {
+        _setupBasicLoan(true);
+
+        vm.prank(nft1Owner);
+        vm.expectRevert(Constants.SelfSend.selector);
+        vault.transferLoan(nft1TokenId, address(vault));
+        assertEq(vault.ownerOf(nft1TokenId), nft1Owner, "owner unchanged");
     }
 }
 

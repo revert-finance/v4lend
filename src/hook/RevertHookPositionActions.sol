@@ -39,7 +39,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
     /// @param tokenId The token ID of the position
     /// @param isUpperTrigger True if triggered by upper tick, false if lower tick
     function autoExit(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
-        _requireAuthorization(tokenId);
+        _requireAuthorization(poolKey, tokenId);
 
         // Remove all liquidity and collect fees
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
@@ -103,16 +103,17 @@ contract RevertHookPositionActions is RevertHookActionBase {
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
 
-        uint256 lendAmount = lendToken.balanceOfSelf();
+        uint256 lendAmount = _sweepableBalance(lendToken);
         if (lendAmount < currentDebt) {
-            lendAmount = _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1, Mode.AUTO_EXIT);
+            lendAmount =
+                _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1, Mode.AUTO_EXIT);
         }
         _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
 
         if (swapOnExit && !targetIsLendToken) {
             // Repay against the lend asset first, then rotate any residual value back
             // into the trigger-side token the strategy wants to leave the user with.
-            uint256 remainingLend = lendToken.balanceOfSelf();
+            uint256 remainingLend = _sweepableBalance(lendToken);
             if (remainingLend > 0) {
                 _executeSwap(poolKey, lendIsToken0, remainingLend, tokenId, Mode.AUTO_EXIT);
             }
@@ -136,7 +137,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
     /// @param poolKey The pool key for the position
     /// @param tokenId The token ID of the position
     function autoRange(PoolKey calldata poolKey, uint256 tokenId) external {
-        _requireAuthorization(tokenId);
+        _requireAuthorization(poolKey, tokenId);
         (, PositionInfo oldPositionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         // Calculate new tick range based on current tick
@@ -163,7 +164,8 @@ contract RevertHookPositionActions is RevertHookActionBase {
         }
 
         // Swap to optimal ratio for new range
-        (amount0, amount1) = _calculateAndSwap(tokenId, poolKey, newTickLower, newTickUpper, amount0, amount1, Mode.AUTO_RANGE);
+        (amount0, amount1) =
+            _calculateAndSwap(tokenId, poolKey, newTickLower, newTickUpper, amount0, amount1, Mode.AUTO_RANGE);
 
         address owner = _getOwner(tokenId, false);
         address beneficiary = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
@@ -171,20 +173,29 @@ contract RevertHookPositionActions is RevertHookActionBase {
         // Approve tokens and mint new position
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
-        (uint256 newTokenId,,) =
+        (
+            uint256 newTokenId,,
             // forge-lint: disable-next-line(unsafe-typecast)
-            _mintPosition(poolKey, newTickLower, newTickUpper, uint128(amount0), uint128(amount1), owner);
+        ) = _mintPosition(poolKey, newTickLower, newTickUpper, uint128(amount0), uint128(amount1), owner);
 
         if (newTokenId == 0) {
             // If remint fails, restore liquidity on the original position without re-arming the consumed trigger.
             (amount0, amount1) = _calculateAndSwap(
-                tokenId, poolKey, oldPositionInfo.tickLower(), oldPositionInfo.tickUpper(), amount0, amount1, Mode.AUTO_RANGE
+                tokenId,
+                poolKey,
+                oldPositionInfo.tickLower(),
+                oldPositionInfo.tickUpper(),
+                amount0,
+                amount1,
+                Mode.AUTO_RANGE
             );
             _approveToken(currency0, amount0);
             _approveToken(currency1, amount1);
-            (uint256 restored0, uint256 restored1) =
+            (
+                uint256 restored0,
+                uint256 restored1
                 // forge-lint: disable-next-line(unsafe-typecast)
-                _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
+            ) = _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
             _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
             if (restored0 > 0 || restored1 > 0) {
                 _removePositionTriggers(tokenId, poolKey);
@@ -255,10 +266,9 @@ contract RevertHookPositionActions is RevertHookActionBase {
         // Process based on collect mode
         if (collectMode == AutoCollectMode.AUTO_COLLECT) {
             // Swap to optimal ratio and add back as liquidity
-            (fees0, fees1) =
-                _calculateAndSwap(
-                    tokenId, poolKey, positionInfo.tickLower(), positionInfo.tickUpper(), fees0, fees1, Mode.AUTO_COLLECT
-                );
+            (fees0, fees1) = _calculateAndSwap(
+                tokenId, poolKey, positionInfo.tickLower(), positionInfo.tickUpper(), fees0, fees1, Mode.AUTO_COLLECT
+            );
         } else if (collectMode == AutoCollectMode.HARVEST_TOKEN_0) {
             // Swap token1 to token0
             (fees0, fees1) =
