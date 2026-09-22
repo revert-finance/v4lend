@@ -16,7 +16,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
-import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
+import {RevertHookMigrationActions} from "./RevertHookMigrationActions.sol";
 import {RevertHookExecution} from "./RevertHookExecution.sol";
 
 /// @title RevertHookCallbacks
@@ -91,6 +91,17 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         }
     }
 
+    /// @dev Fail-open value gate for the remove callback: an oracle that reverts (stale feed,
+    ///      sequencer grace, pool deviation) must not block withdrawing liquidity from an automated
+    ///      position or a vault liquidation of it, so the position simply stays activated (L-01).
+    function _isBelowMinimumValue(uint256 tokenId) internal view returns (bool) {
+        try v4Oracle.getValue(tokenId, address(0)) returns (uint256 value, uint256, uint256, uint256) {
+            return value < _minPositionValueNative;
+        } catch {
+            return false;
+        }
+    }
+
     /// @dev Fail-open notification so vested auction proceeds are dripped to the liquidity
     ///      that was in range while they vested, before the liquidity set changes.
     function _notifyAuctionLiquidityChange(PoolKey calldata key) internal {
@@ -139,6 +150,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
             bool increasing = cursor < liveTick;
             int24 tickEnd = liveTick;
+            int24 oracleBound;
             {
                 // single _tryOracleMaxEndTick call site: its inlined tick-math body must exist
                 // exactly once in the bytecode (one copy per call site would blow EIP-170)
@@ -155,13 +167,15 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                         hasCachedLowerOracleMaxEndTick = true;
                     }
                 }
-                int24 oracleBound = increasing ? upperOracleMaxEndTick : lowerOracleMaxEndTick;
-                if (increasing ? oracleBound < tickEnd : oracleBound > tickEnd) {
-                    tickEnd = oracleBound;
+                // Nothing runs while the live price sits outside the oracle window. Trigger
+                // actions swap at the live price, so dispatching the triggers whose tick is inside
+                // the window while the pool has overshot it would execute them at the overshot
+                // price (M-03). They stay armed and the cursor stays put: the next swap that ends
+                // inside the window walks from the cursor and processes them at a bounded price.
+                oracleBound = increasing ? upperOracleMaxEndTick : lowerOracleMaxEndTick;
+                if (increasing ? liveTick > oracleBound : liveTick < oracleBound) {
+                    break;
                 }
-            }
-            if (tickEnd == cursor) {
-                break;
             }
 
             TickLinkedList.List storage list =
@@ -197,11 +211,20 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 }
 
                 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
-                if (_hasDirectionReversed(previousLiveTick, liveTick, increasing)) {
+                directionReversed = _hasDirectionReversed(previousLiveTick, liveTick, increasing);
+                // The action's own swap may also have carried the pool past the oracle bound in
+                // the traversal direction; the positions still queued at this tick would execute
+                // at that price. Either way put them back. A reversal continues the walk from this
+                // tick; leaving the window stops it with the cursor before the tick, so the next
+                // in-window swap finds them again (same bookkeeping as the per-swap cap).
+                bool leftWindow = !directionReversed && (increasing ? liveTick > oracleBound : liveTick < oracleBound);
+                if (directionReversed || leftWindow) {
                     if (i < length) {
                         _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i);
                     }
-                    directionReversed = true;
+                    if (leftWindow) {
+                        tickDrained = false;
+                    }
                     break;
                 }
                 previousLiveTick = liveTick;
@@ -218,12 +241,11 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         return (this.afterSwap.selector, 0);
     }
 
-    function _beforeAddLiquidity(
-        address sender,
-        PoolKey calldata key,
-        ModifyLiquidityParams calldata,
-        bytes calldata
-    ) internal override returns (bytes4) {
+    function _beforeAddLiquidity(address sender, PoolKey calldata key, ModifyLiquidityParams calldata, bytes calldata)
+        internal
+        override
+        returns (bytes4)
+    {
         // NOTE: in practice sender is always the PositionManager - the hook's own liquidity
         // operations also go through positionManager.modifyLiquidities, so the address(this)
         // alternative here (and the sender == address(this) early-returns below) are defensive
@@ -269,13 +291,13 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         }
 
         // Activation of a configured position and the remint migration a tagged mint may name are
-        // handled in the auto-leverage sidecar (EIP-170); a plain deposit to an unconfigured position
-        // stops here. See RevertHookAutoLeverageActions.afterAddLiquidity.
+        // handled in the migration sidecar (EIP-170); a plain deposit to an unconfigured position
+        // stops here. See RevertHookMigrationActions.afterAddLiquidity.
         if (hookData.length == 36 || !PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags)) {
             _delegatecallPassthrough(
-                address(autoLeverageActions),
+                address(migrationActions),
                 abi.encodeCall(
-                    RevertHookAutoLeverageActions.afterAddLiquidity, (key, tokenId, params.liquidityDelta, hookData)
+                    RevertHookMigrationActions.afterAddLiquidity, (key, tokenId, params.liquidityDelta, hookData)
                 )
             );
         }
@@ -302,7 +324,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
         if (_isActivated(tokenId)) {
             uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
-            if (liquidity == 0 || _getPositionValueNative(tokenId) < _minPositionValueNative) {
+            if (liquidity == 0 || _isBelowMinimumValue(tokenId)) {
                 _removePositionTriggers(tokenId, key);
                 _deactivatePosition(tokenId);
             }

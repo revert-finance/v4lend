@@ -49,6 +49,92 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         _selfAddress = address(this);
     }
 
+    // ==================== Position config validation ====================
+
+    /// @notice Validates a position configuration against the position's pool, range and owner.
+    ///         Hosted here (delegatecall from RevertHookConfig._setPositionConfig, shared storage)
+    ///         to keep the hook's own bytecode under the EIP-170 limit. Pure validation: no state
+    ///         is written, so a direct call is harmless.
+    function validatePositionConfig(uint256 tokenId, PositionConfig calldata config) external view {
+        (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        _validateTickAlignedConfig(config, poolKey.tickSpacing);
+        _validateModeFlags(config.modeFlags, tokenId, poolKey);
+        _validateRangeConfig(poolKey.tickSpacing, positionInfo.tickLower(), positionInfo.tickUpper(), config);
+    }
+
+    function _validateTickAlignedConfig(PositionConfig memory config, int24 tickSpacing) internal pure {
+        if (
+            !_isValidTickConfig(config.autoExitTickLower, tickSpacing, type(int24).min)
+                || !_isValidTickConfig(config.autoExitTickUpper, tickSpacing, type(int24).max)
+                || !_isValidTickConfig(config.autoRangeLowerLimit, tickSpacing, type(int24).min)
+                || !_isValidTickConfig(config.autoRangeUpperLimit, tickSpacing, type(int24).max)
+                || !_isValidTickConfig(config.autoRangeLowerDelta, tickSpacing, 0)
+                || !_isValidTickConfig(config.autoRangeUpperDelta, tickSpacing, 0)
+                || !_isValidTickConfig(config.autoLendToleranceTick, tickSpacing, 0)
+                || config.autoLeverageTargetBps >= 10000
+        ) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _validateModeFlags(uint8 modeFlags, uint256 tokenId, PoolKey memory poolKey) internal view {
+        if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoLeverage(modeFlags)) {
+            revert InvalidConfig();
+        }
+        if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoExit(modeFlags)) {
+            revert InvalidConfig();
+        }
+
+        _validateAutoLendMode(tokenId, poolKey, modeFlags);
+        _validateAutoLeverageMode(tokenId, poolKey, modeFlags);
+    }
+
+    function _validateAutoLendMode(uint256 tokenId, PoolKey memory poolKey, uint8 modeFlags) internal view {
+        if (!PositionModeFlags.hasAutoLend(modeFlags)) {
+            return;
+        }
+
+        address tokenOwner = _getOwner(tokenId, false);
+        if (_vaults[tokenOwner]) {
+            revert InvalidConfig();
+        }
+        if (
+            !_hasAutoLendVault(Currency.unwrap(poolKey.currency0))
+                || !_hasAutoLendVault(Currency.unwrap(poolKey.currency1))
+        ) {
+            revert InvalidConfig();
+        }
+    }
+
+    function _hasAutoLendVault(address token) internal view returns (bool) {
+        if (address(_autoLendVaults[token]) != address(0)) {
+            return true;
+        }
+        return token == address(0) && address(_autoLendVaults[address(weth)]) != address(0);
+    }
+
+    function _validateAutoLeverageMode(uint256 tokenId, PoolKey memory poolKey, uint8 modeFlags) internal view {
+        address tokenOwner = _getOwner(tokenId, false);
+        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
+        bool hasAutoExit = PositionModeFlags.hasAutoExit(modeFlags);
+
+        if (hasAutoLeverage || hasAutoExit) {
+            bool isVault = _vaults[tokenOwner];
+
+            if (hasAutoLeverage && !isVault) {
+                revert InvalidConfig();
+            }
+
+            if (isVault) {
+                address lendAsset = IVault(tokenOwner).asset();
+                if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset)
+                {
+                    revert InvalidConfig();
+                }
+            }
+        }
+    }
+
     // ==================== Protocol fee on collected LP fees ====================
 
     /// @notice Time-weighted protocol fee on the LP fees a position collects. Called by the hook via
@@ -262,6 +348,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
 
             PositionState storage state = _positionStates[tokenId];
             state.autoLendShares = shares;
+            _custodiedShares[address(lendVault)] += shares;
             state.autoLendToken = tokenAddress;
             state.autoLendAmount = lendAmount;
             state.autoLendVault = address(lendVault);
@@ -389,9 +476,12 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         }
     }
 
-    function _sendLendingProtocolFee(uint256 tokenId, PoolKey memory poolKey, Currency lendCurrency, uint256 protocolFee)
-        internal
-    {
+    function _sendLendingProtocolFee(
+        uint256 tokenId,
+        PoolKey memory poolKey,
+        Currency lendCurrency,
+        uint256 protocolFee
+    ) internal {
         if (protocolFee == 0) return;
 
         address protocolFeeRecipient = hookFeeController.protocolFeeRecipient();
@@ -409,8 +499,13 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     }
 
     /// @notice Resets the auto-lend state for a position
+    /// @dev Every caller has already redeemed the recorded shares, so the custody total drops with
+    ///      the position's record (see RevertHookState._custodiedShares).
     function _resetAutoLendState(uint256 tokenId) internal {
         PositionState storage state = _positionStates[tokenId];
+        uint256 custodied = _custodiedShares[state.autoLendVault];
+        uint256 shares = state.autoLendShares;
+        _custodiedShares[state.autoLendVault] = custodied > shares ? custodied - shares : 0;
         state.autoLendShares = 0;
         state.autoLendToken = address(0);
         state.autoLendAmount = 0;
@@ -430,9 +525,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ) internal {
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
-        (uint256 restored0, uint256 restored1) =
+        (
+            uint256 restored0,
+            uint256 restored1
             // forge-lint: disable-next-line(unsafe-typecast)
-            _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
+        ) = _increaseLiquidity(tokenId, poolKey, positionInfo, uint128(amount0), uint128(amount1));
         _sendLeftoverTokens(tokenId, currency0, currency1, owner);
 
         if (restored0 == 0 && restored1 == 0) {

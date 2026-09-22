@@ -38,6 +38,7 @@ import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookMigrationActions} from "src/hook/RevertHookMigrationActions.sol";
 import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 
 import {DemoERC20} from "./support/DemoERC20.sol";
@@ -202,7 +203,8 @@ contract UnichainForkHookathonE2E is Script {
         address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
         address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
         address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
-        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
+        address predictedMigrationActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
+        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 7);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
@@ -211,7 +213,8 @@ contract UnichainForkHookathonE2E is Script {
             HookAuctionController(predictedAuctionController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
-            RevertHookAutoLendActions(predictedAutoLendActions)
+            RevertHookAutoLendActions(predictedAutoLendActions),
+            RevertHookMigrationActions(predictedMigrationActions)
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
         (address expectedHookAddress, bytes32 salt) = findHookSalt(CREATE2_DEPLOYER, creationCodeWithArgs);
@@ -248,6 +251,14 @@ contract UnichainForkHookathonE2E is Script {
             deployment.routeController,
             swapActions
         );
+        RevertHookMigrationActions migrationActions = new RevertHookMigrationActions(
+            PERMIT2,
+            deployment.oracle,
+            ILiquidityCalculator(deployment.liquidityCalculator),
+            deployment.routeController,
+            swapActions
+        );
+        require(address(migrationActions) == predictedMigrationActions, "Demo: migration actions address mismatch");
         HookAuctionController auctionController =
             new HookAuctionController(expectedHookAddress, deployment.oracle.poolManager());
         require(address(auctionController) == predictedAuctionController, "Demo: auction controller address mismatch");
@@ -259,7 +270,8 @@ contract UnichainForkHookathonE2E is Script {
             auctionController,
             deployment.positionActions,
             deployment.autoLeverageActions,
-            deployment.autoLendActions
+            deployment.autoLendActions,
+            migrationActions
         );
         require(address(deployment.revertHook) == expectedHookAddress, "Demo: hook address mismatch");
         deployment.revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
@@ -914,9 +926,9 @@ contract UnichainForkHookathonE2E is Script {
     function getHookFlags() internal pure returns (uint160) {
         return uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
-                | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
+                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG
+                | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
         );
     }
 

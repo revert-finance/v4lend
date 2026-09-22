@@ -994,34 +994,209 @@ contract HookLeaseControllerTest is BaseTest {
         assertEq(lessee, address(0), "owner wind-down not blocked");
     }
 
-    function testEvictOnlyDisabledAndInsolvent() public {
+    event LeaseStarted(
+        PoolId indexed poolId, address indexed lessee, address indexed executor, uint256 price, uint256 rentDeposit
+    );
+    event LeaseEvicted(PoolId indexed poolId, address indexed lessee, uint256 refund);
+    event RefundEscrowed(PoolId indexed poolId, Currency indexed currency, address indexed account, uint256 amount);
+
+    /// @notice L-05: eviction is gated by rent insolvency alone. A solvent lessee cannot be evicted
+    ///         by anyone (owner included, leasing enabled or not); once now >= paidThrough ANY
+    ///         caller can free the slot, with leasing still enabled. The price deposit (plus the
+    ///         sub-second rent remainder) goes to the lessee's pull-refund escrow and the final
+    ///         accrual is delivered to the LP in range rather than parked.
+    function testEvictInsolventLeaseIsPermissionless() public {
         _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
         uint256 rps = leaseController.rentPerSecond(leasePoolId); // price is cleared by the eviction
+        address stranger = makeAddr("stranger");
 
-        // enabled -> cannot evict at all
-        vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
-        leaseController.evictLease(leasePoolKey);
-
-        leaseController.setLeasingEnabled(leasePoolKey, false);
-
-        // solvent -> cannot evict
+        // solvent -> nobody can evict, not even the owner
         vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
         leaseController.evictLease(leasePoolKey);
+        vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
+        vm.prank(stranger);
+        leaseController.evictLease(leasePoolKey);
 
-        // insolvent -> evictable; the price deposit goes to the lessee's escrow, and the final
-        // accrual is delivered to the LP in range rather than parked for later LPs or the sweep
+        // still solvent one second before the runway ends (strict boundary, same as the discount)
         (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        vm.warp(uint256(paidThrough) - 1);
+        vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
+        vm.prank(stranger);
+        leaseController.evictLease(leasePoolKey);
+
+        // insolvent -> a stranger evicts while leasing stays enabled
         vm.warp(uint256(paidThrough) + 1);
+        uint256 remainder = 0.2e18 % rps;
+        uint256 lesseeBalBefore = token1.balanceOf(lesseeA);
         vm.expectEmit(true, false, false, false, address(leaseController));
         emit RentDripped(leasePoolId, 0);
+        vm.expectEmit(true, true, true, true, address(leaseController));
+        emit RefundEscrowed(leasePoolId, currency1, lesseeA, 1e18 + remainder);
+        vm.expectEmit(true, true, false, true, address(leaseController));
+        emit LeaseEvicted(leasePoolId, lesseeA, 1e18 + remainder);
+        vm.prank(stranger);
         uint256 refund = leaseController.evictLease(leasePoolKey);
-        uint256 remainder = 0.2e18 % rps;
+
         assertEq(refund, 1e18 + remainder, "price deposit plus the sub-second rent remainder refunded");
         assertEq(leaseController.refunds(currency1, lesseeA), refund, "escrowed, not pushed");
+        assertEq(token1.balanceOf(lesseeA), lesseeBalBefore, "nothing pushed to the lessee");
+        assertEq(leaseController.refunds(currency1, stranger), 0, "the evictor earns nothing");
         (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
         assertEq(lessee, address(0), "slot vacated");
-        (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        (
+            address storedLessee,
+            address storedExecutor,
+            uint256 price,
+            uint256 rentBalance,,
+            uint40 pt,
+            uint256 pending
+        ) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(storedLessee, address(0));
+        assertEq(storedExecutor, address(0));
+        assertEq(price + rentBalance, 0, "deposit and rent balance cleared");
+        assertEq(pt, 0, "runway cleared");
         assertEq(pending, 0, "eviction delivered the final accrual instead of parking it");
+        assertTrue(
+            leaseController.getPoolLeaseConfig(leasePoolId).leasingEnabled, "eviction did not need the market frozen"
+        );
+
+        // the discount is gone for the evicted executor
+        (uint256 outLessee, uint256 outOther) = _swapOutcomes(1e18);
+        assertEq(outLessee, outOther, "no discount after eviction");
+
+        // vacant slot -> nothing to evict; the lessee pulls the escrow and can re-enter
+        vm.expectRevert(HookLeaseController.NoActiveLease.selector);
+        leaseController.evictLease(leasePoolKey);
+        vm.prank(lesseeA);
+        leaseController.claimRefund(currency1, lesseeA);
+        assertEq(token1.balanceOf(lesseeA), lesseeBalBefore + refund, "escrow claimable");
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        (lessee,,,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, lesseeA, "evicted lessee re-enters at their own price");
+    }
+
+    /// @notice L-05: the owner's wind-down still works the same way - once leasing is disabled and
+    ///         the lease is insolvent the owner evicts and can reconfigure - eviction just no
+    ///         longer REQUIRES the market to be disabled.
+    function testOwnerWindDownEvictsInsolventLease() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        leaseController.setLeasingEnabled(leasePoolKey, false);
+
+        // disabled but solvent -> the running lease is honored, no eviction
+        vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
+        leaseController.evictLease(leasePoolKey);
+        vm.expectRevert(HookLeaseController.PoolStateNotClean.selector);
+        leaseController.configurePool(leasePoolKey, _defaultConfig());
+
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        vm.warp(uint256(paidThrough));
+        // nobody can re-enter while leasing is disabled, even over an insolvent incumbent
+        vm.expectRevert(HookLeaseController.LeasingDisabled.selector);
+        vm.prank(lesseeB);
+        leaseController.startLease(leasePoolKey, address(otherSwapper), 1e18, 0.2e18);
+
+        uint256 refund = leaseController.evictLease(leasePoolKey);
+        assertEq(leaseController.refunds(currency1, lesseeA), refund, "deposit escrowed for the lessee");
+        (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, address(0), "slot freed");
+        // clean state: the owner can reconfigure
+        leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    /// @notice L-05: a lapsed lease has no claim on the slot. startLease over a rent-insolvent
+    ///         incumbent evicts it (final accrual delivered, deposit + rent dust escrowed) and
+    ///         installs the caller at the caller's OWN price - below the incumbent's and far below
+    ///         the buyout floor - without the Harberger bump.
+    function testStartLeaseOverInsolventIncumbentEvictsWithoutBump() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId);
+        uint256 buyoutFloor = leaseController.minBuyoutPrice(leasePoolId);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+
+        uint256 newPrice = 0.5e18;
+        uint256 newRent = 0.1e18;
+        assertLt(newPrice, buyoutFloor, "test premise: the entrant pays less than the buyout floor");
+
+        // insolvent exactly at paidThrough (strict boundary): the incumbent no longer holds the slot
+        vm.warp(uint256(paidThrough));
+        uint256 remainder = 0.2e18 % rps;
+        uint256 refundA = 1e18 + remainder;
+        uint256 balABefore = token1.balanceOf(lesseeA);
+        uint256 balBBefore = token1.balanceOf(lesseeB);
+
+        vm.expectEmit(true, false, false, false, address(leaseController));
+        emit RentDripped(leasePoolId, 0);
+        vm.expectEmit(true, true, true, true, address(leaseController));
+        emit RefundEscrowed(leasePoolId, currency1, lesseeA, refundA);
+        vm.expectEmit(true, true, false, true, address(leaseController));
+        emit LeaseEvicted(leasePoolId, lesseeA, refundA);
+        vm.expectEmit(true, true, true, true, address(leaseController));
+        emit LeaseStarted(leasePoolId, lesseeB, address(otherSwapper), newPrice, newRent);
+        _startLease(lesseeB, address(otherSwapper), newPrice, newRent);
+
+        // incumbent made whole from escrow
+        assertEq(leaseController.refunds(currency1, lesseeA), refundA, "incumbent deposit + rent dust escrowed");
+        assertEq(token1.balanceOf(lesseeA), balABefore, "nothing pushed to the incumbent");
+        // entrant paid exactly its own price + rent, no bump
+        assertEq(balBBefore - token1.balanceOf(lesseeB), newPrice + newRent, "entrant escrows price + rent only");
+
+        (address lessee, address executor, uint256 price,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, lesseeB, "entrant holds the slot");
+        assertEq(executor, address(otherSwapper));
+        assertEq(price, newPrice, "installed at the entrant's own price");
+        (,,, uint256 rentBalance, uint64 lastAccrualTime, uint40 newPaidThrough, uint256 pending) =
+            leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(rentBalance, newRent, "fresh rent balance, the incumbent's dust did not carry over");
+        assertEq(lastAccrualTime, block.timestamp);
+        assertEq(
+            newPaidThrough,
+            block.timestamp + newRent / leaseController.rentPerSecond(leasePoolId),
+            "runway from the entrant's own rent"
+        );
+        assertEq(pending, 0, "final accrual of the incumbent delivered, not parked");
+
+        // the discount followed the slot to the entrant's executor
+        (uint256 outOldExecutor, uint256 outNewExecutor) = _swapOutcomes(1e18);
+        assertLt(outOldExecutor, outNewExecutor, "discount moved to the entrant's executor");
+
+        // the entrant is now a solvent incumbent: only a buyout can take the slot
+        vm.expectRevert(HookLeaseController.LeaseAlreadyActive.selector);
+        _startLease(lesseeA, address(lesseeSwapper), 2e18, 0.3e18);
+
+        // A pulls its escrow
+        vm.prank(lesseeA);
+        leaseController.claimRefund(currency1, lesseeA);
+        assertEq(token1.balanceOf(lesseeA), balABefore + refundA);
+    }
+
+    /// @notice A solvent incumbent still holds the slot: startLease reverts right up to the last
+    ///         covered second, and topping up the rent keeps it that way. The lapsed lessee can
+    ///         also re-enter through startLease themselves (evict + reinstall).
+    function testStartLeaseOverSolventIncumbentReverts() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+
+        vm.warp(uint256(paidThrough) - 1);
+        vm.expectRevert(HookLeaseController.LeaseAlreadyActive.selector);
+        _startLease(lesseeB, address(otherSwapper), 0.5e18, 0.1e18);
+
+        // the incumbent extends its runway: still not startable afterwards
+        vm.prank(lesseeA);
+        leaseController.fundRent(leasePoolKey, 0.2e18);
+        vm.warp(uint256(paidThrough) + 100);
+        vm.expectRevert(HookLeaseController.LeaseAlreadyActive.selector);
+        _startLease(lesseeB, address(otherSwapper), 0.5e18, 0.1e18);
+
+        // let it lapse; the lapsed lessee re-enters via startLease: old deposit escrowed, new lease fresh
+        (,,,,, uint40 paidThrough2,) = leaseController.getPoolLeaseState(leasePoolId);
+        vm.warp(uint256(paidThrough2));
+        uint256 balBefore = token1.balanceOf(lesseeA);
+        _startLease(lesseeA, address(lesseeSwapper), 2e18, 0.3e18);
+        assertEq(balBefore - token1.balanceOf(lesseeA), 2e18 + 0.3e18, "new lease funded in full");
+        assertGe(leaseController.refunds(currency1, lesseeA), 1e18, "old deposit escrowed for the same account");
+        (address lessee,, uint256 price,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, lesseeA);
+        assertEq(price, 2e18);
     }
 
     function testSweepRequiresWindDownAndVacancy() public {

@@ -14,6 +14,7 @@ import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
+import {RevertHookMigrationActions} from "./RevertHookMigrationActions.sol";
 import {RevertHookAutoLeverageActions} from "./RevertHookAutoLeverageActions.sol";
 import {RevertHookPositionActions} from "./RevertHookPositionActions.sol";
 import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
@@ -31,6 +32,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
     RevertHookPositionActions internal immutable positionActions;
     RevertHookAutoLeverageActions internal immutable autoLeverageActions;
     RevertHookAutoLendActions internal immutable autoLendActions;
+    RevertHookMigrationActions internal immutable migrationActions;
 
     constructor(
         address owner_,
@@ -39,7 +41,8 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         IHookAuctionController _hookAuctionController,
         RevertHookPositionActions _positionActions,
         RevertHookAutoLeverageActions _autoLeverageActions,
-        RevertHookAutoLendActions _autoLendActions
+        RevertHookAutoLendActions _autoLendActions,
+        RevertHookMigrationActions _migrationActions
     ) BaseHook(_v4Oracle.poolManager()) {
         if (owner_ == address(0)) {
             revert OwnableInvalidOwner(address(0));
@@ -56,6 +59,7 @@ abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallb
         positionActions = _positionActions;
         autoLeverageActions = _autoLeverageActions;
         autoLendActions = _autoLendActions;
+        migrationActions = _migrationActions;
     }
 
     function transferOwnership(address newOwner) external payable onlyOwner {

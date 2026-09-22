@@ -18,6 +18,7 @@ import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookMigrationActions} from "src/hook/RevertHookMigrationActions.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -93,7 +94,24 @@ contract DeployUnichain is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 1 hours;
+    // Feed max ages, one per feed. Each value must be >= the feed's heartbeat plus a margin: a
+    // too-low value makes borrow, transform AND liquidate revert on every valuation once the
+    // price has not moved enough to publish a new round (see DeployBase, where a shared one-hour
+    // limit took the USDC vault down).
+    //
+    // Verified heartbeats, 2026-09-22, from RedStone's relayer manifest for these exact feed
+    // addresses (redstone-oracles-monorepo: packages/relayer-remote-config/main/
+    // relayer-manifests-multi-feed/unichainMultiFeed.json, adapter 0xFB1267A2...):
+    //   USDC/USD 0xD15862FC...  10800 s / 0.5%    USDT/USD 0x58fa68A3...  10800 s / 0.5%    DAI/USD 0xE94c9f9A...  10800 s / 0.5%
+    //   ETH/USD  0xe8D9FbC1...  21600 s / 0.5%    BTC/USD  0xc44be6D0...  21600 s / 0.5%    UNI/USD 0xf1454949...  86400 s / 1%
+    // The previous 2 hour values for ETH/BTC/UNI were below the heartbeat and would have taken
+    // the vault down in a flat market. Re-check the manifest before every deployment.
+    uint32 constant USDC_MAX_FEED_AGE = 4 hours;
+    uint32 constant USDT_MAX_FEED_AGE = 4 hours;
+    uint32 constant DAI_MAX_FEED_AGE = 4 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 7 hours;
+    uint32 constant BTC_MAX_FEED_AGE = 7 hours;
+    uint32 constant UNI_MAX_FEED_AGE = 25 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
@@ -131,9 +149,9 @@ contract DeployUnichain is Script {
     function getHookFlags() internal pure returns (uint160) {
         return uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
-                | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
+                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG
+                | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
         );
     }
 
@@ -179,6 +197,7 @@ contract DeployUnichain is Script {
         V4Oracle oracle,
         address token,
         AggregatorV3Interface feed,
+        uint32 maxFeedAge,
         address twapPool,
         address twapTokenAlias,
         bool allowSingleSourceOracle
@@ -200,7 +219,7 @@ contract DeployUnichain is Script {
         }
 
         oracle.setTokenConfig(
-            token, feed, MAX_FEED_AGE, pool, twapTokenAlias, ORACLE_TWAP_SECONDS, mode, MAX_ORACLE_SOURCE_DIFFERENCE
+            token, feed, maxFeedAge, pool, twapTokenAlias, ORACLE_TWAP_SECONDS, mode, MAX_ORACLE_SOURCE_DIFFERENCE
         );
     }
 
@@ -270,7 +289,13 @@ contract DeployUnichain is Script {
         // USDC/USD
         if (REDSTONE_USDC_USD != address(0) && USDC != address(0)) {
             _configureOracleToken(
-                oracle, USDC, AggregatorV3Interface(REDSTONE_USDC_USD), address(0), USDC, allowSingleSourceOracle
+                oracle,
+                USDC,
+                AggregatorV3Interface(REDSTONE_USDC_USD),
+                USDC_MAX_FEED_AGE,
+                address(0),
+                USDC,
+                allowSingleSourceOracle
             );
             console.log("  Configured USDC/USD feed");
         }
@@ -281,6 +306,7 @@ contract DeployUnichain is Script {
                 oracle,
                 WETH,
                 AggregatorV3Interface(REDSTONE_ETH_USD),
+                ETH_MAX_FEED_AGE,
                 UNISWAP_V3_WETH_USDC,
                 WETH,
                 allowSingleSourceOracle
@@ -289,6 +315,7 @@ contract DeployUnichain is Script {
                 oracle,
                 ETH,
                 AggregatorV3Interface(REDSTONE_ETH_USD),
+                ETH_MAX_FEED_AGE,
                 UNISWAP_V3_WETH_USDC,
                 WETH,
                 allowSingleSourceOracle
@@ -305,6 +332,7 @@ contract DeployUnichain is Script {
                 oracle,
                 WBTC,
                 AggregatorV3Interface(REDSTONE_BTC_USD),
+                BTC_MAX_FEED_AGE,
                 UNISWAP_V3_WBTC_USDC,
                 WBTC,
                 allowSingleSourceOracle
@@ -320,6 +348,7 @@ contract DeployUnichain is Script {
                 oracle,
                 USDT,
                 AggregatorV3Interface(REDSTONE_USDT_USD),
+                USDT_MAX_FEED_AGE,
                 UNISWAP_V3_USDT_USDC,
                 USDT,
                 allowSingleSourceOracle
@@ -330,7 +359,13 @@ contract DeployUnichain is Script {
         // DAI/USD
         if (REDSTONE_DAI_USD != address(0) && DAI != address(0)) {
             _configureOracleToken(
-                oracle, DAI, AggregatorV3Interface(REDSTONE_DAI_USD), UNISWAP_V3_DAI_USDC, DAI, allowSingleSourceOracle
+                oracle,
+                DAI,
+                AggregatorV3Interface(REDSTONE_DAI_USD),
+                DAI_MAX_FEED_AGE,
+                UNISWAP_V3_DAI_USDC,
+                DAI,
+                allowSingleSourceOracle
             );
             console.log("  Configured DAI/USD feed");
         }
@@ -338,7 +373,13 @@ contract DeployUnichain is Script {
         // UNI/USD
         if (REDSTONE_UNI_USD != address(0) && UNI != address(0)) {
             _configureOracleToken(
-                oracle, UNI, AggregatorV3Interface(REDSTONE_UNI_USD), UNISWAP_V3_UNI_USDC, UNI, allowSingleSourceOracle
+                oracle,
+                UNI,
+                AggregatorV3Interface(REDSTONE_UNI_USD),
+                UNI_MAX_FEED_AGE,
+                UNISWAP_V3_UNI_USDC,
+                UNI,
+                allowSingleSourceOracle
             );
             console.log("  Configured UNI/USD feed");
         }
@@ -353,7 +394,8 @@ contract DeployUnichain is Script {
         address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
         address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
         address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
-        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
+        address predictedMigrationActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
+        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 7);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
@@ -362,7 +404,8 @@ contract DeployUnichain is Script {
             HookAuctionController(predictedAuctionController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
-            RevertHookAutoLendActions(predictedAutoLendActions)
+            RevertHookAutoLendActions(predictedAutoLendActions),
+            RevertHookMigrationActions(predictedMigrationActions)
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
 
@@ -410,6 +453,13 @@ contract DeployUnichain is Script {
         );
         console.log("  RevertHookAutoLendActions deployed at:", address(autoLendActions));
 
+        // Deploy RevertHookMigrationActions (delegatecall target 4: remint migration + add-liquidity tail)
+        RevertHookMigrationActions migrationActions = new RevertHookMigrationActions(
+            IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
+        );
+        require(address(migrationActions) == predictedMigrationActions, "Migration actions address mismatch");
+        console.log("  RevertHookMigrationActions deployed at:", address(migrationActions));
+
         // Deploy RevertHook using CREATE2
         HookAuctionController auctionController = new HookAuctionController(expectedHookAddress, oracle.poolManager());
         require(address(auctionController) == predictedAuctionController, "Auction controller address mismatch");
@@ -422,7 +472,8 @@ contract DeployUnichain is Script {
             auctionController,
             positionActions,
             autoLeverageActions,
-            autoLendActions
+            autoLendActions,
+            migrationActions
         );
         require(address(revertHook) == expectedHookAddress, "Hook address mismatch");
         console.log("  RevertHook deployed at:", address(revertHook));

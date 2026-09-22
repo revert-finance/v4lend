@@ -151,8 +151,10 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
 
     /// @notice Executes router swap and enforces oracle-based slippage floor when enabled.
     /// @dev The effective minimum output is max(user amountOutMin, oracle floor).
-    ///      maxSwapSlippageBps == 10000 disables oracle slippage checks and relies only on amountOutMin.
-    ///      This mode is intended for long-tail tokens/pairs that are not configured in V4Oracle.
+    ///      maxSwapSlippageBps == 10000 disables the oracle slippage check entirely: the position owner then
+    ///      has NO onchain bound on swap output and relies fully on the operator-supplied amountOutMin
+    ///      (i.e. on operator honesty and quote quality). This mode is intended only for long-tail
+    ///      tokens/pairs that are not configured in V4Oracle.
     function _routerSwapWithSlippageCheck(RouterSwapParams memory params, uint16 maxSwapSlippageBps)
         internal
         returns (uint256 amountInDelta, uint256 amountOutDelta)

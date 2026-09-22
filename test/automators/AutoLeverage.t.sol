@@ -1062,4 +1062,64 @@ contract AutoLeverageTest is AutomatorTestBase {
         uint256 oracleOut = FullMath.mulDiv(amountIn, oraclePriceX96, Q96);
         amountOut = FullMath.mulDiv(oracleOut, 10000 - uint256(maxSwapSlippageBps), 10000);
     }
+
+    /// @dev L-03: configs persist after a position leaves the vault. The NFT owner must not be able to
+    ///      call `_execute` directly and have themselves treated as the `IVault`.
+    function test_RevertWhenNonVaultCallerInvokesInternalExecute() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+        _depositToVault(200000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(
+            tokenId,
+            AutoLeverage.PositionConfig({
+                isActive: true,
+                targetLeverageBps: 5000,
+                rebalanceThresholdBps: 500,
+                maxSwapSlippageBps: 10000,
+                maxRewardX64: 0
+            })
+        );
+
+        // Position leaves the vault (no debt) to a plain EOA; the active config stays behind.
+        // (WHALE_ACCOUNT is a contract without onERC721Received, so it cannot be the safeTransfer recipient.)
+        address holder = makeAddr("holder");
+        vm.prank(WHALE_ACCOUNT);
+        vault.remove(tokenId, holder, bytes(""));
+        assertEq(IERC721(address(positionManager)).ownerOf(tokenId), holder);
+        (bool isActive,,,,) = autoLeverage.positionConfigs(tokenId);
+        assertTrue(isActive, "config persists after leaving the vault");
+
+        AutoLeverage.ExecuteParams memory params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: true,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: bytes(""),
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: bytes(""),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
+        });
+
+        // NFT owner calling the transform entry point directly is rejected before it is treated as a vault
+        vm.prank(holder);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoLeverage._execute(params);
+
+        // and so is any other non-vault caller
+        vm.prank(operator);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoLeverage._execute(params);
+    }
 }

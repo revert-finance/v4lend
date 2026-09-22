@@ -18,6 +18,7 @@ import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookMigrationActions} from "src/hook/RevertHookMigrationActions.sol";
 
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
@@ -57,7 +58,18 @@ contract DeployMainnet is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 1 hours;
+    // Chainlink max feed ages, one per feed. Each value must be >= the feed's heartbeat plus a
+    // margin: a too-low value makes borrow, transform AND liquidate revert on every valuation
+    // once the price has not moved enough to publish a new round (see DeployBase, where a shared
+    // one-hour limit took the USDC vault down).
+    //
+    // Verified heartbeats, 2026-09-22 (Chainlink reference data directory, cross-checked against the
+    // last 40 rounds of each proxy on chain; observed max gaps in brackets):
+    //   USDC/USD 0x8fFfFfd4...  82800 s / 0.25% [82836 s]
+    //   ETH/USD  0x5f4eC3Df...   3600 s / 0.5%  [3636 s] - a bare 1 hour leaves no margin
+    // Re-check on the provider's feed page before every deployment; Chainlink changes these.
+    uint32 constant USDC_MAX_FEED_AGE = 25 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 2 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200;
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
@@ -85,9 +97,9 @@ contract DeployMainnet is Script {
     function getHookFlags() internal pure returns (uint160) {
         return uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
-                | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
+                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG
+                | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
         );
     }
 
@@ -151,7 +163,7 @@ contract DeployMainnet is Script {
         oracle.setTokenConfig(
             USDC,
             AggregatorV3Interface(CHAINLINK_USDC_USD),
-            MAX_FEED_AGE,
+            USDC_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
             USDC,
             ORACLE_TWAP_SECONDS,
@@ -161,7 +173,7 @@ contract DeployMainnet is Script {
         oracle.setTokenConfig(
             WETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -171,7 +183,7 @@ contract DeployMainnet is Script {
         oracle.setTokenConfig(
             ETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -188,7 +200,8 @@ contract DeployMainnet is Script {
         address predictedPositionActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 3);
         address predictedAutoLeverageActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 4);
         address predictedAutoLendActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 5);
-        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
+        address predictedMigrationActions = vm.computeCreateAddress(deployer, hookSidecarNonce + 6);
+        address predictedAuctionController = vm.computeCreateAddress(deployer, hookSidecarNonce + 7);
 
         bytes memory constructorArgs = abi.encode(
             deployer,
@@ -197,7 +210,8 @@ contract DeployMainnet is Script {
             HookAuctionController(predictedAuctionController),
             RevertHookPositionActions(predictedPositionActions),
             RevertHookAutoLeverageActions(predictedAutoLeverageActions),
-            RevertHookAutoLendActions(predictedAutoLendActions)
+            RevertHookAutoLendActions(predictedAutoLendActions),
+            RevertHookMigrationActions(predictedMigrationActions)
         );
         bytes memory creationCodeWithArgs = abi.encodePacked(type(RevertHook).creationCode, constructorArgs);
 
@@ -238,12 +252,26 @@ contract DeployMainnet is Script {
         );
         console.log("  RevertHookAutoLendActions deployed at:", address(autoLendActions));
 
+        // Deploy RevertHookMigrationActions (delegatecall target 4: remint migration + add-liquidity tail)
+        RevertHookMigrationActions migrationActions = new RevertHookMigrationActions(
+            IPermit2(PERMIT2), oracle, ILiquidityCalculator(liquidityCalculator), routeController, swapActions
+        );
+        require(address(migrationActions) == predictedMigrationActions, "Migration actions address mismatch");
+        console.log("  RevertHookMigrationActions deployed at:", address(migrationActions));
+
         HookAuctionController auctionController = new HookAuctionController(expectedHookAddress, oracle.poolManager());
         require(address(auctionController) == predictedAuctionController, "Auction controller address mismatch");
         console.log("  HookAuctionController deployed at:", address(auctionController));
 
         RevertHook revertHook = new RevertHook{salt: salt}(
-            deployer, oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
+            deployer,
+            oracle,
+            feeController,
+            auctionController,
+            positionActions,
+            autoLeverageActions,
+            autoLendActions,
+            migrationActions
         );
         require(address(revertHook) == expectedHookAddress, "Hook address mismatch");
         console.log("  RevertHook deployed at:", address(revertHook));

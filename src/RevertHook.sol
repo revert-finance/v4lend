@@ -5,6 +5,7 @@ import {IHookFeeController} from "./hook/interfaces/IHookFeeController.sol";
 import {IHookAuctionController} from "./hook/interfaces/IHookAuctionController.sol";
 import {RevertHookAutoLendActions} from "./hook/RevertHookAutoLendActions.sol";
 import {RevertHookAutoLeverageActions} from "./hook/RevertHookAutoLeverageActions.sol";
+import {RevertHookMigrationActions} from "./hook/RevertHookMigrationActions.sol";
 import {RevertHookBase} from "./hook/RevertHookBase.sol";
 import {RevertHookCallbacks} from "./hook/RevertHookCallbacks.sol";
 import {RevertHookPositionActions} from "./hook/RevertHookPositionActions.sol";
@@ -25,7 +26,8 @@ contract RevertHook is RevertHookCallbacks {
         IHookAuctionController _hookAuctionController,
         RevertHookPositionActions _positionActions,
         RevertHookAutoLeverageActions _autoLeverageActions,
-        RevertHookAutoLendActions _autoLendActions
+        RevertHookAutoLendActions _autoLendActions,
+        RevertHookMigrationActions _migrationActions
     )
         RevertHookBase(
             owner_,
@@ -34,7 +36,8 @@ contract RevertHook is RevertHookCallbacks {
             _hookAuctionController,
             _positionActions,
             _autoLeverageActions,
-            _autoLendActions
+            _autoLendActions,
+            _migrationActions
         )
     {}
 }

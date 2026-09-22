@@ -57,7 +57,13 @@ Constants
             └─ RevertHookActionBase
                ├─ RevertHookPositionActions
                ├─ RevertHookAutoLendActions
-               └─ RevertHookAutoLeverageActions
+               ├─ RevertHookAutoLeverageActions
+               └─ RevertHookMigrationActions
+
+Constants
+└─ RevertHookAccess
+   └─ RevertHookState
+      └─ RevertHookSwapActions   (fifth delegatecall target; shares the spine only up to RevertHookState)
 ```
 
 Mermaid view:
@@ -73,7 +79,13 @@ graph TD
     AB --> PA["RevertHookPositionActions"]
     AB --> AL["RevertHookAutoLendActions"]
     AB --> AV["RevertHookAutoLeverageActions"]
+    AB --> MG["RevertHookMigrationActions"]
+    S --> SW["RevertHookSwapActions"]
 ```
+
+`RevertHookConfig._setPositionConfig` delegatecalls `RevertHookAutoLendActions.validatePositionConfig` for the tick-alignment, mode-flag and range validation (moved out of the hook for bytecode room; reverts bubble up). The remint-migration cluster (`migrateVaultPosition`, the tagged-mint `afterAddLiquidity` tail, `_migrateMintedPosition`, `_migratePositionState`) lives in `RevertHookMigrationActions`, a sidecar of its own because neither the auto-lend nor the auto-leverage sidecar has the room.
+
+`RevertHookSwapActions` is delegatecalled from `RevertHookActionBase._executeSwapResolved` (and so runs with the hook's storage) but inherits only up to `RevertHookState`; it reads `_swapProtectionConfigs`. It declares no storage of its own and must never do so.
 
 ## Why The Split Exists
 
@@ -100,10 +112,14 @@ RevertHookTriggers
 RevertHookLookupBase
 ```
 
+All five delegatecall targets (`RevertHookPositionActions`, `RevertHookAutoLendActions`, `RevertHookAutoLeverageActions`, `RevertHookMigrationActions`, `RevertHookSwapActions`) must produce a `forge inspect <C> storage-layout` byte-identical to `RevertHook`'s. Note `RevertHookSwapActions` stops at `RevertHookState`, so a field added to `RevertHookTriggers` or `RevertHookLookupBase` does not shift it, while a field added to `RevertHookSwapActions` itself would collide with the hook's `RevertHookTriggers` slots.
+
 That means future mutable storage changes must be made carefully:
-- safe: add shared mutable storage in the common state chain
+- safe: add shared mutable storage at the END of `RevertHookState` (all four targets see it)
 - risky: add mutable storage directly in `RevertHookBase`
 - risky: add mutable storage directly in `RevertHookActionBase`
+- forbidden: add mutable storage in `RevertHookSwapActions`
+- transient storage (`tstore`/`tload`, e.g. the C-01 hook-transform marker in `RevertHookAccess`) is outside the layout and safe to use from any contract in the spine
 
 Immutables are less dangerous here because they are not part of the contract storage layout used by delegatecall.
 

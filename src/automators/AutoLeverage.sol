@@ -119,7 +119,12 @@ contract AutoLeverage is Automator {
     }
 
     /// @notice Internal execution called from vault.transform()
+    /// @dev Only a registered vault may call this. Configs persist after a position leaves the vault, and
+    /// `_validateCaller` alone would accept the NFT owner as caller and then treat it as an `IVault`.
     function _execute(ExecuteParams calldata params) external nonReentrant {
+        if (!vaults[msg.sender]) {
+            revert Unauthorized();
+        }
         _validateCaller(positionManager, params.tokenId);
 
         PositionConfig memory config = positionConfigs[params.tokenId];

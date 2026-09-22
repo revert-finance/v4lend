@@ -201,4 +201,11 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // Protocol fee carried per position until a liquidity operation can absorb it
     mapping(uint256 tokenId => PendingProtocolFee pendingProtocolFee) internal _pendingProtocolFees;
+
+    /// @notice ERC4626 shares the hook custodies for auto-lend positions, per share token (the
+    ///         lending vault). Hook actions sweep whole self-balances, so every balance read that
+    ///         feeds a payout subtracts this (see RevertHookActionBase._sweepableBalance); a pool
+    ///         whose currency is a share token can then never pay another position's shares out.
+    /// @dev Appended last: the delegatecall sidecars share this layout (docs/hook-hierarchy.md).
+    mapping(address shareToken => uint256 shares) internal _custodiedShares;
 }

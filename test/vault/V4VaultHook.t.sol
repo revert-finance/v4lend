@@ -25,6 +25,7 @@ import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookMigrationActions} from "src/hook/RevertHookMigrationActions.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
@@ -106,8 +107,18 @@ contract V4VaultHookTest is V4ForkTestBase {
                 permit2, v4Oracle, liquidityCalculator, feeController, routeController, swapActions
             );
 
+        RevertHookMigrationActions migrationActions =
+            new RevertHookMigrationActions(permit2, v4Oracle, liquidityCalculator, routeController, swapActions);
+
         bytes memory constructorArgs = abi.encode(
-            address(this), v4Oracle, feeController, auctionController, positionActions, autoLeverageActions, autoLendActions
+            address(this),
+            v4Oracle,
+            feeController,
+            auctionController,
+            positionActions,
+            autoLeverageActions,
+            autoLendActions,
+            migrationActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, hookFlags);
         revertHook = RevertHook(payable(hookFlags));
@@ -735,6 +746,10 @@ contract V4VaultHookTest is V4ForkTestBase {
 
     function test_CollateralizedPositionWithAutoRange() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
+        // Same as the auto-collect scenario: this fresh 1e14-liquidity pool drifts far from the
+        // Chainlink-derived oracle price on the trigger swap. Triggers are only dispatched while
+        // the live tick is inside the oracle window (M-03), so widen it for this scenario.
+        revertHook.setMaxTicksFromOracle(10000);
         uint256 fullRangeHookedTokenId = _createPositionInHookedPool(hookedPoolKey);
         uint256 hookedTokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);
         _configurePositionForAutoRange(hookedTokenId, hookedPoolKey);
@@ -2138,6 +2153,10 @@ contract V4VaultHookTest is V4ForkTestBase {
 
     function testAutoLeverageReconfiguration_ReplacesOldTriggerNodes() public {
         PoolKey memory hookedPoolKey = _createHookedPool();
+        // Same fresh-pool artefact as the auto-collect/auto-range scenarios: moving this 1e14
+        // liquidity pool two spacings puts it far outside the default 100-tick oracle window, where
+        // dispatch is deferred and setPositionConfig refuses new triggers (TriggerCursorStale).
+        revertHook.setMaxTicksFromOracle(10000);
         _createPositionInHookedPool(hookedPoolKey);
 
         uint256 tokenId = _createPositionInHookedPoolForAutoRange(hookedPoolKey);

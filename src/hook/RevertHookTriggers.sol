@@ -125,22 +125,19 @@ abstract contract RevertHookTriggers is RevertHookState {
         }
 
         (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
-            positionTickLower,
-            positionTickUpper,
-            config.autoRangeLowerLimit,
-            config.autoRangeUpperLimit
+            positionTickLower, positionTickUpper, config.autoRangeLowerLimit, config.autoRangeUpperLimit
         );
 
         if (
             _rangeTriggerCanResolveToSamePosition(
-                positionTickLower,
-                positionTickUpper,
-                rangeLower,
-                config.autoRangeLowerDelta,
-                config.autoRangeUpperDelta,
-                tickSpacing,
-                false
-            )
+                    positionTickLower,
+                    positionTickUpper,
+                    rangeLower,
+                    config.autoRangeLowerDelta,
+                    config.autoRangeUpperDelta,
+                    tickSpacing,
+                    false
+                )
                 || _rangeTriggerCanResolveToSamePosition(
                     positionTickLower,
                     positionTickUpper,
@@ -253,6 +250,24 @@ abstract contract RevertHookTriggers is RevertHookState {
         (, PositionInfo posInfo) = _getPoolAndPositionInfo(tokenId);
         int24[4] memory ticks = _computeTriggerTicks(tokenId, poolKey, config, posInfo.tickLower(), posInfo.tickUpper());
         _insertTriggerTicks(poolId, tokenId, ticks);
+    }
+
+    /// @dev Registration guard for the external arming paths (setPositionConfig, a vault remint).
+    ///      While the cursor lags the live bucket - dispatch was deferred because the pool sits
+    ///      outside the oracle window, or a swap hit the per-swap action cap - a trigger inserted
+    ///      relative to the live price can land on the far side of the pending walk: the next
+    ///      in-window swap infers its direction from cursor to live and would never visit it.
+    ///      Refuse instead; the caller retries once a swap has brought the pool back in line.
+    ///      Not used on the hook's own arming inside a walk, where the stored cursor is stale by
+    ///      construction and the walk itself accounts for the new ticks.
+    function _requireTriggerCursorFresh(PoolId poolId, int24 tickSpacing) internal view {
+        TriggerCursor storage triggerCursor = _triggerCursors[poolId];
+        if (
+            triggerCursor.hasTriggers
+                && triggerCursor.tickLowerLast != _getTickLower(_getCurrentTick(poolId), tickSpacing)
+        ) {
+            revert TriggerCursorStale();
+        }
     }
 
     /// @notice Inserts precomputed trigger ticks into the linked lists

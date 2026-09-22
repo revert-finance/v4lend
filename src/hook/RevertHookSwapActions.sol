@@ -43,17 +43,30 @@ contract RevertHookSwapActions is RevertHookState {
         uint160 sqrtPriceLimitX96;
         if (priceMultiplier == 0) {
             // @custom:accepted-risk AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR
-            // No configured multiplier means no additional price limit. External pools are oracle-
-            // checked immediately before this call, while same-pool triggered actions inherit the
-            // traversal oracle window; a tighter position-specific floor is optional.
+            // No configured multiplier means no additional price limit: the swap runs to whatever
+            // price the pool gives. What bounds it instead is the requirement that the pool price
+            // is inside the oracle window at the moment the action starts, enforced for every
+            // entry point:
+            //   - trigger-driven actions (AUTO_RANGE / AUTO_EXIT / AUTO_LEVERAGE / AUTO_LEND) run
+            //     only from _afterSwap, which dispatches nothing while the live tick is outside
+            //     [oracleTick - _maxTicksFromOracle, oracleTick + _maxTicksFromOracle], re-checks
+            //     after every executed action and requeues the rest of a tick when an action's own
+            //     swap leaves the window; a swap that overshoots leaves the triggers armed for a
+            //     later swap that ends inside it, and registration is refused while the cursor lags
+            //     so no trigger can land where the resumed walk would miss it (M-03);
+            //   - the hook's own action entry points are reachable from a vault only during a
+            //     transform the hook itself started (RevertHookActionBase._requireAuthorization), so
+            //     a borrower cannot fire them at an arbitrary price (C-01);
+            //   - AUTO_COLLECT arms no trigger and is invoked through the permissionless
+            //     `autoCollect`, so `_executeSwapResolved` price-checks its swaps explicitly;
+            //   - a configured external route is price-checked immediately before its swap.
             //
             // Accepted with the following assumptions (deployed values, see script/Deploy*.s.sol):
-            //   - _maxTicksFromOracle = 100 ticks, so a trigger is only processed while the pool
-            //     price is within ~1.0% of the oracle price (1.0001^100), and a configured external
-            //     route is re-checked against the same bound immediately before its swap;
+            //   - _maxTicksFromOracle = 100 ticks, so an action starts while the pool price is
+            //     within ~1.0% of the oracle price (1.0001^100);
             //   - V4Oracle.maxPoolPriceDifference = 200 bps, so a manipulation that leaves the pool
-            //     more than 2% from the oracle makes position valuation revert and the action aborts
-            //     instead of swapping;
+            //     more than 2% from the oracle makes position valuation revert and value-gated
+            //     actions abort instead of swapping;
             //   - action swap sizes are small next to pool depth: collected fees (AUTO_COLLECT), one
             //     position's rebalance delta (AUTO_RANGE), or one leverage/exit step.
             // Worst case per action: an attacker moves the pool to the far edge of the oracle window
@@ -63,15 +76,7 @@ contract RevertHookSwapActions is RevertHookState {
             // and is only profitable when that exceeds the attacker's round trip - the pool fee twice
             // on the size needed to reach the window edge, plus their own impact and the risk of an
             // unrelated swap landing between the two legs. It does not compound across actions: the
-            // window is re-established for every one, and the 2% oracle guard caps how far the pool
-            // can be pushed before automation stops entirely.
-            //
-            // Where the window comes from differs by entry point, and both are covered:
-            //   - trigger-driven actions (AUTO_RANGE / AUTO_EXIT / AUTO_LEVERAGE / AUTO_LEND) only
-            //     run inside _afterSwap, whose traversal is already clamped to the oracle window;
-            //   - AUTO_COLLECT arms no trigger and is invoked through the permissionless
-            //     `autoCollect`, so traversal never bounds it; `_executeSwapResolved` price-checks
-            //     its swaps explicitly instead (same bound, applied immediately before the swap).
+            // window is re-established for every one.
             // Levers that tighten this without a code change: per-position setSwapProtectionConfig
             // (a real price limit for that position), a lower owner-set setMaxTicksFromOracle, and
             // HookRouteController routes pointing actions at deeper pools.
