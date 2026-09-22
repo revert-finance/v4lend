@@ -1,12 +1,15 @@
 name: Test Suite
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
-  # push:
-  # pull_request:
 
 env:
-  FOUNDRY_PROFILE: ci
+  # Fork suites (test/vault/V4VaultHook.t.sol, test/automators/*) need an archive RPC.
+  # The default public endpoint rejects archive requests, so CI must provide one.
+  MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL || 'https://eth-mainnet.public.blastapi.io' }}
 
 jobs:
   test:

@@ -93,7 +93,23 @@ contract DeployUnichain is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 1 hours;
+    // Feed max ages, one per feed. Each value must be >= the feed's heartbeat plus a margin: a
+    // too-low value makes borrow, transform AND liquidate revert on every valuation once the
+    // price has not moved enough to publish a new round (see DeployBase, where a shared one-hour
+    // limit took the USDC vault down).
+    //
+    // Assumed heartbeats (RedStone push feeds on Unichain, https://docs.redstone.finance):
+    //   USDC/USD 0xD15862FC...  86400 s     USDT/USD 0x58fa68A3...  86400 s     DAI/USD 0xE94c9f9A...  86400 s
+    //   ETH/USD  0xe8D9FbC1...  unverified  BTC/USD  0xc44be6D0...  unverified  UNI/USD 0xf1454949...  unverified
+    // TODO(deployer): verify heartbeat of ETH/USD, BTC/USD and UNI/USD. RedStone push feeds
+    // commonly run 6-24 h heartbeats; if so, raise the corresponding constant to heartbeat + 1 h
+    // or the vault reverts in a flat market.
+    uint32 constant USDC_MAX_FEED_AGE = 25 hours;
+    uint32 constant USDT_MAX_FEED_AGE = 25 hours;
+    uint32 constant DAI_MAX_FEED_AGE = 25 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 2 hours;
+    uint32 constant BTC_MAX_FEED_AGE = 2 hours;
+    uint32 constant UNI_MAX_FEED_AGE = 2 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
@@ -179,6 +195,7 @@ contract DeployUnichain is Script {
         V4Oracle oracle,
         address token,
         AggregatorV3Interface feed,
+        uint32 maxFeedAge,
         address twapPool,
         address twapTokenAlias,
         bool allowSingleSourceOracle
@@ -200,7 +217,7 @@ contract DeployUnichain is Script {
         }
 
         oracle.setTokenConfig(
-            token, feed, MAX_FEED_AGE, pool, twapTokenAlias, ORACLE_TWAP_SECONDS, mode, MAX_ORACLE_SOURCE_DIFFERENCE
+            token, feed, maxFeedAge, pool, twapTokenAlias, ORACLE_TWAP_SECONDS, mode, MAX_ORACLE_SOURCE_DIFFERENCE
         );
     }
 
@@ -270,7 +287,13 @@ contract DeployUnichain is Script {
         // USDC/USD
         if (REDSTONE_USDC_USD != address(0) && USDC != address(0)) {
             _configureOracleToken(
-                oracle, USDC, AggregatorV3Interface(REDSTONE_USDC_USD), address(0), USDC, allowSingleSourceOracle
+                oracle,
+                USDC,
+                AggregatorV3Interface(REDSTONE_USDC_USD),
+                USDC_MAX_FEED_AGE,
+                address(0),
+                USDC,
+                allowSingleSourceOracle
             );
             console.log("  Configured USDC/USD feed");
         }
@@ -281,6 +304,7 @@ contract DeployUnichain is Script {
                 oracle,
                 WETH,
                 AggregatorV3Interface(REDSTONE_ETH_USD),
+                ETH_MAX_FEED_AGE,
                 UNISWAP_V3_WETH_USDC,
                 WETH,
                 allowSingleSourceOracle
@@ -289,6 +313,7 @@ contract DeployUnichain is Script {
                 oracle,
                 ETH,
                 AggregatorV3Interface(REDSTONE_ETH_USD),
+                ETH_MAX_FEED_AGE,
                 UNISWAP_V3_WETH_USDC,
                 WETH,
                 allowSingleSourceOracle
@@ -305,6 +330,7 @@ contract DeployUnichain is Script {
                 oracle,
                 WBTC,
                 AggregatorV3Interface(REDSTONE_BTC_USD),
+                BTC_MAX_FEED_AGE,
                 UNISWAP_V3_WBTC_USDC,
                 WBTC,
                 allowSingleSourceOracle
@@ -320,6 +346,7 @@ contract DeployUnichain is Script {
                 oracle,
                 USDT,
                 AggregatorV3Interface(REDSTONE_USDT_USD),
+                USDT_MAX_FEED_AGE,
                 UNISWAP_V3_USDT_USDC,
                 USDT,
                 allowSingleSourceOracle
@@ -330,7 +357,13 @@ contract DeployUnichain is Script {
         // DAI/USD
         if (REDSTONE_DAI_USD != address(0) && DAI != address(0)) {
             _configureOracleToken(
-                oracle, DAI, AggregatorV3Interface(REDSTONE_DAI_USD), UNISWAP_V3_DAI_USDC, DAI, allowSingleSourceOracle
+                oracle,
+                DAI,
+                AggregatorV3Interface(REDSTONE_DAI_USD),
+                DAI_MAX_FEED_AGE,
+                UNISWAP_V3_DAI_USDC,
+                DAI,
+                allowSingleSourceOracle
             );
             console.log("  Configured DAI/USD feed");
         }
@@ -338,7 +371,13 @@ contract DeployUnichain is Script {
         // UNI/USD
         if (REDSTONE_UNI_USD != address(0) && UNI != address(0)) {
             _configureOracleToken(
-                oracle, UNI, AggregatorV3Interface(REDSTONE_UNI_USD), UNISWAP_V3_UNI_USDC, UNI, allowSingleSourceOracle
+                oracle,
+                UNI,
+                AggregatorV3Interface(REDSTONE_UNI_USD),
+                UNI_MAX_FEED_AGE,
+                UNISWAP_V3_UNI_USDC,
+                UNI,
+                allowSingleSourceOracle
             );
             console.log("  Configured UNI/USD feed");
         }

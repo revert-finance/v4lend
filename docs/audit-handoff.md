@@ -3,7 +3,7 @@
 This document is a concise protocol handoff for external auditors reviewing `v4lend`.
 
 Target snapshot:
-- commit: `775f7e23f2d38aa0e0268214f671efe72fda527a`
+- commit: re-pin at merge of `fix/audit-readiness-2026-09` (findings from `docs/audit-readiness-review.md` fixed on that branch)
 - branch: `main`
 
 Validation at this snapshot:
@@ -144,15 +144,38 @@ Important implementation detail:
 ### Controllers
 
 Files:
+- [`src/hook/HookOwnedControllerBase.sol`](/Users/kalinbas/Code/v4lend/src/hook/HookOwnedControllerBase.sol)
 - [`src/hook/HookFeeController.sol`](/Users/kalinbas/Code/v4lend/src/hook/HookFeeController.sol)
 - [`src/hook/HookRouteController.sol`](/Users/kalinbas/Code/v4lend/src/hook/HookRouteController.sol)
+- [`src/hook/HookAuctionController.sol`](/Users/kalinbas/Code/v4lend/src/hook/HookAuctionController.sol)
+- [`src/hook/HookLeaseController.sol`](/Users/kalinbas/Code/v4lend/src/hook/HookLeaseController.sol)
+- [`src/automators/AuctionArbExecutor.sol`](/Users/kalinbas/Code/v4lend/src/automators/AuctionArbExecutor.sol)
 
 Purpose:
-- keep fee governance and swap routing out of `RevertHook` storage
+- keep fee governance, swap routing, and the fee-discount market out of `RevertHook` storage
+- `HookFeeController`: LP protocol fee, auto-lend gain fee, per-mode hook swap fee, protocol fee recipient
+- `HookRouteController`: protocol-managed single-pool routes per ordered token pair
+- `HookAuctionController`: per-epoch English auction selling a discounted-LP-fee executor slot; the winning bid minus a protocol fee is dripped to in-range LPs through `PoolManager.donate` over the following epoch
+- `HookLeaseController`: Harberger-lease alternative with the same hook-facing interface; one lessee self-assesses a price, pays per-second rent on it, can be bought out at that price, and rent minus a protocol fee is dripped to in-range LPs
+- `AuctionArbExecutor`: owner-operated executor a bidder registers as the discount recipient; the controllers recognise the executor as the address that calls `PoolManager.swap` directly
 
 Auth model:
-- both controllers are administered through `hook.owner()`
+- all controllers are administered through `hook.owner()`
 - they do not keep an independent mutable owner
+- a deployment wires exactly one of the auction or lease controller as the hook's immutable auction controller
+
+Known design points auditors should read first:
+- the discount applies only when `sender == executor`; hook-internal swaps never receive it
+- drips `sync`/`settle` inside the caller's unlock, which assumes integrators sync immediately before paying
+- controllers hold bidder escrow and prepaid rent; refunds are pull-based
+
+### Hook Protocol Fee Deferral
+
+`PositionManager` derives principal as `callerDelta - feesAccrued` and casts it to `uint128` on removes, so a hook delta on a fee-only `DECREASE_LIQUIDITY(0)` would revert. The hook therefore caps the LP protocol fee at what the operation can absorb and carries any shortfall per position (`_pendingProtocolFees`, `ProtocolFeeDeferred`), settling it on later removes with principal or on the hook's own fee collection. The logic lives in `RevertHookAutoLendActions` via delegatecall. Accepted leak: dust withdrawals after long fee-only collecting escape part of the carried fee, and a carried fee larger than the final principal is stranded on the burned token.
+
+### Remint Migration
+
+When a vault transform replaces the collateral NFT, `V4Vault.transform` calls `migrateVaultPosition(oldTokenId, newTokenId)` on the allowlisted pool hook so trigger state, swap protection, and the carried protocol fee follow the loan. Automation follows only inside the same pool; a move to a pool this hook does not serve retires the old token's automation. Non-vault range changes through `V4Utils` do not migrate (`AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS`).
 
 ## Accounting Model
 
@@ -343,5 +366,6 @@ Highest-value review areas:
 - dynamic-fee hook routes are intentionally unsupported
 - controllers are governed by `hook.owner()`
 - hook automation migrates across a position remint only for vault-held positions; a direct `V4Utils` range change intentionally leaves the replacement without automation (`AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS`)
-- hook-managed swaps intentionally have no default `amountOutMin` floor; the oracle window and the oracle pool-deviation guard are the bound, with per-position price limits available opt-in (`AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR`, which states the assumed parameters and worst case). Trigger-driven actions inherit the window from swap traversal; the permissionless `autoCollect` entry point is price-checked directly in `_executeSwapResolved` because it never traverses
+- hook-managed swaps intentionally have no default `amountOutMin` floor. What bounds them is that no hook action starts while the pool price is outside the oracle window: `_afterSwap` dispatches no trigger while the live tick is outside `oracleTick +- maxTicksFromOracle` and re-checks after every executed action (triggers stay armed for a later in-window swap); the hook's action entry points are reachable from a vault only during a transform the hook itself started; the permissionless `autoCollect` path and configured external routes are price-checked immediately before their swap. Per-position price limits remain available opt-in (`AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR` states the assumed parameters and worst case)
+- the hook custodies ERC4626 shares for auto-lend positions and tracks them per share token (`_custodiedShares`); every whole-balance read that feeds a payout subtracts that amount, so a pool whose currency is a share token cannot pay another position's shares out. `AutoLend` (standalone) does the same with `custodiedShares` and additionally refuses to execute on share-token pools
 

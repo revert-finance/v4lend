@@ -57,7 +57,17 @@ contract DeployMainnet is Script {
 
     // ==================== Configuration Constants ====================
 
-    uint32 constant MAX_FEED_AGE = 1 hours;
+    // Chainlink max feed ages, one per feed. Each value must be >= the feed's heartbeat plus a
+    // margin: a too-low value makes borrow, transform AND liquidate revert on every valuation
+    // once the price has not moved enough to publish a new round (see DeployBase, where a shared
+    // one-hour limit took the USDC vault down).
+    //
+    // Assumed heartbeats (Ethereum mainnet, https://docs.chain.link/data-feeds/price-feeds/addresses?network=ethereum):
+    //   USDC/USD 0x8fFfFfd4...  86400 s (0.25% deviation)
+    //   ETH/USD  0x5f4eC3Df...   3600 s (0.5% deviation) - a bare 1 hour leaves no margin
+    // TODO(deployer): verify both heartbeats before broadcasting.
+    uint32 constant USDC_MAX_FEED_AGE = 25 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 2 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200;
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;
@@ -151,7 +161,7 @@ contract DeployMainnet is Script {
         oracle.setTokenConfig(
             USDC,
             AggregatorV3Interface(CHAINLINK_USDC_USD),
-            MAX_FEED_AGE,
+            USDC_MAX_FEED_AGE,
             IUniswapV3Pool(UNISWAP_V3_USDC_WETH),
             USDC,
             ORACLE_TWAP_SECONDS,
@@ -161,7 +171,7 @@ contract DeployMainnet is Script {
         oracle.setTokenConfig(
             WETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,
@@ -171,7 +181,7 @@ contract DeployMainnet is Script {
         oracle.setTokenConfig(
             ETH,
             AggregatorV3Interface(CHAINLINK_ETH_USD),
-            MAX_FEED_AGE,
+            ETH_MAX_FEED_AGE,
             IUniswapV3Pool(address(0)),
             WETH,
             ORACLE_TWAP_SECONDS,

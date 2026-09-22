@@ -25,3 +25,6 @@ script/demo/logs/
 
 # Node modules
 node_modules/
+
+# Generated analysis output
+x-ray/
