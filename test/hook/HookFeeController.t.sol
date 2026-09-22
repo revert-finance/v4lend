@@ -20,6 +20,16 @@ contract HookOwnerMock {
     }
 }
 
+/// @dev Mirrors the real hook's public `poolManager` immutable (BaseHook), which the fee
+///      controller reads to refuse the PoolManager as a fee recipient.
+contract HookOwnerWithPoolManagerMock is HookOwnerMock {
+    address public poolManager;
+
+    constructor(address initialOwner, address poolManager_) HookOwnerMock(initialOwner) {
+        poolManager = poolManager_;
+    }
+}
+
 contract HookFeeControllerTest is Test {
     address internal constant OWNER = address(0xA11CE);
     address internal constant RECIPIENT = address(0xBEEF);
@@ -153,22 +163,93 @@ contract HookFeeControllerTest is Test {
         controller.setProtocolFeeRecipient(address(0));
     }
 
-    function test_RevertWhenBpsAboveMax() public {
+    /// @notice L-08: fees are direct-sent (`take` / `transfer`) to the recipient, so the system's
+    ///         own addresses - hook, controller, PoolManager - must be refused like address(0).
+    function test_RevertWhenProtocolFeeRecipientIsHookOrController() public {
         vm.expectRevert(HookFeeController.InvalidConfig.selector);
-        new HookFeeController(address(hook), RECIPIENT, 10001, 300);
-
-        vm.expectRevert(HookFeeController.InvalidConfig.selector);
-        new HookFeeController(address(hook), RECIPIENT, 200, 10001);
+        new HookFeeController(address(hook), address(hook), 200, 300);
 
         vm.startPrank(OWNER);
         vm.expectRevert(HookFeeController.InvalidConfig.selector);
-        controller.setLpFeeBps(10001);
+        controller.setProtocolFeeRecipient(address(hook));
 
         vm.expectRevert(HookFeeController.InvalidConfig.selector);
-        controller.setAutoLendFeeBps(10001);
-
-        vm.expectRevert(HookFeeController.InvalidConfig.selector);
-        controller.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), 10001);
+        controller.setProtocolFeeRecipient(address(controller));
         vm.stopPrank();
+
+        assertEq(controller.protocolFeeRecipient(), RECIPIENT, "recipient unchanged after rejected updates");
+    }
+
+    function test_RevertWhenProtocolFeeRecipientIsPoolManager() public {
+        address poolManager = makeAddr("poolManager");
+        HookOwnerWithPoolManagerMock pmHook = new HookOwnerWithPoolManagerMock(OWNER, poolManager);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        new HookFeeController(address(pmHook), poolManager, 200, 300);
+
+        HookFeeController pmController = new HookFeeController(address(pmHook), RECIPIENT, 200, 300);
+        vm.prank(OWNER);
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        pmController.setProtocolFeeRecipient(poolManager);
+
+        // any other recipient still works against a hook that exposes poolManager()
+        address other = makeAddr("other");
+        vm.prank(OWNER);
+        pmController.setProtocolFeeRecipient(other);
+        assertEq(pmController.protocolFeeRecipient(), other);
+    }
+
+    /// @notice The deploy scripts create the controller BEFORE the hook, at the hook's predicted
+    ///         address: the PoolManager lookup must tolerate a hook without code (and, as the base
+    ///         mock shows throughout this file, one without the getter).
+    function test_ConstructorToleratesUndeployedHook() public {
+        address predictedHook = makeAddr("predictedHook");
+        assertEq(predictedHook.code.length, 0, "precondition: no code at the predicted hook");
+        HookFeeController predeployed = new HookFeeController(predictedHook, RECIPIENT, 200, 300);
+        assertEq(predeployed.protocolFeeRecipient(), RECIPIENT);
+        assertEq(predeployed.hook(), predictedHook);
+    }
+
+    function test_RevertWhenBpsAboveMax() public {
+        uint16 gainCap = controller.MAX_GAIN_FEE_BPS();
+        uint16 swapCap = controller.MAX_SWAP_FEE_BPS();
+        assertEq(gainCap, 5000, "gain-fee cap");
+        assertEq(swapCap, 1000, "swap-fee cap");
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        new HookFeeController(address(hook), RECIPIENT, gainCap + 1, 300);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        new HookFeeController(address(hook), RECIPIENT, 200, gainCap + 1);
+
+        vm.startPrank(OWNER);
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setLpFeeBps(gainCap + 1);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setAutoLendFeeBps(gainCap + 1);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), swapCap + 1);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setPoolOverrideSwapFeeBps(OVERRIDE_POOL, uint8(RevertHookState.Mode.AUTO_COLLECT), swapCap + 1);
+
+        // the caps themselves are accepted
+        controller.setLpFeeBps(gainCap);
+        controller.setAutoLendFeeBps(gainCap);
+        controller.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_COLLECT), swapCap);
+        controller.setPoolOverrideSwapFeeBps(OVERRIDE_POOL, uint8(RevertHookState.Mode.AUTO_COLLECT), swapCap);
+        vm.stopPrank();
+
+        assertEq(controller.lpFeeBps(), gainCap);
+        assertEq(controller.autoLendFeeBps(), gainCap);
+        assertEq(controller.swapFeeBps(DEFAULT_POOL, uint8(RevertHookState.Mode.AUTO_COLLECT)), swapCap);
+        assertEq(controller.swapFeeBps(OVERRIDE_POOL, uint8(RevertHookState.Mode.AUTO_COLLECT)), swapCap);
+
+        // a swap fee is bounded by the tighter swap cap even though it fits the gain cap
+        vm.prank(OWNER);
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        controller.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_RANGE), gainCap);
     }
 }

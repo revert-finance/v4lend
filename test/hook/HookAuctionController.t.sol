@@ -571,6 +571,43 @@ contract HookAuctionControllerTest is BaseTest {
         assertGt(swept, 0, "sweep allowed after the winner's epoch ends");
     }
 
+    /// @notice The required next bid saturates at MAX_BID_AMOUNT (mirrors HookLeaseController.
+    ///         minBuyoutPrice): a standing bid at, or bumped past, the cap is contestable at the
+    ///         cap itself - an equal amount - so no bid can make the next epoch un-outbiddable.
+    function testMinNextBidSaturatesAtBidCap() public {
+        uint256 cap = uint256(uint128(type(int128).max)); // MAX_BID_AMOUNT
+        IERC20 token1 = IERC20(Currency.unwrap(currency1));
+        deal(address(token1), bidderA, 2 * cap);
+        deal(address(token1), bidderB, cap);
+
+        // above the cap is never a valid bid
+        vm.expectRevert(HookAuctionController.InvalidBid.selector);
+        _bid(bidderA, address(winnerSwapper), cap + 1);
+
+        // a bid whose 5% bump would land past the cap: the requirement is the cap, not cap-1+bump
+        _bid(bidderA, address(winnerSwapper), cap - 1);
+        assertEq(auctionController.minNextBid(auctionPoolId), cap, "bump past the cap saturates at the cap");
+        vm.expectRevert(HookAuctionController.InvalidBid.selector);
+        _bid(bidderB, address(otherSwapper), cap - 1); // no bump at all is still rejected
+        _bid(bidderB, address(otherSwapper), cap);
+        assertEq(auctionController.refunds(currency1, bidderA), cap - 1, "outbid amount escrowed");
+
+        // a standing bid AT the cap stays contestable at equal amount
+        assertEq(auctionController.minNextBid(auctionPoolId), cap, "cap bid is contestable at the cap");
+        _bid(bidderA, address(winnerSwapper), cap);
+        assertEq(auctionController.refunds(currency1, bidderB), cap, "cap bid escrowed for the outbid bidder");
+        (address nextBidder,, uint256 nextBid,,,,) = auctionController.getEpochAuction(auctionPoolId, true);
+        assertEq(nextBidder, bidderA);
+        assertEq(nextBid, cap);
+
+        // the controller holds every escrowed wei: standing bid + both refunds
+        assertEq(
+            token1.balanceOf(address(auctionController)),
+            cap + (cap - 1) + cap,
+            "controller balance backs the standing bid and both escrowed refunds"
+        );
+    }
+
     function testMinNextBidReflectsPendingRollover() public {
         _bid(bidderA, address(winnerSwapper), 5e15); // epoch 1 winner
         // move into epoch 1 without any pool touch: the stored next slot is stale
