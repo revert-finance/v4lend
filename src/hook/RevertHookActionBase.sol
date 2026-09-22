@@ -10,7 +10,7 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -85,14 +85,25 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
     // ==================== Auth Helpers ====================
 
-    /// @notice Validates that the caller is authorized to interact with the position
-    function _requireAuthorization(uint256 tokenId) internal view {
-        if (msg.sender != address(poolManager)) {
-            if (_vaults[msg.sender]) {
-                _validateCaller(positionManager, tokenId);
-            } else {
-                revert Unauthorized();
-            }
+    /// @notice Validates that the caller may run an action on the position with the supplied pool key
+    /// @dev Two callers exist. The hook's own delegatecalls arrive with the PoolManager as msg.sender
+    ///      (afterSwap or unlockCallback) and a key taken from the position's own trigger list. A
+    ///      registered vault arrives while executing the transform the hook started for this token
+    ///      (RevertHookExecution._transformViaVault); the transient marker set there is required, so
+    ///      a borrower's own `vault.transform` with the hook as transformer is refused, and the
+    ///      caller-supplied key is bound to the position, so the whole-balance sweeps that follow can
+    ///      only ever touch the position's own currencies (C-01).
+    function _requireAuthorization(PoolKey memory poolKey, uint256 tokenId) internal view {
+        if (msg.sender == address(poolManager)) {
+            return;
+        }
+        if (!_vaults[msg.sender] || _hookTransformToken() != tokenId) {
+            revert Unauthorized();
+        }
+        _validateCaller(positionManager, tokenId);
+        (PoolKey memory positionKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        if (PoolId.unwrap(positionKey.toId()) != PoolId.unwrap(poolKey.toId())) {
+            revert Unauthorized();
         }
     }
 
@@ -111,11 +122,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             return (poolKey, true);
         }
         swapPool = PoolKey({
-            currency0: poolKey.currency0,
-            currency1: poolKey.currency1,
-            fee: fee,
-            tickSpacing: tickSpacing,
-            hooks: hooks
+            currency0: poolKey.currency0, currency1: poolKey.currency1, fee: fee, tickSpacing: tickSpacing, hooks: hooks
         });
         isSamePool = _isSamePoolConfig(poolKey, swapPool);
     }
@@ -171,12 +178,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         if (swapPlan.amountIn > 0) {
             return _applyBalanceDelta(
                 _executeSwapResolved(
-                    swapPlan.poolKey,
-                    swapPlan.zeroForOne,
-                    swapPlan.amountIn,
-                    tokenId,
-                    mode,
-                    swapPlan.isExternalRoute
+                    swapPlan.poolKey, swapPlan.zeroForOne, swapPlan.amountIn, tokenId, mode, swapPlan.isExternalRoute
                 ),
                 amount0,
                 amount1
@@ -185,13 +187,11 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         return (amount0, amount1);
     }
 
-    function _buildSwapPlan(
-        PoolKey memory poolKey,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 amount0,
-        uint256 amount1
-    ) internal view returns (SwapPlan memory plan) {
+    function _buildSwapPlan(PoolKey memory poolKey, int24 tickLower, int24 tickUpper, uint256 amount0, uint256 amount1)
+        internal
+        view
+        returns (SwapPlan memory plan)
+    {
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
 
         plan.zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
@@ -202,9 +202,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         if (isSamePool) {
             (plan.amountIn,, plan.zeroForOne,) = liquidityCalculator.calculateSamePool(
                 ILiquidityCalculator.V4PoolInfo({
-                    poolMgr: poolManager,
-                    poolIdentifier: poolKey.toId(),
-                    tickSpacing: poolKey.tickSpacing
+                    poolMgr: poolManager, poolIdentifier: poolKey.toId(), tickSpacing: poolKey.tickSpacing
                 }),
                 tickLower,
                 tickUpper,
@@ -216,9 +214,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
         (uint160 swapSqrtPriceX96,, uint24 packedProtocolFee, uint24 lpFee) =
             StateLibrary.getSlot0(poolManager, plan.poolKey.toId());
-        uint16 protocolFee = plan.zeroForOne
-            ? packedProtocolFee.getZeroForOneFee()
-            : packedProtocolFee.getOneForZeroFee();
+        uint16 protocolFee =
+            plan.zeroForOne ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
         uint24 swapFee = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
 
         (plan.amountIn,, plan.zeroForOne) = liquidityCalculator.calculateSimple(
@@ -249,13 +246,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     }
 
     /// @notice Executes a swap on the pool manager
-    function _executeSwap(
-        PoolKey memory poolKey,
-        bool zeroForOne,
-        uint256 amountIn,
-        uint256 tokenId,
-        Mode mode
-    ) internal returns (BalanceDelta delta) {
+    function _executeSwap(PoolKey memory poolKey, bool zeroForOne, uint256 amountIn, uint256 tokenId, Mode mode)
+        internal
+        returns (BalanceDelta delta)
+    {
         (PoolKey memory swapPool, bool isSamePool) = _resolveSwapPool(poolKey, zeroForOne);
         return _executeSwapResolved(swapPool, zeroForOne, amountIn, tokenId, mode, !isSamePool);
     }
@@ -274,9 +268,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         // too - both the same-pool ratio swap and the HARVEST single-side swap - so a caller cannot
         // manipulate the pool first and force a position's collected fees through it.
         if (validateOracle || mode == Mode.AUTO_COLLECT) _validateSwapPoolPrice(swapPool);
-        (bool success, bytes memory returndata) = address(swapActions).delegatecall(
-            abi.encodeCall(RevertHookSwapActions.executeSwap, (swapPool, zeroForOne, amountIn, tokenId, mode))
-        );
+        (bool success, bytes memory returndata) = address(swapActions)
+            .delegatecall(
+                abi.encodeCall(RevertHookSwapActions.executeSwap, (swapPool, zeroForOne, amountIn, tokenId, mode))
+            );
         if (!success) {
             assembly ("memory-safe") {
                 revert(add(returndata, 0x20), mload(returndata))
@@ -293,9 +288,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         (uint160 swapSqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, swapPool.toId());
         if (swapSqrtPriceX96 == 0) revert ILiquidityCalculator.Invalid_Pool();
 
-        uint160 oracleSqrtPriceX96 = v4Oracle.getPoolSqrtPriceX96(
-            Currency.unwrap(swapPool.currency0), Currency.unwrap(swapPool.currency1)
-        );
+        uint160 oracleSqrtPriceX96 =
+            v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(swapPool.currency0), Currency.unwrap(swapPool.currency1));
         int24 swapTick = TickMath.getTickAtSqrtPrice(swapSqrtPriceX96);
         int24 oracleTick = TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96);
         int256 tickDifference = int256(swapTick) - int256(oracleTick);
@@ -357,30 +351,27 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint128 amount1Max
     ) internal returns (uint256, uint256) {
         uint128 liquidity = _calculateLiquidityForRange(
-            poolKey,
-            positionInfo.tickLower(),
-            positionInfo.tickUpper(),
-            amount0Max,
-            amount1Max
+            poolKey, positionInfo.tickLower(), positionInfo.tickUpper(), amount0Max, amount1Max
         );
 
         if (liquidity == 0) return (0, 0);
 
-        uint256 balance0Before = poolKey.currency0.balanceOfSelf();
-        uint256 balance1Before = poolKey.currency1.balanceOfSelf();
+        uint256 balance0Before = _sweepableBalance(poolKey.currency0);
+        uint256 balance1Before = _sweepableBalance(poolKey.currency1);
         uint256 nativeValue = NativeAssetLib.nativeValue(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
 
         bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
-        if (
-            _modifyLiquiditiesWithPair(
+        if (_modifyLiquiditiesWithPair(
                 actions,
                 abi.encode(tokenId, liquidity, type(uint128).max, type(uint128).max, bytes("")),
                 poolKey.currency0,
                 poolKey.currency1,
                 nativeValue
-            )
-        ) {
-            return (balance0Before - poolKey.currency0.balanceOfSelf(), balance1Before - poolKey.currency1.balanceOfSelf());
+            )) {
+            return (
+                balance0Before - _sweepableBalance(poolKey.currency0),
+                balance1Before - _sweepableBalance(poolKey.currency1)
+            );
         }
         return (0, 0);
     }
@@ -395,8 +386,8 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         address recipient
     ) internal returns (uint256 newTokenId, uint256 amount0Used, uint256 amount1Used) {
         newTokenId = positionManager.nextTokenId();
-        amount0Used = poolKey.currency0.balanceOfSelf();
-        amount1Used = poolKey.currency1.balanceOfSelf();
+        amount0Used = _sweepableBalance(poolKey.currency0);
+        amount1Used = _sweepableBalance(poolKey.currency1);
 
         uint128 liquidity = _calculateLiquidityForRange(poolKey, tickLower, tickUpper, amount0Max, amount1Max);
         if (liquidity == 0) {
@@ -405,17 +396,15 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
 
         uint256 nativeValue = NativeAssetLib.nativeValue(poolKey.currency0, poolKey.currency1, amount0Max, amount1Max);
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        if (
-            _modifyLiquiditiesWithPair(
+        if (_modifyLiquiditiesWithPair(
                 actions,
                 abi.encode(poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, recipient, bytes("")),
                 poolKey.currency0,
                 poolKey.currency1,
                 nativeValue
-            )
-        ) {
-            amount0Used -= poolKey.currency0.balanceOfSelf();
-            amount1Used -= poolKey.currency1.balanceOfSelf();
+            )) {
+            amount0Used -= _sweepableBalance(poolKey.currency0);
+            amount1Used -= _sweepableBalance(poolKey.currency1);
             if (_vaults[recipient]) {
                 IVault(recipient).notifyERC721Received(newTokenId, recipient);
             }
@@ -431,71 +420,69 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     ///      Successful flows are expected to drain the hook back to zero, so the returned amounts
     ///      represent all balances currently attributable to the action. If unsolicited balances
     ///      are present, they will be swept by the next execution by design.
-    function _decreaseLiquidity(
-        PoolKey memory poolKey,
-        uint256 tokenId,
-        bool feesOnly
-    ) internal returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) {
+    function _decreaseLiquidity(PoolKey memory poolKey, uint256 tokenId, bool feesOnly)
+        internal
+        returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)
+    {
         uint128 liquidity = feesOnly ? 0 : positionManager.getPositionLiquidity(tokenId);
         currency0 = poolKey.currency0;
         currency1 = poolKey.currency1;
 
         bytes memory actions = abi.encodePacked(
-            feesOnly ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY),
-            uint8(Actions.TAKE_PAIR)
+            feesOnly ? uint8(Actions.INCREASE_LIQUIDITY) : uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)
         );
-        if (
-            _modifyLiquiditiesWithPair(
+        if (_modifyLiquiditiesWithPair(
                 actions,
                 abi.encode(
-                    tokenId,
-                    liquidity,
-                    feesOnly ? type(uint128).max : 0,
-                    feesOnly ? type(uint128).max : 0,
-                    bytes("")
+                    tokenId, liquidity, feesOnly ? type(uint128).max : 0, feesOnly ? type(uint128).max : 0, bytes("")
                 ),
                 currency0,
                 currency1,
                 0
-            )
-        ) {
-            amount0 = currency0.balanceOfSelf();
-            amount1 = currency1.balanceOfSelf();
+            )) {
+            amount0 = _sweepableBalance(currency0);
+            amount1 = _sweepableBalance(currency1);
         }
     }
 
     /// @notice Decreases a partial amount of liquidity from a position
-    function _decreaseLiquidityPartial(
-        PoolKey memory poolKey,
-        uint256 tokenId,
-        uint128 liquidityToRemove
-    ) internal returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) {
+    function _decreaseLiquidityPartial(PoolKey memory poolKey, uint256 tokenId, uint128 liquidityToRemove)
+        internal
+        returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)
+    {
         currency0 = poolKey.currency0;
         currency1 = poolKey.currency1;
 
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        if (
-            _modifyLiquiditiesWithPair(
-                actions,
-                abi.encode(tokenId, liquidityToRemove, 0, 0, bytes("")),
-                currency0,
-                currency1,
-                0
-            )
-        ) {
-            amount0 = currency0.balanceOfSelf();
-            amount1 = currency1.balanceOfSelf();
+        if (_modifyLiquiditiesWithPair(
+                actions, abi.encode(tokenId, liquidityToRemove, 0, 0, bytes("")), currency0, currency1, 0
+            )) {
+            amount0 = _sweepableBalance(currency0);
+            amount1 = _sweepableBalance(currency1);
         }
     }
 
     // ==================== Token Transfer Helpers ====================
 
+    /// @notice Balance of `currency` the running action may treat as its own
+    /// @dev Whole-balance accounting (see the sweep helpers below) minus the ERC4626 shares the
+    ///      hook custodies for auto-lend positions when `currency` is such a share token. A pool
+    ///      whose currency is a registered lend vault's share token can therefore never pay another
+    ///      position's shares out as fees or leftovers (M-01).
+    function _sweepableBalance(Currency currency) internal view returns (uint256 amount) {
+        amount = currency.balanceOfSelf();
+        uint256 custodied = _custodiedShares[Currency.unwrap(currency)];
+        if (custodied != 0) {
+            amount = amount > custodied ? amount - custodied : 0;
+        }
+    }
+
     /// @notice Sends leftover tokens to the recipient
     /// @dev Intentionally sweeps the entire remaining balance for each pool token. The hook's
     ///      accounting model assumes successful executions leave no residual balances behind.
     function _sendLeftoverTokens(uint256 tokenId, Currency currency0, Currency currency1, address recipient) internal {
-        uint256 amount0 = currency0.balanceOfSelf();
-        uint256 amount1 = currency1.balanceOfSelf();
+        uint256 amount0 = _sweepableBalance(currency0);
+        uint256 amount1 = _sweepableBalance(currency1);
         if (amount0 > 0) currency0.transfer(recipient, amount0);
         if (amount1 > 0) currency1.transfer(recipient, amount1);
         emit SendLeftoverTokens(tokenId, currency0, currency1, amount0, amount1, recipient);
@@ -531,12 +518,12 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             if (amount1 > 0) {
                 _executeSwap(poolKey, false, amount1, tokenId, mode);
             }
-            return currency0.balanceOfSelf();
+            return _sweepableBalance(currency0);
         } else {
             if (amount0 > 0) {
                 _executeSwap(poolKey, true, amount0, tokenId, mode);
             }
-            return currency1.balanceOfSelf();
+            return _sweepableBalance(currency1);
         }
     }
 
@@ -564,11 +551,11 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     // ==================== Balance Delta Helpers ====================
 
     /// @notice Applies a balance delta to amounts
-    function _applyBalanceDelta(
-        BalanceDelta delta,
-        uint256 amount0,
-        uint256 amount1
-    ) internal pure returns (uint256, uint256) {
+    function _applyBalanceDelta(BalanceDelta delta, uint256 amount0, uint256 amount1)
+        internal
+        pure
+        returns (uint256, uint256)
+    {
         int128 delta0 = delta.amount0();
         int128 delta1 = delta.amount1();
         return (

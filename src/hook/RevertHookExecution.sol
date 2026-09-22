@@ -151,9 +151,8 @@ abstract contract RevertHookExecution is RevertHookConfig {
             return;
         }
 
-        try IVault(owner)
-            .transform(tokenId, address(this), abi.encodeCall(this.autoLeverage, (poolKey, tokenId, isUpperTrigger))) {}
-        catch {
+        if (!_transformViaVault(owner, tokenId, abi.encodeCall(this.autoLeverage, (poolKey, tokenId, isUpperTrigger))))
+        {
             _emitActionFailed(tokenId, Mode.AUTO_LEVERAGE);
         }
     }
@@ -254,13 +253,22 @@ abstract contract RevertHookExecution is RevertHookConfig {
         bytes memory delegateData
     ) internal returns (bool) {
         if (_vaults[owner]) {
-            try IVault(owner).transform(tokenId, address(this), transformData) {
-                return true;
-            } catch {
-                return false;
-            }
+            return _transformViaVault(owner, tokenId, transformData);
         }
         return _tryDelegatecallPositionActions(delegateData);
+    }
+
+    /// @dev Runs a vault transform the hook itself initiates (the hook is an allowlisted vault
+    ///      transformer). The transient marker names the token for the duration of the call: the
+    ///      sidecars' vault-caller authorization requires it (RevertHookActionBase._requireAuthorization),
+    ///      so a borrower cannot reach the same action entry points through their own
+    ///      `vault.transform` with the hook as transformer (C-01). Fails open like the callers expect.
+    function _transformViaVault(address vault, uint256 tokenId, bytes memory data) internal returns (bool success) {
+        _setHookTransformToken(tokenId);
+        try IVault(vault).transform(tokenId, address(this), data) {
+            success = true;
+        } catch {}
+        _setHookTransformToken(0);
     }
 
     function _hasDirectionReversed(int24 previousLiveTick, int24 currentLiveTick, bool increasing)
