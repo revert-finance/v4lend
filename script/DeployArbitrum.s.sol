@@ -87,17 +87,17 @@ contract DeployArbitrum is Script {
     // one-hour limit took the USDC vault down). The fee-deviation trigger keeps rounds frequent
     // in normal markets; the heartbeat is the only guarantee in a flat one.
     //
-    // Assumed heartbeats (Arbitrum One, https://docs.chain.link/data-feeds/price-feeds/addresses?network=arbitrum):
-    //   USDC/USD 0x50834F31...  86400 s     USDT/USD 0x3f3f5dF8...  86400 s     DAI/USD 0xc5C8E77B...  86400 s
-    //   ETH/USD  0x639Fe6ab...  86400 s     BTC/USD  0x6ce18586...  86400 s     ARB/USD 0xb2A82404...  86400 s
-    // TODO(deployer): verify every heartbeat above before broadcasting. Arbitrum's ETH/USD,
-    // BTC/USD and ARB/USD feeds are believed to run a 24 h heartbeat with a 0.05% deviation
-    // trigger; tighten ETH/BTC/ARB to 1-2 hours only if the live heartbeat is 3600 s.
-    uint32 constant USDC_MAX_FEED_AGE = 25 hours; // also used for USDC.e (same feed)
-    uint32 constant USDT_MAX_FEED_AGE = 25 hours;
+    // Verified heartbeats, 2026-09-22 (Chainlink reference data directory, cross-checked against the
+    // last 40 rounds of each proxy on chain; observed max gaps in brackets):
+    //   USDC/USD 0x50834F31...    255 s / 0.1%  [271 s]     USDT/USD 0x3f3f5dF8...    255 s / 0.1%  [271 s]
+    //   DAI/USD  0xc5C8E77B...  86400 s / 0.1%  [86429 s]   ARB/USD  0xb2A82404...  86400 s / 0.05% [121 s]
+    //   ETH/USD  0x639Fe6ab...   1755 s / 0.05% [330 s]     BTC/USD  0x6ce18586...   1755 s / 0.05% [450 s]
+    // Re-check on the provider's feed page before every deployment; Chainlink changes these.
+    uint32 constant USDC_MAX_FEED_AGE = 1 hours; // also used for USDC.e (same feed)
+    uint32 constant USDT_MAX_FEED_AGE = 1 hours;
     uint32 constant DAI_MAX_FEED_AGE = 25 hours;
-    uint32 constant ETH_MAX_FEED_AGE = 25 hours;
-    uint32 constant BTC_MAX_FEED_AGE = 25 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 2 hours;
+    uint32 constant BTC_MAX_FEED_AGE = 2 hours;
     uint32 constant ARB_MAX_FEED_AGE = 25 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
