@@ -53,6 +53,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     uint32 public constant MIN_RESERVE_PROTECTION_FACTOR_X32 = uint32(Q32 / 100); //1%
 
     // forge-lint: disable-next-line(unsafe-typecast)
+    uint32 public constant MAX_RESERVE_PROTECTION_FACTOR_X32 = uint32(Q32 / 2); //50%
+
+    // forge-lint: disable-next-line(unsafe-typecast)
     uint32 public constant MAX_RESERVE_FACTOR_X32 = uint32(Q32 / 2); //50%
 
     // forge-lint: disable-next-line(unsafe-typecast)
@@ -591,6 +594,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         if (newOwner == address(0)) {
             revert Unauthorized();
         }
+        // the vault itself can never act as a loan owner - the loan would be stranded
+        if (newOwner == address(this)) {
+            revert SelfSend();
+        }
 
         _removeTokenFromOwner(currentOwner, tokenId);
         _addTokenToOwner(newOwner, tokenId);
@@ -1019,9 +1026,14 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice sets reserve protection factor - percentage of globalLendAmount which can't be withdrawn by owner (onlyOwner)
+    /// @dev Bounded to [MIN_RESERVE_PROTECTION_FACTOR_X32, MAX_RESERVE_PROTECTION_FACTOR_X32]. The factor only
+    ///      restricts the owner's own reserve withdrawals, so the upper bound is a sanity check, not a safety limit.
     /// @param _reserveProtectionFactorX32 reserve protection factor multiplied by Q32
     function setReserveProtectionFactor(uint32 _reserveProtectionFactorX32) external onlyOwner {
-        if (_reserveProtectionFactorX32 < MIN_RESERVE_PROTECTION_FACTOR_X32) {
+        if (
+            _reserveProtectionFactorX32 < MIN_RESERVE_PROTECTION_FACTOR_X32
+                || _reserveProtectionFactorX32 > MAX_RESERVE_PROTECTION_FACTOR_X32
+        ) {
             revert InvalidConfig();
         }
         reserveProtectionFactorX32 = _reserveProtectionFactorX32;
@@ -1223,32 +1235,29 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     // removes correct amount from position to send to liquidator
+    // returns the amounts the liquidator (params.recipient) actually received
     function _sendPositionValue(
         LiquidateParams calldata params,
         uint256 liquidationValue,
         uint256 fullValue,
         uint256 feeValue
     ) internal returns (uint256 amount0, uint256 amount1) {
-        uint128 liquidity;
-        uint128 fees0;
-        uint128 fees1;
+        // when the uncollected fees alone cover the liquidation value no liquidity is removed
+        // and the collected fees are split between liquidator and owner by value share
+        bool feesOnly = liquidationValue <= feeValue;
 
-        // if full position is liquidated - no analysis needed
+        uint128 liquidity;
         if (liquidationValue == fullValue) {
+            // if full position is liquidated - no analysis needed
             liquidity = positionManager.getPositionLiquidity(params.tokenId);
-        } else {
-            (liquidity, fees0, fees1) = oracle.getLiquidityAndFees(params.tokenId);
-            // calculate needed fees
-            if (liquidationValue <= feeValue) {
-                liquidity = 0;
-                fees0 = SafeCast.toUint128(liquidationValue * fees0 / feeValue);
-                fees1 = SafeCast.toUint128(liquidationValue * fees1 / feeValue);
-            } else {
-                liquidity = SafeCast.toUint128((liquidationValue - feeValue) * liquidity / (fullValue - feeValue));
-            }
+        } else if (!feesOnly) {
+            // all fees plus the share of liquidity needed to cover the remaining value
+            liquidity = positionManager.getPositionLiquidity(params.tokenId);
+            liquidity = SafeCast.toUint128((liquidationValue - feeValue) * liquidity / (fullValue - feeValue));
         }
 
         // decrease liquidity and collect fees/tokens
+        // fee-only liquidations are collected to the vault first and split in _transferPartialFees
         (amount0, amount1) = _decreaseLiquidity(
             params.tokenId,
             liquidity,
@@ -1256,32 +1265,46 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             0,
             params.deadline,
             params.decreaseLiquidityHookData,
-            (liquidationValue <= feeValue) ? address(this) : params.recipient // if all fees are taken - send directly to recipient
+            feesOnly ? address(this) : params.recipient
         );
 
-        // if only part of the fees are taken - special handling needed
-        if (liquidationValue <= feeValue) {
-            _transferPartialFees(params.tokenId, params.recipient, amount0, amount1, fees0, fees1);
+        if (feesOnly) {
+            (amount0, amount1) =
+                _transferPartialFees(params.tokenId, params.recipient, amount0, amount1, liquidationValue, feeValue);
         }
     }
 
-    // transfers partial fees to recipient and remaining tokens to position owner
+    // splits collected fees between liquidator (recipient) and position owner by value share
+    // The split is applied to the amounts actually received from the DECREASE, not to the oracle's gross fee
+    // estimate: hooks may skim part of the collected fees (e.g. RevertHook protocol fees), so the received
+    // amounts can be lower than the estimate. Because liquidationValue <= feeValue, each liquidator share is
+    // bounded by the received amount, the owner remainder can never underflow, and the skim is carried
+    // proportionally by both parties (L-02).
     function _transferPartialFees(
         uint256 tokenId,
         address recipient,
         uint256 amount0,
         uint256 amount1,
-        uint128 fees0,
-        uint128 fees1
-    ) internal {
+        uint256 liquidationValue,
+        uint256 feeValue
+    ) internal returns (uint256 share0, uint256 share1) {
+        if (feeValue > 0) {
+            share0 = Math.mulDiv(amount0, liquidationValue, feeValue);
+            share1 = Math.mulDiv(amount1, liquidationValue, feeValue);
+        }
+
         (Currency currency0, Currency currency1) = _getPositionTokens(tokenId);
-        currency0.transfer(recipient, fees0);
-        currency1.transfer(recipient, fees1);
+        if (share0 > 0) {
+            currency0.transfer(recipient, share0);
+        }
+        if (share1 > 0) {
+            currency1.transfer(recipient, share1);
+        }
         address owner = tokenOwner[tokenId];
 
         // wrap native ETH to WETH to prevent revert attacks from owner
-        _transferTokenOrWeth(currency0, amount0 - fees0, owner);
-        _transferTokenOrWeth(currency1, amount1 - fees1, owner);
+        _transferTokenOrWeth(currency0, amount0 - share0, owner);
+        _transferTokenOrWeth(currency1, amount1 - share1, owner);
     }
 
     // transfers token to recipient, wrapping native ETH to WETH to prevent revert attacks
