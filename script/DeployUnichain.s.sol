@@ -98,18 +98,19 @@ contract DeployUnichain is Script {
     // price has not moved enough to publish a new round (see DeployBase, where a shared one-hour
     // limit took the USDC vault down).
     //
-    // Assumed heartbeats (RedStone push feeds on Unichain, https://docs.redstone.finance):
-    //   USDC/USD 0xD15862FC...  86400 s     USDT/USD 0x58fa68A3...  86400 s     DAI/USD 0xE94c9f9A...  86400 s
-    //   ETH/USD  0xe8D9FbC1...  unverified  BTC/USD  0xc44be6D0...  unverified  UNI/USD 0xf1454949...  unverified
-    // TODO(deployer): verify heartbeat of ETH/USD, BTC/USD and UNI/USD. RedStone push feeds
-    // commonly run 6-24 h heartbeats; if so, raise the corresponding constant to heartbeat + 1 h
-    // or the vault reverts in a flat market.
-    uint32 constant USDC_MAX_FEED_AGE = 25 hours;
-    uint32 constant USDT_MAX_FEED_AGE = 25 hours;
-    uint32 constant DAI_MAX_FEED_AGE = 25 hours;
-    uint32 constant ETH_MAX_FEED_AGE = 2 hours;
-    uint32 constant BTC_MAX_FEED_AGE = 2 hours;
-    uint32 constant UNI_MAX_FEED_AGE = 2 hours;
+    // Verified heartbeats, 2026-09-22, from RedStone's relayer manifest for these exact feed
+    // addresses (redstone-oracles-monorepo: packages/relayer-remote-config/main/
+    // relayer-manifests-multi-feed/unichainMultiFeed.json, adapter 0xFB1267A2...):
+    //   USDC/USD 0xD15862FC...  10800 s / 0.5%    USDT/USD 0x58fa68A3...  10800 s / 0.5%    DAI/USD 0xE94c9f9A...  10800 s / 0.5%
+    //   ETH/USD  0xe8D9FbC1...  21600 s / 0.5%    BTC/USD  0xc44be6D0...  21600 s / 0.5%    UNI/USD 0xf1454949...  86400 s / 1%
+    // The previous 2 hour values for ETH/BTC/UNI were below the heartbeat and would have taken
+    // the vault down in a flat market. Re-check the manifest before every deployment.
+    uint32 constant USDC_MAX_FEED_AGE = 4 hours;
+    uint32 constant USDT_MAX_FEED_AGE = 4 hours;
+    uint32 constant DAI_MAX_FEED_AGE = 4 hours;
+    uint32 constant ETH_MAX_FEED_AGE = 7 hours;
+    uint32 constant BTC_MAX_FEED_AGE = 7 hours;
+    uint32 constant UNI_MAX_FEED_AGE = 25 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200; // 2% max difference between pool and oracle price
     uint32 constant ORACLE_TWAP_SECONDS = 30 minutes;
     uint16 constant MAX_ORACLE_SOURCE_DIFFERENCE = 200;

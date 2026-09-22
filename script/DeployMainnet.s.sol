@@ -62,10 +62,11 @@ contract DeployMainnet is Script {
     // once the price has not moved enough to publish a new round (see DeployBase, where a shared
     // one-hour limit took the USDC vault down).
     //
-    // Assumed heartbeats (Ethereum mainnet, https://docs.chain.link/data-feeds/price-feeds/addresses?network=ethereum):
-    //   USDC/USD 0x8fFfFfd4...  86400 s (0.25% deviation)
-    //   ETH/USD  0x5f4eC3Df...   3600 s (0.5% deviation) - a bare 1 hour leaves no margin
-    // TODO(deployer): verify both heartbeats before broadcasting.
+    // Verified heartbeats, 2026-09-22 (Chainlink reference data directory, cross-checked against the
+    // last 40 rounds of each proxy on chain; observed max gaps in brackets):
+    //   USDC/USD 0x8fFfFfd4...  82800 s / 0.25% [82836 s]
+    //   ETH/USD  0x5f4eC3Df...   3600 s / 0.5%  [3636 s] - a bare 1 hour leaves no margin
+    // Re-check on the provider's feed page before every deployment; Chainlink changes these.
     uint32 constant USDC_MAX_FEED_AGE = 25 hours;
     uint32 constant ETH_MAX_FEED_AGE = 2 hours;
     uint16 constant MAX_POOL_PRICE_DIFFERENCE = 200;
