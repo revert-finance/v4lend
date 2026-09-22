@@ -7,6 +7,8 @@ import {Vm} from "forge-std/Vm.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -1650,6 +1652,291 @@ contract RevertHookTest is BaseTest {
             token2Liquidity,
             "in-window pool should compound normally"
         );
+    }
+
+    // ==================== Manual remint: hookData names the replaced position ====================
+
+    /// @dev Revert data the pool wraps around a failing hook callback (v4-core CustomRevert).
+    function _afterAddLiquidityRevert(bytes memory reason) internal view returns (bytes memory) {
+        return abi.encodeWithSelector(
+            CustomRevert.WrappedError.selector,
+            address(hook),
+            IHooks.afterAddLiquidity.selector,
+            reason,
+            abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+        );
+    }
+
+    function _migrationHookData(uint256 oldTokenId) internal pure returns (bytes memory) {
+        return abi.encodePacked(bytes4(keccak256("RevertHookRemintMigration(uint256)")), oldTokenId);
+    }
+
+    function _relativeExitConfig() internal view returns (RevertHookState.PositionConfig memory) {
+        return RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_EXIT,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: true,
+            autoExitTickLower: poolKey.tickSpacing, // exit once the price is one spacing below the range
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: false,
+            autoExitSwapOnUpperTrigger: false,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+    }
+
+    /// @dev Mints straight through modifyLiquidities so an expectRevert is consumed by the mint itself
+    ///      and not by a helper's preceding staticcall. Returns the id of the position just minted.
+    function _mintRaw(int24 tickLower, int24 tickUpper, uint128 liquidity, address owner, bytes memory hookData)
+        internal
+        returns (uint256 newTokenId)
+    {
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory params = new bytes[](2);
+        params[0] =
+            abi.encode(poolKey, tickLower, tickUpper, liquidity, type(uint128).max, type(uint128).max, owner, hookData);
+        params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+        newTokenId = positionManager.nextTokenId() - 1;
+    }
+
+    /// @dev The two halves of a manual range change on token2Id without a transformer: drain the old
+    ///      position, then mint its replacement one spacing higher (still around the current tick).
+    function _drainAndRemint(bytes memory hookData, address recipient) internal returns (uint256 newTokenId) {
+        positionManager.decreaseLiquidity(
+            token2Id,
+            positionManager.getPositionLiquidity(token2Id),
+            0,
+            0,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        newTokenId =
+            _mintRaw(tickLower2 + poolKey.tickSpacing, tickUpper2 + poolKey.tickSpacing, 10e18, recipient, hookData);
+    }
+
+    function testManualRemintWithHookDataCarriesAutomation() public {
+        RevertHookState.PositionConfig memory config = _relativeExitConfig();
+        hook.setPositionConfig(token2Id, config);
+        hook.setSwapProtectionConfig(token2Id, 300, 400);
+        (,, uint32 activatedBefore,,,,,) = hook.positionStates(token2Id);
+        assertGt(activatedBefore, 0, "old position should start active");
+        (uint128 oldMultiplier0, uint128 oldMultiplier1) = hook.swapProtectionConfigs(token2Id);
+
+        uint256 newTokenId = _drainAndRemint(_migrationHookData(token2Id), address(this));
+
+        _assertPositionConfigEq(newTokenId, config);
+        (,, uint32 newActivated,,,,,) = hook.positionStates(newTokenId);
+        assertGt(newActivated, 0, "replacement should be armed and active");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_NONE, "old config should be disabled, not left dormant");
+        (uint128 newMultiplier0, uint128 newMultiplier1) = hook.swapProtectionConfigs(newTokenId);
+        assertEq(newMultiplier0, oldMultiplier0, "token0 swap protection should follow");
+        assertEq(newMultiplier1, oldMultiplier1, "token1 swap protection should follow");
+        assertGt(newMultiplier0, 0, "swap protection should be set");
+
+        // The carried triggers are live: crossing the relative exit tick exits the replacement.
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+        assertEq(positionManager.getPositionLiquidity(newTokenId), 0, "carried auto-exit should have fired");
+    }
+
+    function testManualRemintWithoutHookDataLeavesAutomationBehind() public {
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+
+        uint256 newTokenId = _drainAndRemint(Constants.ZERO_BYTES, address(this));
+
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_NONE, "no opt-in: replacement starts unautomated");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "no opt-in: old config stays (dormant)");
+        (,, uint32 oldActivated,,,,,) = hook.positionStates(token2Id);
+        assertEq(oldActivated, 0, "drained position should be inactive");
+    }
+
+    function testManualRemintUntaggedHookDataIsIgnored() public {
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        // An integrator's own 32-byte payload - here even a valid token id, and below a word that is
+        // no token at all - is not a migration claim: the mint succeeds, unautomated, with no revert
+        // from ownerOf or from the authority checks.
+        uint256 newTokenId = _drainAndRemint(abi.encode(token2Id), address(this));
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_NONE, "untagged 32-byte hookData is not a claim");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "old config untouched");
+
+        uint256 unrelated = _mintRaw(tickLower2, tickUpper2, 1e18, address(this), abi.encode(type(uint256).max));
+        (uint8 flags,,,,,,,,,,,,) = hook.positionConfigs(unrelated);
+        assertEq(flags, PositionModeFlags.MODE_NONE, "arbitrary 32-byte word: mint succeeds, nothing migrates");
+
+        uint256 other = _mintRaw(tickLower2, tickUpper2, 1e18, address(this), hex"01");
+        (uint8 otherFlags,,,,,,,,,,,,) = hook.positionConfigs(other);
+        assertEq(otherFlags, PositionModeFlags.MODE_NONE, "other lengths ignored too");
+    }
+
+    function testManualRemintWithHookDataRequiresAuthorityOverOldToken() public {
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        address alice = makeAddr("alice");
+        address bob = makeAddr("bob");
+        int24 newLower = tickLower2 + poolKey.tickSpacing;
+        int24 newUpper = tickUpper2 + poolKey.tickSpacing;
+
+        // Old position belongs to alice; this contract is neither its owner nor approved for it.
+        IERC721(address(positionManager)).transferFrom(address(this), alice, token2Id);
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
+        _mintRaw(newLower, newUpper, 10e18, address(this), _migrationHookData(token2Id));
+
+        // A blanket operator (the standalone AutoRange shape) is authority too, but the claim is
+        // still bound to a drained old position: naming a live one is refused.
+        vm.prank(alice);
+        IERC721(address(positionManager)).setApprovalForAll(address(this), true);
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
+        _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
+        vm.prank(alice);
+        IERC721(address(positionManager)).setApprovalForAll(address(this), false);
+
+        // Per-token approval, but minting the replacement to a third party: refused.
+        vm.prank(alice);
+        IERC721(address(positionManager)).approve(address(this), token2Id);
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
+        _mintRaw(newLower, newUpper, 10e18, bob, _migrationHookData(token2Id));
+
+        // Per-token-approved operator draining the old position and minting the replacement to the
+        // old owner is the V4Utils shape: accepted.
+        positionManager.decreaseLiquidity(
+            token2Id, positionManager.getPositionLiquidity(token2Id), 0, 0, alice, block.timestamp, Constants.ZERO_BYTES
+        );
+        uint256 newTokenId = _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
+        assertEq(IERC721(address(positionManager)).ownerOf(newTokenId), alice, "replacement goes to the owner");
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "config should follow");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_NONE, "old config should be disabled");
+    }
+
+    /// @dev The standalone AutoRange is approved with setApprovalForAll; a drained old position it
+    ///      replaces carries its automation under that blanket approval.
+    function testManualRemintWithHookDataAcceptsBlanketOperator() public {
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        address alice = makeAddr("alice");
+        int24 newLower = tickLower2 + poolKey.tickSpacing;
+        int24 newUpper = tickUpper2 + poolKey.tickSpacing;
+        IERC721(address(positionManager)).transferFrom(address(this), alice, token2Id);
+        vm.prank(alice);
+        IERC721(address(positionManager)).setApprovalForAll(address(this), true);
+
+        positionManager.decreaseLiquidity(
+            token2Id, positionManager.getPositionLiquidity(token2Id), 0, 0, alice, block.timestamp, Constants.ZERO_BYTES
+        );
+        uint256 newTokenId = _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "config follows under blanket approval");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_NONE, "old config disabled");
+    }
+
+    function testManualRemintHookDataIgnoredForVaultOwnedToken() public {
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        address fakeVault = makeAddr("fakeVault");
+        hook.setVault(fakeVault);
+        IERC721(address(positionManager)).transferFrom(address(this), fakeVault, token2Id);
+
+        // Vault-held positions are migrated by the vault's own notification, so a mint naming one is
+        // not a claim this path judges: no revert even though this contract is not approved, and no
+        // migration either.
+        uint256 newTokenId = _mintRaw(
+            tickLower2 + poolKey.tickSpacing,
+            tickUpper2 + poolKey.tickSpacing,
+            10e18,
+            address(this),
+            _migrationHookData(token2Id)
+        );
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_NONE, "vault-owned old token: no callback migration");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "vault-owned old token untouched");
+    }
+
+    function testManualRemintWithHookDataRefusesOutstandingAutoLendShares() public {
+        uint256 lentTokenId = _createActiveAutoLendPosition();
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("SharesOutstanding()")));
+        _mintRaw(
+            tickLower2 + poolKey.tickSpacing,
+            tickUpper2 + poolKey.tickSpacing,
+            10e18,
+            address(this),
+            _migrationHookData(lentTokenId)
+        );
+    }
+
+    function testManualRemintWithHookDataRequiresDrainedOldPosition() public {
+        // Old position active and owing a carried protocol fee (fee-only collection cannot take it).
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        _swapHookedPoolBothWays(1e17);
+        vm.warp(block.timestamp + 1 days);
+        positionManager.decreaseLiquidity(token2Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
+        (uint128 owed0, uint128 owed1) = hook.pendingProtocolFees(token2Id);
+        assertGt(owed0 + owed1, 0, "old position should carry a protocol fee");
+
+        // A tagged mint that names the still-live position is not a replacement: refused, so the owed
+        // fee cannot be parked on a dust NFT and the live position keeps its automation.
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
+        _mintRaw(tickLower2, tickUpper2, 1e18, address(this), _migrationHookData(token2Id));
+        (uint128 still0, uint128 still1) = hook.pendingProtocolFees(token2Id);
+        assertEq(still0, owed0, "carried token0 fee stays owed by the live position");
+        assertEq(still1, owed1, "carried token1 fee stays owed by the live position");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "live position keeps its automation");
+
+        // Once drained the same claim is a replacement and goes through.
+        uint256 newTokenId = _drainAndRemint(_migrationHookData(token2Id), address(this));
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "drained: config follows");
+        (uint128 left0, uint128 left1) = hook.pendingProtocolFees(token2Id);
+        assertEq(left0 + left1, 0, "nothing stays owed by the drained position");
+    }
+
+    function testManualRemintHookDataRefusesExistingTarget() public {
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        hook.setSwapProtectionConfig(token3Id, 50, 60); // the target's own protection must survive
+
+        // The claim is only honoured on the token minted by the running operation. An increase on an
+        // existing position - even one this owner controls and even an unconfigured one - is refused,
+        // so old automation cannot be attached to a position that was never its replacement and the
+        // target's own swap protection is never overwritten.
+        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory params = new bytes[](2);
+        params[0] =
+            abi.encode(token3Id, uint128(1e18), type(uint128).max, type(uint128).max, _migrationHookData(token2Id));
+        params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+
+        (uint128 protection0,) = hook.swapProtectionConfigs(token3Id);
+        assertGt(protection0, 0, "target's own swap protection untouched");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_AUTO_EXIT, "old automation still on the old token");
+
+        // Emptied first, so the liquidity test alone would pass: the target's own swap protection
+        // still marks it as an existing position, not a blank replacement.
+        positionManager.decreaseLiquidity(
+            token3Id, positionManager.getPositionLiquidity(token3Id), 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
     }
 
     function testBasicAutoHarvestToken0() public {

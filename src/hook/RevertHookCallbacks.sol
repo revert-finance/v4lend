@@ -16,6 +16,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {RevertHookAutoLendActions} from "./RevertHookAutoLendActions.sol";
+import {RevertHookMigrationActions} from "./RevertHookMigrationActions.sol";
 import {RevertHookExecution} from "./RevertHookExecution.sol";
 
 /// @title RevertHookCallbacks
@@ -277,7 +278,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         ModifyLiquidityParams calldata params,
         BalanceDelta delta,
         BalanceDelta feeDelta,
-        bytes calldata
+        bytes calldata hookData
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
 
@@ -289,15 +290,16 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return (BaseHook.afterAddLiquidity.selector, feeDelta);
         }
 
-        // Only a not-yet-active configured position consults the oracle here. Adds only raise a
-        // position's value, so below-minimum deactivation belongs to the remove callback; reading
-        // the oracle on every add of an active position would make plain deposits depend on feed
-        // freshness.
-        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
-            if (_getPositionValueNative(tokenId) >= _minPositionValueNative) {
-                _addPositionTriggers(tokenId, key);
-                _activatePosition(tokenId);
-            }
+        // Activation of a configured position and the remint migration a tagged mint may name are
+        // handled in the migration sidecar (EIP-170); a plain deposit to an unconfigured position
+        // stops here. See RevertHookMigrationActions.afterAddLiquidity.
+        if (hookData.length == 36 || !PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags)) {
+            _delegatecallPassthrough(
+                address(migrationActions),
+                abi.encodeCall(
+                    RevertHookMigrationActions.afterAddLiquidity, (key, tokenId, params.liquidityDelta, hookData)
+                )
+            );
         }
 
         return (BaseHook.afterAddLiquidity.selector, feeDelta);

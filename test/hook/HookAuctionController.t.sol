@@ -1288,8 +1288,10 @@ contract HookAuctionControllerTest is BaseTest {
         fot.setFeeBps(100);
 
         // the drip attempt under-settles -> must be isolated as DonateFailed, and the swap and
-        // the winner's discount must be unaffected
-        bool zeroForOne = true;
+        // the winner's discount must be unaffected. Sell the partner token: the fee-on-transfer
+        // token as swap input would under-settle the swapper's own payment, which is not what this
+        // test isolates (and which currency it sorts as depends on deployment nonces).
+        bool zeroForOne = Currency.unwrap(c0) == address(partner);
         vm.expectEmit(true, false, false, false, address(auctionController));
         emit DonateFailed(pid, 0);
         uint256 outFirst = otherSwapper.swapExactIn(key, zeroForOne, 1e18);

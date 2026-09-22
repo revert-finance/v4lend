@@ -11,6 +11,7 @@ import {RevertHook} from "src/RevertHook.sol";
 import {RevertHookPositionActions} from "src/hook/RevertHookPositionActions.sol";
 import {RevertHookAutoLeverageActions} from "src/hook/RevertHookAutoLeverageActions.sol";
 import {RevertHookAutoLendActions} from "src/hook/RevertHookAutoLendActions.sol";
+import {RevertHookMigrationActions} from "src/hook/RevertHookMigrationActions.sol";
 import {RevertHookSwapActions} from "src/hook/RevertHookSwapActions.sol";
 import {HookFeeController} from "src/hook/HookFeeController.sol";
 import {HookRouteController} from "src/hook/HookRouteController.sol";
@@ -81,6 +82,9 @@ contract BaseTest is Test, Deployers {
         stack.autoLendActions = new RevertHookAutoLendActions(
             permit2, v4Oracle, stack.liquidityCalculator, stack.feeController, stack.routeController, swapActions
         );
+        RevertHookMigrationActions migrationActions = new RevertHookMigrationActions(
+            permit2, v4Oracle, stack.liquidityCalculator, stack.routeController, swapActions
+        );
 
         bytes memory constructorArgs = abi.encode(
             address(this),
@@ -89,7 +93,8 @@ contract BaseTest is Test, Deployers {
             auctionController,
             positionActions,
             autoLeverageActions,
-            stack.autoLendActions
+            stack.autoLendActions,
+            migrationActions
         );
         deployCodeTo("RevertHook.sol:RevertHook", constructorArgs, flags);
         stack.hook = RevertHook(payable(flags));
