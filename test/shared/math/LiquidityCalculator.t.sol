@@ -1372,4 +1372,110 @@ contract LiquidityCalculatorTest is Test {
         }
     }
 
+    // ==================== Tick bitmap search regressions (M-04) ====================
+    // `_locateNextTick` has to see every initialized tick on the simulated swap path: ticks in the
+    // current bitmap word in both directions and every bit of the neighbouring words, including
+    // bit 0 and bit 255. Each scenario builds a pool whose liquidity changes at a specific tick,
+    // asks calculateSamePool for the optimal swap, executes exactly that swap and compares the
+    // executed output and final price with the prediction. A missed tick makes the planner
+    // simulate the wrong liquidity and mis-predict by double-digit percentages.
+
+    uint256 constant PREDICTION_TOLERANCE = 1e15; // 0.1%
+
+    /// @dev Re-points the harness at a fresh pool (same tokens and tick spacing, different fee)
+    ///      initialized at `initTick`, so scenarios can start away from tick 0.
+    function _usePoolAtTick(uint24 fee, int24 initTick) internal {
+        poolKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: fee,
+            tickSpacing: DEFAULT_TICK_SPACING,
+            hooks: IHooks(address(0))
+        });
+        poolId = poolKey.toId();
+        poolManager.initialize(poolKey, TickMath.getSqrtPriceAtTick(initTick));
+        poolCallee = ILiquidityCalculator.V4PoolInfo({
+            poolMgr: poolManager,
+            poolIdentifier: poolId,
+            tickSpacing: DEFAULT_TICK_SPACING
+        });
+    }
+
+    /// @dev Predicts the optimal swap for a deposit, executes it and asserts the prediction held.
+    ///      `mustPassTick` is an initialized tick the executed swap has to cross, proving the
+    ///      scenario exercised the bitmap search for that tick.
+    function _assertPredictionMatchesExecution(
+        int24 lower,
+        int24 upper,
+        uint256 amount0,
+        uint256 amount1,
+        bool expectDir0to1,
+        int24 mustPassTick
+    ) internal {
+        (uint256 amountIn, uint256 predictedOut, bool dir0to1, uint160 predictedSqrtPrice) =
+            helper.getOptimalSwap(poolCallee, lower, upper, amount0, amount1);
+        assertEq(dir0to1, expectDir0to1, "unexpected swap direction");
+        assertGt(amountIn, 0, "expected a swap");
+
+        BalanceDelta delta = _executeSwap(amountIn, dir0to1);
+        uint256 actualOut = dir0to1 ? uint256(int256(delta.amount1())) : uint256(int256(delta.amount0()));
+        (uint160 sqrtPriceAfter, int24 tickAfter,,) = poolManager.getSlot0(poolId);
+
+        if (dir0to1) {
+            assertLt(tickAfter, mustPassTick, "swap did not cross the target tick");
+        } else {
+            assertGe(tickAfter, mustPassTick, "swap did not cross the target tick");
+        }
+        console.log("Predicted output:", predictedOut);
+        console.log("Executed output: ", actualOut);
+        assertApproxEqRel(actualOut, predictedOut, PREDICTION_TOLERANCE, "executed output deviates from prediction");
+        assertApproxEqRel(
+            sqrtPriceAfter, predictedSqrtPrice, PREDICTION_TOLERANCE, "final price deviates from prediction"
+        );
+    }
+
+    /// @notice 1->0 swap from tick 0 with the liquidity step at 600/1200, inside the current word
+    function test_calculateSamePool_rightSearchSeesTicksInCurrentWord() public {
+        _addLiquidity(-1200, 1200, 10 ether, 10 ether);
+        _addLiquidity(600, 1200, 100 ether, 0);
+        _assertPredictionMatchesExecution(-1200, 1200, 0, 100 ether, false, 600);
+    }
+
+    /// @notice 0->1 swap from tick 7200 with the liquidity step at 6600/6000, inside the current word
+    function test_calculateSamePool_leftSearchSeesTicksInCurrentWord() public {
+        _usePoolAtTick(500, 7200);
+        _addLiquidity(-30720, 30720, 10 ether, 10 ether);
+        _addLiquidity(6000, 6600, 0, 1000 ether);
+        _assertPredictionMatchesExecution(-30720, 30720, 100 ether, 0, true, 6600);
+    }
+
+    /// @notice 0->1 swap from tick 0; word 0 is empty, the liquidity step at -600/-1200 is in word -1
+    function test_calculateSamePool_leftSearchSeesTicksInPreviousWord() public {
+        _addLiquidity(-30720, 30720, 10 ether, 10 ether);
+        _addLiquidity(-1200, -600, 0, 1000 ether);
+        _assertPredictionMatchesExecution(-30720, 30720, 100 ether, 0, true, -600);
+    }
+
+    /// @notice 1->0 swap from tick 0; word 0 is empty, the liquidity step at 15420/16020 is in word 1
+    function test_calculateSamePool_rightSearchSeesTicksInNextWord() public {
+        _addLiquidity(-30720, 30720, 10 ether, 10 ether);
+        _addLiquidity(15420, 16020, 1000 ether, 0); // word 1, bits 1 and 11
+        _assertPredictionMatchesExecution(-30720, 30720, 0, 100 ether, false, 15420);
+    }
+
+    /// @notice 0->1 swap crossing bit 255 (-60) and bit 0 (-15360) of word -1
+    function test_calculateSamePool_leftSearchSeesWordBoundaryBits() public {
+        _addLiquidity(-46080, 46080, 10 ether, 10 ether); // words -3 / 3, bit 0
+        _addLiquidity(-15360, 15360, 10 ether, 10 ether); // words -1 / 1, bit 0
+        _addLiquidity(-60, 30660, 10 ether, 10 ether); // words -1 / 1, bit 255
+        _assertPredictionMatchesExecution(-46080, 46080, 180 ether, 0, true, -15360);
+    }
+
+    /// @notice 1->0 swap crossing bit 0 (15360) and bit 255 (30660) of word 1
+    function test_calculateSamePool_rightSearchSeesWordBoundaryBits() public {
+        _addLiquidity(-46080, 46080, 10 ether, 10 ether); // words -3 / 3, bit 0
+        _addLiquidity(-15360, 15360, 10 ether, 10 ether); // words -1 / 1, bit 0
+        _addLiquidity(-60, 30660, 10 ether, 10 ether); // words -1 / 1, bit 255
+        _assertPredictionMatchesExecution(-46080, 46080, 0, 1400 ether, false, 30660);
+    }
 }
