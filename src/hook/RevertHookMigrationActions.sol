@@ -131,10 +131,13 @@ contract RevertHookMigrationActions is RevertHookActionBase {
 
     /// @dev Mint-callback entry to the shared migration (see afterAddLiquidity for the protocol).
     ///      Authority is the one that let the locker remove the old liquidity: the locker
-    ///      (`positionManager.msgSender()`) must own the old token or hold its per-token approval
-    ///      (blanket operators are deliberately not enough: they would be able to claim across all of
-    ///      an owner's positions), and the new token must be in the locker's custody (V4Utils mints to
-    ///      itself before forwarding) or already with the old owner. The callback also fires for
+    ///      (`positionManager.msgSender()`) must own the old token, hold its per-token approval, or be
+    ///      an operator for the owner (`isApprovedForAll`, which is how the standalone AutoRange is
+    ///      approved), and the new token must be in the locker's custody (V4Utils mints to itself
+    ///      before forwarding) or already with the old owner. A blanket operator could name any of the
+    ///      owner's positions here, but the claim only succeeds once that position is drained, so
+    ///      misdirecting automation would first require closing a position the operator was already
+    ///      trusted with; the cross-position claim adds nothing to what the approval already permits. The callback also fires for
     ///      increases, so the target must be a blank slate the way a fresh mint is - no liquidity
     ///      before this add, no config and no swap protection of its own - and the old position must
     ///      already be drained, so the claim is bound to a real replacement rather than a dust mint
@@ -148,7 +151,7 @@ contract RevertHookMigrationActions is RevertHookActionBase {
             return;
         }
         address locker = IMsgSender(address(positionManager)).msgSender();
-        if (oldOwner != locker && nft.getApproved(oldTokenId) != locker) {
+        if (oldOwner != locker && nft.getApproved(oldTokenId) != locker && !nft.isApprovedForAll(oldOwner, locker)) {
             revert Unauthorized();
         }
         address newOwner = nft.ownerOf(newTokenId);

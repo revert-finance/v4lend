@@ -1799,12 +1799,14 @@ contract RevertHookTest is BaseTest {
         vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
         _mintRaw(newLower, newUpper, 10e18, address(this), _migrationHookData(token2Id));
 
-        // A blanket operator approval is deliberately not enough: it would let one operator claim
-        // across every position of the owner.
+        // A blanket operator (the standalone AutoRange shape) is authority too, but the claim is
+        // still bound to a drained old position: naming a live one is refused.
         vm.prank(alice);
         IERC721(address(positionManager)).setApprovalForAll(address(this), true);
-        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("Unauthorized()")));
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("InvalidConfig()")));
         _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
+        vm.prank(alice);
+        IERC721(address(positionManager)).setApprovalForAll(address(this), false);
 
         // Per-token approval, but minting the replacement to a third party: refused.
         vm.prank(alice);
@@ -1823,6 +1825,27 @@ contract RevertHookTest is BaseTest {
         assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "config should follow");
         (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(oldFlags, PositionModeFlags.MODE_NONE, "old config should be disabled");
+    }
+
+    /// @dev The standalone AutoRange is approved with setApprovalForAll; a drained old position it
+    ///      replaces carries its automation under that blanket approval.
+    function testManualRemintWithHookDataAcceptsBlanketOperator() public {
+        hook.setPositionConfig(token2Id, _relativeExitConfig());
+        address alice = makeAddr("alice");
+        int24 newLower = tickLower2 + poolKey.tickSpacing;
+        int24 newUpper = tickUpper2 + poolKey.tickSpacing;
+        IERC721(address(positionManager)).transferFrom(address(this), alice, token2Id);
+        vm.prank(alice);
+        IERC721(address(positionManager)).setApprovalForAll(address(this), true);
+
+        positionManager.decreaseLiquidity(
+            token2Id, positionManager.getPositionLiquidity(token2Id), 0, 0, alice, block.timestamp, Constants.ZERO_BYTES
+        );
+        uint256 newTokenId = _mintRaw(newLower, newUpper, 10e18, alice, _migrationHookData(token2Id));
+        (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
+        assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "config follows under blanket approval");
+        (uint8 oldFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(oldFlags, PositionModeFlags.MODE_NONE, "old config disabled");
     }
 
     function testManualRemintHookDataIgnoredForVaultOwnedToken() public {
