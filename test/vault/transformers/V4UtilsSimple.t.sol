@@ -181,7 +181,9 @@ contract V4UtilsSimpleTest is V4TestBase {
         assertTrue(receiver.reentered(), "Receiver should attempt reentrant execute");
         assertFalse(receiver.reenterSucceeded(), "Reentrant execute should fail");
         bytes memory revertData = receiver.revertData();
-        assertEq(bytes4(revertData), Constants.Reentrancy.selector, "Reentrant execute should hit mutex");
+        // V4LE-29: the reentrant caller is not the NFT owner and V4Utils's own custody is no longer
+        // authority, so the caller check refuses it before the mutex would
+        assertEq(bytes4(revertData), Constants.Unauthorized.selector, "Reentrant execute should be refused");
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId), user1, "Original NFT should be returned");
         assertEq(IERC721(address(positionManager)).ownerOf(tokenId + 1), address(receiver), "Minted NFT should transfer");
     }

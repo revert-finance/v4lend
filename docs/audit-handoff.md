@@ -96,6 +96,7 @@ Notes:
 - liquidation proceeds are collected to the vault and split there: the liquidator receives at most `liquidationValue` worth at the oracle's own token prices (the removal settles at the live pool price, up to `maxPoolPriceDifference` off the oracle, so the actual delta can exceed the quote); any excess goes to the loan owner, a shortfall (hook skim, pool below oracle) is the liquidator's, and native ETH remainders are wrapped. A remainder the owner cannot receive (ERC20 blocklist) goes to the liquidator rather than blocking the liquidation
 - the same cap applies to the fee-only split: whatever the pool hook credits to the position in its before-remove callback (the auction drip donated to in-range liquidity) lands in the collected amounts after the quote was taken and goes to the owner, never to the liquidator
 - `LeverageTransformer.leverageIn` accepts a native-ETH pool for a wrapped-native-asset vault (the alias the vault, the oracle and leverageUp/Down already use): the borrowed WETH is unwrapped for the pool and all pool-side arithmetic and the optional swap use the native currency
+- `Transformer._validateCaller` accepts only a registered vault inside its transform of that token or the NFT owner; a transformer's own custody of an NFT (e.g. one parked in `V4Utils` by a plain `transferFrom`) is not authority for a public caller. The `V4Utils` safe-transfer callback executes through an internal path bound to the token it just received
 
 ### V4Oracle
 

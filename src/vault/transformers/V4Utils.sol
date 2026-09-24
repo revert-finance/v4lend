@@ -199,9 +199,14 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     /// @param tokenId The token ID of the Uniswap V4 position NFT to process
     /// @param instructions The instructions struct containing all parameters for the operation
     /// @return newTokenId The ID of the newly created position (only set if whatToDo is CHANGE_RANGE, otherwise 0)
-    function execute(uint256 tokenId, Instructions memory instructions) public returns (uint256 newTokenId) {
+    function execute(uint256 tokenId, Instructions memory instructions) external returns (uint256 newTokenId) {
         _validateCaller(positionManager, tokenId);
+        newTokenId = _executeGuarded(tokenId, instructions);
+    }
 
+    /// @dev Shared by the public entry (after the caller check) and the safe-transfer callback, whose
+    ///      authority is the transfer itself: the callback runs against the token it just received.
+    function _executeGuarded(uint256 tokenId, Instructions memory instructions) internal returns (uint256 newTokenId) {
         if (executing) {
             revert Reentrancy();
         }
@@ -571,7 +576,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
 
         Instructions memory instructions = abi.decode(data, (Instructions));
 
-        execute(tokenId, instructions);
+        // the transfer that triggered this callback is the authority: it executes only against the token
+        // just received (and never through the public caller check, which does not treat custody as authority)
+        _executeGuarded(tokenId, instructions);
 
         IERC721(address(positionManager)).safeTransferFrom(address(this), from, tokenId, instructions.returnData);
 
