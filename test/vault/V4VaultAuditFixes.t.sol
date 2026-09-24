@@ -89,4 +89,31 @@ contract V4VaultAuditFixesTest is V4VaultLocalBase {
         vault.deposit(allowance, lender);
         vm.stopPrank();
     }
+
+    // ==================== V4LE-65: a no-op repay must not pin the daily debt quota ====================
+
+    function testZeroDebtRepayDoesNotResetDailyDebtLimit() public {
+        // nominal minimum debt quota: the day's quota is 10% of whatever is lent at its first debt-side action
+        vault.setLimits(0, 1e30, 1e30, 1e30, 1);
+        uint32 lastReset = vault.dailyDebtIncreaseLimitLastReset();
+        uint256 tokenId = _createLoan(10e18); // a debt-free loan
+        vm.warp(block.timestamp + 1 days); // fresh UTC day, nothing has touched the debt quota yet
+
+        // anyone can call repay on a loan without debt (or on a token that is no loan at all)
+        vm.prank(makeAddr("anyone"));
+        (uint256 assets, uint256 shares) = vault.repay(tokenId, 1, false);
+        assertEq(assets, 0);
+        assertEq(shares, 0);
+        vm.prank(makeAddr("anyone"));
+        vault.repay(type(uint256).max, 1, false);
+        assertEq(vault.dailyDebtIncreaseLimitLastReset(), lastReset, "a no-op repay leaves the daily quota alone");
+
+        // the lender pool is funded afterwards
+        _deposit(lender, 1000e18);
+        oracle.setMockPositionValue(1000e18);
+
+        // the first real debt-side action of the day sizes the quota from the funded pool (100 of 1000)
+        _borrow(tokenId, 60e18);
+        assertApproxEqRel(vault.dailyDebtIncreaseLimitLeft(), 40e18, 1e12, "quota sized from the funded pool");
+    }
 }

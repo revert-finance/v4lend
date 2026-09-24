@@ -1191,7 +1191,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     function _repay(uint256 tokenId, uint256 amount, bool isShare) internal returns (uint256 assets, uint256 shares) {
         (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
-        _resetDailyDebtIncreaseLimit(newLendExchangeRateX96, false);
 
         Loan storage loan = loans[tokenId];
 
@@ -1214,6 +1213,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             shares = currentShares;
             assets = _convertToAssets(shares, newDebtExchangeRateX96, Math.Rounding.Ceil);
         }
+
+        // nothing to repay (debt-free loan or unknown token): this must stay a pure no-op. In particular
+        // the daily debt quota is only refreshed by a real repayment, otherwise anyone could pin the
+        // day's quota on a still unfunded lender pool with a zero-value call.
+        if (shares == 0) {
+            return (0, 0);
+        }
+
+        _resetDailyDebtIncreaseLimit(newLendExchangeRateX96, false);
 
         if (assets > 0) {
             // fails if not enough token approved
