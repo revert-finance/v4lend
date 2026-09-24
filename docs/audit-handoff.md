@@ -108,6 +108,7 @@ Boundary behavior:
 - `getValue` divides each price-times-amount term with `FullMath.mulDiv` (V4LE-64): a valid extreme-tick position (Q96 price ~2^224) no longer overflows a checked product while its quotient fits
 - uncollected fees are bounded at v4's `toInt128` settlement limit (V4LE-6): a fee amount >= 2^127 reverts with `SettlementBoundExceeded` instead of being counted as collateral, since `Pool.modifyLiquidity` settles fees on every collection and decrease and rejects that amount
 - principal amounts are bounded the same way (V4LE-61): `_getAmounts` reverts with `SettlementBoundExceeded` for a token amount >= 2^127, which v4 cannot pay out in the single decrease a liquidation or full withdrawal performs
+- the L2 sequencer uptime / grace guard runs once per external read in `getPoolSqrtPriceX96` and `_loadPositionState` (`_requireSequencerUp`, V4LE-2), so `Mode.TWAP` reads are guarded like Chainlink ones and a Chainlink read no longer consults the uptime feed once per leg
 
 ### RevertHook
 

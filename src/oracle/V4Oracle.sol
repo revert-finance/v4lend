@@ -153,6 +153,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         if (token0 == token1) {
             return SafeCast.toUint160(Q96);
         }
+        _requireSequencerUp();
 
         (uint256 price0X96, uint256 chainlinkReferencePriceX96) = _getReferenceTokenPriceX96(token0, 0);
         (uint256 price1X96,) = _getReferenceTokenPriceX96(token1, chainlinkReferencePriceX96);
@@ -417,43 +418,52 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
     }
 
+    /// @notice L2 sequencer guard, applied once per external price read (`getPoolSqrtPriceX96` and every
+    ///         position read through `_loadPositionState`) and therefore to every source mode. A TWAP-only
+    ///         read consults the v3 pool's observations, which are just as frozen during a sequencer outage
+    ///         as a Chainlink round, so the guard is not tied to the Chainlink path.
+    /// @dev No-op on chains without a configured uptime feed (L1).
+    function _requireSequencerUp() internal view {
+        if (sequencerUptimeFeed == address(0)) {
+            return;
+        }
+        (
+            uint80 sequencerRoundId,
+            int256 sequencerAnswer,
+            uint256 sequencerStartedAt,
+            uint256 sequencerUpdatedAt,
+            uint80 sequencerAnsweredInRound
+        ) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
+
+        // Answer == 0: Sequencer is up
+        // Answer == 1: Sequencer is down
+        if (sequencerAnswer == 1) {
+            revert SequencerDown();
+        }
+
+        // Feed result must be valid
+        if (
+            sequencerRoundId == 0 || sequencerAnsweredInRound < sequencerRoundId || sequencerStartedAt == 0
+                || sequencerUpdatedAt == 0 || sequencerUpdatedAt > block.timestamp || sequencerAnswer != 0
+        ) {
+            revert SequencerUptimeFeedInvalid();
+        }
+
+        // Make sure grace period has passed since sequencer is back up
+        uint256 timeSinceUp = block.timestamp - sequencerStartedAt;
+        if (timeSinceUp <= SEQUENCER_GRACE_PERIOD_TIME) {
+            revert SequencerGracePeriodNotOver();
+        }
+    }
+
     /// @notice Calculates Chainlink-compatible price with validation for given token address
-    /// @dev Internal function that fetches feed price with sequencer and stale check validation
+    /// @dev Internal function that fetches feed price with stale check validation; the sequencer guard runs
+    ///      once per read in the callers, see `_requireSequencerUp`.
     /// @param token Token address to get price for (use address(0) for native ETH)
     /// @return uint256 Chainlink price normalized to Q96 format (decimal adjustment included)
     function _getChainlinkPriceX96(address token) internal view returns (uint256) {
         if (token == chainlinkReferenceToken) {
             return Q96;
-        }
-        // Sequencer check on chains where needed
-        if (sequencerUptimeFeed != address(0)) {
-            (
-                uint80 sequencerRoundId,
-                int256 sequencerAnswer,
-                uint256 sequencerStartedAt,
-                uint256 sequencerUpdatedAt,
-                uint80 sequencerAnsweredInRound
-            ) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
-
-            // Answer == 0: Sequencer is up
-            // Answer == 1: Sequencer is down
-            if (sequencerAnswer == 1) {
-                revert SequencerDown();
-            }
-
-            // Feed result must be valid
-            if (
-                sequencerRoundId == 0 || sequencerAnsweredInRound < sequencerRoundId || sequencerStartedAt == 0
-                    || sequencerUpdatedAt == 0 || sequencerUpdatedAt > block.timestamp || sequencerAnswer != 0
-            ) {
-                revert SequencerUptimeFeedInvalid();
-            }
-
-            // Make sure grace period has passed since sequencer is back up
-            uint256 timeSinceUp = block.timestamp - sequencerStartedAt;
-            if (timeSinceUp <= SEQUENCER_GRACE_PERIOD_TIME) {
-                revert SequencerGracePeriodNotOver();
-            }
         }
 
         TokenConfig memory feedConfig = feedConfigs[token];
@@ -615,6 +625,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @param tokenId Token ID of the position NFT to load state for
     /// @return state Complete PositionState struct containing all position data and calculated prices
     function _loadPositionState(uint256 tokenId) internal view returns (PositionState memory state) {
+        _requireSequencerUp();
         state.tokenId = tokenId;
 
         // Get position info from PositionManager
