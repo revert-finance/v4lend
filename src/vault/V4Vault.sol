@@ -1317,20 +1317,19 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             params.tokenId, liquidity, 0, 0, params.deadline, params.decreaseLiquidityHookData, address(this)
         );
 
-        // The quote (fullValue, feeValue, liquidationValue) is oracle-priced while the removal settles at the
-        // live pool price, which may sit up to maxPoolPriceDifference away, so the amounts that actually come
-        // out can be worth more than the quote at the oracle's own prices. The liquidator's share is what the
-        // quote authorizes: liquidationValue out of the value the removal was sized on, and never more than
+        // The quote (fullValue, feeValue, liquidationValue) is oracle-priced and taken before the removal,
+        // while the amounts that actually come out are settled at the live pool price (up to
+        // maxPoolPriceDifference away) and include whatever the pool hook credits to the position in its
+        // before-remove callback (an auction drip donated to in-range liquidity). Both can make the removal
+        // worth more than the quote at the oracle's own prices. The liquidator's share is what the quote
+        // authorizes: liquidationValue out of the value the removal was sized on, and never more than
         // liquidationValue worth at oracle prices. Anything above stays with the loan owner. Receiving less
-        // (a hook skim, a pool price below the oracle) is the liquidator's risk, covered by the penalty; a
-        // fee-only split is applied to what was actually received so a skim is carried proportionally (L-02).
+        // (a hook skim, a pool price below the oracle) is the liquidator's risk, covered by the penalty; the
+        // split is applied to what was actually received so a skim is carried proportionally (L-02).
         uint256 base = feesOnly ? state.feeValue : state.liquidationValue;
-        if (!feesOnly) {
-            uint256 receivedValue =
-                received0.mulDiv(state.price0X96, Q96) + received1.mulDiv(state.price1X96, Q96);
-            if (receivedValue > base) {
-                base = receivedValue;
-            }
+        uint256 receivedValue = received0.mulDiv(state.price0X96, Q96) + received1.mulDiv(state.price1X96, Q96);
+        if (receivedValue > base) {
+            base = receivedValue;
         }
         if (base > 0) {
             amount0 = received0.mulDiv(state.liquidationValue, base);
