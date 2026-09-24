@@ -1433,6 +1433,87 @@ contract LiquidityCalculatorTest is Test {
         }
     }
 
+    // ==================== Zero-fee exact-boundary states (external audit V4LE-85) ====================
+    // With a zero total fee and the live price exactly at a requested range bound, the solver's
+    // coefficient guards used to reject the state as invalid (strict `a > amount0Target` /
+    // `c > amount1Target`) although it is a valid, exactly balanced boundary: the pool accepts fee 0
+    // and any initialized tick is a normal post-swap price. The planner must return a real plan.
+
+    /// @dev Executes the planned swap and asserts the resulting holdings fit the range with a
+    ///      negligible one-sided leftover, i.e. the plan was the balancing swap.
+    function _assertPlanBalancesHoldings(
+        int24 lower,
+        int24 upper,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 amountIn,
+        uint256 predictedOut,
+        bool dir0to1
+    ) internal {
+        BalanceDelta delta = _executeSwap(amountIn, dir0to1);
+        uint256 actualOut = dir0to1 ? uint256(int256(delta.amount1())) : uint256(int256(delta.amount0()));
+        assertApproxEqRel(actualOut, predictedOut, PREDICTION_TOLERANCE, "executed output deviates from prediction");
+        uint256 have0 = dir0to1 ? amount0 - amountIn : amount0 + actualOut;
+        uint256 have1 = dir0to1 ? amount1 + actualOut : amount1 - amountIn;
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(lower);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upper);
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtLower, sqrtUpper, have0, have1);
+        (uint256 used0, uint256 used1) =
+            LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, sqrtLower, sqrtUpper, liquidity);
+        // prices sit at ~1:1 in these scenarios, so summing the two tokens' leftovers is fair
+        assertLt((have0 - used0) + (have1 - used1), (have0 + have1) / 1000, "leftover above 0.1%");
+    }
+
+    /// @notice Price exactly at the requested LOWER bound of a zero-fee pool, holding token1: the
+    ///         1->0 solver's `c == amount1Target` equality used to revert Math_Overflow.
+    function test_calculateSamePool_ZeroFee_PriceAtLowerBound_SwapsToken1() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut, bool dir0to1,) = helper.getOptimalSwap(poolCallee, 0, 60, 0, 1 ether);
+        assertFalse(dir0to1, "token1 -> token0 into the range");
+        assertGt(amountIn, 0, "a real balancing swap is planned");
+        _assertPlanBalancesHoldings(0, 60, 0, 1 ether, amountIn, amountOut, false);
+    }
+
+    /// @notice Same state with token0 only: already balanced (the range is all token0 at its lower
+    ///         bound), so the plan is deterministically "no swap" instead of a revert.
+    function test_calculateSamePool_ZeroFee_PriceAtLowerBound_Token0OnlyNoSwap() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut,, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, 0, 60, 1 ether, 0);
+        assertEq(amountIn, 0, "nothing to swap");
+        assertEq(amountOut, 0);
+        assertEq(sqrtPriceX96, SQRT_PRICE_1_0, "current price");
+    }
+
+    /// @notice Price exactly at the requested UPPER bound of a zero-fee pool, holding token0: the
+    ///         0->1 solver's `a == amount0Target` equality used to revert Math_Overflow.
+    function test_calculateSamePool_ZeroFee_PriceAtUpperBound_SwapsToken0() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut, bool dir0to1,) = helper.getOptimalSwap(poolCallee, -60, 0, 1 ether, 0);
+        assertTrue(dir0to1, "token0 -> token1 into the range");
+        assertGt(amountIn, 0, "a real balancing swap is planned");
+        _assertPlanBalancesHoldings(-60, 0, 1 ether, 0, amountIn, amountOut, true);
+    }
+
+    /// @notice Same state with token1 only: already balanced, no swap.
+    function test_calculateSamePool_ZeroFee_PriceAtUpperBound_Token1OnlyNoSwap() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut,, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, -60, 0, 0, 1 ether);
+        assertEq(amountIn, 0, "nothing to swap");
+        assertEq(amountOut, 0);
+        assertEq(sqrtPriceX96, SQRT_PRICE_1_0, "current price");
+    }
+
     // ==================== Tick bitmap search regressions (M-04) ====================
     // `_locateNextTick` has to see every initialized tick on the simulated swap path: ticks in the
     // current bitmap word in both directions and every bit of the neighbouring words, including

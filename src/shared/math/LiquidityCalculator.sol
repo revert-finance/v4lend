@@ -738,11 +738,20 @@ contract LiquidityCalculator is ILiquidityCalculator {
                     // a = amount0Target + liquidity / ((1 - f) * sqrtPrice) - liquidity / sqrtUpper
                     aBase := add(amount0Target, div(mul(MAX_FEE_PIPS, liqX96), mul(FEE_DIFF, sqrtPrice)))
                     a := sub(aBase, div(liqX96, sqrtUpper))
-                    // Ensure a > amount0Target to prevent overflow
-                    if iszero(gt(a, amount0Target)) {
+                    // a < amount0Target means sqrtUpper < (1 - f) * sqrtPrice: not an in-range
+                    // state, the solver's premise is broken
+                    if lt(a, amount0Target) {
                         mstore(0, 0x20236808) // Math_Overflow error selector
                         revert(0x1c, 0x04)
                     }
+                }
+                // a == amount0Target is the exact upper bound of a zero-fee pool (external audit
+                // V4LE-85), a valid state the old strict guard rejected. With token0 to place the
+                // quadratic is well-defined there (leading coefficient amount0Target) and finds the
+                // interior root; with none it degenerates to the linear solution p == sqrtPrice, i.e.
+                // no swap - return it directly, the division by a below would yield 0.
+                if (a == 0) {
+                    return uint160(sqrtPrice);
                 }
                 // Calculate coefficient 'b'
                 b = FullMath.mulDiv(aBase, state.sqrtLower, FixedPoint96.Q96);
@@ -839,12 +848,20 @@ contract LiquidityCalculator is ILiquidityCalculator {
                     cBase := add(amount1Target, cBase)
                 }
                 c = cBase - FullMath.mulDiv(liquidity, state.sqrtLower, FixedPoint96.Q96);
-                // Ensure c > amount1Target to prevent overflow
+                // c < amount1Target means sqrtPrice < (1 - f) * sqrtLower: not an in-range state,
+                // the solver's premise is broken
                 assembly ("memory-safe") {
-                    if iszero(gt(c, amount1Target)) {
+                    if lt(c, amount1Target) {
                         mstore(0, 0x20236808) // Math_Overflow error selector
                         revert(0x1c, 0x04)
                     }
+                }
+                // c == amount1Target is the exact lower bound of a zero-fee pool (external audit
+                // V4LE-85), a valid state the old strict guard rejected. With token1 to place the
+                // quadratic finds the interior root; with none the root is p == sqrtPrice, i.e. no
+                // swap - return it directly rather than rely on the rounding of the general path.
+                if (c == 0) {
+                    return uint160(sqrtPrice);
                 }
                 b -= cBase.mulDiv(FixedPoint96.Q96, sqrtUpper);
             }
