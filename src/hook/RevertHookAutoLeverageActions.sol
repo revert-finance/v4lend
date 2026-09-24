@@ -23,6 +23,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
 
     error RestoreFailed();
     error NoImprovement();
+    error RemovalConsumedByFees();
 
     constructor(
         IPermit2 _permit2,
@@ -172,6 +173,16 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
             _decreaseLiquidityPartial(poolKey, tokenId, liquidityToRemove);
         if (amount0 == 0 && amount1 == 0) {
+            // No credit to repay with. If the removal itself failed nothing changed and a soft
+            // failure is right. If it succeeded, the position's carried protocol fees (deferred by
+            // earlier fee-only collections) consumed the whole principal credit: liquidity is gone
+            // and there is nothing to repay or to restore it with. Returning false here would skip
+            // the postcondition and let the vault transform commit lower collateral against
+            // unchanged debt, so the action has to roll back instead (the hook runs vault-backed
+            // actions inside a caught transform, so this only fails the action).
+            if (positionManager.getPositionLiquidity(tokenId) < currentLiquidity) {
+                revert RemovalConsumedByFees();
+            }
             return false;
         }
 
