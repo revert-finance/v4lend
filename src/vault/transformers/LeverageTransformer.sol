@@ -364,12 +364,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             revert Unauthorized();
         }
 
-        // Validate that one token is the lend token
+        // Validate that one pool currency is the lend token. A WETH-asset vault also serves a native-ETH
+        // pool: the vault and oracle price address(0) as WETH, and the borrowed WETH is unwrapped for the
+        // pool (see _removeBorrowAndSwap).
         Currency lendToken = Currency.wrap(IVault(params.vault).asset());
         Currency otherToken;
-        if (lendToken == params.token0) {
+        if (_isLendCurrency(lendToken, params.token0)) {
             otherToken = params.token1;
-        } else if (lendToken == params.token1) {
+        } else if (_isLendCurrency(lendToken, params.token1)) {
             otherToken = params.token0;
         } else {
             revert InvalidToken();
@@ -551,13 +553,21 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         _finalizeLeverageIn(params, amount0, amount1, newTokenId);
     }
 
+    /// @dev A pool currency stands for the vault's lend token when it is that token, or native ETH for a
+    ///      wrapped-native lend token (the alias the vault, the oracle and leverageUp/Down already use).
+    function _isLendCurrency(Currency lendToken, Currency poolCurrency) internal view returns (bool) {
+        return poolCurrency == lendToken || (poolCurrency.isAddressZero() && lendToken == Currency.wrap(address(weth)));
+    }
+
     /// @dev Helper function to remove dummy position, borrow, and swap
     function _removeBorrowAndSwap(LeverageInTransformParams calldata params, Currency lendToken)
         internal
         returns (uint256 amount0, uint256 amount1)
     {
-        // Determine which token is the other (non-lend) token
-        Currency otherToken = lendToken == params.token0 ? params.token1 : params.token0;
+        // Determine which pool currency carries the lend token (native ETH for a WETH lend token) and
+        // which is the other (non-lend) token
+        Currency lendCurrency = _isLendCurrency(lendToken, params.token0) ? params.token0 : params.token1;
+        Currency otherToken = lendCurrency == params.token0 ? params.token1 : params.token0;
 
         // Get current liquidity of the dummy position
         uint128 dummyLiquidity = positionManager.getPositionLiquidity(params.tokenId);
@@ -571,11 +581,12 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         amount0 = params.token0.balanceOfSelf();
         amount1 = params.token1.balanceOfSelf();
 
-        // Borrow from the vault
+        // Borrow from the vault; a native pool gets the borrowed WETH unwrapped
         IVault(msg.sender).borrow(params.tokenId, params.borrowAmount);
+        NativeAssetLib.unwrapIfNative(weth, lendCurrency, params.borrowAmount);
 
-        // Add borrowed amount to the lend token balance
-        if (lendToken == params.token0) {
+        // Add borrowed amount to the lend currency balance
+        if (lendCurrency == params.token0) {
             amount0 += params.borrowAmount;
         } else {
             amount1 += params.borrowAmount;
@@ -587,13 +598,13 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             Currency tokenOut;
 
             if (params.swapDirection) {
-                // Swap lend token to other token
-                tokenIn = lendToken;
+                // Swap lend currency to other token
+                tokenIn = lendCurrency;
                 tokenOut = otherToken;
             } else {
-                // Swap other token to lend token
+                // Swap other token to lend currency
                 tokenIn = otherToken;
-                tokenOut = lendToken;
+                tokenOut = lendCurrency;
             }
 
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
@@ -687,7 +698,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         // The vault's onERC721Received will handle replacing the old position with the new one
         IERC721(address(positionManager)).safeTransferFrom(address(this), msg.sender, newTokenId);
 
-        // Send leftover tokens to recipient (lendToken is always one of token0 or token1)
+        // Send leftover tokens to recipient (the lend currency is always one of token0 or token1)
         uint256 leftover0 = params.token0.balanceOfSelf();
         uint256 leftover1 = params.token1.balanceOfSelf();
 
