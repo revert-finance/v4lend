@@ -106,6 +106,7 @@ Boundary behavior:
 - the feed-derived sqrt price in `_loadPositionState` only splits liquidity into token amounts, which saturates beyond the position's range, so it is clamped to `TickMath.MIN_SQRT_PRICE..MAX_SQRT_PRICE` (exact, no value change). A pool at the price boundary with an honest feed ratio slightly above it therefore stays valuable and liquidatable instead of reverting in a `uint160` cast
 - `getPoolSqrtPriceX96` is consumed numerically (swap floors, oracle ticks) and reverts with `SqrtPriceOutOfRange` for ratios outside the sqrt-price domain rather than overflowing above or returning zero below
 - `getValue` divides each price-times-amount term with `FullMath.mulDiv` (V4LE-64): a valid extreme-tick position (Q96 price ~2^224) no longer overflows a checked product while its quotient fits
+- uncollected fees are bounded at v4's `toInt128` settlement limit (V4LE-6): a fee amount >= 2^127 reverts with `SettlementBoundExceeded` instead of being counted as collateral, since `Pool.modifyLiquidity` settles fees on every collection and decrease and rejects that amount
 
 ### RevertHook
 

@@ -68,6 +68,10 @@ interface IUniswapV3Pool {
 ///   - Owner is trusted to configure valid feeds, TWAP pools, staleness parameters, and emergency modes
 contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     uint256 private constant SEQUENCER_GRACE_PERIOD_TIME = 600; // 10mins
+    // Uniswap v4 settles every principal and fee amount of a modifyLiquidity call through
+    // SafeCast.toInt128, which rejects amounts >= 2^127. Amounts at or beyond it can be shown by the
+    // oracle but never collected, so they are not certified as collateral.
+    uint256 private constant V4_SETTLEMENT_BOUND = 1 << 127;
 
     event TokenConfigUpdated(address indexed token, TokenConfig config);
     event OracleModeUpdated(address indexed token, Mode mode);
@@ -77,6 +81,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     error InvalidPool();
     error SqrtPriceOutOfRange();
+    error SettlementBoundExceeded();
 
     enum Mode {
         NOT_SET,
@@ -725,9 +730,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     ///      other while the true accrued growth (their difference mod 2^256) stays small and positive. A common
     ///      trigger is a position whose upper tick was initialized before its lower tick while the price sat
     ///      above both. With checked arithmetic that wrapped state panics, which would block `getValue` and every
-    ///      vault health check and liquidation of the position. The final narrowing stays checked: Uniswap
-    ///      narrows the same product with `toInt128()` in `Pool.modifyLiquidity`, so a fee amount that does not
-    ///      fit is uncollectable there as well.
+    ///      vault health check and liquidation of the position. The final narrowing is bounded like Uniswap's:
+    ///      `Pool.modifyLiquidity` narrows the same product with `toInt128()`, so a fee amount >= 2^127 reverts
+    ///      every collection and liquidity decrease of the position (fees are settled on each of them). Such an
+    ///      amount is reported with `SettlementBoundExceeded` instead of being counted as collateral; a plain
+    ///      uint128 cast accepted [2^127, 2^128) although v4 can never pay it out.
     /// @param feeGrowthInsideX128 Current fee growth accumulator inside the position range (Q128 format)
     /// @param feeGrowthInsideLastX128 Last fee growth accumulator when fees were collected (Q128 format)
     /// @param liquidity Current liquidity amount in the position
@@ -749,6 +756,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             return 0;
         }
 
-        return SafeCast.toUint128(FullMath.mulDiv(deltaFeeGrowth, liquidity, FixedPoint128.Q128));
+        uint256 fees = FullMath.mulDiv(deltaFeeGrowth, liquidity, FixedPoint128.Q128);
+        if (fees >= V4_SETTLEMENT_BOUND) {
+            revert SettlementBoundExceeded();
+        }
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint128(fees);
     }
 }
