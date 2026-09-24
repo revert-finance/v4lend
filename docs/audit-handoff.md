@@ -109,6 +109,7 @@ Boundary behavior:
 - uncollected fees are bounded at v4's `toInt128` settlement limit (V4LE-6): a fee amount >= 2^127 reverts with `SettlementBoundExceeded` instead of being counted as collateral, since `Pool.modifyLiquidity` settles fees on every collection and decrease and rejects that amount
 - principal amounts are bounded the same way (V4LE-61): `_getAmounts` reverts with `SettlementBoundExceeded` for a token amount >= 2^127, which v4 cannot pay out in the single decrease a liquidation or full withdrawal performs
 - the L2 sequencer uptime / grace guard runs once per external read in `getPoolSqrtPriceX96` and `_loadPositionState` (`_requireSequencerUp`, V4LE-2), so `Mode.TWAP` reads are guarded like Chainlink ones and a Chainlink read no longer consults the uptime feed once per leg
+- an unverified Chainlink read (`Mode.CHAINLINK`, or a two-source mode with `maxDifference == type(uint16).max`) re-reads `feed.decimals()` and reverts with `FeedDecimalsChanged` when it differs from the value cached at `setTokenConfig` (V4LE-15); the owner re-runs `setTokenConfig` to accept a feed precision migration. Verified two-source reads pay nothing: a 10^k mis-scaling always trips the deviation check
 
 ### RevertHook
 

@@ -82,6 +82,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     error InvalidPool();
     error SqrtPriceOutOfRange();
     error SettlementBoundExceeded();
+    error FeedDecimalsChanged();
 
     enum Mode {
         NOT_SET,
@@ -390,9 +391,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
         uint256 verifyPriceX96;
         if (_usesChainlink(mode)) {
-            uint256 chainlinkPriceX96 = _getChainlinkPriceX96(token);
+            // A single-source Chainlink read (or a two-source read whose deviation check is disabled) has
+            // no independent price that would expose a changed feed precision, so its cached metadata is
+            // re-checked against the live contracts; a verified two-source read fails closed on its own
+            // (a 10^k mis-scaling always exceeds any representable maxDifference).
+            bool unverified = !_isTwoSourceMode(mode) || feedConfig.maxDifference == type(uint16).max;
+            uint256 chainlinkPriceX96 = _getChainlinkPriceX96(token, unverified);
             chainlinkReferencePriceX96 = cachedChainlinkReferencePriceX96 == 0
-                ? _getChainlinkPriceX96(referenceToken)
+                ? _getChainlinkPriceX96(referenceToken, unverified)
                 : cachedChainlinkReferencePriceX96;
             uint256 referencePriceX96 =
                 _normalizeChainlinkPrice(feedConfig, chainlinkPriceX96, chainlinkReferencePriceX96);
@@ -460,8 +466,10 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @dev Internal function that fetches feed price with stale check validation; the sequencer guard runs
     ///      once per read in the callers, see `_requireSequencerUp`.
     /// @param token Token address to get price for (use address(0) for native ETH)
+    /// @param checkDecimals Re-read the feed's `decimals()` and reject a value that differs from the one
+    ///        cached at configuration (an upgraded feed proxy would otherwise be scaled with the old exponent)
     /// @return uint256 Chainlink price normalized to Q96 format (decimal adjustment included)
-    function _getChainlinkPriceX96(address token) internal view returns (uint256) {
+    function _getChainlinkPriceX96(address token, bool checkDecimals) internal view returns (uint256) {
         if (token == chainlinkReferenceToken) {
             return Q96;
         }
@@ -471,6 +479,10 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         // Check if token is configured
         if (address(feedConfig.feed) == address(0)) {
             revert NotConfigured();
+        }
+
+        if (checkDecimals && feedConfig.feed.decimals() != feedConfig.feedDecimals) {
+            revert FeedDecimalsChanged();
         }
 
         // Get latest round data from Chainlink
