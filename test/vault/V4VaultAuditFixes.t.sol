@@ -51,4 +51,42 @@ contract V4VaultAuditFixesTest is V4VaultLocalBase {
         assertGt(amount0 + amount1, 0, "collateral paid out");
         assertEq(vault.loans(tokenId), 0, "debt cleared");
     }
+
+    // ==================== V4LE-86: lend allowance after a socialized loss ====================
+
+    /// @dev The daily lend allowance is 10% of the lent amount at the day's first reset. A liquidation
+    ///      whose uncovered reserve cost is written off against lenders lowers the lend exchange rate,
+    ///      so the allowance snapshot refers to claims that no longer exist and must be recomputed.
+    function testLiquidationHaircutShrinksSameDayLendAllowance() public {
+        _deposit(lender, 1000e18);
+        // nominal minimum lend quota, so today's lend allowance is 10% of the 1000 lent
+        vault.setLimits(0, 1e30, 1e30, 1, 1e30);
+        uint256 staleAllowance = vault.dailyLendIncreaseLimitLeft();
+        assertApproxEqRel(staleAllowance, 100e18, 1e12);
+
+        oracle.setMockPositionValue(1000e18);
+        uint256 tokenId = _createLoan(10e18);
+        _borrow(tokenId, 500e18);
+
+        // the collateral collapses: 50 comes from the liquidator, reserves are empty, lenders lose 450
+        oracle.setMockPositionValue(100e18);
+        uint256 lendRateBefore = vault.lastLendExchangeRateX96();
+        _liquidateAs(liquidator, tokenId, liquidator);
+        assertLt(vault.lastLendExchangeRateX96(), lendRateBefore, "lenders took the haircut");
+        (, uint256 lent,,,,) = vault.vaultInfo();
+        assertApproxEqRel(lent, 550e18, 1e12, "surviving lender claim");
+
+        uint256 allowance = vault.dailyLendIncreaseLimitLeft();
+        assertLe(allowance, lent / 10, "allowance is measured against the surviving claim");
+        assertGt(allowance, lent / 10 * 99 / 100, "and not below what a fresh day would grant");
+
+        // a deposit sized on the erased claims is refused, one within the recomputed allowance passes
+        asset.mint(lender, staleAllowance);
+        vm.startPrank(lender);
+        asset.approve(address(vault), staleAllowance);
+        vm.expectRevert(abi.encodeWithSignature("DailyLendIncreaseLimit()"));
+        vault.deposit(staleAllowance, lender);
+        vault.deposit(allowance, lender);
+        vm.stopPrank();
+    }
 }

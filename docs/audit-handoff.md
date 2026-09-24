@@ -90,6 +90,7 @@ Notes:
 - `V4Vault` intentionally holds lender funds, reserves, and collateral NFTs
 - unlike automators and hook helpers, it is not expected to end operations with zero balances
 - `liquidate` refuses the loan owner as caller and as collateral recipient: the reserve-backed liquidation branch subsidizes an independent liquidator, and a borrower must not collect that subsidy on their own loan (a second address stays possible; the check closes the direct and flash-helper paths)
+- a liquidation whose uncovered reserve cost is socialized (lend exchange rate written down) also caps the same-day lend allowance (`dailyLendIncreaseLimitLeft`) at what a fresh day would grant on the surviving lender claims, so a later deposit cannot consume an allowance sized on erased claims
 
 ### V4Oracle
 

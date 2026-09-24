@@ -1476,6 +1476,14 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             }
             lastLendExchangeRateX96 = newLendExchangeRateX96;
             emit ExchangeRateUpdate(newDebtExchangeRateX96, newLendExchangeRateX96);
+
+            // the same-day lend allowance was sized on claims that were just written off: never let a
+            // later deposit consume more than a fresh day's allowance on the surviving claims would grant
+            uint256 allowance =
+                _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
+            if (dailyLendIncreaseLimitLeft > allowance) {
+                dailyLendIncreaseLimitLeft = allowance;
+            }
         }
     }
 
