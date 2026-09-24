@@ -347,6 +347,14 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(aFlags, 0, "A receives nothing");
     }
 
+    /// @dev V4LE-27 companion: the fee controller learns the PositionManager from the real hook, so
+    ///      the rejection of the publicly sweepable PositionManager as fee recipient is live.
+    function testFeeControllerRefusesPositionManagerThroughRealHook() public {
+        assertEq(address(hook.positionManager()), address(positionManager));
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        feeController.setProtocolFeeRecipient(address(positionManager));
+    }
+
     // ==================== M-03: no dispatch while the pool is outside the oracle window ====================
 
     function testTriggerWaitsWhilePoolIsOutsideOracleWindow() public {
