@@ -28,8 +28,12 @@ import {MutableChainlinkFeed} from "test/oracle/support/OracleMocks.sol";
 ///         - External audit V4LE-6: `_calculateUncollectedFees` narrowed with `SafeCast.toUint128` and so
 ///           accepted fee amounts in [2^127, 2^128) that v4 can never pay out (fees are settled on every
 ///           collection and liquidity decrease of the position).
+///         - External audit V4LE-61: `_getAmounts` returned unbounded uint256 principal amounts, so a
+///           position whose current-side principal grew past 2^127 (the pool price crossed its range) was
+///           valued and borrowable while v4 rejects the decrease that a liquidation or full withdrawal needs.
 /// @dev Fork-free: real PoolManager / PositionManager from BaseTest, mock tokens, a real V4Oracle with mock
-///      1:1 Chainlink feeds. The oversized fee snapshot is written straight into PoolManager storage.
+///      Chainlink feeds. The oversized fee snapshot and the post-crossing pool price are written straight
+///      into PoolManager storage.
 contract V4OracleSettlementBoundTest is BaseTest {
     using EasyPosm for IPositionManager;
     using PoolIdLibrary for PoolKey;
@@ -43,6 +47,10 @@ contract V4OracleSettlementBoundTest is BaseTest {
     int24 constant FEE_TICK_LOWER = -600;
     int24 constant FEE_TICK_UPPER = 600;
     uint128 constant FEE_POSITION_LIQUIDITY = 2 ** 64;
+    int24 constant PRINCIPAL_TICK_LOWER = 600000;
+    int24 constant PRINCIPAL_TICK_UPPER = 600060;
+    int24 constant CROSSED_TICK = 600100;
+    uint8 constant FEED_DECIMALS = 8;
 
     Currency currency0;
     Currency currency1;
@@ -62,8 +70,8 @@ contract V4OracleSettlementBoundTest is BaseTest {
 
         oracle = new V4Oracle(positionManager, Currency.unwrap(currency1), address(0xdead));
         oracle.setMaxPoolPriceDifference(200);
-        feed0 = new MutableChainlinkFeed(1e8, 8);
-        feed1 = new MutableChainlinkFeed(1e8, 8);
+        feed0 = new MutableChainlinkFeed(int256(10 ** FEED_DECIMALS), FEED_DECIMALS);
+        feed1 = new MutableChainlinkFeed(int256(10 ** FEED_DECIMALS), FEED_DECIMALS);
         _configureToken(Currency.unwrap(currency0), feed0);
         _configureToken(Currency.unwrap(currency1), feed1);
     }
@@ -100,6 +108,84 @@ contract V4OracleSettlementBoundTest is BaseTest {
 
         (, uint256 feeValue,,) = oracle.getValue(tokenId, Currency.unwrap(currency1));
         assertEq(feeValue, V4_SETTLEMENT_BOUND - 1, "fee value follows at the 1:1 price");
+    }
+
+    // ---------------------------------------------------------------- V4LE-61: principal
+
+    function testPrincipalAtSettlementBoundIsRejectedLikeV4() public {
+        // minted below its range with a small token0 amount, then the pool price crosses above it
+        uint128 liquidity = 2 ** 93;
+        uint256 tokenId = _mintPrincipalPosition(liquidity);
+        _crossAboveRange();
+        uint256 amount1 = _principalAmount1(liquidity);
+        assertGe(amount1, V4_SETTLEMENT_BOUND, "scenario: token1 principal at or above the v4 bound");
+
+        // v4 ground truth: the full decrease (liquidation / withdrawal) reverts at the int128 narrowing
+        vm.expectRevert(SafeCast.SafeCastOverflow.selector);
+        positionManager.modifyLiquidities(_decreaseCalldata(tokenId, liquidity), block.timestamp);
+
+        // the oracle no longer certifies the amount (the old code valued it at amount1)
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getValue(tokenId, Currency.unwrap(currency1));
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getPositionBreakdown(tokenId);
+    }
+
+    function testPrincipalJustBelowSettlementBoundIsValued() public {
+        uint128 liquidity = 2 ** 91;
+        uint256 tokenId = _mintPrincipalPosition(liquidity);
+        _crossAboveRange();
+        uint256 amount1 = _principalAmount1(liquidity);
+        assertLt(amount1, V4_SETTLEMENT_BOUND, "control: token1 principal below the v4 bound");
+        assertGt(amount1, V4_SETTLEMENT_BOUND / 8, "control: still a huge position");
+
+        (uint256 value, uint256 feeValue,,) = oracle.getValue(tokenId, Currency.unwrap(currency1));
+        assertEq(value, amount1, "valued at its token1 principal");
+        assertEq(feeValue, 0);
+        (,,,, uint256 breakdown0, uint256 breakdown1,,) = oracle.getPositionBreakdown(tokenId);
+        assertEq(breakdown0, 0);
+        assertEq(breakdown1, amount1);
+    }
+
+    function _mintPrincipalPosition(uint128 liquidity) internal returns (uint256 tokenId) {
+        (tokenId,) = positionManager.mint(
+            poolKey,
+            PRINCIPAL_TICK_LOWER,
+            PRINCIPAL_TICK_UPPER,
+            liquidity,
+            type(uint128).max,
+            type(uint128).max,
+            address(this),
+            block.timestamp,
+            ""
+        );
+    }
+
+    /// @dev Moves the pool's slot0 above the principal range (no active liquidity is in the way of such
+    ///      a crossing on a real pool; writing it directly avoids swapping ~2^127 tokens) and points the
+    ///      currency0 feed at the new price so the oracle's pool/feed deviation check passes.
+    function _crossAboveRange() internal {
+        uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(CROSSED_TICK);
+        bytes32 stateSlot = StateLibrary._getPoolStateSlot(poolId);
+        uint256 slot0 = uint256(vm.load(address(poolManager), stateSlot));
+        uint256 priceAndTickMask = (uint256(1) << 184) - 1;
+        slot0 = (slot0 & ~priceAndTickMask) | uint256(sqrtPriceX96) | (uint256(uint24(CROSSED_TICK)) << 160);
+        vm.store(address(poolManager), stateSlot, bytes32(slot0));
+        (uint160 liveSqrtPriceX96, int24 liveTick,,) = poolManager.getSlot0(poolId);
+        assertEq(liveSqrtPriceX96, sqrtPriceX96, "pool price written");
+        assertEq(liveTick, CROSSED_TICK, "pool tick written");
+
+        uint256 livePriceX96 = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96);
+        feed0.setAnswer(int256(FullMath.mulDiv(livePriceX96, 10 ** FEED_DECIMALS, Q96)));
+    }
+
+    /// @dev Token1 principal of a position entirely above its range, as v4 computes it.
+    function _principalAmount1(uint128 liquidity) internal pure returns (uint256) {
+        return FullMath.mulDiv(
+            liquidity,
+            TickMath.getSqrtPriceAtTick(PRINCIPAL_TICK_UPPER) - TickMath.getSqrtPriceAtTick(PRINCIPAL_TICK_LOWER),
+            Q96
+        );
     }
 
     function _mintFeePosition() internal returns (uint256 tokenId) {

@@ -682,7 +682,12 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     }
 
     /// @notice Calculates token amounts of a position based on oracle-derived price
-    /// @dev Internal function that converts liquidity to token amounts using oracle price instead of pool price
+    /// @dev Internal function that converts liquidity to token amounts using oracle price instead of pool price.
+    ///      An amount >= 2^127 is reported with `SettlementBoundExceeded`: `Pool.modifyLiquidity` narrows the
+    ///      principal delta of a decrease with `toInt128()`, so v4 cannot pay such an amount out in one
+    ///      operation (the vault's liquidation and full withdrawal), and the oracle does not certify it as
+    ///      collateral. The state is reachable without any oracle attack, by the pool price crossing a range
+    ///      whose other-side principal is that large.
     /// @param state Complete PositionState struct containing position data and derived price
     /// @return amount0 Calculated amount of token0 based on oracle-derived sqrt price
     /// @return amount1 Calculated amount of token1 based on oracle-derived sqrt price
@@ -700,6 +705,9 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
                 state.sqrtPriceX96Upper, // Upper tick price
                 state.liquidity // Position liquidity
             );
+            if (amount0 >= V4_SETTLEMENT_BOUND || amount1 >= V4_SETTLEMENT_BOUND) {
+                revert SettlementBoundExceeded();
+            }
         }
     }
 
