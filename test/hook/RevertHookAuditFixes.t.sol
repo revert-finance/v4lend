@@ -19,6 +19,9 @@ import {RevertHook} from "src/RevertHook.sol";
 import {RevertHookState} from "src/hook/RevertHookState.sol";
 import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {RevertHookTest} from "test/hook/RevertHook.t.sol";
+import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
+import {V4Vault} from "src/vault/V4Vault.sol";
+import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 
 /// @dev Stand-in for a registered lending vault. `transform` forwards borrower-chosen calldata
 ///      exactly like V4Vault.transform does (the C-01 entry point); with `spoof` set it ignores
@@ -225,6 +228,7 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         IERC721(address(positionManager)).transferFrom(address(this), fakeVault, oldTokenId);
         IERC721(address(positionManager)).transferFrom(address(this), fakeVault, newTokenId);
         vm.mockCall(fakeVault, abi.encodeWithSignature("transformedTokenId()"), abi.encode(newTokenId));
+        vm.mockCall(fakeVault, abi.encodeWithSignature("transformOriginTokenId()"), abi.encode(oldTokenId));
         vm.mockCall(fakeVault, abi.encodeWithSignature("ownerOf(uint256)", oldTokenId), abi.encode(oldOwner));
         vm.mockCall(fakeVault, abi.encodeWithSignature("ownerOf(uint256)", newTokenId), abi.encode(newOwner));
     }
@@ -289,6 +293,49 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         (uint8 newFlags,,,,,,,,,,,,) = hook.positionConfigs(newTokenId);
         assertEq(newFlags, PositionModeFlags.MODE_AUTO_EXIT, "config follows the remint");
         vm.clearMockedCalls();
+    }
+
+    /// @dev V4LE-28: the vault forwards borrower calldata to any allowlisted transformer, the hook
+    ///      included. A borrower who owns two vault positions A and B could run
+    ///      `vault.transform(A, hook, migrateVaultPosition(B, A))`: A is the transformed token, both
+    ///      NFTs sit in the vault and share a loan owner, so every guard passed and B's automation,
+    ///      swap protection and carried fee were rewritten onto A while B was silently disabled.
+    ///      The retired token must be the one the transform started with.
+    function testMigrateVaultPositionRefusesTokenOtherThanTransformOrigin() public {
+        InterestRateModel irm = new InterestRateModel(0, 0, 0, 0);
+        V4Vault lendVault = new V4Vault(
+            "Local lending vault",
+            "lLOCAL",
+            Currency.unwrap(currency0),
+            positionManager,
+            irm,
+            v4Oracle,
+            NativeWrapper(payable(address(positionManager))).WETH9()
+        );
+        uint32 collateralFactor = uint32(uint256(2 ** 32) * 9 / 10);
+        lendVault.setTokenConfig(Currency.unwrap(currency0), collateralFactor, type(uint32).max);
+        lendVault.setTokenConfig(Currency.unwrap(currency1), collateralFactor, type(uint32).max);
+        lendVault.setHookAllowList(address(hook), true);
+        lendVault.setTransformer(address(hook), true);
+        lendVault.setLimits(0, 10e18, 10e18, 10e18, 10e18);
+        hook.setVault(address(lendVault));
+
+        // B carries automation, A is a plain second position of the same borrower
+        hook.setPositionConfig(token2Id, _autoExitConfig(tickLower2 - poolKey.tickSpacing, tickUpper2));
+        IERC721(address(positionManager)).approve(address(lendVault), token2Id);
+        lendVault.create(token2Id, address(this));
+        IERC721(address(positionManager)).approve(address(lendVault), token3Id);
+        lendVault.create(token3Id, address(this));
+
+        vm.expectRevert(abi.encodeWithSignature("TransformFailed()"));
+        lendVault.transform(
+            token3Id, address(hook), abi.encodeCall(hook.migrateVaultPosition, (token2Id, token3Id))
+        );
+
+        (uint8 bFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(bFlags, PositionModeFlags.MODE_AUTO_EXIT, "B keeps its automation");
+        (uint8 aFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(aFlags, 0, "A receives nothing");
     }
 
     // ==================== M-03: no dispatch while the pool is outside the oracle window ====================

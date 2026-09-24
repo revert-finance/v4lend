@@ -369,6 +369,7 @@ Highest-value review areas:
 
 - whole-balance accounting in hook/helpers/transformers/automators is intentional; where an operation compares its own amounts against a whole balance (the leverage transformer's added-amount checks) the subtraction saturates, so unsolicited dust pushed into a transformer can only end up with the recipient, never revert the operation
 - `AutoLend` intentionally holds ERC4626 shares while a position is lent
+- the vault records the token a transform started with in transient storage (`transformOriginTokenId`); the hook's `migrateVaultPosition` accepts only that token as the retired one, so borrower-chosen transform calldata cannot point the migration at another position of the same owner
 - the hook's `_custodiedShares` reserve is honored on every balance the running action may spend, including the zero-share-deposit guard and the liquidity restore that follows it: a pool whose currency is another auto-lend vault's share token can never have another position's shares consumed by a rebuild
 - hook swap routing is protocol-managed, not user-managed
 - hook swap fees are direct-send, not retained

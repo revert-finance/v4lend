@@ -1565,6 +1565,7 @@ contract RevertHookTest is BaseTest {
         IERC721(address(positionManager)).transferFrom(address(this), fakeVault, oldTokenId);
         IERC721(address(positionManager)).transferFrom(address(this), fakeVault, newTokenId);
         vm.mockCall(fakeVault, abi.encodeWithSignature("transformedTokenId()"), abi.encode(newTokenId));
+        vm.mockCall(fakeVault, abi.encodeWithSignature("transformOriginTokenId()"), abi.encode(oldTokenId));
         vm.mockCall(
             fakeVault, abi.encodeWithSignature("ownerOf(uint256)", oldTokenId), abi.encode(address(this))
         );

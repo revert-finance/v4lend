@@ -66,7 +66,16 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         if (address(this) == _selfAddress) {
             revert Unauthorized();
         }
-        if (!_vaults[msg.sender] || oldTokenId == newTokenId || IVault(msg.sender).transformedTokenId() != newTokenId) {
+        // The vault forwards borrower-chosen calldata to any allowlisted transformer, this hook
+        // included, so `oldTokenId` must be the token the running transform started with: the
+        // vault records it when the transform begins and the remint moves transformedTokenId to
+        // the replacement. Otherwise a borrower could name any other position they own and have
+        // its automation, swap protection and carried fee rewritten onto the transformed one.
+        IVault vault = IVault(msg.sender);
+        if (
+            !_vaults[msg.sender] || oldTokenId == newTokenId || vault.transformedTokenId() != newTokenId
+                || vault.transformOriginTokenId() != oldTokenId
+        ) {
             revert Unauthorized();
         }
         IERC721 nft = IERC721(address(positionManager));
@@ -78,7 +87,6 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         // owner: the old token's owner record is the account that now owns the replacement. A
         // different owner means a borrower is pointing at someone else's position (M-02). The old
         // token may keep liquidity (partial range changes leave some behind).
-        IVault vault = IVault(msg.sender);
         if (vault.ownerOf(oldTokenId) != vault.ownerOf(newTokenId)) {
             revert Unauthorized();
         }

@@ -175,6 +175,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     mapping(uint256 => address) private tokenOwner; // Mapping from token ID to owner
 
     uint256 public override transformedTokenId; // stores currently transformed token (is always reset to 0 after tx)
+
+    /// @dev Transient slot holding the token id a running transform started with. A remint moves
+    ///      transformedTokenId to the replacement, so the hook's migration entry needs the origin to
+    ///      bind the retired token it is asked to migrate from to this very transform.
+    bytes32 internal constant _TRANSFORM_ORIGIN_SLOT = keccak256("V4Vault.transformOriginTokenId");
     uint256 private liquidatingTokenId; // stores currently liquidated token during collateral payout callbacks
 
     mapping(address => bool) public transformerAllowList; // contracts allowed to transform positions (selected audited contracts e.g. V4Utils)
@@ -634,6 +639,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Reentrancy();
         }
         transformedTokenId = tokenId;
+        bytes32 originSlot = _TRANSFORM_ORIGIN_SLOT;
+        assembly ("memory-safe") {
+            tstore(originSlot, tokenId)
+        }
 
         (uint256 newDebtExchangeRateX96,) = _updateGlobalInterest();
 
@@ -687,6 +696,17 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         _requireLoanIsHealthy(newTokenId, debt);
 
         transformedTokenId = 0;
+        assembly ("memory-safe") {
+            tstore(originSlot, 0)
+        }
+    }
+
+    /// @inheritdoc IVault
+    function transformOriginTokenId() external view override returns (uint256 tokenId) {
+        bytes32 originSlot = _TRANSFORM_ORIGIN_SLOT;
+        assembly ("memory-safe") {
+            tokenId := tload(originSlot)
+        }
     }
 
     /// @notice Borrows specified amount of the vault's asset using the position as collateral
