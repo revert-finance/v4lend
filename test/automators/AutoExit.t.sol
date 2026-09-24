@@ -567,6 +567,66 @@ contract AutoExitTest is AutomatorTestBase {
 
     // --- Vault Exit Test ---
 
+    /// @notice V4LE-14: the automation reward was reserved before the vault debt was repaid, so a
+    ///         loan whose gross proceeds cover the debt but whose reward-reduced proceeds do not could
+    ///         never be exited: repayment left debt on an emptied position and the vault's health
+    ///         check rolled the whole exit back. Debt is senior to the reward.
+    function test_ExecuteWithVaultRepaysDebtBeforeReservingReward() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        uint64 reward = uint64(Q64 / 5); // 20% of the proceeds
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: reward,
+            onlyFees: false
+        });
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoExit), true);
+
+        // price below the range: the position is all USDC (the lend token). Borrow 88% of full value:
+        // gross proceeds cover it, proceeds after a 20% reward do not.
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        (, uint256 fullValue,,,) = vault.loanInfo(tokenId);
+        uint256 debt = fullValue * 88 / 100;
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, debt);
+        uint256 recipientBefore = usdc.balanceOf(protocolFeeRecipient);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: reward
+        });
+        _executeWithVault(params);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "position exited");
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "debt fully repaid from gross proceeds");
+        uint256 rewardPaid = usdc.balanceOf(protocolFeeRecipient) - recipientBefore;
+        assertGt(rewardPaid, 0, "the reward is capped to the residual, not dropped");
+        assertLt(rewardPaid, fullValue / 5, "reward reduced by what the debt needed");
+    }
+
     function test_ExecuteWithVault() public {
         // Increase oracle tolerance for large swap price impact
         v4Oracle.setMaxPoolPriceDifference(10000);
