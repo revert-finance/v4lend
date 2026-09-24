@@ -7,7 +7,9 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -23,6 +25,43 @@ import {DirectSwapper, BlacklistingToken} from "test/hook/HookAuctionController.
 
 import {RevertHook} from "src/RevertHook.sol";
 import {HookLeaseController} from "src/hook/HookLeaseController.sol";
+
+/// @notice Permissionless forwarder: ANYONE can swap through it. Models the public executor of
+///         external audit V4LE-36 - a lessee registering it hands its discount to every caller.
+contract PublicSwapper is IUnlockCallback {
+    IPoolManager internal immutable poolManager;
+
+    constructor(IPoolManager _poolManager) {
+        poolManager = _poolManager;
+    }
+
+    function swapExactIn(PoolKey memory key, bool zeroForOne, uint256 amountIn) external returns (uint256 amountOut) {
+        amountOut = abi.decode(poolManager.unlock(abi.encode(key, zeroForOne, amountIn)), (uint256));
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(poolManager), "PublicSwapper: not poolManager");
+        (PoolKey memory key, bool zeroForOne, uint256 amountIn) = abi.decode(data, (PoolKey, bool, uint256));
+        BalanceDelta delta = poolManager.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(amountIn),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            ""
+        );
+        Currency inCurrency = zeroForOne ? key.currency0 : key.currency1;
+        Currency outCurrency = zeroForOne ? key.currency1 : key.currency0;
+        uint256 owed = uint256(uint128(-(zeroForOne ? delta.amount0() : delta.amount1())));
+        uint256 received = uint256(uint128(zeroForOne ? delta.amount1() : delta.amount0()));
+        poolManager.sync(inCurrency);
+        IERC20(Currency.unwrap(inCurrency)).transfer(address(poolManager), owed);
+        poolManager.settle();
+        poolManager.take(outCurrency, address(this), received);
+        return abi.encode(received);
+    }
+}
 
 contract HookLeaseControllerTest is BaseTest {
     using EasyPosm for IPositionManager;
@@ -551,6 +590,71 @@ contract HookLeaseControllerTest is BaseTest {
         vm.warp(uint256(paidThrough));
         leaseController.evictLease(leasePoolKey);
         leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    /// @notice External audit V4LE-36 (V4LE-22 composed with a public executor): a lessee registers
+    ///         a permissionless forwarder as executor, so EVERY caller routing through it trades at
+    ///         the discount. With the saturated runway of V4LE-22 that subsidy survived the owner's
+    ///         wind-down for ~34,000 years: evictLease reverted while now < paidThrough == uint40.max
+    ///         and configurePool stayed blocked. With the bounded runway, setLeasingEnabled(false)
+    ///         freezes top-ups and runway-extending price cuts, so the lease - and the public
+    ///         discount - ends within MAX_PREPAID_RUNWAY_SECONDS and eviction opens to anyone.
+    function testWindDownEndsPublicExecutorDiscountWithinBoundedRunway() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1; // rent rounds up to 1 wei/second at the minimum price
+        leaseController.configurePool(leasePoolKey, config);
+        uint256 maxRunway = leaseController.MAX_PREPAID_RUNWAY_SECONDS();
+
+        PublicSwapper pub = new PublicSwapper(poolManager);
+        token0.transfer(address(pub), 10e18);
+        token1.transfer(address(pub), 10e18);
+        address stranger = makeAddr("stranger");
+
+        // the saturating deposit of the audit is refused; the lessee prepays the maximum instead
+        uint256 sentinelDeposit = uint256(type(uint40).max) - block.timestamp + 1;
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.startLease(leasePoolKey, address(pub), 1, sentinelDeposit);
+        _startLease(lesseeA, address(pub), 1, maxRunway);
+
+        // anyone routing through the public executor gets the discount
+        (uint256 outPublic, uint256 outOther) = _publicVsOther(pub, stranger, 1e18);
+        assertGt(outPublic, outOther, "the public executor forwards the discount to a stranger");
+
+        // wind-down: the prepaid lease is honored, but only up to the bounded runway
+        leaseController.setLeasingEnabled(leasePoolKey, false);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertLe(paidThrough, block.timestamp + maxRunway, "runway bounded");
+        vm.warp(uint256(paidThrough) - 1);
+        vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
+        leaseController.evictLease(leasePoolKey);
+        (outPublic, outOther) = _publicVsOther(pub, stranger, 1e18);
+        assertGt(outPublic, outOther, "still honored inside the runway");
+
+        // at the bound the discount is gone, anyone can evict, the owner can retire the pool
+        vm.warp(uint256(paidThrough));
+        (outPublic, outOther) = _publicVsOther(pub, stranger, 1e18);
+        assertEq(outPublic, outOther, "no discount through the public executor after the runway");
+        vm.prank(stranger);
+        leaseController.evictLease(leasePoolKey);
+        (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, address(0), "slot freed");
+        leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    /// @dev Swap output of a stranger routing through the public executor vs a plain swapper, at
+    ///      the same pool state (each in its own snapshot).
+    function _publicVsOther(PublicSwapper pub, address caller, uint256 amountIn)
+        internal
+        returns (uint256 outPublic, uint256 outOther)
+    {
+        uint256 snap = vm.snapshotState();
+        vm.prank(caller);
+        outPublic = pub.swapExactIn(leasePoolKey, true, amountIn);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        outOther = otherSwapper.swapExactIn(leasePoolKey, true, amountIn);
+        vm.revertToState(snap);
     }
 
     /// @notice External audit V4LE-22: a price cut lowers the rent and stretches the remaining

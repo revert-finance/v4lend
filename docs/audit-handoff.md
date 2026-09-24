@@ -186,6 +186,7 @@ Known design points auditors should read first:
 - the discount applies only when `sender == executor`; hook-internal swaps never receive it
 - drips `sync`/`settle` inside the caller's unlock, which assumes integrators sync immediately before paying
 - controllers hold bidder escrow and prepaid rent; refunds are pull-based
+- lease wind-down is finite (external audit V4LE-36): `setLeasingEnabled(false)` freezes top-ups and runway-extending price cuts, and the prepaid runway is capped at `MAX_PREPAID_RUNWAY_SECONDS`, so a running lease - including one whose registered executor is a permissionless forwarder that hands the discount to every caller - ends within that bound and `evictLease` (permissionless) then frees the slot for `configurePool`
 
 ### Hook Protocol Fee Deferral
 
