@@ -76,6 +76,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     event SetSequencerUptimeFeed(address sequencerUptimeFeed);
 
     error InvalidPool();
+    error SqrtPriceOutOfRange();
 
     enum Mode {
         NOT_SET,
@@ -150,7 +151,15 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
         (uint256 price0X96, uint256 chainlinkReferencePriceX96) = _getReferenceTokenPriceX96(token0, 0);
         (uint256 price1X96,) = _getReferenceTokenPriceX96(token1, chainlinkReferencePriceX96);
-        return SafeCast.toUint160(Math.sqrt(FullMath.mulDiv(price0X96, Q96, price1X96)) * (2 ** 48));
+        uint256 sqrtPriceX96 = _sqrtPriceX96FromPriceX96(FullMath.mulDiv(price0X96, Q96, price1X96));
+        // Callers use this value numerically (swap floors, oracle ticks), so a ratio outside the
+        // sqrt-price domain is reported as such instead of surfacing as a SafeCast revert (above)
+        // or a silent zero (below).
+        if (sqrtPriceX96 < TickMath.MIN_SQRT_PRICE || sqrtPriceX96 > TickMath.MAX_SQRT_PRICE) {
+            revert SqrtPriceOutOfRange();
+        }
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint160(sqrtPriceX96);
     }
 
     /// @notice Gets value of a V4 position in a specific token
@@ -630,8 +639,21 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint256 priceX96 = _priceX96FromSqrtPriceX96(state.sqrtPriceX96);
         _requireMaxDifference(priceX96, derivedPoolPriceX96, maxPoolPriceDifference);
 
-        // Calculate derived sqrt price
-        state.derivedSqrtPriceX96 = SafeCast.toUint160(Math.sqrt(derivedPoolPriceX96) * (2 ** 48));
+        // Derived sqrt price, used only to split the position's liquidity into token amounts.
+        // That split saturates outside the position's tick range, and no range extends past the
+        // TickMath bounds, so clamping the derived price to those bounds yields exactly the
+        // amounts of the unclamped value. A live pool sitting at the price boundary with an
+        // honest feed ratio a fraction of a percent higher still passes the deviation check but
+        // overflows uint160 (MAX_SQRT_PRICE is within 0.01% of it); an unchecked cast would then
+        // revert here and block valuation, health checks and liquidation of the position.
+        uint256 derivedSqrtPriceX96 = _sqrtPriceX96FromPriceX96(derivedPoolPriceX96);
+        if (derivedSqrtPriceX96 > TickMath.MAX_SQRT_PRICE) {
+            derivedSqrtPriceX96 = TickMath.MAX_SQRT_PRICE;
+        } else if (derivedSqrtPriceX96 < TickMath.MIN_SQRT_PRICE) {
+            derivedSqrtPriceX96 = TickMath.MIN_SQRT_PRICE;
+        }
+        // forge-lint: disable-next-line(unsafe-typecast)
+        state.derivedSqrtPriceX96 = uint160(derivedSqrtPriceX96);
 
         // Get position liquidity and previous fee growth data
         (state.liquidity, state.feeGrowthInside0LastX128, state.feeGrowthInside1LastX128) = StateLibrary.getPositionInfo(
@@ -641,6 +663,13 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     function _priceX96FromSqrtPriceX96(uint160 sqrtPriceX96) internal pure returns (uint256) {
         return FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96);
+    }
+
+    /// @dev Inverse of _priceX96FromSqrtPriceX96 (sqrt(p * 2^96) * 2^48 = sqrt(p) * 2^96). Returns
+    ///      uint256: the result exceeds uint160 for price ratios above ~2^128, which callers decide
+    ///      how to treat.
+    function _sqrtPriceX96FromPriceX96(uint256 priceX96) internal pure returns (uint256) {
+        return Math.sqrt(priceX96) * (2 ** 48);
     }
 
     /// @notice Calculates token amounts of a position based on oracle-derived price

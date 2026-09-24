@@ -102,6 +102,10 @@ Purpose:
 - oracle-vs-pool deviation checks
 - L2 sequencer guard integration
 
+Boundary behavior:
+- the feed-derived sqrt price in `_loadPositionState` only splits liquidity into token amounts, which saturates beyond the position's range, so it is clamped to `TickMath.MIN_SQRT_PRICE..MAX_SQRT_PRICE` (exact, no value change). A pool at the price boundary with an honest feed ratio slightly above it therefore stays valuable and liquidatable instead of reverting in a `uint160` cast
+- `getPoolSqrtPriceX96` is consumed numerically (swap floors, oracle ticks) and reverts with `SqrtPriceOutOfRange` for ratios outside the sqrt-price domain rather than overflowing above or returning zero below
+
 ### RevertHook
 
 Files:
