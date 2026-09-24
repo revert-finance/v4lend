@@ -1311,6 +1311,89 @@ contract HookAuctionControllerTest is BaseTest {
         winnerSwapper.swapExactIn(key, zeroForOne, 1e18);
     }
 
+    /// @notice External audit V4LE-42: a FAILED active-epoch donate used to be retry-only - the
+    ///         vested slice stayed claimable and kept growing for the whole outage, so the first
+    ///         successful drip after the currency recovered paid the entire accrued amount in ONE
+    ///         lump to whoever was in range at that instant, i.e. to a JIT position that entered
+    ///         during the outage and waited one throttle window. The failed slice must be parked
+    ///         into the pending bucket and recover at the paced release, like a zero-liquidity gap.
+    function testDonateFailureParksSliceAndRecoversThroughPacedRelease() public {
+        BlacklistingToken bt = new BlacklistingToken();
+        bt.mint(address(this), 10_000_000 ether);
+        bt.approve(address(permit2), type(uint256).max);
+        permit2.approve(address(bt), address(positionManager), type(uint160).max, type(uint48).max);
+        MockERC20 partner = deployToken();
+        partner.mint(address(this), 10_000_000 ether);
+
+        (Currency c0, Currency c1) = address(bt) < address(partner)
+            ? (Currency.wrap(address(bt)), Currency.wrap(address(partner)))
+            : (Currency.wrap(address(partner)), Currency.wrap(address(bt)));
+        PoolKey memory key = PoolKey(c0, c1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
+        PoolId pid = key.toId();
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        // the incumbent LP, in range for the whole epoch
+        positionManager.mint(
+            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.auctionCurrency = Currency.wrap(address(bt));
+        auctionController.configurePool(key, config);
+        uint64 s = uint64(block.timestamp);
+
+        uint256 bid = 1e18;
+        uint256 totalDrip = bid - bid * PROTOCOL_FEE_BPS / 10_000;
+        bt.mint(bidderA, 10e18);
+        vm.prank(bidderA);
+        bt.approve(address(auctionController), type(uint256).max);
+        vm.prank(bidderA);
+        auctionController.bidNext(key, address(winnerSwapper), bid);
+
+        // won epoch: one successful drip right at the start, then the currency blacklists the controller
+        uint256 t = uint256(s) + EPOCH_LENGTH + 1;
+        vm.warp(t);
+        auctionController.drip(key);
+        bt.setBlockedSender(address(auctionController));
+
+        // 90% of the epoch passes broken; a touch attempts the donate and fails
+        t += EPOCH_LENGTH * 9 / 10;
+        vm.warp(t);
+        auctionController.drip(key);
+        // donations are the controller's only outflow, so its balance drop measures what LPs got
+        uint256 controllerBeforeJit = bt.balanceOf(address(auctionController));
+
+        // JIT: 100x the incumbent's liquidity enters during the outage (its own mint touch cannot donate)
+        positionManager.mint(
+            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10_000e18,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        assertEq(bt.balanceOf(address(auctionController)), controllerBeforeJit, "nothing donated while blacklisted");
+
+        // the currency recovers; the JIT waits exactly one throttle window and drips
+        t += MIN_DRIP;
+        vm.warp(t);
+        bt.setBlockedSender(address(0));
+        auctionController.drip(key);
+        uint256 released = controllerBeforeJit - bt.balanceOf(address(auctionController));
+
+        // the old code paid ~90% of totalDrip here; a paced recovery pays at most the pending
+        // slice for the elapsed window plus the freshly vested window
+        uint256 slice = totalDrip * MIN_DRIP / EPOCH_LENGTH;
+        assertGt(released, 0, "the drip works again");
+        assertLe(released, 3 * slice, "recovery pays a paced slice, not the outage's accrued lump");
+        (,, uint256 pending) = auctionController.getPoolAuctionState(pid);
+        assertGt(pending, totalDrip * 8 / 10, "the outage's accrual stays parked for paced release");
+
+        // and the parked value does reach LPs over the following epochs
+        _drainPending(key);
+        (,, pending) = auctionController.getPoolAuctionState(pid);
+        assertEq(pending, 0, "pending fully drains");
+        assertEq(
+            bt.balanceOf(address(auctionController)), bid - totalDrip, "controller keeps only the protocol fee"
+        );
+    }
+
     function testFeeOnTransferDonateIsIsolatedAndDoesNotBrickPool() public {
         // Codex P1: a currency that begins charging a transfer fee AFTER a bid is escrowed makes
         // the donate under-settle the PoolManager. donateExternal must detect the shortfall and

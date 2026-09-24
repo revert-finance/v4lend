@@ -1005,9 +1005,18 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
         amountToDonate = _donate(key, poolId, config, claimable);
         if (amountToDonate == 0) {
-            // donate failed: back off for minDripSeconds (vesting is computed from epochStart and
-            // `donated`, so throttling retries loses nothing)
+            // donate failed (e.g. blacklisting auction currency): park the vested slice into the
+            // pending bucket, exactly like the zero-liquidity branch, and back off for
+            // minDripSeconds. Leaving it claimable instead would let it keep accruing across the
+            // whole outage and pay out in ONE lump - the entire epoch's drip so far - to whoever
+            // is in range the moment donates work again, i.e. to a JIT position that entered
+            // during the outage. Parked value recovers through _dripPending's paced release
+            // (one epoch's drip per epoch length, throttled), the same anti-JIT bound as a
+            // zero-liquidity gap. The active epoch keeps vesting from `donated`, so nothing is
+            // counted twice.
+            auction.donated += uint128(claimable);
             auction.lastDripTime = uint64(block.timestamp);
+            _addPending(state, claimable, totalDrip);
             return 0;
         }
 
