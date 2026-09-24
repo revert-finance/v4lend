@@ -272,9 +272,9 @@ contract HookAuctionControllerTest is BaseTest {
         vm.warp(uint256(startTime) + uint256(epoch) * EPOCH_LENGTH + 1);
     }
 
-    /// @dev Pending donation now releases gradually (anti-JIT); drive it to empty by warping a
-    ///      full epoch per drip so the flush branch releases the remainder. Warps then drips
-    ///      before checking, so the first call also rolls any end-of-epoch remainder into pending.
+    /// @dev Pending donation releases gradually (anti-JIT) at one epoch's drip per epoch length;
+    ///      drive it to empty by warping a full epoch per drip. Warps then drips before checking,
+    ///      so the first call also rolls any end-of-epoch remainder into pending.
     function _drainPending(PoolKey memory key) internal {
         for (uint256 i = 0; i < 60; i++) {
             vm.warp(block.timestamp + EPOCH_LENGTH);
@@ -841,6 +841,76 @@ contract HookAuctionControllerTest is BaseTest {
         (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
         // throttled in the same block: essentially nothing is released to the JIT
         assertEq(pendingAfter, pendingBefore, "no catch-up dumped to a same-block JIT");
+    }
+
+    /// @notice Audit: the pending bucket aggregates every carried epoch, so a release sized as a
+    ///         fraction of the WHOLE bucket lets a dust LP that appears after a long zero-liquidity
+    ///         stretch capture N epochs' worth per throttle slice. The release must instead be paced
+    ///         by one epoch's drip, so the slice is the same whether one epoch or many were carried.
+    function testPendingSliceIsBoundedByOneEpochDripNotByAggregate() public {
+        uint256 bid = 1e18;
+        uint256 totalDrip = bid - bid * PROTOCOL_FEE_BPS / 10_000;
+
+        // pool sits at zero liquidity while three won epochs accrue and carry into pending
+        uint256 liquidity = positionManager.getPositionLiquidity(fullRangeTokenId);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, liquidity, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        for (uint64 e = 0; e < 3; e++) {
+            _bid(bidderA, address(winnerSwapper), bid);
+            _warpToEpoch(e + 1);
+            auctionController.drip(auctionPoolKey);
+        }
+        _warpToEpoch(5);
+        auctionController.drip(auctionPoolKey); // last won epoch carried too
+        (,, uint256 pendingBefore) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertGt(pendingBefore, totalDrip * 3 * 99 / 100, "three epochs of drip aggregated in pending");
+        (, uint128 pace) = auctionController.getPendingRelease(auctionPoolId);
+        assertEq(pace, totalDrip, "release paced by a single epoch's drip");
+
+        // dust LP appears alone, waits exactly one throttle interval, drips
+        positionManager.mint(
+            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 1e6,
+            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        vm.warp(block.timestamp + MIN_DRIP);
+        auctionController.drip(auctionPoolKey);
+        (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
+        uint256 released = pendingBefore - pendingAfter;
+        uint256 oneEpochSlice = totalDrip * MIN_DRIP / EPOCH_LENGTH;
+        assertGt(released, 0, "a held slice is released");
+        assertLe(released, oneEpochSlice + 1, "slice bounded by ONE epoch's drip over the interval");
+
+        // every further slice is bounded the same way, and the bucket still fully drains
+        for (uint256 i = 0; i < 5; i++) {
+            (,, uint256 before) = auctionController.getPoolAuctionState(auctionPoolId);
+            vm.warp(block.timestamp + MIN_DRIP);
+            auctionController.drip(auctionPoolKey);
+            (,, uint256 after_) = auctionController.getPoolAuctionState(auctionPoolId);
+            assertLe(before - after_, oneEpochSlice + 1, "later slices bounded too");
+        }
+        _drainPending(auctionPoolKey);
+        (,, uint256 pendingFinal) = auctionController.getPoolAuctionState(auctionPoolId);
+        assertEq(pendingFinal, 0, "aggregate still drains completely");
+        (, pace) = auctionController.getPendingRelease(auctionPoolId);
+        assertEq(pace, 0, "pace resets with the drained bucket");
+    }
+
+    /// @notice The bucket's pace follows the LARGEST contributing epoch, so a small carry after a
+    ///         large one neither slows the large one down nor speeds itself up beyond it.
+    function testPendingPaceFollowsLargestContributingEpoch() public {
+        uint256 liquidity = positionManager.getPositionLiquidity(fullRangeTokenId);
+        positionManager.decreaseLiquidity(
+            fullRangeTokenId, liquidity, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+        uint256 bigBid = 4e18;
+        _bid(bidderA, address(winnerSwapper), bigBid);
+        _warpToEpoch(1);
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        _warpToEpoch(3);
+        auctionController.drip(auctionPoolKey);
+        (, uint128 pace) = auctionController.getPendingRelease(auctionPoolId);
+        assertEq(pace, bigBid - bigBid * PROTOCOL_FEE_BPS / 10_000, "pace is the largest epoch's drip");
     }
 
     function testLargePendingDoesNotOverflowAndIsSweepable() public {

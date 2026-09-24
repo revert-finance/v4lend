@@ -160,6 +160,7 @@ Purpose:
 - `HookAuctionController`: per-epoch English auction selling a discounted-LP-fee executor slot; the winning bid minus a protocol fee is dripped to in-range LPs through `PoolManager.donate` over the following epoch
 - `HookLeaseController`: Harberger-lease alternative with the same hook-facing interface; one lessee self-assesses a price, pays per-second rent on it, can be bought out at that price, and rent minus a protocol fee is dripped to in-range LPs
 - `AuctionArbExecutor`: owner-operated executor a bidder registers as the discount recipient; the controllers recognise the executor as the address that calls `PoolManager.swap` directly
+- `HookAuctionController` pending bucket: value that could not be donated (zero in-range liquidity, failed donates, carried epochs) aggregates in `pendingDonation` and releases gradually. Each release is paced by `pendingReleasePerEpoch`, the largest single epoch's `totalDrip` that fed the bucket, over `epochLengthSeconds`, never by a fraction of the aggregate: a dust LP that appears after several zero-liquidity epochs can capture at most one epoch's slice per `minDripSeconds`, the same exposure as the live epoch drip. A bucket of N epochs therefore takes about N epochs to drain; `sweepPendingDonation` remains the wind-down path
 
 Auth model:
 - all controllers are administered through `hook.owner()`

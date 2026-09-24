@@ -115,6 +115,11 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         // near-MAX_BID_AMOUNT epochs can never overflow and brick _syncPool.
         uint256 pendingDonation;
         uint64 pendingLastDripTime; // throttles gradual release of the pending bucket
+        // Release pace of the pending bucket: the largest single-epoch totalDrip that fed it.
+        // Bounds every release to what that epoch would have dripped over the same interval, so
+        // the slice a JIT position can capture does not grow with the number of carried epochs.
+        // Shares pendingLastDripTime's slot; reset to 0 whenever the bucket drains.
+        uint128 pendingReleasePerEpoch;
     }
 
     // ==================== State ====================
@@ -571,6 +576,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
         state.pendingDonation = 0;
         state.hasPending = false;
+        state.pendingReleasePerEpoch = 0;
         refunds[config.auctionCurrency][recipient] += amount;
         emit PendingDonationSwept(poolId, config.auctionCurrency, recipient, amount);
     }
@@ -588,6 +594,16 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     {
         PoolAuctionState storage state = _poolStates[poolId];
         return (state.epochsSynced, state.activeEpoch, state.pendingDonation);
+    }
+
+    /// @notice Throttle clock and release pace of the pool's pending-donation bucket.
+    function getPendingRelease(PoolId poolId)
+        external
+        view
+        returns (uint64 pendingLastDripTime, uint128 pendingReleasePerEpoch)
+    {
+        PoolAuctionState storage state = _poolStates[poolId];
+        return (state.pendingLastDripTime, state.pendingReleasePerEpoch);
     }
 
     /// @notice Whether a pool has an auction configuration (independent of any activity).
@@ -801,20 +817,25 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
             return;
         }
         auction.donated = auction.totalDrip;
-        _addPending(state, remaining);
+        _addPending(state, remaining, auction.totalDrip);
     }
 
     /// @dev Adds to the pending-donation bucket, (re)initializing the throttle clock whenever the
     ///      bucket transitions from empty to non-empty. Without this, a stale pendingLastDripTime
     ///      left over from a previously-drained bucket would let the first drip of a fresh bucket
     ///      compute a full-epoch elapsed interval and release the whole thing to a same-block JIT.
-    function _addPending(PoolAuctionState storage state, uint256 amount) internal {
+    ///      `epochDrip` is the totalDrip of the epoch the value came from; the bucket releases at
+    ///      the pace of the largest contributing epoch (see pendingReleasePerEpoch).
+    function _addPending(PoolAuctionState storage state, uint256 amount, uint128 epochDrip) internal {
         if (amount == 0) {
             return;
         }
         if (state.pendingDonation == 0) {
             state.pendingLastDripTime = uint64(block.timestamp);
             state.hasPending = true;
+        }
+        if (epochDrip > state.pendingReleasePerEpoch) {
+            state.pendingReleasePerEpoch = epochDrip;
         }
         state.pendingDonation += amount;
     }
@@ -862,14 +883,20 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     /// @dev Releases the pending-donation bucket gradually rather than in one lump. donate()
     ///      credits whoever is in range at that instant, so dumping the whole bucket at once
     ///      lets a single-block JIT position capture all of it. Each release is throttled by
-    ///      minDripSeconds and bounded to (elapsed / epochLength) of the bucket, with the
-    ///      catch-up window capped at one epoch. Crucially, whenever the pool has no in-range
-    ///      liquidity the throttle clock is advanced, so an idle zero-liquidity stretch is NOT
-    ///      later paid out as one large catch-up slice to the first LP that reappears (which
-    ///      would be the sole in-range recipient of the whole accrued bucket). A JIT therefore
-    ///      has to hold liquidity for at least minDripSeconds to receive even one bounded slice.
-    ///      This bounds, but does not fully eliminate, point-in-time JIT exposure - a known
-    ///      tradeoff of donate-based distribution.
+    ///      minDripSeconds and bounded to (elapsed / epochLength) of pendingReleasePerEpoch - the
+    ///      largest single epoch's drip that fed the bucket - with the catch-up window capped at
+    ///      one epoch. The bound is deliberately NOT a fraction of the whole bucket: the bucket
+    ///      aggregates every carried epoch, so a fraction of it would hand a dust LP that appears
+    ///      after a long zero-liquidity stretch a slice that grows with the number of epochs
+    ///      carried. Pacing by one epoch's drip keeps the per-slice exposure identical to the
+    ///      active-epoch drip, whatever the aggregate; a bucket of N epochs takes ~N epochs to
+    ///      drain. Crucially, whenever the pool has no in-range liquidity the throttle clock is
+    ///      advanced, so an idle zero-liquidity stretch is NOT later paid out as one large
+    ///      catch-up slice to the first LP that reappears (which would be the sole in-range
+    ///      recipient of the whole accrued bucket). A JIT therefore has to hold liquidity for at
+    ///      least minDripSeconds to receive even one bounded slice. This bounds, but does not
+    ///      fully eliminate, point-in-time JIT exposure - a known tradeoff of donate-based
+    ///      distribution.
     function _dripPending(
         PoolKey memory key,
         PoolId poolId,
@@ -897,10 +924,15 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         if (elapsed > config.epochLengthSeconds) {
             elapsed = config.epochLengthSeconds; // cap the catch-up at one epoch's worth
         }
-        // round UP so every release moves at least one base unit - the bucket self-drains
-        // without a flush-on-zero branch, which for a small bucket against a long epoch (e.g.
-        // low-decimal currencies) would dump the whole bucket to the first LP
-        uint256 release = FullMath.mulDivRoundingUp(pending, elapsed, config.epochLengthSeconds);
+        // Pace by the largest contributing epoch's drip, never by the aggregate. Round UP so
+        // every release moves at least one base unit - the bucket self-drains without a
+        // flush-on-zero branch, which for a small bucket against a long epoch (e.g. low-decimal
+        // currencies) would dump the whole bucket to the first LP.
+        uint256 pace = state.pendingReleasePerEpoch;
+        if (pace > pending) {
+            pace = pending; // legacy or dust bucket: never release faster than the old whole-bucket rule
+        }
+        uint256 release = FullMath.mulDivRoundingUp(pace, elapsed, config.epochLengthSeconds);
         if (release > pending) {
             release = pending;
         }
@@ -919,6 +951,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         state.pendingDonation = pendingRemaining;
         if (pendingRemaining == 0) {
             state.hasPending = false;
+            state.pendingReleasePerEpoch = 0;
         }
         state.pendingLastDripTime = uint64(block.timestamp);
         emit PendingDonationDripped(poolId, amountToDonate, pendingRemaining);
@@ -966,7 +999,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         // it donated so it is not counted twice. Mirrors _dripPending's zero-liquidity handling.
         if (StateLibrary.getLiquidity(poolManager, poolId) == 0) {
             auction.donated += uint128(claimable);
-            _addPending(state, claimable);
+            _addPending(state, claimable, totalDrip);
             return 0;
         }
 
