@@ -863,6 +863,16 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Reentrancy();
         }
 
+        // The reserve-backed branch of _calculateLiquidation charges the liquidator less than the debt and
+        // socializes the rest, a subsidy meant for an independent liquidator. A borrower must not collect
+        // it on their own loan, neither directly nor by naming themselves as the collateral recipient
+        // (the flash-loan helper path). A second address remains possible; that residual is a property of
+        // the subsidy design, this closes the documented direct paths.
+        address loanOwner = tokenOwner[params.tokenId];
+        if (msg.sender == loanOwner || params.recipient == loanOwner) {
+            revert Unauthorized();
+        }
+
         LiquidateState memory state;
 
         (state.newDebtExchangeRateX96, state.newLendExchangeRateX96) = _updateGlobalInterest();
@@ -918,7 +928,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         emit Liquidate(
             params.tokenId,
             msg.sender,
-            tokenOwner[params.tokenId],
+            loanOwner,
             state.fullValue,
             state.liquidatorCost,
             amount0,

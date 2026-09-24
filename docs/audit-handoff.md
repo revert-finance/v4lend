@@ -89,6 +89,7 @@ Purpose:
 Notes:
 - `V4Vault` intentionally holds lender funds, reserves, and collateral NFTs
 - unlike automators and hook helpers, it is not expected to end operations with zero balances
+- `liquidate` refuses the loan owner as caller and as collateral recipient: the reserve-backed liquidation branch subsidizes an independent liquidator, and a borrower must not collect that subsidy on their own loan (a second address stays possible; the check closes the direct and flash-helper paths)
 
 ### V4Oracle
 
