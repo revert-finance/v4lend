@@ -171,9 +171,13 @@ contract AutoExit is Automator {
             state.owner = vault.ownerOf(params.tokenId);
             state.lendToken = Currency.wrap(vault.asset());
 
-            // Vault asset must be one of the pool tokens for debt repayment to work
+            // The vault asset must be one of the pool tokens only when there is debt to repay: a
+            // zero-debt loan in any accepted collateral pair exits with its tokens sent to the owner.
             if (!(state.lendToken == token0) && !(state.lendToken == token1)) {
-                revert InvalidConfig();
+                (uint256 debt,,,,) = vault.loanInfo(params.tokenId);
+                if (debt > 0) {
+                    revert InvalidConfig();
+                }
             }
 
             // Swap sells (isAbove ? token1 : token0) and buys the other
