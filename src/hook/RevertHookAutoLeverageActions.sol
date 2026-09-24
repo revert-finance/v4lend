@@ -106,9 +106,12 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         );
         if (borrowAmount == 0) return true;
 
-        // Borrow from vault
-        Currency lendToken = Currency.wrap(vault.asset());
+        // Borrow from vault; a WETH vault on a native pool is unwrapped into the pool's native side
+        (Currency lendToken,) = _lendCurrency(poolKey, vault.asset());
         vault.borrow(tokenId, borrowAmount);
+        if (lendToken.isAddressZero()) {
+            weth.withdraw(borrowAmount);
+        }
 
         // Swap to optimal ratio and add liquidity
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -157,7 +160,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         );
 
         address lendAsset = vault.asset();
-        Currency lendToken = Currency.wrap(lendAsset);
+        (Currency lendToken,) = _lendCurrency(poolKey, lendAsset);
         uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
         (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, lendAsset);
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -189,7 +192,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1, Mode.AUTO_LEVERAGE);
 
         // Repay debt
-        _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
+        _repayDebtToVault(tokenId, vault, lendToken, lendAsset, lendAmount, currentDebt);
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
         if (newDebt < currentDebt) {
             _sendLeftoverTokens(tokenId, currency0, currency1, vault.ownerOf(tokenId));
@@ -236,7 +239,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         );
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
-        _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);
+        _repayDebtToVault(tokenId, vault, lendToken, vault.asset(), lendAmount, currentDebt);
         (debtAfterRollback,,,,) = vault.loanInfo(tokenId);
     }
 }

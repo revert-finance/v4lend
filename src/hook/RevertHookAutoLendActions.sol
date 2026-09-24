@@ -126,9 +126,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             }
 
             if (isVault) {
-                address lendAsset = IVault(tokenOwner).asset();
-                if (Currency.unwrap(poolKey.currency0) != lendAsset && Currency.unwrap(poolKey.currency1) != lendAsset)
-                {
+                // native/WETH canonicalised: a WETH vault serves a native pool (V4LE-49)
+                (, bool lendInPool) = _lendCurrency(poolKey, IVault(tokenOwner).asset());
+                if (!lendInPool) {
                     revert InvalidConfig();
                 }
             }

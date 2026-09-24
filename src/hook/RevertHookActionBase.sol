@@ -518,6 +518,11 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         }
     }
 
+    function _approvePair(Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) internal {
+        _approveToken(currency0, amount0);
+        _approveToken(currency1, amount1);
+    }
+
     /// @notice Swaps tokens to the lend token
     /// @dev Returns the full lend-token balance after the swap. This is intentional so later
     ///      repayment/leftover handling operates on the hook's complete transient balance for
@@ -545,22 +550,45 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         }
     }
 
+    /// @notice Resolves the pool currency a vault's asset is held as inside this pool
+    /// @dev The oracle, the vaults and NativeAssetLib treat WETH as the alias of native ETH, so a
+    ///      WETH-asset vault position in a native pool is a supported shape: the lend currency is the
+    ///      pool's native side and the borrow/repay legs wrap and unwrap at the vault boundary
+    ///      (V4LE-49). Native always sorts as currency0. `inPool` is false when the asset is neither
+    ///      pool currency nor that alias; the returned currency is then the raw asset.
+    function _lendCurrency(PoolKey memory poolKey, address lendAsset)
+        internal
+        view
+        returns (Currency lendCurrency, bool inPool)
+    {
+        if (lendAsset == Currency.unwrap(poolKey.currency0)) return (poolKey.currency0, true);
+        if (lendAsset == Currency.unwrap(poolKey.currency1)) return (poolKey.currency1, true);
+        if (lendAsset == address(weth) && poolKey.currency0.isAddressZero()) return (poolKey.currency0, true);
+        return (Currency.wrap(lendAsset), false);
+    }
+
     /// @notice Repays debt to a vault up to the available amount
     /// @param tokenId The position token ID
     /// @param vault The vault to repay to
-    /// @param lendAsset The address of the lend asset
+    /// @param lendCurrency The pool currency the repayment is held as (native for a WETH vault
+    ///        in a native pool; wrapped here before the vault pulls WETH)
+    /// @param lendAsset The vault's asset
     /// @param availableAmount The amount available for repayment
     /// @param currentDebt The current debt amount
     /// @return repaidAmount The amount that was actually repaid
     function _repayDebtToVault(
         uint256 tokenId,
         IVault vault,
+        Currency lendCurrency,
         address lendAsset,
         uint256 availableAmount,
         uint256 currentDebt
     ) internal returns (uint256 repaidAmount) {
         if (availableAmount > 0 && currentDebt > 0) {
             repaidAmount = availableAmount > currentDebt ? currentDebt : availableAmount;
+            if (lendCurrency.isAddressZero()) {
+                weth.deposit{value: repaidAmount}();
+            }
             SafeERC20.forceApprove(IERC20(lendAsset), address(vault), repaidAmount);
             vault.repay(tokenId, repaidAmount, false);
         }
