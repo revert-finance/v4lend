@@ -505,18 +505,87 @@ contract HookLeaseControllerTest is BaseTest {
         assertGt(outLessee, outOther, "a positive-duration top-up restores the discount");
     }
 
-    function testPaidThroughSaturation() public {
-        // a huge prepaid rent saturates paidThrough at uint40 max instead of overflowing
+    /// @notice External audit V4LE-22: paidThrough used to saturate at uint40.max. At the minimum
+    ///         price (1 raw unit) rent rounds up to 1 raw unit per second, so ~1e-6 tokens of
+    ///         prepaid rent reached the sentinel and the lease could never be evicted (evictLease
+    ///         reverts while now < paidThrough) nor the pool reconfigured. The prepaid runway is now
+    ///         bounded at install, top-up and price cut, so the sentinel is unreachable.
+    function testPrepaidRunwayIsBoundedSoPaidThroughCannotSaturate() public {
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
-        config.taxRatePerSecondX64 = 1; // ~zero tax: rps rounds up to 1 wei/second
+        config.taxRatePerSecondX64 = 1; // ~zero tax: rps rounds up to 1 wei/second at any price
         leaseController.configurePool(leasePoolKey, config);
+        uint256 maxRunway = leaseController.MAX_PREPAID_RUNWAY_SECONDS();
 
-        _startLease(lesseeA, address(lesseeSwapper), 1e18, 50e18); // 50e18 seconds of rent
+        // the audit's exploit: minimum price, a deposit that reaches the uint40 sentinel
+        uint256 sentinelDeposit = uint256(type(uint40).max) - block.timestamp + 1;
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.startLease(leasePoolKey, address(lesseeSwapper), 1, sentinelDeposit);
+
+        // one second past the bound is refused, the bound itself is accepted
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.startLease(leasePoolKey, address(lesseeSwapper), 1, maxRunway + 1);
+        _startLease(lesseeA, address(lesseeSwapper), 1, maxRunway);
         (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
-        assertEq(paidThrough, type(uint40).max, "paidThrough saturates");
-
+        assertEq(paidThrough, block.timestamp + maxRunway, "runway exactly at the bound");
         (uint256 outLessee, uint256 outOther) = _swapOutcomes(1e18);
-        assertGt(outLessee, outOther, "discount active with saturated paidThrough");
+        assertGt(outLessee, outOther, "discount active within the bound");
+
+        // a top-up cannot push past the bound either...
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.fundRent(leasePoolKey, 1);
+        // ...but refilling what has accrued back up to the bound is fine
+        vm.warp(block.timestamp + 100);
+        vm.prank(lesseeA);
+        leaseController.fundRent(leasePoolKey, 100);
+        (,,,,, paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(paidThrough, block.timestamp + maxRunway, "top-up refills the runway to the bound");
+
+        // wind-down terminates the lease within the bound: solvent until then, evictable after
+        leaseController.setLeasingEnabled(leasePoolKey, false);
+        vm.warp(uint256(paidThrough) - 1);
+        vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
+        leaseController.evictLease(leasePoolKey);
+        vm.warp(uint256(paidThrough));
+        leaseController.evictLease(leasePoolKey);
+        leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    /// @notice External audit V4LE-22: a price cut lowers the rent and stretches the remaining
+    ///         balance over a longer runway, so it is bounded like a deposit.
+    function testPriceCutCannotStretchRunwayPastBound() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1;
+        leaseController.configurePool(leasePoolKey, config);
+        uint256 maxRunway = leaseController.MAX_PREPAID_RUNWAY_SECONDS();
+
+        // price 3e19 -> rps = ceil(3e19 / 2^64) = 2 wei/s; a deposit of 2 * maxRunway is exactly the bound
+        _startLease(lesseeA, address(lesseeSwapper), 3e19, 2 * maxRunway);
+        assertEq(leaseController.rentPerSecond(leasePoolId), 2, "precondition: 2 wei/s");
+
+        // cutting the price to rps = 1 would double the runway -> refused
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.setPrice(leasePoolKey, 1e18);
+
+        // raising the price shortens the runway and is fine
+        vm.prank(lesseeA);
+        leaseController.setPrice(leasePoolKey, 4e19);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertLt(paidThrough, block.timestamp + maxRunway, "raising the price shortens the runway");
+    }
+
+    /// @notice A mandatory deposit longer than the runway bound could never be installed.
+    function testConfigureRejectsMinRentDepositBeyondRunwayBound() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1; // so a year of mandatory rent stays escrowable at the price cap
+        config.minRentDepositSeconds = uint32(leaseController.MAX_PREPAID_RUNWAY_SECONDS() + 1);
+        vm.expectRevert(HookLeaseController.InvalidConfig.selector);
+        leaseController.configurePool(leasePoolKey, config);
+        config.minRentDepositSeconds = uint32(leaseController.MAX_PREPAID_RUNWAY_SECONDS());
+        leaseController.configurePool(leasePoolKey, config);
     }
 
     // ==================== Rent accrual and dripping ====================
@@ -719,7 +788,7 @@ contract HookLeaseControllerTest is BaseTest {
         leaseController.configurePool(leasePoolKey, config);
         uint256 t0 = 1_900_000_000;
         vm.warp(t0);
-        _startLease(lesseeA, address(lesseeSwapper), 1e18, 1e18);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 30 days); // 30 days of 1 wei/s rent
 
         // 10 seconds of rent (10 wei, 1 wei protocol fee) parked by the exit at zero liquidity
         _removeAllFullRangeLiquidity();
@@ -846,7 +915,8 @@ contract HookLeaseControllerTest is BaseTest {
     }
 
     function testMinBuyoutPriceRoundsUpForTinyPrices() public {
-        _startLease(lesseeA, address(lesseeSwapper), 1, 0.1e18); // 1 wei price
+        // 1 wei price -> rent rounds up to 1 wei/second; the deposit is a runway, not a value
+        _startLease(lesseeA, address(lesseeSwapper), 1, 30 days);
         assertEq(leaseController.minBuyoutPrice(leasePoolId), 2, "bump is at least 1 wei");
     }
 
@@ -898,7 +968,7 @@ contract HookLeaseControllerTest is BaseTest {
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
         config.taxRatePerSecondX64 = 1;
         leaseController.configurePool(leasePoolKey, config);
-        _startLease(lesseeA, address(lesseeSwapper), 1e18, 1e18);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 30 days); // 30 days of 1 wei/s rent
 
         for (uint256 i = 1; i <= 30; i++) {
             vm.warp(base + i);
