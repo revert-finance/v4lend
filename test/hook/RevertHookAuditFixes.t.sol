@@ -10,6 +10,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
@@ -1020,6 +1021,83 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         (,, lastActivated,,,,, baseAfter) = hook.positionStates(tokenId);
         assertGt(lastActivated, 0, "reactivated");
         assertEq(baseAfter, _getTickLowerAt(_currentTick(poolKey), poolKey.tickSpacing), "base re-centred on the live tick");
+    }
+
+    // ==================== V4LE-51: AUTO_EXIT on a vault whose asset is not a pool token ====================
+
+    function _deployVaultWithAsset(address asset) internal returns (V4Vault lendVault) {
+        InterestRateModel interestRateModel = new InterestRateModel(0, 0, 0, 0);
+        lendVault = new V4Vault(
+            "Local lending vault",
+            "lLOCAL",
+            asset,
+            positionManager,
+            interestRateModel,
+            v4Oracle,
+            NativeWrapper(payable(address(positionManager))).WETH9()
+        );
+        uint32 collateralFactor = uint32(uint256(2 ** 32) * 9 / 10);
+        lendVault.setTokenConfig(Currency.unwrap(currency0), collateralFactor, type(uint32).max);
+        lendVault.setTokenConfig(Currency.unwrap(currency1), collateralFactor, type(uint32).max);
+        lendVault.setHookAllowList(address(hook), true);
+        lendVault.setTransformer(address(hook), true);
+        lendVault.setLimits(0, 10e18, 10e18, 10e18, 10e18);
+        hook.setVault(address(lendVault));
+    }
+
+    /// @dev A directly held NFT is configured for AUTO_EXIT, then deposited into a vault whose asset
+    ///      is a third token and borrowed against. At the trigger the old code removed the liquidity,
+    ///      swapped, failed on repay (the hook holds none of the vault asset), and the caught
+    ///      transform left a zombie config with no trigger nodes. Now the exit is skipped up front,
+    ///      the reason is emitted and the config retired; nothing else changes.
+    function testAutoExitSkipsAndRetiresConfigWhenVaultAssetIsNotInPool() public {
+        MockERC20 third = deployToken();
+        V4Vault lendVault = _deployVaultWithAsset(address(third));
+        third.approve(address(lendVault), 2e18);
+        lendVault.deposit(2e18, address(this));
+
+        int24 s = poolKey.tickSpacing;
+        hook.setPositionConfig(token2Id, _autoExitConfig(tickLower2 - s, type(int24).max));
+        IERC721(address(positionManager)).approve(address(lendVault), token2Id);
+        lendVault.create(token2Id, address(this));
+        lendVault.approveTransform(token2Id, address(hook), true);
+        (,, uint256 collateralValue,,) = lendVault.loanInfo(token2Id);
+        lendVault.borrow(token2Id, collateralValue / 10);
+        (uint256 debtBefore,,,,) = lendVault.loanInfo(token2Id);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token2Id);
+
+        vm.recordLogs();
+        _swap(poolKey, true, 12e17);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertTrue(_sawHookActionFailed(logs, token2Id, RevertHookState.Mode.AUTO_EXIT), "action reported as failed");
+        assertTrue(
+            _sawIndexedTokenEvent(logs, RevertHookState.AutoExitIncompatibleVaultAsset.selector, token2Id),
+            "the incompatibility is emitted"
+        );
+        assertEq(positionManager.getPositionLiquidity(token2Id), liquidityBefore, "collateral untouched");
+        (uint256 debtAfter,,,,) = lendVault.loanInfo(token2Id);
+        assertEq(debtAfter, debtBefore, "debt untouched");
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "zombie config retired");
+        _verifyNoLeftoverBalances("skipped exit");
+    }
+
+    /// @dev Negative control: the same vault shape without debt exits normally.
+    function testAutoExitWithoutDebtStillRunsWhenVaultAssetIsNotInPool() public {
+        MockERC20 third = deployToken();
+        V4Vault lendVault = _deployVaultWithAsset(address(third));
+
+        int24 s = poolKey.tickSpacing;
+        hook.setPositionConfig(token2Id, _autoExitConfig(tickLower2 - s, type(int24).max));
+        IERC721(address(positionManager)).approve(address(lendVault), token2Id);
+        lendVault.create(token2Id, address(this));
+        lendVault.approveTransform(token2Id, address(hook), true);
+
+        _swap(poolKey, true, 12e17);
+
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "zero-debt exit runs");
+        _verifyNoLeftoverBalances("zero-debt exit");
     }
 
     // ==================== L-01: remove callback fails open on oracle failure ====================

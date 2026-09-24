@@ -41,6 +41,33 @@ contract RevertHookPositionActions is RevertHookActionBase {
     function autoExit(PoolKey calldata poolKey, uint256 tokenId, bool isUpperTrigger) external {
         _requireAuthorization(poolKey, tokenId);
 
+        address owner = _getOwner(tokenId, false);
+        address beneficiary = owner;
+        uint256 debtShares;
+
+        // Check if this is a vault position with debt
+        if (_vaults[owner]) {
+            beneficiary = IVault(owner).ownerOf(tokenId);
+            debtShares = IVault(owner).loans(tokenId);
+            if (debtShares > 0) {
+                // The config was validated against the owner at the time it was set; a directly
+                // held NFT can be deposited into any vault afterwards without the hook seeing it.
+                // If that vault's asset is neither pool currency the debt cannot be repaid out of
+                // the proceeds, and removing the collateral would only fail the vault's health
+                // check after a pointless swap (V4LE-51). Skip before touching anything, say why,
+                // and retire the config: its trigger nodes are already gone, and re-arming it on
+                // the next add would be refused for this vault anyway. Zero-debt exits still run.
+                address lendAsset = IVault(owner).asset();
+                (, bool lendInPool) = _lendCurrency(poolKey, lendAsset);
+                if (!lendInPool) {
+                    emit AutoExitIncompatibleVaultAsset(tokenId, owner, lendAsset);
+                    emit HookActionFailed(tokenId, Mode.AUTO_EXIT);
+                    _disablePosition(tokenId);
+                    return;
+                }
+            }
+        }
+
         // Remove all liquidity and collect fees
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
             _decreaseLiquidity(poolKey, tokenId, false);
@@ -49,20 +76,11 @@ contract RevertHookPositionActions is RevertHookActionBase {
             return;
         }
 
-        address owner = _getOwner(tokenId, false);
-        address beneficiary = owner;
-
-        // Check if this is a vault position with debt
-        if (_vaults[owner]) {
-            beneficiary = IVault(owner).ownerOf(tokenId);
-            uint256 debtShares = IVault(owner).loans(tokenId);
-
-            if (debtShares > 0) {
-                _autoExitWithDebtRepayment(
-                    tokenId, poolKey, IVault(owner), beneficiary, isUpperTrigger, currency0, currency1, amount0, amount1
-                );
-                return;
-            }
+        if (debtShares > 0) {
+            _autoExitWithDebtRepayment(
+                tokenId, poolKey, IVault(owner), beneficiary, isUpperTrigger, currency0, currency1, amount0, amount1
+            );
+            return;
         }
 
         // No debt case: swap based on trigger direction and send to owner

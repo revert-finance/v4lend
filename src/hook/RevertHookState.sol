@@ -150,6 +150,10 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // Special events for swap failures / modifyLiquidities failures
     event HookActionFailed(uint256 indexed tokenId, Mode mode);
+    /// @notice A debt-bearing vault position reached its AUTO_EXIT trigger but the vault's asset is
+    ///         not a pool currency (nor the native alias), so the debt cannot be repaid from the
+    ///         proceeds: the exit is skipped and the config disabled (V4LE-51).
+    event AutoExitIncompatibleVaultAsset(uint256 indexed tokenId, address vault, address asset);
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
     event HookSwapPartial(uint256 indexed tokenId, bool zeroForOne, uint256 requested, uint256 swapped);
     event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
