@@ -244,6 +244,7 @@ abstract contract RevertHookTriggers is RevertHookState {
         TriggerCursor storage triggerCursor = _triggerCursors[poolId];
         if (!triggerCursor.hasTriggers) {
             triggerCursor.tickLowerLast = _getTickLower(_getCurrentTick(poolId), poolKey.tickSpacing);
+            triggerCursor.tickLowerOpposite = triggerCursor.tickLowerLast;
             triggerCursor.hasTriggers = true;
         }
 
@@ -258,13 +259,14 @@ abstract contract RevertHookTriggers is RevertHookState {
     ///      relative to the live price can land on the far side of the pending walk: the next
     ///      in-window swap infers its direction from cursor to live and would never visit it.
     ///      Refuse instead; the caller retries once a swap has brought the pool back in line.
-    ///      Not used on the hook's own arming inside a walk, where the stored cursor is stale by
-    ///      construction and the walk itself accounts for the new ticks.
+    ///      Not used on the hook's own arming inside a walk: the walk retains both directional
+    ///      cursors so newly armed ticks remain reachable even if an action leaves the oracle window.
     function _requireTriggerCursorFresh(PoolId poolId, int24 tickSpacing) internal view {
         TriggerCursor storage triggerCursor = _triggerCursors[poolId];
         if (
             triggerCursor.hasTriggers
-                && triggerCursor.tickLowerLast != _getTickLower(_getCurrentTick(poolId), tickSpacing)
+                && (triggerCursor.tickLowerLast != triggerCursor.tickLowerOpposite
+                    || triggerCursor.tickLowerLast != _getTickLower(_getCurrentTick(poolId), tickSpacing))
         ) {
             revert TriggerCursorStale();
         }

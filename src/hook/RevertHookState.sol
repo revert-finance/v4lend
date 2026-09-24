@@ -189,6 +189,7 @@ abstract contract RevertHookState is RevertHookAccess {
     struct TriggerCursor {
         int24 tickLowerLast; // last processed tick bucket
         bool hasTriggers; // set when the first trigger registers; gates the afterSwap list walk
+        int24 tickLowerOpposite; // opposite end of a walk left pending by action-induced price movement
     }
 
     // Position trigger mappings
