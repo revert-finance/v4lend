@@ -84,6 +84,12 @@ abstract contract RevertHookState is RevertHookAccess {
         uint16 autoLeverageTargetBps; // target debt/collateral ratio (0-10000 bps, e.g., 5000 = 50%)
     }
 
+    // ==================== Errors ====================
+
+    /// @notice A configured, inactive position was re-activated by an external liquidity add while
+    ///         one of its triggers is already satisfied at the live tick (V4LE-70).
+    error TriggerAlreadySatisfied();
+
     // ==================== Events ====================
 
     // Configuration events

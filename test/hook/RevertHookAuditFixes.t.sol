@@ -12,6 +12,7 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {Vm} from "forge-std/Vm.sol";
@@ -927,6 +928,98 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         int24 compressed = tick / spacing;
         if (tick < 0 && tick % spacing != 0) compressed--;
         return compressed * spacing;
+    }
+
+    // ==================== V4LE-70: reactivation checks the trigger against the live tick ====================
+
+    /// @dev Increases straight through modifyLiquidities so an expectRevert lands on the add itself.
+    function _increaseRaw(uint256 id, uint128 liquidity) internal {
+        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory params = new bytes[](2);
+        params[0] = abi.encode(id, liquidity, type(uint128).max, type(uint128).max, bytes(""));
+        params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+    }
+
+    /// @dev A configured position deactivated by a below-minimum partial removal keeps its config
+    ///      with no trigger nodes. Once the price has crossed its exit trigger, an ordinary add
+    ///      reactivated it and inserted the trigger behind a fresh cursor, where no walk in the
+    ///      adverse direction ever visits it. The add must be refused while the trigger is
+    ///      satisfied, and go through once the price is back on the right side.
+    function testReactivationRefusedWhileExitTriggerIsSatisfied() public {
+        int24 s = poolKey.tickSpacing;
+        hook.setPositionConfig(token2Id, _autoExitConfig(tickLower2 - s, type(int24).max));
+        IERC721(address(positionManager)).approve(address(hook), token2Id);
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+
+        v4Oracle.setMockPositionValue(0.001 ether);
+        uint128 step = positionManager.getPositionLiquidity(token2Id) / 20;
+        positionManager.decreaseLiquidity(token2Id, step, 0, 0, address(this), block.timestamp, "");
+        (,, uint32 lastActivated,,,,,) = hook.positionStates(token2Id);
+        assertEq(lastActivated, 0, "position deactivated below the value minimum");
+        (uint32 lowerInactive,) = _getTriggerListSizes();
+        assertEq(lowerInactive, lowerBefore - 1, "trigger node removed while inactive");
+
+        // the price crosses the exit trigger while the position is inactive
+        _swap(poolKey, true, 12e17);
+        assertLt(_currentTick(poolKey), tickLower2 - s, "price past the exit trigger");
+        v4Oracle.setMockPositionValue(1 ether);
+
+        vm.expectRevert(_afterAddLiquidityRevert(abi.encodeWithSignature("TriggerAlreadySatisfied()")));
+        _increaseRaw(token2Id, step);
+        (,, lastActivated,,,,,) = hook.positionStates(token2Id);
+        assertEq(lastActivated, 0, "still inactive");
+        (uint32 lowerStill,) = _getTriggerListSizes();
+        assertEq(lowerStill, lowerInactive, "no dormant trigger armed");
+        assertGt(positionManager.getPositionLiquidity(token2Id), 0, "liquidity untouched");
+
+        // back above the trigger the add reactivates and arms normally
+        _swap(poolKey, false, 12e17);
+        assertGt(_currentTick(poolKey), tickLower2 - s, "price back above the exit trigger");
+        _increaseRaw(token2Id, step);
+        (,, lastActivated,,,,,) = hook.positionStates(token2Id);
+        assertGt(lastActivated, 0, "reactivated");
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore, "trigger armed again");
+        assertEq(upperAfter, upperBefore);
+
+        // and the armed trigger is live: crossing it now exits the position
+        _swap(poolKey, true, 12e17);
+        assertEq(positionManager.getPositionLiquidity(token2Id), 0, "exit fires on the next crossing");
+    }
+
+    /// @dev An AUTO_LEVERAGE position is re-centred on the live tick at reactivation, like a remint,
+    ///      so its stale base cannot turn into an immediately-satisfied trigger.
+    function testReactivationRecentresAutoLeverageBase() public {
+        MockTransformVault vault = new MockTransformVault(address(this), Currency.unwrap(currency0));
+        hook.setVault(address(vault));
+        IERC721(address(positionManager)).transferFrom(address(this), address(vault), tokenId);
+        RevertHookState.PositionConfig memory config = _autoExitConfig(type(int24).min, type(int24).max);
+        config.modeFlags = PositionModeFlags.MODE_AUTO_LEVERAGE;
+        config.autoLeverageTargetBps = 5000;
+        hook.setPositionConfig(tokenId, config);
+        (,,,,,,, int24 baseBefore) = hook.positionStates(tokenId);
+
+        v4Oracle.setMockPositionValue(0.001 ether);
+        uint128 step = positionManager.getPositionLiquidity(tokenId) / 20;
+        vm.prank(address(vault));
+        IERC721(address(positionManager)).approve(address(this), tokenId);
+        positionManager.decreaseLiquidity(tokenId, step, 0, 0, address(this), block.timestamp, "");
+        (,, uint32 lastActivated,,,,,) = hook.positionStates(tokenId);
+        assertEq(lastActivated, 0, "deactivated");
+
+        // more than ten spacings down: the stale base's lower trigger is satisfied here
+        for (uint256 i; i < 40 && _currentTick(poolKey) > baseBefore - 11 * poolKey.tickSpacing; i++) {
+            _swap(poolKey, true, 1e18);
+        }
+        assertLt(_currentTick(poolKey), baseBefore - 10 * poolKey.tickSpacing, "past the stale lower trigger");
+        v4Oracle.setMockPositionValue(1 ether);
+
+        _increaseRaw(tokenId, step);
+        int24 baseAfter;
+        (,, lastActivated,,,,, baseAfter) = hook.positionStates(tokenId);
+        assertGt(lastActivated, 0, "reactivated");
+        assertEq(baseAfter, _getTickLowerAt(_currentTick(poolKey), poolKey.tickSpacing), "base re-centred on the live tick");
     }
 
     // ==================== L-01: remove callback fails open on oracle failure ====================

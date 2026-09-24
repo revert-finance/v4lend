@@ -121,15 +121,39 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         // position's value, so below-minimum deactivation belongs to the remove callback; reading
         // the oracle on every add of an active position would make plain deposits depend on feed
         // freshness.
-        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
+        PositionConfig storage config = _positionConfigs[tokenId];
+        if (!PositionModeFlags.isNone(config.modeFlags) && !_isActivated(tokenId)) {
             (uint256 positionValueNative,,,) = v4Oracle.getValue(tokenId, address(0));
             if (positionValueNative >= _minPositionValueNative) {
                 // A third party arming a configured position while the trigger cursor lags the live
                 // bucket would place its triggers where the resumed walk never visits them
                 // (TriggerCursorStale, see RevertHookTriggers._requireTriggerCursorFresh). The hook's
-                // own adds inside a walk are exempt: there the stored cursor is stale by construction.
+                // own adds inside a walk are exempt: there the stored cursor is stale by construction,
+                // and the restore paths re-add liquidity right after the fired trigger emptied the
+                // position, so its condition is satisfied by construction and removed again by the
+                // caller.
                 if (IMsgSender(address(positionManager)).msgSender() != address(this)) {
                     _requireTriggerCursorFresh(key.toId(), key.tickSpacing);
+                    // The position was deactivated by a removal (empty, or below the value minimum)
+                    // and the price may have crossed its trigger since. A fresh cursor sits on the
+                    // live bucket and the walk searches strictly past it, so a trigger that is
+                    // already satisfied would be armed on the wrong side of every future walk and
+                    // stay dormant until a recross (V4LE-70). It cannot execute here either: the
+                    // PositionManager holds its reentrancy lock for the caller's own operation.
+                    // Refuse the add; the owner reconfigures (which executes the trigger at once)
+                    // or disables automation first. Auto-leverage is re-centred on the live tick
+                    // like a remint, so only range, exit and lend triggers can be satisfied.
+                    (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+                    if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
+                        _positionStates[tokenId].autoLeverageBaseTick =
+                            _getTickLower(_getCurrentTick(key.toId()), key.tickSpacing);
+                    }
+                    (bool alreadyTriggered,,) = _checkTriggerConditions(
+                        tokenId, key, config, positionInfo.tickLower(), positionInfo.tickUpper()
+                    );
+                    if (alreadyTriggered) {
+                        revert TriggerAlreadySatisfied();
+                    }
                 }
                 _addPositionTriggers(tokenId, key);
                 _activatePosition(tokenId);
