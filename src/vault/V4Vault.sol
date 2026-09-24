@@ -280,7 +280,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         debt = _convertToAssets(loans[tokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
 
         bool isHealthy;
-        (isHealthy, fullValue, collateralValue,) = _checkLoanIsHealthy(tokenId, debt);
+        (isHealthy, fullValue, collateralValue,,,) = _checkLoanIsHealthy(tokenId, debt);
 
         if (!isHealthy) {
             (liquidationValue, liquidationCost,) = _calculateLiquidation(debt, fullValue, collateralValue);
@@ -859,6 +859,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 fullValue;
         uint256 collateralValue;
         uint256 feeValue;
+        uint256 price0X96;
+        uint256 price1X96;
     }
 
     /// @notice Liquidates an unhealthy position by repaying debt and receiving collateral
@@ -902,7 +904,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // @custom:accepted-risk AUDIT-ACCEPTED-ORACLE-LIQUIDATION-LIVENESS
         // Liquidation intentionally depends on live oracle data. Stale or missing
         // feeds revert here until governance refreshes feed configuration.
-        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue) =
+        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue, state.price0X96, state.price1X96) =
             _checkLoanIsHealthy(params.tokenId, state.debt);
         if (state.isHealthy) {
             revert NotLiquidatable();
@@ -933,7 +935,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         _cleanupLoan(params.tokenId, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
 
         // send promised collateral tokens to liquidator
-        (amount0, amount1) = _sendPositionValue(params, state.liquidationValue, state.fullValue, state.feeValue);
+        (amount0, amount1) = _sendPositionValue(params, state);
 
         liquidatingTokenId = 0;
 
@@ -1288,89 +1290,88 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         reserves = balance + debt > lent ? balance + debt - lent : 0;
     }
 
-    // removes correct amount from position to send to liquidator
+    // removes the liquidation share from the position and pays it out
     // returns the amounts the liquidator (params.recipient) actually received
-    function _sendPositionValue(
-        LiquidateParams calldata params,
-        uint256 liquidationValue,
-        uint256 fullValue,
-        uint256 feeValue
-    ) internal returns (uint256 amount0, uint256 amount1) {
+    function _sendPositionValue(LiquidateParams calldata params, LiquidateState memory state)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
         // when the uncollected fees alone cover the liquidation value no liquidity is removed
         // and the collected fees are split between liquidator and owner by value share
-        bool feesOnly = liquidationValue <= feeValue;
+        bool feesOnly = state.liquidationValue <= state.feeValue;
 
         uint128 liquidity;
-        if (liquidationValue == fullValue) {
+        if (state.liquidationValue == state.fullValue) {
             // if full position is liquidated - no analysis needed
             liquidity = positionManager.getPositionLiquidity(params.tokenId);
         } else if (!feesOnly) {
             // all fees plus the share of liquidity needed to cover the remaining value
             liquidity = positionManager.getPositionLiquidity(params.tokenId);
-            liquidity = SafeCast.toUint128(Math.mulDiv(liquidationValue - feeValue, liquidity, fullValue - feeValue));
+            liquidity = SafeCast.toUint128(
+                Math.mulDiv(state.liquidationValue - state.feeValue, liquidity, state.fullValue - state.feeValue)
+            );
         }
 
-        // decrease liquidity and collect fees/tokens
-        // fee-only liquidations are collected to the vault first and split in _transferPartialFees
-        (amount0, amount1) = _decreaseLiquidity(
-            params.tokenId,
-            liquidity,
-            0,
-            0,
-            params.deadline,
-            params.decreaseLiquidityHookData,
-            feesOnly ? address(this) : params.recipient
+        // everything is collected to the vault first and split afterwards
+        (uint256 received0, uint256 received1) = _decreaseLiquidity(
+            params.tokenId, liquidity, 0, 0, params.deadline, params.decreaseLiquidityHookData, address(this)
         );
 
-        if (feesOnly) {
-            (amount0, amount1) =
-                _transferPartialFees(params.tokenId, params.recipient, amount0, amount1, liquidationValue, feeValue);
-        }
-    }
-
-    // splits collected fees between liquidator (recipient) and position owner by value share
-    // The split is applied to the amounts actually received from the DECREASE, not to the oracle's gross fee
-    // estimate: hooks may skim part of the collected fees (e.g. RevertHook protocol fees), so the received
-    // amounts can be lower than the estimate. Because liquidationValue <= feeValue, each liquidator share is
-    // bounded by the received amount, the owner remainder can never underflow, and the skim is carried
-    // proportionally by both parties (L-02).
-    function _transferPartialFees(
-        uint256 tokenId,
-        address recipient,
-        uint256 amount0,
-        uint256 amount1,
-        uint256 liquidationValue,
-        uint256 feeValue
-    ) internal returns (uint256 share0, uint256 share1) {
-        if (feeValue > 0) {
-            share0 = Math.mulDiv(amount0, liquidationValue, feeValue);
-            share1 = Math.mulDiv(amount1, liquidationValue, feeValue);
-        }
-
-        (Currency currency0, Currency currency1) = _getPositionTokens(tokenId);
-        if (share0 > 0) {
-            currency0.transfer(recipient, share0);
-        }
-        if (share1 > 0) {
-            currency1.transfer(recipient, share1);
-        }
-        address owner = tokenOwner[tokenId];
-
-        // wrap native ETH to WETH to prevent revert attacks from owner
-        _transferTokenOrWeth(currency0, amount0 - share0, owner);
-        _transferTokenOrWeth(currency1, amount1 - share1, owner);
-    }
-
-    // transfers token to recipient, wrapping native ETH to WETH to prevent revert attacks
-    function _transferTokenOrWeth(Currency currency, uint256 amount, address recipient) internal {
-        if (amount > 0) {
-            if (currency.isAddressZero()) {
-                weth.deposit{value: amount}();
-                require(weth.transfer(recipient, amount), "WETH_TRANSFER_FAILED");
-            } else {
-                currency.transfer(recipient, amount);
+        // The quote (fullValue, feeValue, liquidationValue) is oracle-priced while the removal settles at the
+        // live pool price, which may sit up to maxPoolPriceDifference away, so the amounts that actually come
+        // out can be worth more than the quote at the oracle's own prices. The liquidator's share is what the
+        // quote authorizes: liquidationValue out of the value the removal was sized on, and never more than
+        // liquidationValue worth at oracle prices. Anything above stays with the loan owner. Receiving less
+        // (a hook skim, a pool price below the oracle) is the liquidator's risk, covered by the penalty; a
+        // fee-only split is applied to what was actually received so a skim is carried proportionally (L-02).
+        uint256 base = feesOnly ? state.feeValue : state.liquidationValue;
+        if (!feesOnly) {
+            uint256 receivedValue =
+                received0.mulDiv(state.price0X96, Q96) + received1.mulDiv(state.price1X96, Q96);
+            if (receivedValue > base) {
+                base = receivedValue;
             }
         }
+        if (base > 0) {
+            amount0 = received0.mulDiv(state.liquidationValue, base);
+            amount1 = received1.mulDiv(state.liquidationValue, base);
+        }
+
+        (Currency currency0, Currency currency1) = _getPositionTokens(params.tokenId);
+        address owner = tokenOwner[params.tokenId];
+        _payLiquidationProceeds(currency0, amount0, received0 - amount0, params.recipient, owner);
+        _payLiquidationProceeds(currency1, amount1, received1 - amount1, params.recipient, owner);
+    }
+
+    // pays the liquidator's share and hands the remainder to the loan owner. Native ETH is wrapped so a
+    // reverting owner cannot block the liquidation; an ERC20 the owner cannot receive (e.g. a blocklisted
+    // owner) leaves the remainder with the liquidator instead of blocking it - liquidation liveness first.
+    function _payLiquidationProceeds(
+        Currency currency,
+        uint256 share,
+        uint256 remainder,
+        address recipient,
+        address owner
+    ) internal {
+        if (share > 0) {
+            currency.transfer(recipient, share);
+        }
+        if (remainder > 0) {
+            address token = Currency.unwrap(currency);
+            if (currency.isAddressZero()) {
+                weth.deposit{value: remainder}();
+                token = address(weth);
+            }
+            if (!_tryTransfer(token, owner, remainder)) {
+                SafeERC20.safeTransfer(IERC20(token), recipient, remainder);
+            }
+        }
+    }
+
+    // ERC20 transfer that reports failure instead of reverting
+    function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
+        (bool success, bytes memory data) = token.call(abi.encodeCall(IERC20.transfer, (to, amount)));
+        return success && (data.length == 0 || (data.length >= 32 && abi.decode(data, (bool))));
     }
 
     // decreases liquidity from uniswap v4 position
@@ -1560,7 +1561,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     function _requireLoanIsHealthy(uint256 tokenId, uint256 debt) internal view {
-        (bool isHealthy,,,) = _checkLoanIsHealthy(tokenId, debt);
+        (bool isHealthy,,,,,) = _checkLoanIsHealthy(tokenId, debt);
         if (!isHealthy) {
             revert CollateralFail();
         }
@@ -1645,9 +1646,16 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     function _checkLoanIsHealthy(uint256 tokenId, uint256 debt)
         internal
         view
-        returns (bool isHealthy, uint256 fullValue, uint256 collateralValue, uint256 feeValue)
+        returns (
+            bool isHealthy,
+            uint256 fullValue,
+            uint256 collateralValue,
+            uint256 feeValue,
+            uint256 price0X96,
+            uint256 price1X96
+        )
     {
-        (fullValue, feeValue,,) = oracle.getValue(tokenId, address(asset));
+        (fullValue, feeValue, price0X96, price1X96) = oracle.getValue(tokenId, address(asset));
         uint256 collateralFactorX32 = _calculateTokenCollateralFactorX32(tokenId);
         collateralValue = fullValue.mulDiv(collateralFactorX32, Q32);
         isHealthy = collateralValue >= debt;

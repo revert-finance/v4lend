@@ -1203,8 +1203,11 @@ contract V4VaultTest is V4ForkTestBase {
 
         assertEq(liquidationValue - liquidationCost, 13341628); // promised liquidation premium
 
-        assertEq(token0.balanceOf(address(this)) - token0Before, 7901404);
-        assertEq(token1.balanceOf(address(this)) - token1Before, 1235549817247049); // leftover WETH not consumed by the swap
+        // both legs ~3.4e-6 below the pre-V4LE-23 figures (7901404 / 1235549817247049): the live pool sat a
+        // hair above the oracle price, and the liquidator's payout is now capped at the oracle-priced
+        // liquidationValue with the excess going to the owner
+        assertEq(token0.balanceOf(address(this)) - token0Before, 7901396);
+        assertEq(token1.balanceOf(address(this)) - token1Before, 1235545631841841); // leftover WETH not consumed by the swap
 
         (debt,,,,) = vault.loanInfo(nft1TokenId);
         assertEq(debt, 0);
