@@ -746,6 +746,95 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "config kept for the owner to act on");
     }
 
+    // ==================== V4LE-16: a remint must not arm an already-satisfied trigger ====================
+
+    function _rangeConfig(int24 lowerLimit, int24 upperLimit, int24 lowerDelta, int24 upperDelta)
+        internal
+        pure
+        returns (RevertHookState.PositionConfig memory config)
+    {
+        config = RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: lowerLimit,
+            autoRangeUpperLimit: upperLimit,
+            autoRangeLowerDelta: lowerDelta,
+            autoRangeUpperDelta: upperDelta,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: 0
+        });
+    }
+
+    /// @dev The finding's configuration on token3Id = [L, L+2s]: lower trigger inside the range at
+    ///      L+s, replacement [B, B+s]. Fired in bucket B = L+s the replacement's lower trigger is
+    ///      B - (-s) = B+s, already satisfied at B and behind the descending cursor. The rule is
+    ///      config-only (lowerDelta >= lowerLimit), so the config is refused instead of arming a
+    ///      dormant trigger after the remint.
+    function testAutoRangeConfigRefusedWhenReplacementLowerTriggerIsSatisfiedAtOnce() public {
+        int24 s = poolKey.tickSpacing;
+        (uint32 lowerBefore, uint32 upperBefore) = _getTriggerListSizes();
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, _rangeConfig(-s, type(int24).max, 0, s));
+
+        // boundary: lowerDelta == lowerLimit puts the replacement trigger exactly on the fired bucket
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, _rangeConfig(0, type(int24).max, 0, s));
+
+        (uint32 lowerAfter, uint32 upperAfter) = _getTriggerListSizes();
+        assertEq(lowerAfter, lowerBefore, "no trigger armed");
+        assertEq(upperAfter, upperBefore, "no trigger armed");
+
+        // one spacing further down the replacement trigger is strictly below the fired bucket: fine
+        hook.setPositionConfig(token3Id, _rangeConfig(-s, type(int24).max, -2 * s, 0));
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "config with a reachable replacement trigger accepted");
+    }
+
+    /// @dev Mirror image on the upper side: upperDelta + upperLimit <= 0 places the replacement's
+    ///      upper trigger at or below the fired bucket.
+    function testAutoRangeConfigRefusedWhenReplacementUpperTriggerIsSatisfiedAtOnce() public {
+        int24 s = poolKey.tickSpacing;
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, _rangeConfig(type(int24).min, -s, -s, 0));
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, _rangeConfig(type(int24).min, 0, -s, 0));
+
+        hook.setPositionConfig(token3Id, _rangeConfig(type(int24).min, -s, 0, 2 * s));
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "config with a reachable replacement trigger accepted");
+    }
+
+    /// @dev A relative AUTO_EXIT combined with AUTO_RANGE moves with the replacement too: an exit
+    ///      offset at or inside the replacement's shift is satisfied the moment the remint lands.
+    function testAutoRangeConfigRefusedWhenRelativeExitIsSatisfiedAfterRemint() public {
+        int24 s = poolKey.tickSpacing;
+        RevertHookState.PositionConfig memory config = _rangeConfig(0, type(int24).max, -s, s);
+        config.modeFlags = PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_EXIT;
+        config.autoExitIsRelative = true;
+        config.autoExitTickLower = -s; // exit trigger one spacing inside the range: at B after the remint
+
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, config);
+
+        config.autoExitTickLower = type(int24).min;
+        config.autoExitTickUpper = -s; // upper exit one spacing inside the replacement: at B
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, config);
+
+        config.autoExitTickUpper = 0; // exit exactly at the replacement's upper edge B+s: reachable
+        hook.setPositionConfig(token3Id, config);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeFlags, config.modeFlags, "reachable relative exit accepted");
+    }
+
     // ==================== L-01: remove callback fails open on oracle failure ====================
 
     function testRemoveLiquidityFromActivatedPositionSucceedsWhenOracleReverts() public {

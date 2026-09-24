@@ -150,6 +150,12 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     }
 
     /// @notice Migrates configuration from an old position to its reminted replacement
+    /// @dev No live-tick trigger check here, unlike the vault remint path: an AUTO_RANGE
+    ///      replacement whose trigger would already be satisfied in the bucket it fired from is
+    ///      refused at configuration time (_validateRangeConfig, V4LE-16), and a trigger the
+    ///      action's own swap carried the price past sits strictly beyond the fired bucket, where the
+    ///      continued walk consumes it in the same swap. The AUTO_LEND re-entry mint places its
+    ///      deposit trigger by construction one spacing away from the price and is left as is.
     function _migrateRemintedPosition(uint256 tokenId, uint256 newTokenId) internal {
         // auto-lend accounting never follows a remint (see migrateVaultPosition); callers reset or
         // never hold shares here, so this only guards against a future path stranding them

@@ -142,6 +142,7 @@ Important implementation detail:
 External audit 2026-09 fixes (hook):
 - V4LE-4: the `_afterSwap` oracle window is exact - `oracleTick +- maxTicksFromOracle` on unrounded ticks, compared with the exact live tick (`_outsideOracleWindow`); bucket rounding is only used for the cursor walk, so a spacing-200 pool no longer dispatches up to 399 ticks off-oracle
 - V4LE-41: a full removal by AUTO_LEND / AUTO_RANGE / AUTO_EXIT that succeeds but credits nothing in either currency (the carried protocol fee consumed the whole principal inside the remove callback) reverts with `RemovalConsumedByFees` in `_decreaseLiquidity`, the same rule the partial deleverage removal already had; the action fails (`HookActionFailed`) and rolls back instead of leaving an emptied NFT with no shares, remint or exit proceeds
+- V4LE-16: the range an AUTO_RANGE remint produces is fixed by the config (`[B + lowerDelta, B + upperDelta]` from the fired bucket B), so whether the replacement's own range trigger or a relative exit is already satisfied at B is a pure config property; `_validateRangeConfig` refuses such configs (`lowerDelta >= lowerLimit`, `upperDelta + upperLimit <= 0`, relative exit offsets inside the shift) at `setPositionConfig` and on vault remints, instead of arming a trigger behind the traversal cursor after the remint. A trigger the action's own swap carried the price past is strictly beyond the fired bucket and is consumed by the continued walk
 
 See also:
 - [`docs/hook-hierarchy.md`](/Users/kalinbas/Code/v4lend/docs/hook-hierarchy.md)

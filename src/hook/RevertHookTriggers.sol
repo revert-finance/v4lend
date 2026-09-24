@@ -124,6 +124,36 @@ abstract contract RevertHookTriggers is RevertHookState {
             revert InvalidConfig();
         }
 
+        // The replacement AutoRangeLib.plan mints from a trigger fired in bucket B is
+        // [B + lowerDelta, B + upperDelta], so its own triggers sit at B + lowerDelta - lowerLimit
+        // and B + upperDelta + upperLimit, and a relative exit at B + lowerDelta - exitLower and
+        // B + upperDelta + exitUpper: whether one of them is already satisfied at B does not depend
+        // on B at all, only on the config. Such a trigger would be inserted at or behind the
+        // traversal cursor (which rests on the fired bucket and searches strictly past it) and lie
+        // dormant until a full recross, leaving the reminted position unprotected (V4LE-16). The
+        // vault remint path re-checks the live tick because a manual range change is arbitrary;
+        // the hook's own remint is fully determined here, so refuse the configuration up front.
+        if (
+            (config.autoRangeLowerLimit != type(int24).min && config.autoRangeLowerDelta >= config.autoRangeLowerLimit)
+                || (
+                    config.autoRangeUpperLimit != type(int24).max
+                        && int256(config.autoRangeUpperDelta) + int256(config.autoRangeUpperLimit) <= 0
+                )
+        ) {
+            revert InvalidConfig();
+        }
+        if (PositionModeFlags.hasAutoExit(config.modeFlags) && config.autoExitIsRelative) {
+            if (
+                (config.autoExitTickLower != type(int24).min && config.autoExitTickLower <= config.autoRangeLowerDelta)
+                    || (
+                        config.autoExitTickUpper != type(int24).max
+                            && int256(config.autoExitTickUpper) + int256(config.autoRangeUpperDelta) <= 0
+                    )
+            ) {
+                revert InvalidConfig();
+            }
+        }
+
         (int24 rangeLower, int24 rangeUpper) = _calculateRangeTriggerTicks(
             positionTickLower, positionTickUpper, config.autoRangeLowerLimit, config.autoRangeUpperLimit
         );

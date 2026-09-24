@@ -2341,7 +2341,7 @@ contract RevertHookTest is BaseTest {
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: -spacing,
-                autoRangeUpperDelta: 0,
+                autoRangeUpperDelta: spacing, // upperDelta 0 would re-trigger on the fired bucket (V4LE-16)
                 autoLendToleranceTick: 0,
                 autoLeverageTargetBps: 0
             })
@@ -3873,8 +3873,10 @@ contract RevertHookTest is BaseTest {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
         hook.setPositionConfig(token3Id, config);
 
+        // upperDelta 0 with upperLimit 0 would put the replacement's upper trigger on the bucket it
+        // fired from (refused since V4LE-16); a symmetric shift is the ordinary valid shape
         config.autoRangeLowerDelta = -poolKey.tickSpacing;
-        config.autoRangeUpperDelta = 0;
+        config.autoRangeUpperDelta = poolKey.tickSpacing;
         hook.setPositionConfig(token3Id, config);
 
         (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
