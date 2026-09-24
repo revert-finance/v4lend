@@ -190,9 +190,13 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             (priceTokenX96,) = _getReferenceTokenPriceX96(token, state.cachedChainlinkReferencePriceX96);
         }
 
-        // Calculate outputs
-        value = (state.price0X96 * (amount0 + fees0) + state.price1X96 * (amount1 + fees1)) / priceTokenX96;
-        feeValue = (state.price0X96 * fees0 + state.price1X96 * fees1) / priceTokenX96;
+        // Calculate outputs. Each price-times-amount term is a 512-bit product (an extreme-tick price is
+        // ~2^224 in Q96), so it is divided by the quote price with full precision instead of as a checked
+        // uint256 product, which overflowed for valid positions even though the quotient fits.
+        value = FullMath.mulDiv(state.price0X96, amount0 + fees0, priceTokenX96)
+            + FullMath.mulDiv(state.price1X96, amount1 + fees1, priceTokenX96);
+        feeValue = FullMath.mulDiv(state.price0X96, fees0, priceTokenX96)
+            + FullMath.mulDiv(state.price1X96, fees1, priceTokenX96);
         price0X96 = FullMath.mulDiv(state.price0X96, Q96, priceTokenX96);
         price1X96 = FullMath.mulDiv(state.price1X96, Q96, priceTokenX96);
     }
