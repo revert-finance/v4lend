@@ -142,7 +142,10 @@ contract RevertHookMigrationActions is RevertHookActionBase {
     ///      (`positionManager.msgSender()`) must own the old token, hold its per-token approval, or be
     ///      an operator for the owner (`isApprovedForAll`, which is how the standalone AutoRange is
     ///      approved), and the new token must be in the locker's custody (V4Utils mints to itself
-    ///      before forwarding) or already with the old owner. A blanket operator could name any of the
+    ///      before forwarding) or already with the old owner. A shared locker must not lend that
+    ///      authority to its callers: V4Utils forwards a tagged claim only when it names the token its
+    ///      caller is authorized on and draining in that very call, and refuses one on its
+    ///      permissionless mint / increase entries (V4LE-9). A blanket operator could name any of the
     ///      owner's positions here, but the claim only succeeds once that position is drained, so
     ///      misdirecting automation would first require closing a position the operator was already
     ///      trusted with; the cross-position claim adds nothing to what the approval already permits. The callback also fires for

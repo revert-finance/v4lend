@@ -43,6 +43,12 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     /// @dev Prevents callbacks from re-entering execute() while this contract has temporary NFT custody.
     bool private executing;
 
+    /// @dev Tag of a RevertHook remint-migration claim in mint / increase hookData
+    ///      (`abi.encodePacked(REMINT_MIGRATION_TAG, oldTokenId)`, 36 bytes; RevertHookState.REMINT_MIGRATION_TAG).
+    ///      The hook honours such a claim when the PositionManager locker - this contract - is approved on the
+    ///      old token, so this contract must only forward a claim for the token its caller is authorized on.
+    bytes4 internal constant REMINT_MIGRATION_TAG = bytes4(keccak256("RevertHookRemintMigration(uint256)"));
+
     // events
     event CompoundFees(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
     event ChangeRange(uint256 indexed tokenId, uint256 newTokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
@@ -218,6 +224,9 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     }
 
     function _execute(uint256 tokenId, Instructions memory instructions) internal returns (uint256 newTokenId) {
+        // a remint claim in the mint / increase hookData may only name the token this call is draining
+        _checkRemintClaim(instructions.increaseLiquidityHookData, tokenId);
+
         // Get position info from V4 PositionManager
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
 
@@ -633,6 +642,8 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         if (params.token0 == params.token1) {
             revert SameToken();
         }
+        // permissionless mint: nothing here authorizes the caller on any existing position
+        _checkRemintClaim(params.mintHookData, 0);
 
         _prepareAddApproved(
             params.token0,
@@ -662,6 +673,8 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
         // Without this, anyone could call this on a position that granted V4Utils a standing
         // approval, collect its fees, and redirect leftovers to an arbitrary recipient (H-1).
         _validateCaller(positionManager, params.tokenId);
+        // an increase replaces nothing: a remint claim has no token this caller is draining
+        _checkRemintClaim(params.increaseLiquidityHookData, 0);
 
         if (executing) {
             revert Reentrancy();
@@ -694,6 +707,25 @@ contract V4Utils is Transformer, Swapper, IERC721Receiver {
     }
 
     // Internal helper functions
+
+    /// @dev Refuses a tagged remint claim unless it names `allowedOldTokenId` (0: no claim allowed). The hook
+    ///      only checks that the locker is approved on the old token, and this contract is the locker for
+    ///      every caller: without this, anyone could claim the automation of a drained position whose owner
+    ///      once approved this contract (a normal post-range-change state) through the permissionless mint
+    ///      (V4LE-9). Untagged hookData is passed through untouched.
+    function _checkRemintClaim(bytes memory hookData, uint256 allowedOldTokenId) internal pure {
+        if (hookData.length != 36 || bytes4(hookData) != REMINT_MIGRATION_TAG) {
+            return;
+        }
+        uint256 claimed;
+        assembly ("memory-safe") {
+            claimed := mload(add(hookData, 36))
+        }
+        if (allowedOldTokenId == 0 || claimed != allowedOldTokenId) {
+            revert Unauthorized();
+        }
+    }
+
     function _prepareAddApproved(
         Currency token0,
         Currency token1,
