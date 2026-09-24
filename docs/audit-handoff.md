@@ -169,7 +169,7 @@ Files:
 
 Purpose:
 - keep fee governance, swap routing, and the fee-discount market out of `RevertHook` storage
-- `HookFeeController`: LP protocol fee, auto-lend gain fee, per-mode hook swap fee, protocol fee recipient
+- `HookFeeController`: LP protocol fee, auto-lend gain fee, per-mode hook swap fee, protocol fee recipient. The recipient is direct-sent, so the system addresses are refused: zero, hook, controller, PoolManager and (external audit V4LE-27) the v4 PositionManager, whose permissionless SWEEP hands its whole balance to any caller - the latter two via tolerant staticcalls to the hook's `poolManager()` / `positionManager()` getters, so the PositionManager rejection is live only once the hook exposes `positionManager()`
 - `HookRouteController`: protocol-managed single-pool routes per ordered token pair
 - `HookAuctionController`: per-epoch English auction selling a discounted-LP-fee executor slot; the winning bid minus a protocol fee is dripped to in-range LPs through `PoolManager.donate` over the following epoch
 - `HookLeaseController`: Harberger-lease alternative with the same hook-facing interface; one lessee self-assesses a price, pays per-second rent on it, can be bought out at that price, and rent minus a protocol fee is dripped to in-range LPs
