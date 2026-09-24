@@ -15,6 +15,7 @@ import {MutableChainlinkFeed, MutableDecimalsToken} from "test/oracle/support/Or
 ///         precision (a feed proxy migrating from 8 to 18 decimals, an upgradeable token changing its
 ///         units) was scaled with the stale exponent and mispriced by 10^|delta| until noticed.
 ///         - External audit V4LE-15: feed decimals.
+///         - External audit V4LE-25: token decimals (and the immutable reference-token decimals).
 ///         The oracle now re-reads the live metadata on unverified Chainlink reads and reverts when it
 ///         differs from the cached value; the owner re-runs `setTokenConfig` to accept the new precision.
 ///         Verified two-source reads keep failing closed through the deviation check and pay nothing.
@@ -24,6 +25,7 @@ contract V4OracleDecimalsConsistencyTest is BaseTest {
     uint256 constant Q96 = 2 ** 96;
     // by signature so the tests compile against the pre-fix oracle and fail there at runtime
     bytes4 constant FEED_DECIMALS_CHANGED = bytes4(keccak256("FeedDecimalsChanged()"));
+    bytes4 constant TOKEN_DECIMALS_CHANGED = bytes4(keccak256("TokenDecimalsChanged()"));
     bytes4 constant PRICE_DIFFERENCE_EXCEEDED = bytes4(keccak256("PriceDifferenceExceeded()"));
     int24 constant TWAP_TICK = -198080; // ~2.5e-9 reference-raw per token-raw, i.e. 2500 USDC per token
 
@@ -98,8 +100,41 @@ contract V4OracleDecimalsConsistencyTest is BaseTest {
 
         // the TWAP exposes the mis-scaled Chainlink leg; no decimals() call is spent on the hot path
         vm.expectCall(address(feed), abi.encodeWithSelector(AggregatorV3Interface.decimals.selector), 0);
+        vm.expectCall(address(token), abi.encodeWithSignature("decimals()"), 0);
+        vm.expectCall(address(referenceToken), abi.encodeWithSignature("decimals()"), 0);
         vm.expectRevert(PRICE_DIFFERENCE_EXCEEDED);
         oracle.getPoolSqrtPriceX96(address(token), address(referenceToken));
+    }
+
+    // ---------------------------------------------------------------- V4LE-25: token decimals
+
+    function testTokenUnitsUpgradeIsRejectedUntilReconfigured() public {
+        // the upgradeable token switches to 6 decimals; its USD feed keeps quoting the same price
+        token.setDecimals(6);
+
+        // the old code kept converting with the cached 18 and priced the token 1e12 too low
+        vm.expectRevert(TOKEN_DECIMALS_CHANGED);
+        oracle.getPoolSqrtPriceX96(address(token), address(referenceToken));
+        vm.expectRevert(TOKEN_DECIMALS_CHANGED);
+        oracle.getPoolSqrtPriceX96(address(referenceToken), address(token));
+
+        _configure(address(token), feed, V4Oracle.Mode.CHAINLINK);
+        assertEq(oracle.getPoolSqrtPriceX96(address(token), address(referenceToken)), _expectedSqrtPriceX96(6));
+    }
+
+    function testReferenceTokenUnitsUpgradeIsRejected() public {
+        referenceToken.setDecimals(18);
+
+        // referenceTokenDecimals is immutable: the deployment must be replaced, reads fail closed meanwhile
+        vm.expectRevert(TOKEN_DECIMALS_CHANGED);
+        oracle.getPoolSqrtPriceX96(address(token), address(referenceToken));
+        assertEq(oracle.referenceTokenDecimals(), 6);
+    }
+
+    function testNativeTokenHasFixedDecimals() public {
+        MutableChainlinkFeed ethFeed = new MutableChainlinkFeed(2500e8, 8);
+        _configure(address(0), ethFeed, V4Oracle.Mode.CHAINLINK);
+        assertEq(oracle.getPoolSqrtPriceX96(address(0), address(referenceToken)), _expectedSqrtPriceX96(18));
     }
 
     function _configure(address token_, MutableChainlinkFeed feed_, V4Oracle.Mode mode) internal {

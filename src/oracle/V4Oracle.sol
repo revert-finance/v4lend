@@ -83,6 +83,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     error SqrtPriceOutOfRange();
     error SettlementBoundExceeded();
     error FeedDecimalsChanged();
+    error TokenDecimalsChanged();
 
     enum Mode {
         NOT_SET,
@@ -397,9 +398,17 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             // (a 10^k mis-scaling always exceeds any representable maxDifference).
             bool unverified = !_isTwoSourceMode(mode) || feedConfig.maxDifference == type(uint16).max;
             uint256 chainlinkPriceX96 = _getChainlinkPriceX96(token, unverified);
-            chainlinkReferencePriceX96 = cachedChainlinkReferencePriceX96 == 0
-                ? _getChainlinkPriceX96(referenceToken, unverified)
-                : cachedChainlinkReferencePriceX96;
+            if (cachedChainlinkReferencePriceX96 == 0) {
+                chainlinkReferencePriceX96 = _getChainlinkPriceX96(referenceToken, unverified);
+                if (unverified) {
+                    _requireTokenDecimals(referenceToken, referenceTokenDecimals);
+                }
+            } else {
+                chainlinkReferencePriceX96 = cachedChainlinkReferencePriceX96;
+            }
+            if (unverified) {
+                _requireTokenDecimals(token, feedConfig.tokenDecimals);
+            }
             uint256 referencePriceX96 =
                 _normalizeChainlinkPrice(feedConfig, chainlinkPriceX96, chainlinkReferencePriceX96);
 
@@ -498,6 +507,16 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
 
         return FullMath.mulDiv(SafeCast.toUint256(answer), Q96, 10 ** feedConfig.feedDecimals);
+    }
+
+    /// @dev Rejects a token whose live `decimals()` differs from the exponent cached for it (an upgraded
+    ///      token would otherwise have its Chainlink price converted into the wrong raw unit). Native ETH
+    ///      has fixed 18 decimals. For a configured token the owner re-runs `setTokenConfig`; the
+    ///      reference token's decimals are immutable, so a change there needs a new oracle deployment.
+    function _requireTokenDecimals(address token, uint8 cachedDecimals) internal view {
+        if (token != address(0) && IERC20Metadata(token).decimals() != cachedDecimals) {
+            revert TokenDecimalsChanged();
+        }
     }
 
     function _normalizeChainlinkPrice(

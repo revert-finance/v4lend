@@ -110,6 +110,7 @@ Boundary behavior:
 - principal amounts are bounded the same way (V4LE-61): `_getAmounts` reverts with `SettlementBoundExceeded` for a token amount >= 2^127, which v4 cannot pay out in the single decrease a liquidation or full withdrawal performs
 - the L2 sequencer uptime / grace guard runs once per external read in `getPoolSqrtPriceX96` and `_loadPositionState` (`_requireSequencerUp`, V4LE-2), so `Mode.TWAP` reads are guarded like Chainlink ones and a Chainlink read no longer consults the uptime feed once per leg
 - an unverified Chainlink read (`Mode.CHAINLINK`, or a two-source mode with `maxDifference == type(uint16).max`) re-reads `feed.decimals()` and reverts with `FeedDecimalsChanged` when it differs from the value cached at `setTokenConfig` (V4LE-15); the owner re-runs `setTokenConfig` to accept a feed precision migration. Verified two-source reads pay nothing: a 10^k mis-scaling always trips the deviation check
+- the same unverified reads re-read `token.decimals()` (and the reference token's, once per read) and revert with `TokenDecimalsChanged` on a mismatch with the cached exponent (V4LE-25); native ETH is fixed at 18. A configured token is re-accepted through `setTokenConfig`; `referenceTokenDecimals` is immutable, so a reference-token unit change needs a new oracle deployment and fails closed until then
 
 ### RevertHook
 
