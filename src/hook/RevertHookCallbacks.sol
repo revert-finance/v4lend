@@ -75,6 +75,12 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
     /// @dev Isolates the oracle read so a failing oracle aborts trigger processing (never the swap):
     ///      the price call is tried directly and bounds-checked before the tick conversion, instead
     ///      of an external self-call wrapper (saves the call overhead and the extra entrypoint).
+    ///      The bounds are exact ticks: `oracleTick +- _maxTicksFromOracle` with no rounding to the
+    ///      pool's tick spacing, and they are compared against the exact live tick
+    ///      (_outsideOracleWindow). Flooring both sides to the spacing let the effective window grow
+    ///      by up to two spacings less two ticks (399 instead of 100 ticks at spacing 200), so
+    ///      same-pool actions could dispatch materially off-oracle. Bucket rounding belongs to the
+    ///      cursor walk only.
     function _tryOracleTickBounds(PoolKey calldata key)
         internal
         view
@@ -86,13 +92,18 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             if (oracleSqrtPriceX96 < TickMath.MIN_SQRT_PRICE || oracleSqrtPriceX96 >= TickMath.MAX_SQRT_PRICE) {
                 return (false, 0, 0);
             }
-            int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), key.tickSpacing);
-            lowerBound = _getTickLower(oracleTick - _maxTicksFromOracle, key.tickSpacing);
-            upperBound = _getTickLower(oracleTick + _maxTicksFromOracle, key.tickSpacing);
-            return (true, lowerBound, upperBound);
+            int24 oracleTick = TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96);
+            return (true, oracleTick - _maxTicksFromOracle, oracleTick + _maxTicksFromOracle);
         } catch {
             return (false, 0, 0);
         }
+    }
+
+    /// @dev Exact live tick against the exact oracle bounds. Re-reads slot0 instead of reusing the
+    ///      walk's bucket-rounded `liveTick`: the walk is at its stack limit and the slot is warm.
+    function _outsideOracleWindow(PoolId poolId, int24 lowerBound, int24 upperBound) internal view returns (bool) {
+        int24 tick = _getTick(poolId);
+        return tick > upperBound || tick < lowerBound;
     }
 
     /// @dev Fail-open value gate for the remove callback: an oracle that reverts (stale feed,
@@ -166,7 +177,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             int24 tickEnd = liveTick;
             // Both bounds apply even when a pending return walk starts beyond the live bucket.
             // Keep the oracle window fixed across the action's own swaps and direction changes.
-            if (liveTick > upperOracleBound || liveTick < lowerOracleBound) {
+            if (_outsideOracleWindow(poolId, lowerOracleBound, upperOracleBound)) {
                 break;
             }
 
@@ -221,7 +232,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 // at that price. Either way put them back. A reversal continues the walk from this
                 // tick; leaving the window stops it with the cursor before the tick, so the next
                 // in-window swap finds them again (same bookkeeping as the per-swap cap).
-                bool leftWindow = liveTick > upperOracleBound || liveTick < lowerOracleBound;
+                bool leftWindow = _outsideOracleWindow(poolId, lowerOracleBound, upperOracleBound);
                 if (directionReversed || leftWindow) {
                     if (i < length) {
                         _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i);

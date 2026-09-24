@@ -984,6 +984,9 @@ contract RevertHookTest is BaseTest {
     }
 
     function testAutoExit_MultiplePositionsOnSameTriggerExecuteOnceEach() public {
+        // The oracle is this pool itself and the exits' own swaps move the price well past the
+        // 100-tick default window (V4LE-4 made that bound exact); this test is about dispatch, not the window.
+        hook.setMaxTicksFromOracle(1000);
         uint128 extraLiquidity = 10e18;
         (uint256 token4Id,) = positionManager.mint(
             poolKey,
@@ -6627,6 +6630,9 @@ contract RevertHookTest is BaseTest {
     }
 
     function testAutoExitFailureIsolation_OnePositionCanFailWithoutBlockingOthers() public {
+        // The oracle is this pool itself and the exits' own swaps move the price well past the
+        // 100-tick default window (V4LE-4 made that bound exact); this test is about dispatch, not the window.
+        hook.setMaxTicksFromOracle(1000);
         uint128 extraLiquidity = 10e18;
         (uint256 token4Id,) = positionManager.mint(
             poolKey,

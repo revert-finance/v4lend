@@ -139,6 +139,9 @@ Important implementation detail:
 - the deployed hook delegates execution into sidecar contracts
 - storage layout compatibility matters across the shared hook/action state spine
 
+External audit 2026-09 fixes (hook):
+- V4LE-4: the `_afterSwap` oracle window is exact - `oracleTick +- maxTicksFromOracle` on unrounded ticks, compared with the exact live tick (`_outsideOracleWindow`); bucket rounding is only used for the cursor walk, so a spacing-200 pool no longer dispatches up to 399 ticks off-oracle
+
 See also:
 - [`docs/hook-hierarchy.md`](/Users/kalinbas/Code/v4lend/docs/hook-hierarchy.md)
 

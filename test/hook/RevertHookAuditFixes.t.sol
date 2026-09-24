@@ -537,6 +537,113 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(vault0.balanceOf(address(hook)), 0, "force exit redeems the custodied shares");
     }
 
+    // ==================== V4LE-4: the oracle window is exact, not bucket-rounded ====================
+
+    PoolKey internal wideTwin;
+
+    /// @dev Deploys a spacing-200 hooked pool plus a hookless twin the oracle is pinned to, both at
+    ///      `sqrtPrice` with full-range liquidity, and returns the hooked key.
+    function _wideSpacingPoolPinnedToTwin(uint160 sqrtPrice) internal returns (PoolKey memory wide) {
+        wide = PoolKey(currency0, currency1, 3000, 200, IHooks(hook));
+        wideTwin = PoolKey(currency0, currency1, 3000, 200, IHooks(address(0)));
+        poolManager.initialize(wide, sqrtPrice);
+        poolManager.initialize(wideTwin, sqrtPrice);
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), wideTwin);
+        _mintFullRange(wide, 100e18);
+        _mintFullRange(wideTwin, 100e18);
+    }
+
+    function _mintFullRange(PoolKey memory key, uint128 liquidity) internal returns (uint256 id) {
+        (id,) = positionManager.mint(
+            key,
+            TickMath.minUsableTick(key.tickSpacing),
+            TickMath.maxUsableTick(key.tickSpacing),
+            liquidity,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+    }
+
+    /// @dev Swaps `key` in 1e17 steps (about 20 ticks against the 100e18 full-range liquidity)
+    ///      until its tick is at or past `target` in the direction of travel.
+    function _movePastTick(PoolKey memory key, int24 target) internal {
+        bool down = _currentTick(key) > target;
+        for (uint256 i; i < 200 && (down ? _currentTick(key) > target : _currentTick(key) < target); i++) {
+            _swap(key, down, 1e17);
+        }
+        assertTrue(down ? _currentTick(key) <= target : _currentTick(key) >= target, "target tick not reached");
+    }
+
+    /// @dev With tickSpacing 200 and maxTicksFromOracle 100 the old bound floored the oracle tick
+    ///      (190 -> 0), floored 0 - 100 to -200 and compared it with the live bucket, so a live tick
+    ///      anywhere in [-200, -1] passed although the exact window is [90, 290]. An AUTO_EXIT armed
+    ///      at bucket -200 therefore ran ~210 ticks off-oracle; it must wait until the oracle window
+    ///      covers the price.
+    function testOracleWindowLowerSideIsExactAtWideTickSpacing() public {
+        assertEq(hook.maxTicksFromOracle(), 100, "fixture assumes the deployed 100-tick window");
+        PoolKey memory wide = _wideSpacingPoolPinnedToTwin(Constants.SQRT_PRICE_1_1);
+        (uint256 exitId,) = positionManager.mint(
+            wide, -2000, 2000, 1e18, type(uint256).max, type(uint256).max, address(this), block.timestamp, ""
+        );
+        IERC721(address(positionManager)).approve(address(hook), exitId);
+        hook.setPositionConfig(exitId, _autoExitConfig(-200, type(int24).max));
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(exitId);
+
+        // oracle near the top of bucket 0: the old floor put its lower bound at -200
+        _movePastTick(wideTwin, 185);
+        assertLt(_currentTick(wideTwin), 200, "oracle stays inside bucket 0");
+
+        // one small swap puts the hooked pool into bucket -200: the trigger bucket, ~210 ticks off-oracle
+        _swap(wide, true, 1e17);
+        int24 offWindowTick = _currentTick(wide);
+        assertGe(offWindowTick, -200, "hooked pool sits in bucket -200");
+        assertLt(offWindowTick, 0, "hooked pool sits in bucket -200");
+        assertEq(positionManager.getPositionLiquidity(exitId), liquidityBefore, "exit must not run off-oracle");
+
+        // the oracle comes down to the price: the deferred exit runs on the next hooked swap
+        _movePastTick(wideTwin, -20);
+        assertGt(_currentTick(wideTwin), -60, "oracle within 100 ticks of the hooked pool");
+        _swap(wide, true, 1e15);
+        assertEq(positionManager.getPositionLiquidity(exitId), 0, "deferred exit runs once the price is bounded");
+        assertEq(currency0.balanceOf(address(hook)), 0, "hook flat in token0");
+        assertEq(currency1.balanceOf(address(hook)), 0, "hook flat in token1");
+    }
+
+    /// @dev Mirror image: an oracle tick anywhere in bucket -200 gave an old upper bound of
+    ///      floor(-200 + 100) = -200, so a live tick in [-200, -1] passed even when the oracle sat at
+    ///      -195 and the exact window was [-295, -95]. An upper AUTO_EXIT at bucket -200 ran ~145
+    ///      ticks off-oracle.
+    function testOracleWindowUpperSideIsExactAtWideTickSpacing() public {
+        PoolKey memory wide = _wideSpacingPoolPinnedToTwin(TickMath.getSqrtPriceAtTick(-300));
+        (uint256 exitId,) = positionManager.mint(
+            wide, -2000, 2000, 1e18, type(uint256).max, type(uint256).max, address(this), block.timestamp, ""
+        );
+        IERC721(address(positionManager)).approve(address(hook), exitId);
+        hook.setPositionConfig(exitId, _autoExitConfig(type(int24).min, -200));
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(exitId);
+
+        // oracle near the bottom of bucket -200
+        _movePastTick(wideTwin, -195);
+        assertLt(_currentTick(wideTwin), -170, "oracle stays near the bottom of bucket -200");
+
+        // walk the hooked pool up to just below the trigger bucket, then cross it in one swap that
+        // lands in the top half of the bucket, more than 100 ticks above the oracle
+        _movePastTick(wide, -230);
+        _swap(wide, false, 9e17);
+        int24 offWindowTick = _currentTick(wide);
+        assertGt(offWindowTick, -65, "hooked pool lands more than 100 ticks above the oracle");
+        assertLt(offWindowTick, 0, "hooked pool still in bucket -200");
+        assertEq(positionManager.getPositionLiquidity(exitId), liquidityBefore, "exit must not run off-oracle");
+
+        // the oracle catches up: the deferred exit runs on the next hooked swap
+        _movePastTick(wideTwin, -60);
+        _swap(wide, false, 1e15);
+        assertEq(positionManager.getPositionLiquidity(exitId), 0, "deferred exit runs once the price is bounded");
+    }
+
     // ==================== L-01: remove callback fails open on oracle failure ====================
 
     function testRemoveLiquidityFromActivatedPositionSucceedsWhenOracleReverts() public {
