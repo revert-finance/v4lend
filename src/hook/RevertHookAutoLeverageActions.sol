@@ -23,7 +23,6 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
 
     error RestoreFailed();
     error NoImprovement();
-    error RemovalConsumedByFees();
 
     constructor(
         IPermit2 _permit2,

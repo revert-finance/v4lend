@@ -41,6 +41,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     using ProtocolFeeLibrary for uint16;
 
     error SwapPoolPriceOutOfBounds(int24 swapTick, int24 oracleTick);
+    error RemovalConsumedByFees();
 
     struct SwapPlan {
         PoolKey poolKey;
@@ -420,6 +421,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     ///      Successful flows are expected to drain the hook back to zero, so the returned amounts
     ///      represent all balances currently attributable to the action. If unsolicited balances
     ///      are present, they will be swept by the next execution by design.
+    /// @dev A full removal that succeeds but credits nothing in either currency means the
+    ///      position's carried protocol fee (deferred by earlier fee-only collections) consumed the
+    ///      whole principal inside the remove callback. Every caller treats `(0, 0)` as a soft
+    ///      failure and returns, which is right when the removal itself failed (nothing changed)
+    ///      but would otherwise leave an emptied NFT behind with no shares, no remint and no exit
+    ///      proceeds (V4LE-41). Revert instead so the action rolls back: direct actions run under
+    ///      a caught delegatecall, vault-backed ones inside a caught vault transform, so this only
+    ///      fails the action (HookActionFailed) and the owner settles the fee with a manual removal.
     function _decreaseLiquidity(PoolKey memory poolKey, uint256 tokenId, bool feesOnly)
         internal
         returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)
@@ -442,6 +451,9 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             )) {
             amount0 = _sweepableBalance(currency0);
             amount1 = _sweepableBalance(currency1);
+            if (liquidity != 0 && amount0 == 0 && amount1 == 0) {
+                revert RemovalConsumedByFees();
+            }
         }
     }
 

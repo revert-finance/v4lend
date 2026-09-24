@@ -13,6 +13,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
+import {Vm} from "forge-std/Vm.sol";
+import {stdStorage, StdStorage} from "forge-std/StdStorage.sol";
+
 import {EasyPosm} from "test/utils/libraries/EasyPosm.sol";
 
 import {RevertHook} from "src/RevertHook.sol";
@@ -79,6 +82,9 @@ contract RevertHookAuditFixesTest is RevertHookTest {
     using EasyPosm for IPositionManager;
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
+    using stdStorage for StdStorage;
+
+    StdStorage internal stdstore_;
 
     function _autoExitConfig(int24 lower, int24 upper) internal pure returns (RevertHookState.PositionConfig memory) {
         return RevertHookState.PositionConfig({
@@ -642,6 +648,102 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         _movePastTick(wideTwin, -60);
         _swap(wide, false, 1e15);
         assertEq(positionManager.getPositionLiquidity(exitId), 0, "deferred exit runs once the price is bounded");
+    }
+
+    // ==================== V4LE-41: a full removal consumed by carried fees rolls back ====================
+
+    /// @dev Writes a carried protocol fee larger than any principal into the position's pending
+    ///      slot, in both currencies. Reaching it organically needs LP protocol fees larger than the
+    ///      position, which is exactly the finding's precondition, only slower to set up.
+    function _carryHugeProtocolFee(uint256 id) internal returns (uint128 carried) {
+        carried = type(uint128).max / 4;
+        uint256 slot = stdstore_.target(address(hook)).sig(hook.pendingProtocolFees.selector).with_key(id).find();
+        vm.store(address(hook), bytes32(slot), bytes32((uint256(carried) << 128) | uint256(carried)));
+        (uint128 pending0, uint128 pending1) = hook.pendingProtocolFees(id);
+        assertEq(pending0, carried);
+        assertEq(pending1, carried);
+    }
+
+    function _assertRemovalRolledBack(uint256 id, uint128 liquidityBefore, uint128 carried, RevertHookState.Mode mode)
+        internal
+    {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(_sawHookActionFailed(logs, id, mode), "the action fails instead of leaving an empty NFT");
+        assertEq(positionManager.getPositionLiquidity(id), liquidityBefore, "no liquidity leaves the position");
+        (uint128 pending0, uint128 pending1) = hook.pendingProtocolFees(id);
+        assertEq(pending0, carried, "carried fee still owed, not paid out of the principal");
+        assertEq(pending1, carried);
+        assertEq(IERC20(Currency.unwrap(currency0)).balanceOf(protocolFeeRecipient), 0, "no principal paid as fee");
+        assertEq(IERC20(Currency.unwrap(currency1)).balanceOf(protocolFeeRecipient), 0, "no principal paid as fee");
+        _verifyNoLeftoverBalances("removal consumed by fees");
+    }
+
+    /// @dev A position parked below the price (all token1) that the upward trigger swaps never bring
+    ///      into range, so its removal credits principal only: exactly what the carried fee consumes.
+    function _mintParkedBelowPrice() internal returns (uint256 id) {
+        (id,) = positionManager.mint(
+            poolKey, -240, -120, 10e18, type(uint256).max, type(uint256).max, address(this), block.timestamp, ""
+        );
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        hook.setMaxTicksFromOracle(1000);
+    }
+
+    /// @dev autoLendDeposit removed the whole position, TAKE_PAIR credited nothing because the
+    ///      carried fee consumed the principal inside the remove callback, and the action returned
+    ///      normally: the NFT was left empty with no shares and no restore. It must roll back.
+    function testAutoLendDepositRollsBackWhenCarriedFeesConsumeTheRemoval() public {
+        uint256 id = _mintParkedBelowPrice();
+        RevertHookState.PositionConfig memory config =
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max);
+        config.autoLendToleranceTick = 120; // upper deposit trigger at tickUpper + 240 = 120
+        hook.setPositionConfig(id, config);
+        uint128 carried = _carryHugeProtocolFee(id);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(id);
+
+        vm.recordLogs();
+        _moveTickUpUntil(120, 2e16, 200);
+
+        _assertRemovalRolledBack(id, liquidityBefore, carried, RevertHookState.Mode.AUTO_LEND);
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(id);
+        assertEq(autoLendShares, 0, "no shares recorded");
+        assertEq(autoLendToken, address(0), "no lend state recorded");
+        assertEq(vault1.balanceOf(address(hook)), 0, "nothing was deposited");
+    }
+
+    /// @dev Same shape on AUTO_RANGE: the old code removed the liquidity, saw (0, 0), emitted
+    ///      HookActionFailed and returned with the NFT empty and no replacement minted.
+    function testAutoRangeRollsBackWhenCarriedFeesConsumeTheRemoval() public {
+        uint256 id = _mintParkedBelowPrice();
+        RevertHookState.PositionConfig memory config =
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_RANGE, true, false, type(int24).min, type(int24).max);
+        config.autoRangeLowerLimit = type(int24).min;
+        config.autoRangeUpperLimit = 180; // upper range trigger at tickUpper + 180 = 60
+        hook.setPositionConfig(id, config);
+        uint128 carried = _carryHugeProtocolFee(id);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(id);
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        vm.recordLogs();
+        _moveTickUpUntil(60, 2e16, 200);
+
+        _assertRemovalRolledBack(id, liquidityBefore, carried, RevertHookState.Mode.AUTO_RANGE);
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore, "no replacement minted");
+    }
+
+    /// @dev And on AUTO_EXIT: an "exit" that pays out nothing and leaves the config in place is not
+    ///      an exit; the position stays and the owner settles the fee with a manual removal.
+    function testAutoExitRollsBackWhenCarriedFeesConsumeTheRemoval() public {
+        uint256 id = _mintParkedBelowPrice();
+        hook.setPositionConfig(id, _autoExitConfig(type(int24).min, 60));
+        uint128 carried = _carryHugeProtocolFee(id);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(id);
+
+        vm.recordLogs();
+        _moveTickUpUntil(60, 2e16, 200);
+
+        _assertRemovalRolledBack(id, liquidityBefore, carried, RevertHookState.Mode.AUTO_EXIT);
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(id);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "config kept for the owner to act on");
     }
 
     // ==================== L-01: remove callback fails open on oracle failure ====================

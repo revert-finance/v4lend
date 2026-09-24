@@ -141,6 +141,7 @@ Important implementation detail:
 
 External audit 2026-09 fixes (hook):
 - V4LE-4: the `_afterSwap` oracle window is exact - `oracleTick +- maxTicksFromOracle` on unrounded ticks, compared with the exact live tick (`_outsideOracleWindow`); bucket rounding is only used for the cursor walk, so a spacing-200 pool no longer dispatches up to 399 ticks off-oracle
+- V4LE-41: a full removal by AUTO_LEND / AUTO_RANGE / AUTO_EXIT that succeeds but credits nothing in either currency (the carried protocol fee consumed the whole principal inside the remove callback) reverts with `RemovalConsumedByFees` in `_decreaseLiquidity`, the same rule the partial deleverage removal already had; the action fails (`HookActionFailed`) and rolls back instead of leaving an emptied NFT with no shares, remint or exit proceeds
 
 See also:
 - [`docs/hook-hierarchy.md`](/Users/kalinbas/Code/v4lend/docs/hook-hierarchy.md)
