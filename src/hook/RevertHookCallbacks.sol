@@ -225,6 +225,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 if (directionReversed || leftWindow) {
                     if (i < length) {
                         _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i);
+                        tickDrained = false;
                     }
                     if (leftWindow) {
                         tickDrained = false;
@@ -236,6 +237,14 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
             if (directionReversed || tickDrained) {
                 cursor = tick;
+                // A reversal that leaves entries at `tick` (put back above, or never popped under
+                // the per-swap cap) must keep them reachable. The next search in this direction is
+                // strictly past the cursor, so parking it on the fired tick would strand them until
+                // a full recross; rest one bucket short instead, and the continued walk consumes
+                // them now if the price is still past the tick.
+                if (!tickDrained) {
+                    cursor = increasing ? tick - key.tickSpacing : tick + key.tickSpacing;
+                }
             }
             // A reversal may pass the original cursor as well. Retain that final bucket so
             // triggers rearmed there are reachable on the next move in the original direction.
