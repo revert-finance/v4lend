@@ -162,8 +162,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint256 amount0,
         uint256 amount1
     ) internal {
-        uint256 added0 = amount0 - token0.balanceOfSelf();
-        uint256 added1 = amount1 - token1.balanceOfSelf();
+        // Whole-balance accounting: the remaining balances are the leftovers owed to the recipient.
+        // Anyone can push unsolicited dust into the transformer, so a balance can exceed this
+        // operation's own amount for a token the operation did not consume; saturate instead of
+        // letting a 1-wei donation revert every leverage-up that does not add that token.
+        uint256 leftover0 = token0.balanceOfSelf();
+        uint256 leftover1 = token1.balanceOfSelf();
+        uint256 added0 = amount0 > leftover0 ? amount0 - leftover0 : 0;
+        uint256 added1 = amount1 > leftover1 ? amount1 - leftover1 : 0;
 
         if (added0 < params.amountAddMin0) {
             revert InsufficientAmountAdded();
@@ -172,12 +178,12 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             revert InsufficientAmountAdded();
         }
 
-        // send leftover tokens
-        if (amount0 > added0) {
-            token0.transfer(params.recipient, amount0 - added0);
+        // send leftover tokens (including any dust) to the recipient
+        if (leftover0 > 0) {
+            token0.transfer(params.recipient, leftover0);
         }
-        if (amount1 > added1) {
-            token1.transfer(params.recipient, amount1 - added1);
+        if (leftover1 > 0) {
+            token1.transfer(params.recipient, leftover1);
         }
         if (!(token == token0) && !(token == token1)) {
             uint256 leftover = token.balanceOfSelf();
@@ -662,9 +668,12 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         // Whole-balance accounting is intentional here: the transformer is expected to finish
         // successful executions without retaining position tokens, so the remaining balances are
         // treated as the full leftovers owed back to the recipient.
-        // Calculate amounts added
-        uint256 added0 = amount0 - params.token0.balanceOfSelf();
-        uint256 added1 = amount1 - params.token1.balanceOfSelf();
+        // Calculate amounts added; saturate so unsolicited dust in a token this operation did
+        // not consume cannot revert the whole leverage-in (see _leverageUpFinalize)
+        uint256 balance0 = params.token0.balanceOfSelf();
+        uint256 balance1 = params.token1.balanceOfSelf();
+        uint256 added0 = amount0 > balance0 ? amount0 - balance0 : 0;
+        uint256 added1 = amount1 > balance1 ? amount1 - balance1 : 0;
 
         // Check minimum amounts were added
         if (added0 < params.amountAddMin0) {
