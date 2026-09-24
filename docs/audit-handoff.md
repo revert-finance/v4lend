@@ -363,6 +363,7 @@ Highest-value review areas:
 - `HookFeeController` and `HookRouteController` trust boundaries
 - `AutoLeverage` leverage-down / third-token paths
 - `V4Oracle` valuation assumptions and stale / deviating price behavior
+- `LiquidityCalculator.calculateSamePool` input domain: a 100% total swap fee is rejected with `Invalid_Fee` (the analytic branches divide by `1 - fee`), matching `calculateSimple`
 - shared swap helpers and native ETH handling
 
 ## Things We Intentionally Want Auditors To Know Up Front

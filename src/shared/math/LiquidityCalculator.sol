@@ -408,6 +408,12 @@ contract LiquidityCalculator is ILiquidityCalculator {
             ? packedProtocolFee.getZeroForOneFee()
             : packedProtocolFee.getOneForZeroFee();
         state.feeRate = protocolFee == 0 ? lpFeeRate : protocolFee.calculateSwapFee(lpFeeRate);
+        // A 100% total fee is a valid pool state (LPFeeLibrary allows it) but leaves nothing to
+        // swap: both analytic branches divide by (1 - fee). Reject it like calculateSimple does
+        // instead of dividing by zero.
+        if (state.feeRate >= MAX_FEE_PIPS) {
+            revert Invalid_Fee();
+        }
         // Simulate optimal swap by crossing ticks until direction reverses
         _traverseTicks(TraverseTicksParams({pool: pool, state: state, sqrtPrice: sqrtPrice, swapDir0to1: swapDir0to1}));
         // Load final state after crossing ticks

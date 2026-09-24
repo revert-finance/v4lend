@@ -676,6 +676,35 @@ contract LiquidityCalculatorTest is Test {
     }
 
     /// @notice Test with price exactly at lower bound
+    /// @notice V4LE-81: a pool with the maximum (100%) LP fee is a valid v4 pool. The same-pool
+    ///         planner divided by (1 - fee) == 0 for an in-range position; it must reject the fee
+    ///         deterministically like calculateSimple does.
+    function test_LiquidityCalculator_RejectsHundredPercentFeePool() public {
+        PoolKey memory fullFeeKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 1_000_000,
+            tickSpacing: DEFAULT_TICK_SPACING,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(fullFeeKey, SQRT_PRICE_1_0);
+        // in-range liquidity so the analytic branch is reached
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] =
+            abi.encode(fullFeeKey, int24(-600), int24(600), uint256(1e18), 1000 ether, 1000 ether, address(this), "");
+        paramsArray[1] = abi.encode(fullFeeKey.currency0, fullFeeKey.currency1, address(positionManager));
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
+
+        ILiquidityCalculator.V4PoolInfo memory fullFeePool = ILiquidityCalculator.V4PoolInfo({
+            poolMgr: poolManager,
+            poolIdentifier: fullFeeKey.toId(),
+            tickSpacing: DEFAULT_TICK_SPACING
+        });
+        vm.expectRevert(ILiquidityCalculator.Invalid_Fee.selector);
+        helper.getOptimalSwap(fullFeePool, -600, 600, 10 ether, 1 ether);
+    }
+
     function test_LiquidityCalculator_PriceAtLowerBound() public {
         int24 tickLower = -600;
         // Move price to lower bound by swapping
