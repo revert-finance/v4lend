@@ -81,6 +81,105 @@ contract AutoLeverageTest is AutomatorTestBase {
         );
     }
 
+    /// @dev Token amounts a planner-sized deleverage removal will return for a full-range position.
+    function _removedAmountsForDeleverage(uint256 tokenId, PoolKey memory poolKey, uint16 targetRatioBps)
+        internal
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
+        (uint256 debt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        uint256 repayAmount = AutoLeverageLib.repayAmountToTarget(debt, fullValue, collateralValue, targetRatioBps);
+        uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
+        (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, address(usdc));
+        uint128 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
+        (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtPriceX96, TickMath.getSqrtPriceAtTick(-887220), TickMath.getSqrtPriceAtTick(887220), liquidityToRemove
+        );
+    }
+
+    /// @dev Universal Router data that swaps `amountIn` through a V3 pool but delivers only `keepBps` of it to
+    ///      `recipient`; the rest of the output goes to `diversion`. Models an operator that routes part of
+    ///      the swap output away from the automator while the swap itself still succeeds.
+    function _createSplitSwapData(
+        uint256 amountIn,
+        address tokenIn,
+        address tokenOut,
+        uint24 fee,
+        uint16 keepBps,
+        address recipient,
+        address diversion
+    ) internal view returns (bytes memory swapData) {
+        uint256 keptIn = amountIn * keepBps / 10000;
+        bytes memory path = abi.encodePacked(tokenIn, fee, tokenOut);
+        bytes[] memory inputs = new bytes[](3);
+        inputs[0] = abi.encode(recipient, keptIn, uint256(0), path, false);
+        inputs[1] = abi.encode(diversion, amountIn - keptIn, uint256(0), path, false);
+        inputs[2] = abi.encode(tokenIn, recipient, 0);
+        swapData = abi.encode(
+            address(swapRouter), abi.encode(Swapper.UniversalRouterData(hex"000004", inputs, block.timestamp))
+        );
+    }
+
+    /// @dev USDC vault over a DAI/WETH position (lend token is neither pool token), levered to 70% with a
+    ///      30% target so a deleverage has to remove liquidity and swap both tokens into USDC.
+    function _setupThirdTokenDeleverage(uint16 maxSwapSlippageBps)
+        internal
+        returns (PoolKey memory poolKey, uint256 tokenId)
+    {
+        vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), type(uint32).max);
+        poolKey = _createDaiWethPool();
+        v4Oracle.setMaxPoolPriceDifference(type(uint16).max);
+        _createFullRangePositionDaiWeth(poolKey);
+        _approveWhaleDaiAndWeth();
+        tokenId = _mintPosition(poolKey, -887220, 887220, 1e19);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, collateralValue * 70 / 100);
+
+        AutoLeverage.PositionConfig memory config = AutoLeverage.PositionConfig({
+            isActive: true,
+            targetLeverageBps: 3000,
+            rebalanceThresholdBps: 100,
+            maxSwapSlippageBps: maxSwapSlippageBps,
+            maxRewardX64: 0
+        });
+        vm.prank(WHALE_ACCOUNT);
+        autoLeverage.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoLeverage), true);
+    }
+
+    function _thirdTokenDeleverageParams(uint256 tokenId, uint256 amountIn0, uint256 amountIn1)
+        internal
+        view
+        returns (AutoLeverage.ExecuteParams memory params)
+    {
+        params = AutoLeverage.ExecuteParams({
+            tokenId: tokenId,
+            vault: address(vault),
+            leverageUp: false,
+            amountIn0: amountIn0,
+            amountOut0Min: 0,
+            swapData0: _createSwapDataWithFee(amountIn0, 0, address(dai), address(usdc), 500, address(autoLeverage)),
+            amountIn1: amountIn1,
+            amountOut1Min: 0,
+            swapData1: _createSwapDataWithFee(amountIn1, 0, address(weth), address(usdc), 500, address(autoLeverage)),
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: bytes(""),
+            increaseLiquidityHookData: bytes(""),
+            rewardX64: 0
+        });
+    }
+
     // --- Access Control ---
 
     function test_RevertWhenNonOperatorCallsExecute() public {
@@ -495,6 +594,75 @@ contract AutoLeverageTest is AutomatorTestBase {
         assertEq(usdc.balanceOf(address(autoLeverage)), 0, "automator should not retain lend token leftovers");
         assertGt(debtSharesAfter, 0, "position should remain leveraged after fee-only deleverage");
         assertGt(collateralAfter, 0, "position should remain open after fee-only deleverage");
+    }
+
+    /// @notice Positive control for the band postcondition: an honest third-token deleverage that swaps
+    ///         everything it removed lands on target and passes.
+    function test_LeverageDownThirdTokenLandsOnTarget() public {
+        (PoolKey memory poolKey, uint256 tokenId) = _setupThirdTokenDeleverage(10000);
+        (uint256 amountIn0, uint256 amountIn1) = _removedAmountsForDeleverage(tokenId, poolKey, 3000);
+        assertGt(amountIn0, 0, "deleverage should remove DAI");
+        assertGt(amountIn1, 0, "deleverage should remove WETH");
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        _execute(_thirdTokenDeleverageParams(tokenId, amountIn0, amountIn1));
+
+        (uint256 debtAfter,, uint256 collateralAfter,,) = vault.loanInfo(tokenId);
+        assertLt(positionManager.getPositionLiquidity(tokenId), liquidityBefore, "liquidity should be removed");
+        assertLt(debtAfter, debtBefore, "debt should decrease");
+        assertApproxEqAbs(debtAfter * 10000 / collateralAfter, 3000, 100, "honest deleverage lands inside the band");
+    }
+
+    /// @notice Audit PoC: with `maxSwapSlippageBps == 10000` the operator routes 25% of each third-token swap
+    ///         output away from the automator. Liquidity sized for the full repayment is removed, the ratio
+    ///         still drops, but the position stays far above target. The band postcondition must reject it.
+    function test_RevertWhenLeverageDownDivertsPartOfSwapOutput() public {
+        (PoolKey memory poolKey, uint256 tokenId) = _setupThirdTokenDeleverage(10000);
+        (uint256 amountIn0, uint256 amountIn1) = _removedAmountsForDeleverage(tokenId, poolKey, 3000);
+        address diversion = makeAddr("diversion");
+
+        AutoLeverage.ExecuteParams memory params = _thirdTokenDeleverageParams(tokenId, amountIn0, amountIn1);
+        params.swapData0 =
+            _createSplitSwapData(amountIn0, address(dai), address(usdc), 500, 7500, address(autoLeverage), diversion);
+        params.swapData1 =
+            _createSplitSwapData(amountIn1, address(weth), address(usdc), 500, 7500, address(autoLeverage), diversion);
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.TransformFailed.selector);
+        autoLeverage.execute(params);
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, debtBefore, "rejected deleverage must leave debt unchanged");
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidityBefore, "rejected deleverage keeps liquidity");
+        assertEq(usdc.balanceOf(diversion), 0, "no swap output may reach the diversion address");
+    }
+
+    /// @notice Same shape in the bounded-slippage mode: the oracle floor already forces each swap's output to
+    ///         reach the automator, so the operator instead swaps only three quarters of what was removed. The
+    ///         ratio still drops (it would rise if less than the debt share of the removal were repaid), the
+    ///         rest would be swept to the owner as raw tokens, and the position stays far above target.
+    function test_RevertWhenLeverageDownSwapsOnlyPartOfRemovedTokens() public {
+        (PoolKey memory poolKey, uint256 tokenId) = _setupThirdTokenDeleverage(100);
+        (uint256 amountIn0, uint256 amountIn1) = _removedAmountsForDeleverage(tokenId, poolKey, 3000);
+
+        AutoLeverage.ExecuteParams memory params =
+            _thirdTokenDeleverageParams(tokenId, amountIn0 * 3 / 4, amountIn1 * 3 / 4);
+
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+        uint256 ownerDaiBefore = dai.balanceOf(WHALE_ACCOUNT);
+
+        vm.prank(operator);
+        vm.expectRevert(Constants.TransformFailed.selector);
+        autoLeverage.execute(params);
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, debtBefore, "rejected deleverage must leave debt unchanged");
+        assertEq(dai.balanceOf(WHALE_ACCOUNT), ownerDaiBefore, "no removed tokens may leak to the owner");
     }
 
     // --- Native ETH Position Tests ---

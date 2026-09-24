@@ -44,12 +44,15 @@ library AutoLeverageLib {
         borrowAmount = Math.mulDiv(targetCollateral - currentDebtBps, fullValue, denominator);
     }
 
-    /// @notice Post-condition for one leverage adjustment.
+    /// @notice Post-condition for one hook-driven leverage adjustment.
     /// @dev Deleverage is a risk improvement whenever it lowers the debt ratio, even if execution
     ///      lands below target. Leverage-up must raise the ratio and must not cross the target by
     ///      more than `overshootToleranceBps`: overshoot means more leverage than the user asked
     ///      for, and since hook-managed swaps have no default price floor a bad fill is not bounded
     ///      to rounding dust. The tolerance keeps 1-wei landings above target from reverting.
+    ///      The hook performs its own swaps through protocol-managed routes, so a deleverage that
+    ///      only partially reaches target cannot have diverted proceeds. Operator-driven execution
+    ///      with operator-supplied swap routing must use `landsWithinTolerance` instead.
     function improvesTowardTarget(
         uint256 debtBefore,
         uint256 collateralBefore,
@@ -66,6 +69,29 @@ library AutoLeverageLib {
             return ratioAfter < ratioBefore;
         }
         return ratioAfter > ratioBefore && ratioAfter <= targetRatioBps + overshootToleranceBps;
+    }
+
+    /// @notice Strict post-condition for one operator-driven leverage adjustment.
+    /// @dev The ratio must move toward the target and land at or below `targetRatioBps + toleranceBps`
+    ///      in both directions. For deleverage this binds settlement to the plan: liquidity removal is
+    ///      sized to reach the target, so any execution that lands above the band either did not swap
+    ///      the removed tokens or did not deliver the swap output to the automator, and is rejected
+    ///      rather than accepted as "some" improvement. Landing below target is allowed: removal is
+    ///      sized on-chain, so a lower landing only reflects favorable fills.
+    function landsWithinTolerance(
+        uint256 debtBefore,
+        uint256 collateralBefore,
+        uint256 debtAfter,
+        uint256 collateralAfter,
+        uint256 targetRatioBps,
+        uint256 toleranceBps
+    ) internal pure returns (bool) {
+        if (collateralBefore == 0 || collateralAfter == 0) return false;
+        uint256 ratioBefore = currentRatio(debtBefore, collateralBefore);
+        uint256 ratioAfter = currentRatio(debtAfter, collateralAfter);
+
+        bool movedTowardTarget = ratioBefore > targetRatioBps ? ratioAfter < ratioBefore : ratioAfter > ratioBefore;
+        return movedTowardTarget && ratioAfter <= targetRatioBps + toleranceBps;
     }
 
     function repayAmountToTarget(

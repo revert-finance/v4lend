@@ -73,6 +73,19 @@ contract SharedPlanningLibrariesHarness {
         );
     }
 
+    function landsWithinTolerance(
+        uint256 debtBefore,
+        uint256 collateralBefore,
+        uint256 debtAfter,
+        uint256 collateralAfter,
+        uint256 targetRatioBps,
+        uint256 toleranceBps
+    ) external pure returns (bool) {
+        return AutoLeverageLib.landsWithinTolerance(
+            debtBefore, collateralBefore, debtAfter, collateralAfter, targetRatioBps, toleranceBps
+        );
+    }
+
     function liquidityToRemove(uint128 currentLiquidity, uint256 removeValue, uint256 totalValue)
         external
         pure
@@ -175,6 +188,29 @@ contract SharedPlanningLibrariesTest is Test {
         assertFalse(harness.improvesTowardTargetWithTolerance(3_000, 10_000, 3_000, 10_000, 5_000, 0));
         // deleverage keeps its "any reduction" rule regardless of tolerance
         assertTrue(harness.improvesTowardTargetWithTolerance(8_000, 10_000, 1_000, 10_000, 5_000, 0));
+    }
+
+    /// @notice Operator-driven adjustments must land inside the band in both directions. A deleverage
+    ///         that removes target-sized liquidity but repays only part of the proceeds still lowers the
+    ///         ratio, and is exactly what the strict variant has to reject.
+    function testAutoLeverageLibLandsWithinToleranceBindsDeleverageToBand() public view {
+        // target 30%, band 100bps: 70% -> 57% is a decrease but far above the band -> rejected
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 2_875, 5_070, 3_000, 100));
+        // honest landing on target passes, as does landing below it
+        assertTrue(harness.landsWithinTolerance(7_000, 10_000, 1_521, 5_070, 3_000, 100));
+        assertTrue(harness.landsWithinTolerance(7_000, 10_000, 1_000, 5_070, 3_000, 100));
+        // boundary: exactly target + tolerance passes, one bp more fails
+        assertTrue(harness.landsWithinTolerance(7_000, 10_000, 3_100, 10_000, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 3_101, 10_000, 3_000, 100));
+        // the ratio still has to move: starting on the band edge and staying there is rejected
+        assertFalse(harness.landsWithinTolerance(3_100, 10_000, 3_100, 10_000, 3_000, 100));
+        // leverage-up keeps the overshoot rule and must still increase the ratio
+        assertTrue(harness.landsWithinTolerance(1_000, 10_000, 3_050, 10_000, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(1_000, 10_000, 3_101, 10_000, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(1_000, 10_000, 1_000, 10_000, 3_000, 100));
+        // degenerate collateral is never an acceptable landing
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 0, 0, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(7_000, 0, 0, 10_000, 3_000, 100));
     }
 
     function testAutoLeverageLibDegenerateInputsReturnZero() public view {

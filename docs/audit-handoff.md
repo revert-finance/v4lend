@@ -140,6 +140,8 @@ Purpose:
 Important implementation detail:
 - protocol fees are sent directly to `protocolFeeRecipient`
 - automators no longer retain protocol fees or use a withdrawer model
+- `AutoLeverage` operators supply swap routing, so every execution must land the debt ratio inside the owner's configured band (`AutoLeverageLib.landsWithinTolerance`): leverage-up may not overshoot `target + rebalanceThresholdBps`, and deleverage may not stop above it. A strict ratio decrease is not enough on deleverage because liquidity removal is sized for the full planned repayment; the band check is what bounds an operator that swaps only part of the removed tokens or routes part of the swap output elsewhere. The hook's own auto-leverage keeps the looser `improvesTowardTarget` rule since its swaps go through protocol-managed routes
+- `maxSwapSlippageBps == 10000` still disables the oracle output floor per swap; in that mode the band check is the only on-chain bound on how far an execution may fall short of the plan
 
 ### Controllers
 
