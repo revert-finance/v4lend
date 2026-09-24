@@ -334,7 +334,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         try lendVault.deposit(lendAmount, address(this)) returns (uint256 shares) {
             if (shares == 0) {
                 SafeERC20.forceApprove(IERC20(depositToken), address(lendVault), 0);
-                if (IERC20(depositToken).balanceOf(address(this)) < lendAmount) {
+                // A zero-share deposit must not have taken the assets. Measure what the running
+                // action may treat as its own: the raw balance would also count ERC4626 shares the
+                // hook custodies for other auto-lend positions when the pool currency is such a
+                // share token, and the restore below would then rebuild this position out of them.
+                if (_sweepableBalance(Currency.wrap(depositToken)) < lendAmount) {
                     revert InvalidConfig();
                 }
                 NativeAssetLib.unwrapIfNative(weth, lendCurrency, lendAmount);
@@ -523,6 +527,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         address owner,
         bool isUpperTrigger
     ) internal {
+        // never fund the restore beyond what the action may spend (custodied shares are reserved)
+        uint256 available0 = _sweepableBalance(currency0);
+        uint256 available1 = _sweepableBalance(currency1);
+        if (amount0 > available0) amount0 = available0;
+        if (amount1 > available1) amount1 = available1;
         _approveToken(currency0, amount0);
         _approveToken(currency1, amount1);
         (

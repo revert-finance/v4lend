@@ -369,6 +369,7 @@ Highest-value review areas:
 
 - whole-balance accounting in hook/helpers/transformers/automators is intentional
 - `AutoLend` intentionally holds ERC4626 shares while a position is lent
+- the hook's `_custodiedShares` reserve is honored on every balance the running action may spend, including the zero-share-deposit guard and the liquidity restore that follows it: a pool whose currency is another auto-lend vault's share token can never have another position's shares consumed by a rebuild
 - hook swap routing is protocol-managed, not user-managed
 - hook swap fees are direct-send, not retained
 - dynamic-fee hook routes are intentionally unsupported

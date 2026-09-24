@@ -5870,6 +5870,48 @@ contract RevertHookTest is BaseTest {
         );
     }
 
+    /// @notice V4LE-19: a zero-share deposit that DID take the assets must not pass the
+    ///         zero-share guard on the strength of ERC4626 shares the hook custodies for other
+    ///         auto-lend positions, and the restore must not be funded out of that custody.
+    /// @dev currency0 stands in for another auto-lend vault's share token: the custody reserve is
+    ///      written into `_custodiedShares[currency0]` (storage slot 13) and matched by balance.
+    function testAutoLendZeroShareDeposit_CannotSpendCustodiedShares() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        AssetTakingZeroShareVault takingVault =
+            new AssetTakingZeroShareVault(IERC20(Currency.unwrap(currency0)), "Taking Zero Share Vault", "TZERO");
+        hook.setAutoLendVault(Currency.unwrap(currency0), takingVault);
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        // a victim's custodied shares, denominated in the pool currency
+        uint256 custodied = 5e18;
+        deal(Currency.unwrap(currency0), address(hook), custodied);
+        vm.store(
+            address(hook), keccak256(abi.encode(Currency.unwrap(currency0), uint256(13))), bytes32(custodied)
+        );
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        uint256 vaultAssetsBefore = takingVault.totalAssets();
+
+        vm.recordLogs();
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertTrue(_sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND), "action fails");
+        assertEq(positionManager.getPositionLiquidity(token3Id), liquidityBefore, "position untouched");
+        assertEq(takingVault.totalAssets(), vaultAssetsBefore, "taking vault keeps nothing");
+        assertGe(
+            IERC20(Currency.unwrap(currency0)).balanceOf(address(hook)), custodied, "custodied shares fully intact"
+        );
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendShares, 0);
+        assertEq(autoLendToken, address(0));
+    }
+
     function testAutoLendZeroShareDeposit_RestoresLiquidityAndConsumesTriggeredTick() public {
         hook.setMaxTicksFromOracle(1000);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
@@ -7044,6 +7086,17 @@ contract ZeroShareERC4626Vault is MockERC4626Vault {
     constructor(IERC20 asset_, string memory name_, string memory symbol_) MockERC4626Vault(asset_, name_, symbol_) {}
 
     function deposit(uint256, address) public pure override returns (uint256) {
+        return 0;
+    }
+}
+
+/// @dev Standard-shaped zero-share vault: pulls the assets (like OpenZeppelin's ERC4626 does before
+///      minting) and then mints nothing, e.g. because of inflation-state floor rounding.
+contract AssetTakingZeroShareVault is MockERC4626Vault {
+    constructor(IERC20 asset_, string memory name_, string memory symbol_) MockERC4626Vault(asset_, name_, symbol_) {}
+
+    function deposit(uint256 assets, address) public override returns (uint256) {
+        IERC20(asset()).transferFrom(msg.sender, address(this), assets);
         return 0;
     }
 }
