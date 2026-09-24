@@ -373,7 +373,7 @@ Highest-value review areas:
 - `HookFeeController` and `HookRouteController` trust boundaries
 - `AutoLeverage` leverage-down / third-token paths
 - `V4Oracle` valuation assumptions and stale / deviating price behavior
-- `LiquidityCalculator.calculateSamePool` input domain: a 100% total swap fee is rejected with `Invalid_Fee` (the analytic branches divide by `1 - fee`), matching `calculateSimple`
+- `LiquidityCalculator.calculateSamePool` input domain: a 100% total swap fee is rejected with `Invalid_Fee` (the analytic branches divide by `1 - fee`), matching `calculateSimple`; zero active liquidity where the tick traversal stops (a sole position crossed at its boundary by an exact-limit swap) returns a no-swap plan at the current price instead of reverting `Math_Overflow` out of the solvers (external audit V4LE-89)
 - shared swap helpers and native ETH handling
 
 ## Things We Intentionally Want Auditors To Know Up Front

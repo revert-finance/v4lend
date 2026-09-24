@@ -496,18 +496,50 @@ contract LiquidityCalculatorTest is Test {
         assertGt(sqrtPriceX96, 0, "Should have final price");
     }
 
-    /// @notice Test with empty pool (no initial liquidity)
-    function test_LiquidityCalculator_EmptyPool() public {
+    /// @notice Test with empty pool (no initial liquidity): nothing to swap against, so the plan is
+    ///         deterministically "no swap at the current price" (external audit V4LE-89; it used to
+    ///         revert Math_Overflow out of the analytic solver).
+    function test_LiquidityCalculator_EmptyPool() public view {
         // Don't add initial liquidity
+        (uint256 amountIn, uint256 amountOut,, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, -600, 600, 10 ether, 10 ether);
+        assertEq(amountIn, 0, "no input without liquidity");
+        assertEq(amountOut, 0, "no output without liquidity");
+        assertEq(sqrtPriceX96, SQRT_PRICE_1_0, "price unchanged without liquidity");
+    }
 
-        vm.expectRevert(ILiquidityCalculator.Math_Overflow.selector);
-        helper.getOptimalSwap(
-                poolCallee,
-                -600,
-                600,
-                10 ether,
-                10 ether
-            );
+    /// @notice External audit V4LE-89: the sole in-range position is crossed at its upper tick by an
+    ///         exact-limit swap, leaving the pool at that tick with ZERO active liquidity while the
+    ///         position still exists. The same-pool planner for a replacement range around the new
+    ///         tick, holding only token1 (what the crossed position is made of), used to revert
+    ///         Math_Overflow - and the hook's caught AUTO_RANGE action consumed the trigger. It must
+    ///         return a no-swap plan at the current price instead.
+    function test_LiquidityCalculator_ZeroLiquidityAfterSolePositionBoundaryCrossing() public {
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
+
+        // swap token1 -> token0 with the price limit exactly at the position's upper tick
+        SwapParams memory swapParams =
+            SwapParams({zeroForOne: false, amountSpecified: -int256(10_000 ether), sqrtPriceLimitX96: sqrtUpper});
+        poolManager.unlock(abi.encode(SwapCallbackData(poolKey, swapParams, address(this))));
+        (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
+        assertEq(sqrtPriceX96, sqrtUpper, "precondition: price at the upper tick");
+        assertEq(tick, 600, "precondition: upper tick crossed");
+        assertEq(poolManager.getLiquidity(poolId), 0, "precondition: zero active liquidity");
+
+        // centered replacement range around the new tick, one-sided token1 holdings
+        (uint256 amountIn, uint256 amountOut, bool zeroForOne, uint160 planSqrtPrice) =
+            helper.getOptimalSwap(poolCallee, 300, 900, 0, 500 ether);
+        assertEq(amountIn, 0, "nothing to swap against");
+        assertEq(amountOut, 0, "no output");
+        assertFalse(zeroForOne, "direction of the one-sided token1 holdings");
+        assertEq(planSqrtPrice, sqrtUpper, "current price returned");
+
+        // the mirror: token0-only holdings plan a 0->1 swap that re-enters the crossed position's
+        // liquidity, so the planner keeps producing a real swap there
+        (amountIn,, zeroForOne,) = helper.getOptimalSwap(poolCallee, 300, 900, 500 ether, 0);
+        assertTrue(zeroForOne);
+        assertGt(amountIn, 0, "liquidity below the tick is still usable");
     }
 
     /// @notice Test with imbalanced amounts (much more token0)

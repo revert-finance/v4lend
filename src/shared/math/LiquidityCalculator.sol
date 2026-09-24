@@ -427,6 +427,22 @@ contract LiquidityCalculator is ILiquidityCalculator {
             lastAmount0 := mload(add(state, 0x60))
             lastAmount1 := mload(add(state, 0x80))
         }
+        // Zero active liquidity where the traversal stopped (external audit V4LE-89). A valid pool
+        // state: e.g. an exact-limit swap just crossed the sole in-range position's boundary tick and
+        // nothing initialized lies ahead in the swap direction, so every simulated step moved the
+        // price for free without consuming anything. There is nothing left to swap against toward
+        // the target, and both analytic solvers assume liquidity > 0 (they would revert
+        // Math_Overflow, and the hook's caught action consumes the trigger). Return what the
+        // traversal could already commit against real liquidity - in the usual case no swap at all,
+        // with the pool's current price - so the caller gets a deterministic plan.
+        if (lastLiquidity == 0) {
+            unchecked {
+                if (swapDir0to1) {
+                    return (amount0Target - lastAmount0, lastAmount1 - amount1Target, true, sqrtPriceLast);
+                }
+                return (amount1Target - lastAmount1, lastAmount0 - amount0Target, false, sqrtPriceLast);
+            }
+        }
         // Calculate final swap amounts based on direction
         unchecked {
             if (!swapDir0to1) {
