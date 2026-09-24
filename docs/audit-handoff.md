@@ -92,6 +92,7 @@ Notes:
 - `liquidate` refuses the loan owner as caller and as collateral recipient: the reserve-backed liquidation branch subsidizes an independent liquidator, and a borrower must not collect that subsidy on their own loan (a second address stays possible; the check closes the direct and flash-helper paths)
 - a liquidation whose uncovered reserve cost is socialized (lend exchange rate written down) also caps the same-day lend allowance (`dailyLendIncreaseLimitLeft`) at what a fresh day would grant on the surviving lender claims, so a later deposit cannot consume an allowance sized on erased claims
 - `repay` on a debt-free loan or an unknown token is a pure no-op (returns `(0, 0)`, no event) and in particular does not refresh the daily debt quota; only a repayment that moves debt shares does, so a zero-value call cannot pin the day's quota on a still unfunded lender pool
+- `transferLoan` moves the former owner's transform approval for the position's own allowlisted pool hook to the new owner (and clears it on the former owner): hook automation is token-id keyed and stays armed across the transfer, so without the approval every hook transform would fail and consume the trigger; the new owner can revoke it with `approveTransform`. Approvals for other targets (operators of the former owner) are not carried and stop working with the transfer
 
 ### V4Oracle
 

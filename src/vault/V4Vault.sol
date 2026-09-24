@@ -582,6 +582,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice Transfers ownership of a loan to a new owner
+    /// @dev Transform approvals are keyed by owner, so the former owner's approvals stop working with the
+    ///      transfer. The one for the position's own (allowlisted) pool hook is moved to the new owner: the
+    ///      hook's automation is keyed by token id and stays armed across the transfer, and without the
+    ///      approval every hook transform would fail and consume the trigger while the position looked
+    ///      protected. The new owner can revoke it with approveTransform. Approvals for other targets
+    ///      (operators of the former owner) are not carried; they cannot be enumerated and are not
+    ///      bound to the position.
     /// @param tokenId The token ID of the loan to transfer
     /// @param newOwner The address of the new owner
     function transferLoan(uint256 tokenId, address newOwner) external override {
@@ -606,6 +613,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         _removeTokenFromOwner(currentOwner, tokenId);
         _addTokenToOwner(newOwner, tokenId);
+
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        address hook = address(poolKey.hooks);
+        if (hook != address(0) && hookAllowList[hook] && transformApprovals[currentOwner][tokenId][hook]) {
+            transformApprovals[currentOwner][tokenId][hook] = false;
+            transformApprovals[newOwner][tokenId][hook] = true;
+            emit ApprovedTransform(tokenId, currentOwner, hook, false);
+            emit ApprovedTransform(tokenId, newOwner, hook, true);
+        }
 
         emit Transfer(tokenId, currentOwner, newOwner);
     }
