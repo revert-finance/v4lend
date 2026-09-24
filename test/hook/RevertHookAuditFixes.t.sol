@@ -1152,6 +1152,76 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(baseAfter, baseBefore, "trigger window not re-centred around an unhandled loan");
     }
 
+    // ==================== V4LE-53 / V4LE-21: external-route planning ====================
+
+    function _leftoverFor(Vm.Log[] memory logs, uint256 id) internal view returns (uint256 amount0, uint256 amount1) {
+        bytes32 topic = RevertHookState.SendLeftoverTokens.selector;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(hook) || logs[i].topics.length < 2) continue;
+            if (logs[i].topics[0] != topic || uint256(logs[i].topics[1]) != id) continue;
+            (,, amount0, amount1,) = abi.decode(logs[i].data, (address, address, uint256, uint256, address));
+            return (amount0, amount1);
+        }
+        revert("no leftover event");
+    }
+
+    /// @dev Configures a 100e18 [-60, 60] AUTO_RANGE position routed through `route` and fires its
+    ///      lower trigger; returns the leftover the remint sent back to the owner.
+    function _autoRangeThroughRoute(PoolKey memory route) internal returns (uint256 leftover0, uint256 leftover1) {
+        hook.setMaxTicksFromOracle(1000);
+        _setBidirectionalRoute(route);
+        (uint256 id,) = positionManager.mint(
+            poolKey, -60, 60, 100e18, type(uint256).max, type(uint256).max, address(this), block.timestamp, ""
+        );
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        hook.setPositionConfig(id, _rangeConfig(0, 0, -60, 60));
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        // The lower trigger sits at tick -60, i.e. bucket -60 = any tick below 0. One swap that
+        // lands mid-bucket makes the replacement [-120, 0] two-sided, so the rebalance swap is a
+        // sizeable share of the removed principal and a mis-sized plan shows up as leftover.
+        vm.recordLogs();
+        _swap(poolKey, true, 45e16);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertLt(_currentTick(poolKey), -15, "landed inside bucket -60");
+        assertGe(_currentTick(poolKey), -60, "landed inside bucket -60");
+
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "remint happened");
+        assertGt(positionManager.getPositionLiquidity(nextTokenIdBefore), 0, "replacement funded");
+        (leftover0, leftover1) = _leftoverFor(logs, id);
+    }
+
+    /// @dev V4LE-53: the route is a hookless pool with only 1e18 full-range liquidity, so the ~1.5e17
+    ///      rebalance swap moves it by tens of percent. Spot pricing planned for the pre-swap price,
+    ///      the route returned far less, and the surplus of the input token (about a third of the
+    ///      swap) went back to the owner instead of into the replacement. Planning against the
+    ///      route's depth leaves only dust behind.
+    function testAutoRangeThroughShallowRouteFundsTheReplacement() public {
+        PoolKey memory route = PoolKey(currency0, currency1, 500, 10, IHooks(address(0)));
+        poolManager.initialize(route, Constants.SQRT_PRICE_1_1);
+        _mintFullRange(route, 1e18);
+
+        (uint256 leftover0, uint256 leftover1) = _autoRangeThroughRoute(route);
+        // the removed position held ~3e17 per side; a spot plan left >4e16 on the input side
+        assertLt(leftover0, 3e15, "token0 leftover is dust");
+        assertLt(leftover1, 3e15, "token1 leftover is dust");
+    }
+
+    /// @dev V4LE-21: a deep route with the hook's maximum 10% swap fee on AUTO_RANGE. The fee comes
+    ///      off the swap output before the mint; a plan that ignores it over-supplies the input side
+    ///      by ~10% of the swap and that surplus leaves as leftover. Planning net of the fee funds
+    ///      the replacement evenly.
+    function testAutoRangeThroughRoutePlansForTheHookSwapFee() public {
+        PoolKey memory route = PoolKey(currency0, currency1, 500, 10, IHooks(address(0)));
+        poolManager.initialize(route, Constants.SQRT_PRICE_1_1);
+        _mintFullRange(route, 1000e18);
+        feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_RANGE), 1000);
+
+        (uint256 leftover0, uint256 leftover1) = _autoRangeThroughRoute(route);
+        assertLt(leftover0, 3e15, "token0 leftover is dust");
+        assertLt(leftover1, 3e15, "token1 leftover is dust");
+    }
+
     // ==================== L-01: remove callback fails open on oracle failure ====================
 
     function testRemoveLiquidityFromActivatedPositionSucceedsWhenOracleReverts() public {

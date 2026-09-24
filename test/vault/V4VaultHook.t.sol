@@ -3681,6 +3681,12 @@ contract V4VaultHookTest is V4ForkTestBase {
         _configurePositionForAutoLeverage(leverageDownTokenId, 5000);
         _alignLoanToTargetBps(leverageDownTokenId, 3500);
         _movePriceUp(hookedPoolKey);
+        // Above target before the down move, so the crossing dispatches a leverage-DOWN (which
+        // sells WETH through the reverse route). Before the depth-aware route planner (V4LE-53)
+        // the loan stayed under target here because every leverage-up through the off-price
+        // route fixture failed NoImprovement, and the assertion below was satisfied by another
+        // failed leverage-up rather than by the reverse route being rejected.
+        _alignLoanToTargetBps(leverageDownTokenId, 6500);
 
         routeController.setRoute(
             address(weth), address(usdc), invalidRoutePoolKey.fee, invalidRoutePoolKey.tickSpacing, invalidRoutePoolKey.hooks

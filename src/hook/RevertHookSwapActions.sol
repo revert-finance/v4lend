@@ -6,10 +6,11 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 
+import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {RevertHookState} from "./RevertHookState.sol";
 
@@ -25,6 +26,40 @@ contract RevertHookSwapActions is RevertHookState {
     constructor(IPoolManager _poolManager, IHookFeeController _hookFeeController) {
         poolManager = _poolManager;
         hookFeeController = _hookFeeController;
+    }
+
+    /// @notice Plans an exact-input swap through a configured external route for a liquidity action
+    /// @dev Plain view (staticcalled by the action sidecars, which have no bytecode room for it):
+    ///      hands the planner the route pool (price, liquidity and fee are read there and its
+    ///      ticks walked) and the hook's own per-mode output fee (`swapFeeBps`, taken from the
+    ///      swap output in _settleSwapDeltas), so the swap is sized against the route's real
+    ///      depth and the net output that will actually fund the mint (V4LE-53, V4LE-21).
+    /// @param calculator The planner
+    /// @param positionSqrtPriceX96 Position pool price, fixing the ratio the range needs
+    /// @param swapPool The route pool
+    /// @param mode Action mode, selecting the hook swap fee
+    function planExternalRoute(
+        ILiquidityCalculator calculator,
+        uint160 positionSqrtPriceX96,
+        PoolKey memory swapPool,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0,
+        uint256 amount1,
+        Mode mode
+    ) external view returns (uint256 amountIn, bool zeroForOne) {
+        PoolId swapPoolId = swapPool.toId();
+        (amountIn,, zeroForOne) = calculator.calculateSimple(
+            positionSqrtPriceX96,
+            ILiquidityCalculator.V4PoolInfo({
+                poolMgr: poolManager, poolIdentifier: swapPoolId, tickSpacing: swapPool.tickSpacing
+            }),
+            tickLower,
+            tickUpper,
+            amount0,
+            amount1,
+            uint24(hookFeeController.swapFeeBps(swapPoolId, uint8(mode))) * 100
+        );
     }
 
     /// @dev Hook-managed swaps may execute in the position pool or through a configured external route.

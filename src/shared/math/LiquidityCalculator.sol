@@ -30,16 +30,67 @@ interface ILiquidityCalculator {
         int24 tickSpacing;
     }
 
-    /// @notice Calculate optimal swap amount for double-sided liquidity deposit (simple version)
+    /// @notice Calculate optimal swap amount for double-sided liquidity deposit (external route version)
+    /// @dev The swap executes in another v4 pool than the position pool: the position pool's price
+    ///      fixes the ratio the range needs, the route pool's price and active liquidity price the
+    ///      swap. The route is modelled as constant-liquidity AMM from its current sqrt price (no
+    ///      tick crossing), so the quote includes the swap's own price impact against the route's
+    ///      depth instead of assuming an infinitely deep pool at spot (V4LE-53). Liquidity that
+    ///      changes at the first crossed tick is not modelled: exact until then, then a bound
+    ///      that is conservative if depth thins out and optimistic if it thickens.
+    /// @param positionSqrtPrice Current sqrt price of the position pool, used
+    ///        to determine the ratio required by its tick range
+    /// @param swapSqrtPrice Current sqrt price of the external route pool
+    /// @param swapLiquidity Active liquidity of the external route pool at that price; zero
+    ///        means nothing can be bought and no swap is planned
+    /// @param lowerTick Lower bound of the position
+    /// @param upperTick Upper bound of the position
+    /// @param amount0 Desired amount of token0
+    /// @param amount1 Desired amount of token1
+    /// @param feeRate Route pool fee taken from the input, in hundredths of a bip (3000 = 0.3%)
+    /// @param outputFeePips Fee the caller takes from the swap output before minting (the hook's
+    ///        per-mode swap fee), in hundredths of a bip; planned so the net output funds the mint
+    /// @return inputAmount Optimal swap input amount
+    /// @return outputAmount Expected net swap output amount (after both fees)
+    /// @return swapDir0to1 Direction: true for token0->token1, false for token1->token0
     function calculateSimple(
         uint160 positionSqrtPrice,
         uint160 swapSqrtPrice,
+        uint128 swapLiquidity,
         int24 lowerTick,
         int24 upperTick,
         uint256 amount0,
         uint256 amount1,
-        uint24 feeRate
+        uint24 feeRate,
+        uint24 outputFeePips
     ) external pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1);
+
+    /// @notice External-route planner that reads the route pool and walks its ticks
+    /// @dev Starts from the constant-liquidity plan above and, when the planned swap would cross
+    ///      initialized ticks of the route pool, refines it against an exact-input quote that walks
+    ///      those ticks (SwapMath step by step, liquidity updated at every crossing), so the plan is
+    ///      sized against the route's real depth wherever its liquidity thickens or thins beyond the
+    ///      current tick range. The route's fee is read from its slot0 for the planned direction.
+    /// @param positionSqrtPrice Current sqrt price of the position pool
+    /// @param swapPool The external route pool
+    /// @param lowerTick Lower bound of the position
+    /// @param upperTick Upper bound of the position
+    /// @param amount0 Desired amount of token0
+    /// @param amount1 Desired amount of token1
+    /// @param outputFeePips Fee the caller takes from the swap output before minting, in
+    ///        hundredths of a bip
+    /// @return inputAmount Optimal swap input amount
+    /// @return outputAmount Expected net swap output amount (after both fees)
+    /// @return swapDir0to1 Direction: true for token0->token1, false for token1->token0
+    function calculateSimple(
+        uint160 positionSqrtPrice,
+        V4PoolInfo memory swapPool,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0,
+        uint256 amount1,
+        uint24 outputFeePips
+    ) external view returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1);
 
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit (same pool version)
     function calculateSamePool(
@@ -105,32 +156,213 @@ contract LiquidityCalculator is ILiquidityCalculator {
         int24 tickSpacing; // offset 0x100
     }
 
-    /// @notice Calculate optimal swap amount for double-sided liquidity deposit
-    /// @dev Simplified version that assumes swap happens in another pool (no tick crossing simulation)
-    /// @param positionSqrtPrice Current sqrt price of the position pool, used
-    ///        to determine the ratio required by its tick range
-    /// @param swapSqrtPrice Current sqrt price of the external route pool,
-    ///        used to quote the swap that produces that ratio
-    /// @param lowerTick Lower bound of the position
-    /// @param upperTick Upper bound of the position
-    /// @param amount0 Desired amount of token0
-    /// @param amount1 Desired amount of token1
-    /// @param feeRate Fee rate in hundredths of a bip (e.g., 3000 = 0.3%)
-    /// @return inputAmount Optimal swap input amount
-    /// @return outputAmount Expected swap output amount (after fees)
-    /// @return swapDir0to1 Direction: true for token0->token1, false for token1->token0
+    /// @notice Route pool state the external-route planner quotes against
+    struct RouteQuote {
+        uint160 sqrtPrice;
+        uint128 liquidity;
+        uint256 inputMultiplier; // MAX_FEE_PIPS - route fee
+        uint256 outputMultiplier; // MAX_FEE_PIPS - caller's output fee
+    }
+
+    /// @dev Relative precision of the in-range bisection: stop once the bracket is below
+    ///      2^-40 of the swappable amount (about 1e-12), which bounds the search at ~41 steps.
+    uint256 internal constant ROUTE_SOLVE_PRECISION_SHIFT = 40;
+
+    /// @dev Bound on the initialized ticks one route quote crosses; past it the quote stops and
+    ///      the plan is sized to what was quoted (a conservative bound for a very long walk).
+    uint256 internal constant MAX_ROUTE_QUOTE_CROSSINGS = 32;
+
+    /// @dev Effective-price refinement rounds after the constant-liquidity start: each one quotes
+    ///      the planned input through the route's ticks and re-solves with the quoted price.
+    uint256 internal constant ROUTE_REFINEMENT_ROUNDS = 2;
+
+    /// @inheritdoc ILiquidityCalculator
     function calculateSimple(
         uint160 positionSqrtPrice,
         uint160 swapSqrtPrice,
+        uint128 swapLiquidity,
         int24 lowerTick,
         int24 upperTick,
         uint256 amount0,
         uint256 amount1,
-        uint24 feeRate
+        uint24 feeRate,
+        uint24 outputFeePips
     ) external pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) {
-        if (amount0 == 0 && amount1 == 0) return (0, 0, false);
         if (positionSqrtPrice == 0 || swapSqrtPrice == 0) revert Invalid_Pool();
-        if (feeRate >= MAX_FEE_PIPS) revert Invalid_Fee();
+        if (feeRate >= MAX_FEE_PIPS || outputFeePips >= MAX_FEE_PIPS) revert Invalid_Fee();
+        RouteQuote memory route = RouteQuote({
+            sqrtPrice: swapSqrtPrice,
+            liquidity: swapLiquidity,
+            inputMultiplier: MAX_FEE_PIPS - uint256(feeRate),
+            outputMultiplier: MAX_FEE_PIPS - uint256(outputFeePips)
+        });
+        (inputAmount, outputAmount, swapDir0to1) =
+            _planConstantLiquidity(route, positionSqrtPrice, lowerTick, upperTick, amount0, amount1);
+    }
+
+    /// @inheritdoc ILiquidityCalculator
+    function calculateSimple(
+        uint160 positionSqrtPrice,
+        V4PoolInfo memory swapPool,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0,
+        uint256 amount1,
+        uint24 outputFeePips
+    ) external view returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) {
+        if (amount0 == 0 && amount1 == 0) return (0, 0, false);
+        if (outputFeePips >= MAX_FEE_PIPS) revert Invalid_Fee();
+        if (lowerTick >= upperTick || lowerTick < TickMath.MIN_TICK || upperTick > TickMath.MAX_TICK) {
+            revert Invalid_Tick_Range();
+        }
+        RouteState memory route;
+        route.pool = swapPool;
+        uint24 packedProtocolFee;
+        uint24 lpFee;
+        (route.sqrtPrice, route.tick, packedProtocolFee, lpFee) = swapPool.poolMgr.getSlot0(swapPool.poolIdentifier);
+        if (positionSqrtPrice == 0 || route.sqrtPrice == 0) revert Invalid_Pool();
+        route.liquidity = swapPool.poolMgr.getLiquidity(swapPool.poolIdentifier);
+
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(lowerTick);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upperTick);
+        swapDir0to1 = _shouldSwap0to1(amount0, amount1, positionSqrtPrice, sqrtLower, sqrtUpper);
+        uint16 protocolFee =
+            swapDir0to1 ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
+        route.feeRate = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
+        if (route.feeRate >= MAX_FEE_PIPS) revert Invalid_Fee();
+        route.outputMultiplier = MAX_FEE_PIPS - uint256(outputFeePips);
+
+        // Start from the constant-liquidity plan, exact until the first crossed tick.
+        (inputAmount,,) = _planConstantLiquidity(
+            RouteQuote({
+                sqrtPrice: route.sqrtPrice,
+                liquidity: route.liquidity,
+                inputMultiplier: MAX_FEE_PIPS - uint256(route.feeRate),
+                outputMultiplier: route.outputMultiplier
+            }),
+            positionSqrtPrice,
+            lowerTick,
+            upperTick,
+            amount0,
+            amount1
+        );
+        if (inputAmount == 0) return (0, 0, swapDir0to1);
+        outputAmount = _quoteThroughTicks(route, swapDir0to1, inputAmount);
+        if (outputAmount == 0) return (0, 0, swapDir0to1);
+
+        // One-sided plans swap everything; an in-range plan is refined against the quoted
+        // effective price, which already includes every tick the swap crosses.
+        if (positionSqrtPrice > sqrtLower && positionSqrtPrice < sqrtUpper) {
+            uint256 requiredRatio = _calculateRequiredRatio(positionSqrtPrice, sqrtLower, sqrtUpper);
+            for (uint256 round; round < ROUTE_REFINEMENT_ROUNDS; ++round) {
+                uint256 refined = _solveWithEffectivePrice(
+                    requiredRatio, amount0, amount1, swapDir0to1, FullMath.mulDiv(outputAmount, FixedPoint96.Q96, inputAmount)
+                );
+                if (refined == 0 || refined == inputAmount) break;
+                inputAmount = refined;
+                outputAmount = _quoteThroughTicks(route, swapDir0to1, inputAmount);
+                if (outputAmount == 0) return (0, 0, swapDir0to1);
+            }
+        }
+    }
+
+    /// @notice Route pool state for a tick-walking quote
+    struct RouteState {
+        V4PoolInfo pool;
+        uint160 sqrtPrice;
+        int24 tick;
+        uint128 liquidity;
+        uint24 feeRate;
+        uint256 outputMultiplier;
+    }
+
+    /// @notice Net output of an exact-input swap through the route pool, crossing its ticks
+    /// @dev The same step the pool takes (SwapMath.computeSwapStep against the next initialized
+    ///      tick, liquidity net applied at every crossing) with the caller's output fee netted out.
+    ///      Bounded by MAX_ROUTE_QUOTE_CROSSINGS steps; a quote that stops early under-reports the
+    ///      output, which only makes the plan swap more conservatively.
+    function _quoteThroughTicks(RouteState memory route, bool zeroForOne, uint256 amountIn)
+        private
+        view
+        returns (uint256 amountOut)
+    {
+        uint160 sqrtPrice = route.sqrtPrice;
+        uint128 liquidity = route.liquidity;
+        int24 tick = route.tick;
+        int16 wordPosition = type(int16).min;
+        uint256 tickBitmap;
+        uint256 remaining = amountIn;
+        for (uint256 crossings; remaining > 0 && crossings < MAX_ROUTE_QUOTE_CROSSINGS; ++crossings) {
+            NextInitializedTickResult memory next = _locateNextTick(
+                NextInitializedTickParams({
+                    pool: route.pool,
+                    tickValue: tick,
+                    tickSpacing: route.pool.tickSpacing,
+                    swapDir0to1: zeroForOne,
+                    wordPosition: wordPosition,
+                    tickBitmap: tickBitmap
+                })
+            );
+            wordPosition = next.wordPosition;
+            tickBitmap = next.tickBitmap;
+            int24 nextTick = next.nextTick;
+            if (nextTick < TickMath.MIN_TICK) nextTick = TickMath.MIN_TICK;
+            if (nextTick > TickMath.MAX_TICK) nextTick = TickMath.MAX_TICK;
+            uint160 sqrtPriceNext = TickMath.getSqrtPriceAtTick(nextTick);
+
+            (uint160 sqrtPriceAfter, uint256 stepIn, uint256 stepOut, uint256 stepFee) = SwapMath.computeSwapStep(
+                sqrtPrice, sqrtPriceNext, liquidity, -int256(remaining), route.feeRate
+            );
+            amountOut += stepOut;
+            remaining -= stepIn + stepFee;
+            sqrtPrice = sqrtPriceAfter;
+            // the input ran out inside this tick range, or the pool's price bound was reached
+            if (sqrtPriceAfter != sqrtPriceNext || nextTick == TickMath.MIN_TICK || nextTick == TickMath.MAX_TICK) {
+                break;
+            }
+            (, int128 liquidityNet) = route.pool.poolMgr.getTickLiquidity(route.pool.poolIdentifier, nextTick);
+            if (zeroForOne) liquidityNet = -liquidityNet;
+            liquidity = liquidityNet < 0 ? liquidity - uint128(-liquidityNet) : liquidity + uint128(liquidityNet);
+            tick = zeroForOne ? nextTick - 1 : nextTick;
+        }
+        amountOut = FullMath.mulDiv(amountOut, route.outputMultiplier, MAX_FEE_PIPS);
+    }
+
+    /// @notice Linear re-solve of the balance condition at a quoted effective price
+    /// @param effectivePriceX96 Net output per unit of input from the last quote (Q96)
+    function _solveWithEffectivePrice(
+        uint256 requiredRatio,
+        uint256 amount0,
+        uint256 amount1,
+        bool swapDir0to1,
+        uint256 effectivePriceX96
+    ) private pure returns (uint256 inputAmount) {
+        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
+        if (swapDir0to1) {
+            if (amount0 <= requiredAmount0) return 0;
+            // amount0 - in == ratio * (amount1 + p * in)
+            uint256 denominator = FixedPoint96.Q96 + FullMath.mulDiv(requiredRatio, effectivePriceX96, FixedPoint96.Q96);
+            inputAmount = FullMath.mulDiv(amount0 - requiredAmount0, FixedPoint96.Q96, denominator);
+            if (inputAmount > amount0) inputAmount = amount0;
+        } else {
+            if (requiredAmount0 <= amount0) return 0;
+            // amount0 + p * in == ratio * (amount1 - in)
+            inputAmount = FullMath.mulDiv(requiredAmount0 - amount0, FixedPoint96.Q96, effectivePriceX96 + requiredRatio);
+            if (inputAmount > amount1) inputAmount = amount1;
+        }
+    }
+
+    /// @dev The constant-liquidity plan shared by both calculateSimple variants (validation of the
+    ///      route price and fees is the caller's).
+    function _planConstantLiquidity(
+        RouteQuote memory route,
+        uint160 positionSqrtPrice,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0,
+        uint256 amount1
+    ) private pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) {
+        if (amount0 == 0 && amount1 == 0) return (0, 0, false);
         if (lowerTick >= upperTick || lowerTick < TickMath.MIN_TICK || upperTick > TickMath.MAX_TICK) {
             revert Invalid_Tick_Range();
         }
@@ -138,106 +370,88 @@ contract LiquidityCalculator is ILiquidityCalculator {
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(lowerTick);
         uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upperTick);
 
-        // Determine swap direction
+        // Determine swap direction from the position pool
         swapDir0to1 = _shouldSwap0to1(amount0, amount1, positionSqrtPrice, sqrtLower, sqrtUpper);
 
+        // A route without active liquidity cannot deliver anything; plan no swap rather than
+        // pricing against an empty book (the action then proceeds with what it holds).
+        if (route.liquidity == 0) return (0, 0, swapDir0to1);
+
         if (positionSqrtPrice <= sqrtLower) {
-            (inputAmount, outputAmount) = _calculateSwapBelowRange(amount1, swapSqrtPrice, feeRate);
+            // Below range: only token0 is needed, swap all token1
+            if (amount1 == 0) return (0, 0, swapDir0to1);
+            inputAmount = amount1;
         } else if (positionSqrtPrice >= sqrtUpper) {
-            (inputAmount, outputAmount) = _calculateSwapAboveRange(amount0, swapSqrtPrice, feeRate);
+            // Above range: only token1 is needed, swap all token0
+            if (amount0 == 0) return (0, 0, swapDir0to1);
+            inputAmount = amount0;
         } else {
-            (inputAmount, outputAmount) = _calculateSwapInRange(
-                amount0,
-                amount1,
-                positionSqrtPrice,
-                swapSqrtPrice,
-                sqrtLower,
-                sqrtUpper,
-                feeRate,
-                swapDir0to1
+            inputAmount = _solveRouteInputInRange(
+                route, _calculateRequiredRatio(positionSqrtPrice, sqrtLower, sqrtUpper), amount0, amount1, swapDir0to1
             );
+            if (inputAmount == 0) return (0, 0, swapDir0to1);
         }
+        outputAmount = _routeOutput(route, swapDir0to1, inputAmount);
     }
 
-    /// @notice Calculate swap when price is below range (need all token0)
-    /// @param amount1 Current amount of token1
-    /// @param sqrtPrice Current external-route sqrt price
-    /// @param feeRate Fee rate
-    /// @return inputAmount Swap input amount
-    /// @return outputAmount Swap output amount
-    function _calculateSwapBelowRange(
-        uint256 amount1,
-        uint160 sqrtPrice,
-        uint24 feeRate
-    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
-        if (amount1 == 0) return (0, 0);
+    /// @notice Net output of an exact-input swap against the route modelled as constant liquidity
+    /// @dev Mirrors one SwapMath step: the fee comes off the input, the price moves along the
+    ///      curve from the route's current sqrt price, and the price is capped at the pool's
+    ///      sqrt price bounds the way the real swap would stop there. Output is rounded down.
+    function _routeOutput(RouteQuote memory route, bool zeroForOne, uint256 amountIn)
+        private
+        pure
+        returns (uint256 outputAmount)
+    {
+        uint256 amountInNet = FullMath.mulDiv(amountIn, route.inputMultiplier, MAX_FEE_PIPS);
+        if (amountInNet == 0) return 0;
 
-        // Swap all token1 -> token0 at the external pool's spot price.
-        inputAmount = amount1;
-        uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
-        outputAmount = _quote1To0(amount1, sqrtPrice, feeMultiplier);
+        uint160 nextSqrtPrice;
+        if (zeroForOne) {
+            nextSqrtPrice =
+                SqrtPriceMath.getNextSqrtPriceFromInput(route.sqrtPrice, route.liquidity, amountInNet, true);
+            if (nextSqrtPrice <= TickMath.MIN_SQRT_PRICE) nextSqrtPrice = TickMath.MIN_SQRT_PRICE + 1;
+            outputAmount = SqrtPriceMath.getAmount1Delta(nextSqrtPrice, route.sqrtPrice, route.liquidity, false);
+        } else {
+            // getNextSqrtPriceFromInput's uint160 cast reverts past the price ceiling; the real
+            // swap stops there instead, so cap the price the same way.
+            uint256 nextRaw = uint256(route.sqrtPrice) + FullMath.mulDiv(amountInNet, FixedPoint96.Q96, route.liquidity);
+            nextSqrtPrice =
+                nextRaw >= TickMath.MAX_SQRT_PRICE ? TickMath.MAX_SQRT_PRICE - 1 : uint160(nextRaw);
+            outputAmount = SqrtPriceMath.getAmount0Delta(route.sqrtPrice, nextSqrtPrice, route.liquidity, false);
+        }
+        outputAmount = FullMath.mulDiv(outputAmount, route.outputMultiplier, MAX_FEE_PIPS);
     }
 
-    /// @notice Calculate swap when price is above range (need all token1)
-    /// @param amount0 Current amount of token0
-    /// @param sqrtPrice Current external-route sqrt price
-    /// @param feeRate Fee rate
-    /// @return inputAmount Swap input amount
-    /// @return outputAmount Swap output amount
-    function _calculateSwapAboveRange(
-        uint256 amount0,
-        uint160 sqrtPrice,
-        uint24 feeRate
-    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
-        if (amount0 == 0) return (0, 0);
-
-        // Swap all token0 -> token1 at the external pool's spot price.
-        inputAmount = amount0;
-        uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
-        outputAmount = _quote0To1(amount0, sqrtPrice, feeMultiplier);
-    }
-
-    /// @notice Calculate swap when price is in range (need optimal ratio)
-    /// @param amount0 Current amount of token0
-    /// @param amount1 Current amount of token1
-    /// @param positionSqrtPrice Current position-pool sqrt price
-    /// @param swapSqrtPrice Current external-route sqrt price
-    /// @param sqrtLower Lower bound sqrt price
-    /// @param sqrtUpper Upper bound sqrt price
-    /// @param feeRate Fee rate
-    /// @param swapDir0to1 Swap direction
-    /// @return inputAmount Swap input amount
-    /// @return outputAmount Swap output amount
-    function _calculateSwapInRange(
+    /// @notice Largest input that still leaves at least the required ratio on the input side
+    /// @dev The route curve is monotone, so the balance condition is solved by bisection: the
+    ///      input token stays in surplus below the root and in deficit above it. Returns the
+    ///      surplus-side bound, so the leftover after minting is at most the bracket width (dust).
+    function _solveRouteInputInRange(
+        RouteQuote memory route,
+        uint256 requiredRatio,
         uint256 amount0,
         uint256 amount1,
-        uint160 positionSqrtPrice,
-        uint160 swapSqrtPrice,
-        uint160 sqrtLower,
-        uint160 sqrtUpper,
-        uint24 feeRate,
         bool swapDir0to1
-    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
-        uint256 requiredRatio = _calculateRequiredRatio(positionSqrtPrice, sqrtLower, sqrtUpper);
-        uint256 feeMultiplier = MAX_FEE_PIPS - uint256(feeRate);
+    ) private pure returns (uint256 inputAmount) {
+        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
+        if (swapDir0to1 ? amount0 <= requiredAmount0 : requiredAmount0 <= amount0) return 0;
 
-        if (swapDir0to1) {
-            (inputAmount, outputAmount) = _calculateSwap0to1InRange(
-                amount0,
-                amount1,
-                swapSqrtPrice,
-                requiredRatio,
-                feeMultiplier
-            );
-        } else {
-            (inputAmount, outputAmount) = _calculateSwap1to0InRange(
-                amount0,
-                amount1,
-                swapSqrtPrice,
-                requiredRatio,
-                feeMultiplier
-            );
+        uint256 lo;
+        uint256 hi = swapDir0to1 ? amount0 : amount1;
+        while (hi - lo > 1 && hi - lo > (hi >> ROUTE_SOLVE_PRECISION_SHIFT)) {
+            uint256 mid = (lo + hi) / 2;
+            uint256 out = _routeOutput(route, swapDir0to1, mid);
+            bool inputStillInSurplus = swapDir0to1
+                ? amount0 - mid > FullMath.mulDiv(requiredRatio, amount1 + out, FixedPoint96.Q96)
+                : FullMath.mulDiv(requiredRatio, amount1 - mid, FixedPoint96.Q96) > amount0 + out;
+            if (inputStillInSurplus) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
         }
+        inputAmount = lo;
     }
 
     /// @notice Calculate required ratio for perfect liquidity in range
@@ -258,98 +472,6 @@ contract LiquidityCalculator is ILiquidityCalculator {
             FixedPoint96.Q96
         );
         requiredRatio = FullMath.mulDiv(numerator, FixedPoint96.Q96, denominator);
-    }
-
-    /// @notice Calculate swap when swapping token0 -> token1 in range
-    /// @param amount0 Current amount of token0
-    /// @param amount1 Current amount of token1
-    /// @param sqrtPrice Current sqrt price
-    /// @param requiredRatio Required ratio scaled by Q96
-    /// @param feeMultiplier Fee multiplier (MAX_FEE_PIPS - feeRate)
-    /// @return inputAmount Swap input amount
-    /// @return outputAmount Swap output amount
-    function _calculateSwap0to1InRange(
-        uint256 amount0,
-        uint256 amount1,
-        uint160 sqrtPrice,
-        uint256 requiredRatio,
-        uint256 feeMultiplier
-    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
-        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
-        if (amount0 <= requiredAmount0) return (0, 0);
-
-        uint256 excess0 = amount0 - requiredAmount0;
-        uint256 ratioTimesPriceX96 = FullMath.mulDiv(requiredRatio, sqrtPrice, FixedPoint96.Q96);
-        ratioTimesPriceX96 = FullMath.mulDiv(ratioTimesPriceX96, sqrtPrice, FixedPoint96.Q96);
-        ratioTimesPriceX96 = FullMath.mulDiv(ratioTimesPriceX96, feeMultiplier, MAX_FEE_PIPS);
-        uint256 denominator = FixedPoint96.Q96 + ratioTimesPriceX96;
-        inputAmount = FullMath.mulDiv(excess0, FixedPoint96.Q96, denominator);
-
-        // Cap at available amount
-        if (inputAmount > amount0) inputAmount = amount0;
-
-        // Calculate output
-        outputAmount = _quote0To1(inputAmount, sqrtPrice, feeMultiplier);
-    }
-
-    /// @notice Calculate swap when swapping token1 -> token0 in range
-    /// @param amount0 Current amount of token0
-    /// @param amount1 Current amount of token1
-    /// @param sqrtPrice Current sqrt price
-    /// @param requiredRatio Required ratio scaled by Q96
-    /// @param feeMultiplier Fee multiplier (MAX_FEE_PIPS - feeRate)
-    /// @return inputAmount Swap input amount
-    /// @return outputAmount Swap output amount
-    function _calculateSwap1to0InRange(
-        uint256 amount0,
-        uint256 amount1,
-        uint160 sqrtPrice,
-        uint256 requiredRatio,
-        uint256 feeMultiplier
-    ) private pure returns (uint256 inputAmount, uint256 outputAmount) {
-        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
-        if (requiredAmount0 <= amount0) return (0, 0);
-
-        uint256 deficit0 = requiredAmount0 - amount0;
-        uint256 price1To0X96 = _price1To0X96(sqrtPrice, feeMultiplier);
-        if (price1To0X96 == 0) revert Math_Overflow();
-        uint256 denominator = price1To0X96 + requiredRatio;
-        inputAmount = FullMath.mulDiv(deficit0, FixedPoint96.Q96, denominator);
-
-        // Cap at available amount
-        if (inputAmount > amount1) inputAmount = amount1;
-
-        // Calculate output
-        outputAmount = _quote1To0(inputAmount, sqrtPrice, feeMultiplier);
-    }
-
-    /// @dev Fee-adjusted token0 units received for one Q96-scaled token1 unit.
-    ///      Build the inverse from sqrtPrice directly instead of first rounding
-    ///      token0->token1 price to zero for low-priced token0 assets.
-    function _price1To0X96(uint160 sqrtPrice, uint256 feeMultiplier) private pure returns (uint256) {
-        uint256 inverseSqrtPriceX96 = FullMath.mulDiv(FixedPoint96.Q96, FixedPoint96.Q96, sqrtPrice);
-        uint256 priceX96 = FullMath.mulDiv(inverseSqrtPriceX96, inverseSqrtPriceX96, FixedPoint96.Q96);
-        return FullMath.mulDiv(priceX96, feeMultiplier, MAX_FEE_PIPS);
-    }
-
-    function _quote0To1(uint256 amount0, uint160 sqrtPrice, uint256 feeMultiplier)
-        private
-        pure
-        returns (uint256)
-    {
-        uint256 outputAmount = FullMath.mulDiv(amount0, sqrtPrice, FixedPoint96.Q96);
-        outputAmount = FullMath.mulDiv(outputAmount, sqrtPrice, FixedPoint96.Q96);
-        return FullMath.mulDiv(outputAmount, feeMultiplier, MAX_FEE_PIPS);
-    }
-
-    function _quote1To0(uint256 amount1, uint160 sqrtPrice, uint256 feeMultiplier)
-        private
-        pure
-        returns (uint256)
-    {
-        uint256 outputAmount = FullMath.mulDiv(amount1, FixedPoint96.Q96, sqrtPrice);
-        outputAmount = FullMath.mulDiv(outputAmount, FixedPoint96.Q96, sqrtPrice);
-        return FullMath.mulDiv(outputAmount, feeMultiplier, MAX_FEE_PIPS);
     }
 
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit

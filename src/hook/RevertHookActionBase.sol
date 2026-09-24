@@ -7,7 +7,6 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
-import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -37,8 +36,6 @@ import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 abstract contract RevertHookActionBase is RevertHookLookupBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
-    using ProtocolFeeLibrary for uint24;
-    using ProtocolFeeLibrary for uint16;
 
     error SwapPoolPriceOutOfBounds(int24 swapTick, int24 oracleTick);
     error RemovalConsumedByFees();
@@ -181,7 +178,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 amount1,
         Mode mode
     ) internal returns (uint256, uint256) {
-        SwapPlan memory swapPlan = _buildSwapPlan(poolKey, tickLower, tickUpper, amount0, amount1);
+        SwapPlan memory swapPlan = _buildSwapPlan(poolKey, tickLower, tickUpper, amount0, amount1, mode);
         if (swapPlan.amountIn > 0) {
             return _applyBalanceDelta(
                 _executeSwapResolved(
@@ -194,11 +191,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         return (amount0, amount1);
     }
 
-    function _buildSwapPlan(PoolKey memory poolKey, int24 tickLower, int24 tickUpper, uint256 amount0, uint256 amount1)
-        internal
-        view
-        returns (SwapPlan memory plan)
-    {
+    function _buildSwapPlan(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0,
+        uint256 amount1,
+        Mode mode
+    ) internal view returns (SwapPlan memory plan) {
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
 
         plan.zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
@@ -219,14 +219,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             return plan;
         }
 
-        (uint160 swapSqrtPriceX96,, uint24 packedProtocolFee, uint24 lpFee) =
-            StateLibrary.getSlot0(poolManager, plan.poolKey.toId());
-        uint16 protocolFee =
-            plan.zeroForOne ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
-        uint24 swapFee = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
-
-        (plan.amountIn,, plan.zeroForOne) = liquidityCalculator.calculateSimple(
-            sqrtPriceX96, swapSqrtPriceX96, tickLower, tickUpper, amount0, amount1, swapFee
+        // Sized against the route's depth and net of the hook's output fee; see
+        // RevertHookSwapActions.planExternalRoute.
+        (plan.amountIn, plan.zeroForOne) = swapActions.planExternalRoute(
+            liquidityCalculator, sqrtPriceX96, plan.poolKey, tickLower, tickUpper, amount0, amount1, mode
         );
     }
 
