@@ -222,6 +222,43 @@ contract AutoExitTest is AutomatorTestBase {
         autoExit.execute(params);
     }
 
+    /// @notice V4LE-60: the lower trigger is reached when the pool tick equals it, like the upper one
+    ///         and like the hook's inclusive evaluation; the operator could not exit at the exact tick.
+    function test_ExecuteAtExactLowerTriggerTick() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+        int24 tick = _getCurrentTick(poolKey);
+
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: tick,
+            token1TriggerTick: tick + 100000,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: 0,
+            onlyFees: false
+        });
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoExit), tokenId);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+        _execute(operator, params);
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "exit executes at the exact lower trigger tick");
+    }
+
     function test_ExecuteWithSwap() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);

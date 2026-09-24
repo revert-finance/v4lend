@@ -137,8 +137,9 @@ contract AutoExit is Automator {
         // Get current tick
         (, int24 tick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
 
-        // Check trigger condition
-        if (config.token0TriggerTick <= tick && tick < config.token1TriggerTick) {
+        // Check trigger condition: the lower trigger is reached at or below its tick, the upper one
+        // at or above, matching the hook's inclusive trigger evaluation on both sides.
+        if (config.token0TriggerTick < tick && tick < config.token1TriggerTick) {
             revert NotReady();
         }
 
