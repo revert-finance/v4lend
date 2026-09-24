@@ -1100,6 +1100,58 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         _verifyNoLeftoverBalances("zero-debt exit");
     }
 
+    // ==================== V4LE-71: a zero-sized deleverage is not a success ====================
+
+    function _leverageConfig(uint16 targetBps) internal pure returns (RevertHookState.PositionConfig memory config) {
+        config = _autoExitConfig(type(int24).min, type(int24).max);
+        config.modeFlags = PositionModeFlags.MODE_AUTO_LEVERAGE;
+        config.autoLeverageTargetBps = targetBps;
+    }
+
+    /// @dev A position whose raw liquidity is tiny next to its (mock) oracle value: the planned
+    ///      repayment floors to zero liquidity. The old code returned success from
+    ///      _decreaseLeverage, autoLeverage saw an unchanged loan, emitted AutoLeverage and
+    ///      re-centred the trigger window, leaving an above-target loan looking handled. Now the
+    ///      action fails: HookActionFailed, no AutoLeverage, base tick untouched.
+    function testZeroSizedDeleverageIsReportedAsFailure() public {
+        PoolKey memory key =
+            PoolKey({currency0: currency0, currency1: currency1, fee: 500, tickSpacing: 10, hooks: IHooks(hook)});
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), key);
+        _mintFullRange(key, 40e18);
+        (uint256 levId,) = positionManager.mint(
+            key, -120, -60, 100, type(uint256).max, type(uint256).max, address(this), block.timestamp, ""
+        );
+
+        V4Vault lendVault = _deployVaultWithAsset(Currency.unwrap(currency0));
+        IERC20(Currency.unwrap(currency0)).approve(address(lendVault), 2e18);
+        lendVault.deposit(2e18, address(this));
+        IERC721(address(positionManager)).approve(address(lendVault), levId);
+        lendVault.create(levId, address(this));
+        lendVault.approveTransform(levId, address(hook), true);
+        (,, uint256 collateralValue,,) = lendVault.loanInfo(levId);
+        lendVault.borrow(levId, collateralValue * 7490 / 10000);
+        hook.setPositionConfig(levId, _leverageConfig(7490));
+        lendVault.borrow(levId, collateralValue / 1000);
+        (uint256 debtBefore,,,,) = lendVault.loanInfo(levId);
+        (,,,,,,, int24 baseBefore) = hook.positionStates(levId);
+        assertGt(debtBefore * 10000 / collateralValue, 7490, "loan above target");
+
+        vm.recordLogs();
+        _swap(key, false, 5e17);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertGe(_currentTick(key), baseBefore + 10 * key.tickSpacing, "upper leverage trigger crossed");
+
+        assertTrue(_sawHookActionFailed(logs, levId, RevertHookState.Mode.AUTO_LEVERAGE), "action reported as failed");
+        assertFalse(
+            _sawIndexedTokenEvent(logs, RevertHookState.AutoLeverage.selector, levId), "no success recorded"
+        );
+        (uint256 debtAfter,,,,) = lendVault.loanInfo(levId);
+        assertEq(debtAfter, debtBefore, "debt unchanged");
+        (,,,,,,, int24 baseAfter) = hook.positionStates(levId);
+        assertEq(baseAfter, baseBefore, "trigger window not re-centred around an unhandled loan");
+    }
+
     // ==================== L-01: remove callback fails open on oracle failure ====================
 
     function testRemoveLiquidityFromActivatedPositionSucceedsWhenOracleReverts() public {
