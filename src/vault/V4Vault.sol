@@ -1253,7 +1253,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         } else if (!feesOnly) {
             // all fees plus the share of liquidity needed to cover the remaining value
             liquidity = positionManager.getPositionLiquidity(params.tokenId);
-            liquidity = SafeCast.toUint128((liquidationValue - feeValue) * liquidity / (fullValue - feeValue));
+            liquidity = SafeCast.toUint128(Math.mulDiv(liquidationValue - feeValue, liquidity, fullValue - feeValue));
         }
 
         // decrease liquidity and collect fees/tokens
@@ -1386,10 +1386,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // if position is more valuable than debt with max penalty
         if (fullValue >= maxPenaltyValue) {
             if (collateralValue > 0) {
-                // position value when position started to be liquidatable
-                uint256 startLiquidationValue = debt * fullValue / collateralValue;
-                uint256 penaltyFractionX96 =
-                    (Q96 - ((fullValue - maxPenaltyValue) * Q96 / (startLiquidationValue - maxPenaltyValue)));
+                // position value when position started to be liquidatable. Full-precision
+                // division: debt and fullValue can each approach 2^144 for a valid large position,
+                // so the checked product would overflow and block loanInfo() and liquidate().
+                uint256 startLiquidationValue = Math.mulDiv(debt, fullValue, collateralValue);
+                uint256 penaltyFractionX96 = (
+                    Q96 - Math.mulDiv(fullValue - maxPenaltyValue, Q96, startLiquidationValue - maxPenaltyValue)
+                );
                 uint256 penaltyX32 = MIN_LIQUIDATION_PENALTY_X32
                     + (MAX_LIQUIDATION_PENALTY_X32 - MIN_LIQUIDATION_PENALTY_X32) * penaltyFractionX96 / Q96;
 

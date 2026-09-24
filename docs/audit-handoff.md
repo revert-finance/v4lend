@@ -358,7 +358,7 @@ Recent tests of note:
 ## Suggested Audit Focus
 
 Highest-value review areas:
-- `V4Vault` borrow / repay / liquidation / transform flows
+- `V4Vault` borrow / repay / liquidation / transform flows (liquidation sizing uses full-precision `Math.mulDiv` for the penalty interpolation and the liquidity fraction, so positions whose debt and value each approach 2^144 stay computable and liquidatable)
 - `RevertHook` delegatecall safety and trigger accounting
 - `HookFeeController` and `HookRouteController` trust boundaries
 - `AutoLeverage` leverage-down / third-token paths
