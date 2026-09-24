@@ -148,6 +148,7 @@ Important implementation detail:
 - `maxSwapSlippageBps == 10000` still disables the oracle output floor per swap; in that mode the band check is the only on-chain bound on how far an execution may fall short of the plan
 - `AutoExit` trigger evaluation is inclusive on both sides (lower reached at or below `token0TriggerTick`, upper at or above `token1TriggerTick`), the same convention as the hook's trigger evaluator
 - `AutoExit` vault exits settle the debt before the automation reward: when the proceeds net of the reserved reward do not cover the debt, the reward reserved in the lend token pays the remainder and is reduced by it
+- `AutoLend` deactivation (`configToken` with `isActive == false`) revokes the operator for both legs; `withdraw` rejects a deactivated position and the owner's `forceExit` is the recovery path for an already-lent one
 
 ### Controllers
 
