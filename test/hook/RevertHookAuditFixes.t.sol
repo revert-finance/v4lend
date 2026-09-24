@@ -12,6 +12,7 @@ import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 
 import {Vm} from "forge-std/Vm.sol";
 import {stdStorage, StdStorage} from "forge-std/StdStorage.sol";
@@ -833,6 +834,99 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         hook.setPositionConfig(token3Id, config);
         (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
         assertEq(modeFlags, config.modeFlags, "reachable relative exit accepted");
+    }
+
+    // ==================== V4LE-74: replacement ranges are clamped to the usable ticks ====================
+
+    /// @dev A position ending at maxUsableTick with the ordinary symmetric shift: the only bucket its
+    ///      upper trigger can fire in is maxUsableTick, where the clamped replacement is the position
+    ///      itself. The old code accepted the config, and at run time the planner rejected the
+    ///      unclamped [887160, 887280] and the trigger was consumed for nothing.
+    function testAutoRangeConfigRefusedWhenEdgeReplacementIsTheSameRange() public {
+        int24 maxUsable = TickMath.maxUsableTick(poolKey.tickSpacing);
+        (uint256 edgeId,) = positionManager.mint(
+            poolKey,
+            maxUsable - 60,
+            maxUsable,
+            1e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            ""
+        );
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(edgeId, _rangeConfig(type(int24).min, 0, -60, 60));
+
+        // a wider edge position clamps to a different (narrower) range and is fine
+        (uint256 wideEdgeId,) = positionManager.mint(
+            poolKey,
+            maxUsable - 120,
+            maxUsable,
+            1e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            ""
+        );
+        hook.setPositionConfig(wideEdgeId, _rangeConfig(type(int24).min, 0, -60, 60));
+
+        // and the mirror image at minUsableTick with a lower trigger
+        int24 minUsable = TickMath.minUsableTick(poolKey.tickSpacing);
+        (uint256 lowEdgeId,) = positionManager.mint(
+            poolKey,
+            minUsable,
+            minUsable + 60,
+            1e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            ""
+        );
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(lowEdgeId, _rangeConfig(0, type(int24).max, -60, 60));
+    }
+
+    /// @dev Run-time: a pool driven to its price ceiling fires an upper trigger at bucket
+    ///      maxUsableTick. The unclamped plan [887160, 887280] made the planner revert and the action
+    ///      fail (trigger consumed, position untouched); the clamped plan [887160, 887220] remints.
+    function testAutoRangeAtPriceCeilingRemintsIntoClampedRange() public {
+        int24 maxUsable = TickMath.maxUsableTick(60); // 887220
+        PoolKey memory top = PoolKey(currency0, currency1, 500, 60, IHooks(hook));
+        poolManager.initialize(top, TickMath.getSqrtPriceAtTick(maxUsable - 220));
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), top);
+        // above the price, so it holds token0 only: minted for a few wei
+        (uint256 id,) = positionManager.mint(
+            top, maxUsable - 120, maxUsable, 1e3, type(uint256).max, type(uint256).max, address(this), block.timestamp, ""
+        );
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        hook.setPositionConfig(id, _rangeConfig(type(int24).min, 0, -60, 60));
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        // buy every token0 the pool has: the price runs to MAX_SQRT_PRICE - 1, bucket maxUsableTick
+        vm.recordLogs();
+        _swap(top, false, 3e22);
+        assertEq(_getTickLowerAt(_currentTick(top), 60), maxUsable, "pool sits in the ceiling bucket");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_sawHookActionFailed(logs, id, RevertHookState.Mode.AUTO_RANGE), "no planner rejection");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "replacement minted");
+        assertEq(positionManager.getPositionLiquidity(id), 0, "old position consumed");
+        (, PositionInfo info) = positionManager.getPoolAndPositionInfo(nextTokenIdBefore);
+        assertEq(info.tickLower(), maxUsable - 60, "clamped replacement lower tick");
+        assertEq(info.tickUpper(), maxUsable, "clamped replacement upper tick");
+        assertGt(positionManager.getPositionLiquidity(nextTokenIdBefore), 0, "replacement holds the liquidity");
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(nextTokenIdBefore);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_RANGE, "automation follows the replacement");
+        _verifyNoLeftoverBalances("clamped remint at the price ceiling");
+    }
+
+    function _getTickLowerAt(int24 tick, int24 spacing) internal pure returns (int24) {
+        int24 compressed = tick / spacing;
+        if (tick < 0 && tick % spacing != 0) compressed--;
+        return compressed * spacing;
     }
 
     // ==================== L-01: remove callback fails open on oracle failure ====================

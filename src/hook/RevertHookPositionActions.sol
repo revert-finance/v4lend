@@ -148,10 +148,14 @@ contract RevertHookPositionActions is RevertHookActionBase {
             _positionConfigs[tokenId].autoRangeUpperDelta
         );
 
-        // This should already be rejected at configuration time.
-        if (AutoRangeLib.isSameRange(
-                oldPositionInfo.tickLower(), oldPositionInfo.tickUpper(), newTickLower, newTickUpper
-            )) {
+        // Both should already be rejected at configuration time; the clamp at a TickMath bound can
+        // collapse the range or reproduce the current one for an edge position (V4LE-74).
+        if (
+            !AutoRangeLib.isValidRange(newTickLower, newTickUpper)
+                || AutoRangeLib.isSameRange(
+                    oldPositionInfo.tickLower(), oldPositionInfo.tickUpper(), newTickLower, newTickUpper
+                )
+        ) {
             revert InvalidConfig();
         }
 

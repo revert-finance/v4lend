@@ -5,6 +5,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
@@ -182,6 +183,13 @@ abstract contract RevertHookTriggers is RevertHookState {
         }
     }
 
+    /// @dev Whether some bucket at or past `triggerTick` makes AutoRangeLib.plan reproduce the
+    ///      current range, which the action would then refuse. Only two candidate buckets can: the
+    ///      one whose unclamped shift lands on the current lower tick and the one landing on the
+    ///      current upper tick; the planner's clamp at the usable tick bounds is applied to the other
+    ///      side, so an edge position ([.., maxUsableTick] with an upper trigger, or
+    ///      [minUsableTick, ..] with a lower one) whose clamped replacement is itself is caught here
+    ///      instead of consuming the trigger at run time (V4LE-74).
     function _rangeTriggerCanResolveToSamePosition(
         int24 currentTickLower,
         int24 currentTickUpper,
@@ -194,20 +202,51 @@ abstract contract RevertHookTriggers is RevertHookState {
         if (triggerTick == type(int24).min || triggerTick == type(int24).max) {
             return false;
         }
+        return _baseTickReproducesRange(
+            int256(currentTickLower) - int256(lowerDelta),
+            currentTickLower,
+            currentTickUpper,
+            triggerTick,
+            lowerDelta,
+            upperDelta,
+            tickSpacing,
+            isUpperTrigger
+        )
+            || _baseTickReproducesRange(
+                int256(currentTickUpper) - int256(upperDelta),
+                currentTickLower,
+                currentTickUpper,
+                triggerTick,
+                lowerDelta,
+                upperDelta,
+                tickSpacing,
+                isUpperTrigger
+            );
+    }
 
-        int256 sameRangeBaseTickLower = int256(currentTickLower) - int256(lowerDelta);
-        int256 sameRangeBaseTickUpper = int256(currentTickUpper) - int256(upperDelta);
-        if (sameRangeBaseTickLower != sameRangeBaseTickUpper) {
+    function _baseTickReproducesRange(
+        int256 baseTick,
+        int24 currentTickLower,
+        int24 currentTickUpper,
+        int24 triggerTick,
+        int24 lowerDelta,
+        int24 upperDelta,
+        int24 tickSpacing,
+        bool isUpperTrigger
+    ) internal pure returns (bool) {
+        if (baseTick % int256(tickSpacing) != 0) {
             return false;
         }
-
-        int256 sameRangeBaseTick = sameRangeBaseTickLower;
-        if (sameRangeBaseTick % int256(tickSpacing) != 0) {
+        if (isUpperTrigger ? baseTick < int256(triggerTick) : baseTick > int256(triggerTick)) {
             return false;
         }
-
-        int256 triggerTickInt = int256(triggerTick);
-        return isUpperTrigger ? sameRangeBaseTick >= triggerTickInt : sameRangeBaseTick <= triggerTickInt;
+        int256 plannedLower = baseTick + int256(lowerDelta);
+        int256 plannedUpper = baseTick + int256(upperDelta);
+        int256 minTick = int256(TickMath.minUsableTick(tickSpacing));
+        int256 maxTick = int256(TickMath.maxUsableTick(tickSpacing));
+        if (plannedLower < minTick) plannedLower = minTick;
+        if (plannedUpper > maxTick) plannedUpper = maxTick;
+        return plannedLower == int256(currentTickLower) && plannedUpper == int256(currentTickUpper);
     }
 
     // ==================== Carried protocol fee ====================

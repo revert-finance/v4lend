@@ -6,6 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {AutoLendLib} from "src/shared/planning/AutoLendLib.sol";
 import {AutoLeverageLib} from "src/shared/planning/AutoLeverageLib.sol";
 import {AutoRangeLib} from "src/shared/planning/AutoRangeLib.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 contract SharedPlanningLibrariesHarness {
     function planOneSidedReentry(
@@ -282,6 +283,26 @@ contract SharedPlanningLibrariesTest is Test {
         (int24 newTickLower, int24 newTickUpper) = harness.planRange(-125, 60, -120, 120);
         assertEq(newTickLower, -300);
         assertEq(newTickUpper, -60);
+    }
+
+    /// @dev V4LE-74: a shift from a bucket at the TickMath edge is clamped to the usable range
+    ///      instead of producing ticks the liquidity planner rejects.
+    function testAutoRangeLibClampsPlannedRangeToUsableTicks() public view {
+        int24 maxUsable = TickMath.maxUsableTick(60); // 887220
+        int24 minUsable = TickMath.minUsableTick(60); // -887220
+        (int24 newTickLower, int24 newTickUpper) = harness.planRange(TickMath.MAX_TICK - 1, 60, -60, 60);
+        assertEq(newTickLower, maxUsable - 60, "lower side untouched");
+        assertEq(newTickUpper, maxUsable, "upper side clamped to maxUsableTick");
+
+        (newTickLower, newTickUpper) = harness.planRange(TickMath.MIN_TICK, 60, -60, 60);
+        assertEq(newTickLower, minUsable, "lower side clamped to minUsableTick");
+        assertEq(newTickUpper, minUsable, "the shift from the sub-usable bucket collapses onto the edge");
+        assertFalse(harness.isValidRange(newTickLower, newTickUpper), "callers must reject the collapsed range");
+
+        (newTickLower, newTickUpper) = harness.planRange(minUsable, 60, -60, 120);
+        assertEq(newTickLower, minUsable);
+        assertEq(newTickUpper, minUsable + 120);
+        assertTrue(harness.isValidRange(newTickLower, newTickUpper));
     }
 
     function testAutoRangeLibValidityAndSameRangeHelpers() public view {
