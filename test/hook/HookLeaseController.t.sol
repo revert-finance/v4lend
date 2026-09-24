@@ -619,6 +619,65 @@ contract HookLeaseControllerTest is BaseTest {
         jitTokenId; // silence unused
     }
 
+    /// @notice Audit follow-up (auction twin): the pending bucket aggregates every parked accrual,
+    ///         so a release sized as a fraction of the WHOLE bucket lets a dust LP that appears after
+    ///         a long zero-liquidity gap capture many horizons of rent per throttle slice. The release
+    ///         must be paced by one horizon of rent, so the slice is what the lease itself would have
+    ///         paid over the same interval however long the gap was.
+    function testPendingSliceIsBoundedByRentRateNotByAggregate() public {
+        uint256 price = 1e18;
+        uint256 rps = _ceilRentPerSecond(price);
+        _startLease(lesseeA, address(lesseeSwapper), price, 0.8e18);
+
+        // no LPs for five horizons: all of that rent parks in the bucket
+        _removeAllFullRangeLiquidity();
+        vm.warp(block.timestamp + 5 * DRIP_HORIZON);
+        leaseController.drip(leasePoolKey);
+        (,,,,,, uint256 pendingBefore) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 netRent = rps * 5 * DRIP_HORIZON * (10_000 - PROTOCOL_FEE_BPS) / 10_000;
+        assertGt(pendingBefore, netRent * 99 / 100, "five horizons of net rent parked");
+        assertEq(
+            leaseController.getPendingReleasePerHorizon(leasePoolId),
+            rps * DRIP_HORIZON,
+            "pace is one horizon of gross rent"
+        );
+
+        // dust LP appears alone (its mint touch advances the clock at zero liquidity), holds one
+        // throttle interval, drips: the bucket may release one interval of rent, not five horizons' share
+        _mintFullRangeLiquidity(1e6);
+        // via-ir treats block.timestamp as loop-invariant, so drive time from a local accumulator
+        uint256 t = block.timestamp;
+        uint256 hold = MIN_DRIP + 1;
+        t += hold;
+        vm.warp(t);
+        leaseController.drip(leasePoolKey);
+        (,,,,,, uint256 pendingAfter) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 released = pendingBefore - pendingAfter;
+        assertGt(released, 0, "a held slice is released");
+        assertLe(released, rps * hold + 1, "pending slice bounded by the rent rate over the interval");
+
+        // later slices are bounded the same way and the bucket still drains completely
+        for (uint256 i = 0; i < 5; i++) {
+            (,,,,,, uint256 before) = leaseController.getPoolLeaseState(leasePoolId);
+            t += hold;
+            vm.warp(t);
+            leaseController.drip(leasePoolKey);
+            (,,,,,, uint256 after_) = leaseController.getPoolLeaseState(leasePoolId);
+            assertGt(before - after_, 0, "later slices keep flowing");
+            assertLe(before - after_, rps * hold + 1, "later slices bounded too");
+        }
+        for (uint256 i = 0; i < 60; i++) {
+            t += DRIP_HORIZON;
+            vm.warp(t);
+            leaseController.drip(leasePoolKey);
+            (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+            if (pending == 0) break;
+        }
+        (,,,,,, uint256 pendingFinal) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(pendingFinal, 0, "aggregate still drains completely");
+        assertEq(leaseController.getPendingReleasePerHorizon(leasePoolId), 0, "pace resets with the drained bucket");
+    }
+
     /// @notice Codex P2 (fresh-clock): a pending bucket created by a LEASE ACTION outside the
     ///         drip path (here: exitLease parking the final accrual) gets its own clock - a
     ///         lastDripTime left stale by a long quiet gap must not dump the bucket at once.

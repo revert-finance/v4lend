@@ -102,6 +102,13 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         // donates, lease-action accruals); released gradually. uint256 so a long-lived lease
         // can never overflow the accumulator.
         uint256 pendingDonation;
+        // Release pace of the pending bucket: the largest "one horizon of rent" (gross rent per
+        // second times dripHorizonSeconds; an upper bound on the net-of-fee rent the bucket
+        // receives) among the accruals that fed it. Bounds every release to what the lease
+        // itself would have delivered over the same interval, so the slice a JIT position can
+        // capture does not grow with the length of the gap that filled the bucket.
+        // Read only when a release actually happens; reset to 0 whenever the bucket drains.
+        uint128 pendingReleasePerHorizon;
     }
 
     // ==================== State ====================
@@ -672,6 +679,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         }
         state.pendingDonation = 0;
         state.hasPending = false;
+        state.pendingReleasePerHorizon = 0;
         refunds[config.auctionCurrency][recipient] += amount;
         emit PendingDonationSwept(poolId, config.auctionCurrency, recipient, amount);
     }
@@ -705,6 +713,11 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             state.paidThrough,
             state.pendingDonation
         );
+    }
+
+    /// @notice Release pace of the pool's pending-donation bucket (see PoolLeaseState).
+    function getPendingReleasePerHorizon(PoolId poolId) external view returns (uint128) {
+        return _poolStates[poolId].pendingReleasePerHorizon;
     }
 
     /// @notice Whether a pool has a lease configuration (independent of any activity).
@@ -923,7 +936,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             poolManager.unlock(abi.encode(key));
             return;
         }
-        _addPending(state, _accrue(poolId, config, state));
+        _addPending(config, state, _accrue(poolId, config, state));
     }
 
     /// @dev Adds to the pending bucket, maintaining the hasPending slot-0 mirror and
@@ -931,13 +944,22 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     ///      non-empty. Without this, a lastDripTime left stale by a long-drained previous
     ///      bucket would let the first drip of a fresh bucket compute a full-horizon elapsed
     ///      interval and release the entire new bucket to a same-block JIT position.
-    function _addPending(PoolLeaseState storage state, uint256 amount) internal {
+    ///      Also raises the bucket's release pace to one horizon of rent at the current lease
+    ///      price (the rate the parked value accrued at), see pendingReleasePerHorizon.
+    function _addPending(PoolLeaseConfig storage config, PoolLeaseState storage state, uint256 amount) internal {
         if (amount == 0) {
             return;
         }
         if (state.pendingDonation == 0) {
             state.hasPending = true;
             state.lastDripTime = uint40(block.timestamp);
+        }
+        uint256 pace = _rentPerSecond(config, state.price) * config.dripHorizonSeconds;
+        if (pace > MAX_ESCROW_AMOUNT) {
+            pace = MAX_ESCROW_AMOUNT; // releases are clamped to int128 range anyway
+        }
+        if (pace > state.pendingReleasePerHorizon) {
+            state.pendingReleasePerHorizon = uint128(pace);
         }
         state.pendingDonation += amount;
     }
@@ -952,7 +974,10 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     ///         departing LP (beforeRemoveLiquidity) collect the rent of its own tenure.
     ///      2) The PENDING bucket - value that could not be delivered (zero liquidity, failed
     ///         donates, lease-action accruals) - releases gradually: throttled by
-    ///         minDripSeconds, bounded to (elapsed / dripHorizonSeconds) per release, clock
+    ///         minDripSeconds, bounded per release to (elapsed / dripHorizonSeconds) of
+    ///         pendingReleasePerHorizon - one horizon of rent at the pace the value accrued -
+    ///         and NOT of the whole bucket (a fraction of the aggregate would hand a dust LP that
+    ///         appears after a long zero-liquidity gap a slice that grows with the gap), clock
     ///         (re)initialized on every empty-to-nonempty transition and advanced over
     ///         zero-liquidity stretches, so no stale interval can dump the bucket to a JIT.
     ///      The shared throttle runs FIRST, from state slot 0 alone, so throttled touches skip
@@ -986,10 +1011,15 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             if (elapsed > config.dripHorizonSeconds) {
                 elapsed = config.dripHorizonSeconds; // cap the catch-up at one horizon's worth
             }
-            // round UP so every release moves at least one base unit - the bucket self-drains
-            // without a flush-on-zero branch, which for a small bucket against a long horizon
-            // (e.g. low-decimal currencies) would dump the whole bucket to the first LP
-            uint256 release = FullMath.mulDivRoundingUp(pending, elapsed, config.dripHorizonSeconds);
+            // Pace by one horizon of rent, never by the aggregate. Round UP so every release
+            // moves at least one base unit - the bucket self-drains without a flush-on-zero
+            // branch, which for a small bucket against a long horizon (e.g. low-decimal
+            // currencies) would dump the whole bucket to the first LP.
+            uint256 pace = state.pendingReleasePerHorizon;
+            if (pace > pending) {
+                pace = pending;
+            }
+            uint256 release = FullMath.mulDivRoundingUp(pace, elapsed, config.dripHorizonSeconds);
             if (release > pending) {
                 release = pending;
             }
@@ -1002,6 +1032,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
                 state.pendingDonation = pendingRemaining;
                 if (pendingRemaining == 0) {
                     state.hasPending = false;
+                    state.pendingReleasePerHorizon = 0;
                 }
                 amountToDonate = released;
                 emit PendingDonationDripped(poolId, released, pendingRemaining);
@@ -1022,7 +1053,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
                 }
             }
             if (freshDonated != fresh) {
-                _addPending(state, fresh - freshDonated);
+                _addPending(config, state, fresh - freshDonated);
             }
         }
 
