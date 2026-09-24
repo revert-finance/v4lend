@@ -1514,6 +1514,50 @@ contract LiquidityCalculatorTest is Test {
         assertEq(sqrtPriceX96, SQRT_PRICE_1_0, "current price");
     }
 
+    // ==================== Discriminant overflow (external audit V4LE-33) ====================
+
+    /// @dev The audit's state: tick spacing 60, price at tick 400000, ~0.3% fee (2500 pips here so
+    ///      the key differs from the default 3000-pip pool), active liquidity 2e30 from the range
+    ///      [396480, 404040] (its token1 requirement ~1.56e38 fits int128).
+    function _setUpHighTickHeavyLiquidityPool() internal {
+        _usePoolAtTick(2500, 400000);
+        token0.mint(address(this), type(uint128).max);
+        token1.mint(address(this), type(uint128).max);
+        permit2.approve(address(token0), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(token1), address(positionManager), type(uint160).max, type(uint48).max);
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] = abi.encode(
+            poolKey, int24(396480), int24(404040), uint256(2e30), type(uint128).max, type(uint128).max, address(this), ""
+        );
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(positionManager));
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
+        assertEq(poolManager.getLiquidity(poolId), 2e30, "precondition: active liquidity");
+    }
+
+    /// @notice For a valid but extreme same-pool state the quadratic's b*b wrapped modulo 2^256 in
+    ///         unchecked arithmetic and the planner returned a plausible but WRONG plan (input,
+    ///         output and final price for a price outside the requested range). The discriminant is
+    ///         now checked: the state reverts Math_Overflow instead of misplanning.
+    function test_calculateSamePool_RevertsOnDiscriminantOverflowInsteadOfWrapping() public {
+        _setUpHighTickHeavyLiquidityPool();
+        vm.expectRevert(ILiquidityCalculator.Math_Overflow.selector);
+        helper.getOptimalSwap(poolCallee, 399720, 400320, 1e30, 1e12);
+    }
+
+    /// @notice The same pool with a smaller token0 target keeps a 218-bit discriminant and plans a
+    ///         normal swap: the check only fires where the arithmetic really overflows.
+    function test_calculateSamePool_LargeButFittingDiscriminantStillPlans() public {
+        _setUpHighTickHeavyLiquidityPool();
+        (uint256 amountIn, uint256 amountOut, bool dir0to1, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, 399720, 400320, 1e24, 1e12);
+        assertTrue(dir0to1, "token0 -> token1");
+        assertGt(amountIn, 0);
+        assertGt(amountOut, 0);
+        assertGe(sqrtPriceX96, TickMath.getSqrtPriceAtTick(399720), "final price inside the requested range");
+        assertLe(sqrtPriceX96, TickMath.getSqrtPriceAtTick(400000), "final price does not exceed the current price");
+    }
+
     // ==================== Tick bitmap search regressions (M-04) ====================
     // `_locateNextTick` has to see every initialized tick on the simulated swap path: ticks in the
     // current bitmap word in both directions and every bit of the neighbouring words, including

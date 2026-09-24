@@ -783,8 +783,12 @@ contract LiquidityCalculator is ILiquidityCalculator {
             }
         }
         // Solve quadratic: sqrtPriceFinal = (sqrt(b^2 + 4ac) + b) / 2a
+        (bool realRoot, uint256 root) = _sqrtDiscriminant(a, b, c);
+        if (!realRoot) {
+            return uint160(sqrtPrice);
+        }
         unchecked {
-            uint256 num = Math.sqrt(b * b + a * c) + b;
+            uint256 num = root + b;
             assembly {
                 sqrtPriceFinal := div(shl(96, num), a)
             }
@@ -872,8 +876,12 @@ contract LiquidityCalculator is ILiquidityCalculator {
             }
         }
         // Solve quadratic: sqrtPriceFinal = (sqrt(b^2 + 4ac) + b) / 2a
+        (bool realRoot, uint256 root) = _sqrtDiscriminant(a, b, c);
+        if (!realRoot) {
+            return uint160(sqrtPrice);
+        }
         unchecked {
-            uint256 num = Math.sqrt(b * b + a * c) + b;
+            uint256 num = root + b;
             assembly {
                 // Use signed division as result may be negative
                 sqrtPriceFinal := sdiv(shl(96, num), a)
@@ -882,6 +890,45 @@ contract LiquidityCalculator is ILiquidityCalculator {
         // Ensure final price is at least current price
         assembly {
             sqrtPriceFinal := xor(sqrtPrice, mul(xor(sqrtPrice, sqrtPriceFinal), gt(sqrtPriceFinal, sqrtPrice)))
+        }
+    }
+
+    /// @notice Square root of the analytic solvers' quadratic discriminant b*b + a*c
+    /// @dev The coefficients are two's-complement words: `b` may be negative in both solvers, `a`
+    ///      in the 1->0 solver (whose root is taken with sdiv) and `c` in the 0->1 solver (the
+    ///      unguarded fee-band case documented at M-5), so the products are formed on magnitudes
+    ///      and recombined by sign. Everything used to be computed unchecked (external audit
+    ///      V4LE-33): for large valid coefficients b*b wrapped modulo 2^256 and the solver returned
+    ///      a plausible-looking but wrong plan (a final price outside the requested range). A
+    ///      magnitude that does not fit 256 bits now reverts Math_Overflow. A negative discriminant
+    ///      has no real root; the solvers then keep the current price (no swap), the degradation the
+    ///      M-5 note documents for that extreme.
+    /// @return realRoot False when the discriminant is negative
+    /// @return root sqrt(b*b + a*c) when realRoot
+    function _sqrtDiscriminant(uint256 a, uint256 b, uint256 c) private pure returns (bool realRoot, uint256 root) {
+        unchecked {
+            uint256 absB = _abs(b);
+            // (2^128 - 1)^2 < 2^256 <= (2^128)^2
+            if (absB > type(uint128).max) revert Math_Overflow();
+            uint256 bb = absB * absB;
+            uint256 absA = _abs(a);
+            uint256 absC = _abs(c);
+            uint256 ac = absA * absC;
+            if (absA != 0 && ac / absA != absC) revert Math_Overflow();
+            if (ac != 0 && (int256(a) < 0) != (int256(c) < 0)) {
+                if (ac > bb) return (false, 0);
+                return (true, Math.sqrt(bb - ac));
+            }
+            uint256 disc = bb + ac;
+            if (disc < bb) revert Math_Overflow();
+            return (true, Math.sqrt(disc));
+        }
+    }
+
+    /// @dev Magnitude of a two's-complement word
+    function _abs(uint256 x) private pure returns (uint256) {
+        unchecked {
+            return int256(x) < 0 ? 0 - x : x;
         }
     }
 
