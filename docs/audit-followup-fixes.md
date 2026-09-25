@@ -75,3 +75,12 @@ loan (for example repay the small excess) and submit setPositionConfig again for
 retry/rearm. Success clears the marker; another failure leaves it set. No rounding-up liquidation
 or automatic swap-loop retry is introduced. The regression exercises failure, manual repair, and
 successful rearming at the current tick.
+
+## V4LE-72: settle fees before withdrawals
+
+Liquidity operations cannot create unpaid protocol-fee receivables. A removal that cannot settle
+the whole fee reverts. INCREASE_LIQUIDITY(0), with explicit max inputs and currency settlement,
+can collect net fees or pay an existing liability. Vault, hook, Swapper/V4Utils, and leverage-down
+paths prepend this collection before removing principal in the same unlock. Direct PositionManager
+clients must use that batch when a DECREASE cannot absorb the fee; DECREASE(0) alone is intentionally
+unsupported when a protocol fee is due. No governance write-off or voluntary-only debt is relied on.

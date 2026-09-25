@@ -50,9 +50,9 @@ abstract contract RevertHookState is RevertHookAccess {
         int24 autoLeverageBaseTick; // Base tick for auto-leverage triggers (triggers at baseTick ± 10 * tickSpacing)
     }
 
-    /// @notice Protocol fee owed by a position that could not be taken inside a liquidity callback.
-    /// @dev PositionManager attributes every hook delta to principal, so a fee-only removal cannot
-    ///      carry a fee. The shortfall is parked here and settled on a later operation with room.
+    /// @notice Carried fee accounting retained for valuation, migration and defensive recovery.
+    /// @dev New liquidity operations settle the entire obligation or revert; no unsecured
+    /// shortfall is created. An INCREASE(0) can settle a pre-existing obligation.
     struct PendingProtocolFee {
         uint128 amount0;
         uint128 amount1;
@@ -210,7 +210,7 @@ abstract contract RevertHookState is RevertHookAccess {
     // Permit2 approval tracking
     mapping(address => bool) internal _permit2Approved;
 
-    // Protocol fee carried per position until a liquidity operation can absorb it
+    // Carried protocol fee state; new operations cannot create an unpaid shortfall
     mapping(uint256 tokenId => PendingProtocolFee pendingProtocolFee) internal _pendingProtocolFees;
 
     /// @notice ERC4626 shares the hook custodies for auto-lend positions, per share token (the

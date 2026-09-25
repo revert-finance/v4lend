@@ -10,6 +10,8 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {RevertHookState} from "./RevertHookState.sol";
@@ -28,6 +30,33 @@ contract RevertHookSwapActions is RevertHookState {
         hookFeeController = _hookFeeController;
     }
 
+    /// @dev Shared delegatecall encoder, including fee-first removals and native sweeps.
+    function modifyLiquiditiesWithPair(
+        IPositionManager positionManager, bytes memory actions, bytes memory primaryParams,
+        Currency currency0, Currency currency1, uint256 nativeValue
+    ) external payable returns (bool success) {
+        bool removing = uint8(actions[0]) == uint8(Actions.DECREASE_LIQUIDITY);
+        uint256 offset = removing ? 1 : 0;
+        bytes memory actionsWithSweep = removing ? abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), actions) : actions;
+        bytes[] memory params = new bytes[](offset + (nativeValue == 0 ? 2 : 3));
+        if (removing) {
+            uint256 tokenId = abi.decode(primaryParams, (uint256));
+            params[0] = abi.encode(tokenId, 0, type(uint128).max, type(uint128).max, bytes(""));
+        }
+        params[offset] = primaryParams;
+        params[offset + 1] = abi.encode(currency0, currency1, address(this));
+        if (nativeValue > 0) {
+            actionsWithSweep = abi.encodePacked(actionsWithSweep, uint8(Actions.SWEEP));
+            params[offset + 2] = abi.encode(address(0), address(this));
+        }
+
+        try positionManager.modifyLiquiditiesWithoutUnlock{value: nativeValue}(actionsWithSweep, params) {
+            return true;
+        } catch (bytes memory reason) {
+            emit HookModifyLiquiditiesFailed(actionsWithSweep, params, reason);
+            return false;
+        }
+    }
     /// @notice Plans an exact-input swap through a configured external route for a liquidity action
     /// @dev Plain view (staticcalled by the action sidecars, which have no bytecode room for it):
     ///      hands the planner the route pool (price, liquidity and fee are read there and its

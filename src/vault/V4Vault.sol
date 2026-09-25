@@ -18,6 +18,7 @@ import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step
 import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
+import {V4VaultPositionActions} from "./V4VaultPositionActions.sol";
 import {LiquidationEscrow} from "./LiquidationEscrow.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IRemintMigrationHook} from "./interfaces/IRemintMigrationHook.sol";
@@ -74,6 +75,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     IInterestRateModel public immutable interestRateModel;
 
     LiquidationEscrow public immutable liquidationEscrow;
+    V4VaultPositionActions private immutable positionActions;
 
     /// @notice oracle implementation
     IV4Oracle public immutable oracle;
@@ -224,6 +226,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         IWETH9 _weth
     ) ERC20(name, symbol) Ownable(msg.sender) {
         liquidationEscrow = new LiquidationEscrow();
+        positionActions = new V4VaultPositionActions(_positionManager);
         asset = _asset;
         assetDecimals = IERC20Metadata(_asset).decimals();
         positionManager = _positionManager;
@@ -1403,29 +1406,14 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         bytes memory decreaseLiquidityHookData,
         address recipient
     ) internal returns (uint256 amount0, uint256 amount1) {
-        // Get position info to determine currencies for TAKE_PAIR
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-
-        // Cache currencies to save gas
-        Currency currency0 = poolKey.currency0;
-        Currency currency1 = poolKey.currency1;
-
-        // check balance before decreasing liquidity
-        amount0 = currency0.balanceOf(recipient);
-        amount1 = currency1.balanceOf(recipient);
-
-        // V4 uses different approach - need to use modifyLiquidities with encoded actions
-        // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory paramsArray = new bytes[](2);
-        paramsArray[0] = abi.encode(tokenId, liquidityRemove, amount0Min, amount1Min, decreaseLiquidityHookData);
-        paramsArray[1] = abi.encode(currency0, currency1, recipient);
-
-        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
-
-        // calculate delta
-        amount0 = currency0.balanceOf(recipient) - amount0;
-        amount1 = currency1.balanceOf(recipient) - amount1;
+        (bool ok, bytes memory result) = address(positionActions).delegatecall(abi.encodeCall(
+            positionActions.decreaseLiquidity,
+            (tokenId,liquidityRemove,amount0Min,amount1Min,deadline,decreaseLiquidityHookData,recipient)
+        ));
+        if (!ok) {
+            assembly ("memory-safe") { revert(add(result,32),mload(result)) }
+        }
+        return abi.decode(result,(uint256,uint256));
     }
 
     // cleans up loan when it is closed because of replacement, repayment or liquidation

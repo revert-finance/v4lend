@@ -315,21 +315,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         Currency currency1,
         uint256 nativeValue
     ) internal returns (bool success) {
-        bytes memory actionsWithSweep = actions;
-        bytes[] memory params = new bytes[](nativeValue == 0 ? 2 : 3);
-        params[0] = primaryParams;
-        params[1] = abi.encode(currency0, currency1, address(this));
-        if (nativeValue > 0) {
-            actionsWithSweep = abi.encodePacked(actions, uint8(Actions.SWEEP));
-            params[2] = abi.encode(address(0), address(this));
+        (bool ok, bytes memory result) = address(swapActions).delegatecall(abi.encodeCall(
+            swapActions.modifyLiquiditiesWithPair,
+            (positionManager, actions, primaryParams, currency0, currency1, nativeValue)
+        ));
+        if (!ok) {
+            assembly ("memory-safe") { revert(add(result,32),mload(result)) }
         }
-
-        try positionManager.modifyLiquiditiesWithoutUnlock{value: nativeValue}(actionsWithSweep, params) {
-            return true;
-        } catch (bytes memory reason) {
-            emit HookModifyLiquiditiesFailed(actionsWithSweep, params, reason);
-            return false;
-        }
+        return abi.decode(result,(bool));
     }
 
     /// @notice Increases liquidity for a position
@@ -411,13 +404,13 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     ///      represent all balances currently attributable to the action. If unsolicited balances
     ///      are present, they will be swept by the next execution by design.
     /// @dev A full removal that succeeds but credits nothing in either currency means the
-    ///      position's carried protocol fee (deferred by earlier fee-only collections) consumed the
+    ///      position's legacy carried protocol fee consumed the
     ///      whole principal inside the remove callback. Every caller treats `(0, 0)` as a soft
     ///      failure and returns, which is right when the removal itself failed (nothing changed)
     ///      but would otherwise leave an emptied NFT behind with no shares, no remint and no exit
     ///      proceeds (V4LE-41). Revert instead so the action rolls back: direct actions run under
     ///      a caught delegatecall, vault-backed ones inside a caught vault transform, so this only
-    ///      fails the action (HookActionFailed) and the owner settles the fee with a manual removal.
+    ///      fails the action (HookActionFailed); the owner can settle fees with a fee-paying INCREASE(0).
     function _decreaseLiquidity(PoolKey memory poolKey, uint256 tokenId, bool feesOnly)
         internal
         returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)

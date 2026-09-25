@@ -135,17 +135,16 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         }
     }
 
+    error ProtocolFeesUnsettled();
+
     // ==================== Protocol fee on collected LP fees ====================
 
     /// @notice Time-weighted protocol fee on the LP fees a position collects. Called by the hook via
     ///         delegatecall from its after-liquidity callbacks (shared storage layout); hosted here
     ///         to keep the hook bytecode under the EIP-170 limit.
-    /// @dev PositionManager derives the caller's principal as `callerDelta - feesAccrued`, so every
-    ///      unit this hook takes is attributed to principal. On DECREASE/BURN it casts that to uint128
-    ///      (SlippageCheck.validateMinOut): a fee-only DECREASE_LIQUIDITY(0) reverts with
-    ///      SafeCastOverflow if anything is taken. The fee is therefore capped at what the current
-    ///      operation can absorb (see `_protocolFeeCaps`) and the shortfall is carried per position,
-    ///      to be settled on a later operation with room.
+    /// @dev PositionManager attributes hook deltas to principal. DECREASE(0) cannot pay a fee;
+    /// use INCREASE(0) with max inputs and settle/close the currencies instead. Removals which
+    /// cannot pay all obligations revert, so fees cannot become an unsecured receivable.
     /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
     /// @param liquidityDelta Signed liquidity change of the operation (0 for fee-only collections)
     /// @param delta Full caller delta (principal + accrued fees) reported by the pool
@@ -173,11 +172,15 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             return BalanceDeltaLibrary.ZERO_DELTA;
         }
 
-        (uint256 cap0, uint256 cap1) = _protocolFeeCaps(liquidityDelta, delta, feeDelta, fee0, fee1);
+        (uint256 cap0, uint256 cap1) = _protocolFeeCaps(liquidityDelta, delta, feeDelta, owed0, owed1);
         uint256 take0 = owed0 > cap0 ? cap0 : owed0;
         uint256 take1 = owed1 > cap1 ? cap1 : owed1;
         uint256 newPending0 = owed0 - take0;
         uint256 newPending1 = owed1 - take1;
+
+        // Never release fees or principal in exchange for an unsecured receivable. Callers can
+        // prepend INCREASE_LIQUIDITY(0) with adequate max inputs to settle all fees atomically.
+        if (newPending0 != 0 || newPending1 != 0) revert ProtocolFeesUnsettled();
 
         if (newPending0 != pending0 || newPending1 != pending1) {
             pending.amount0 = SafeCast.toUint128(newPending0);
@@ -238,15 +241,8 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         fee1 = fees1 * accumulatedActiveTime * lpFeeBps / denominator;
     }
 
-    /// @dev Largest hook delta the current PositionManager operation can absorb without reverting.
-    ///      - DECREASE/BURN (liquidityDelta < 0): validateMinOut casts (principal - hookDelta) to
-    ///        uint128, so at most the principal being removed.
-    ///      - Fee-only (liquidityDelta == 0): a DECREASE(0) has no principal and tolerates nothing.
-    ///        A zero-sized INCREASE also lands here (the pool routes liquidityDelta <= 0 to the
-    ///        remove callback); only the hook's own collection is known to be one, and its TAKE_PAIR
-    ///        needs a non-negative caller delta, so it can absorb up to the fees being collected.
-    ///      - INCREASE/MINT (liquidityDelta > 0): validateMaxIn against a caller-chosen amountMax that
-    ///        is unknown here, so keep the pre-existing charge of the current period only.
+    /// @dev A decrease can pay only from principal (PositionManager validates unsigned min-outs).
+    /// An increase, including zero liquidity, can settle the whole obligation via max-inputs.
     function _protocolFeeCaps(
         int256 liquidityDelta,
         BalanceDelta delta,
@@ -259,11 +255,7 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             int256 principal1 = int256(delta.amount1()) - int256(feeDelta.amount1());
             cap0 = principal0 > 0 ? uint256(principal0) : 0;
             cap1 = principal1 > 0 ? uint256(principal1) : 0;
-        } else if (liquidityDelta == 0) {
-            if (IMsgSender(address(positionManager)).msgSender() == address(this)) {
-                cap0 = feeDelta.amount0() > 0 ? uint256(int256(feeDelta.amount0())) : 0;
-                cap1 = feeDelta.amount1() > 0 ? uint256(int256(feeDelta.amount1())) : 0;
-            }
+
         } else {
             cap0 = fee0;
             cap1 = fee1;

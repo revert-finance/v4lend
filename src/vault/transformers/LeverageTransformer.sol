@@ -233,19 +233,20 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory paramsArray = new bytes[](2);
+        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory paramsArray = new bytes[](3);
+        paramsArray[0] = abi.encode(params.tokenId, 0, type(uint128).max, type(uint128).max, bytes(""));
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
         // Uniswap v4 encodes amount minima as uint128. Transformer callers are trusted
         // to pass uint128-sized slippage minima; larger values intentionally narrow.
-        paramsArray[0] = abi.encode(
+        paramsArray[1] = abi.encode(
             params.tokenId,
             uint256(params.liquidity),
             uint128(params.amountRemoveMin0), // amount0Min
             uint128(params.amountRemoveMin1), // amount1Min
             params.decreaseLiquidityHookData
         );
-        paramsArray[1] = abi.encode(token0, token1, address(this));
+        paramsArray[2] = abi.encode(token0, token1, address(this));
 
         positionManager.modifyLiquidities(abi.encode(actions, paramsArray), params.deadline);
 
