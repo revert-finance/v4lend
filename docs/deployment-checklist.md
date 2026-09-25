@@ -64,3 +64,15 @@ Addresses recorded in `broadcast/` (`transactions[].contractAddress` for `contra
 | Base (8453) | V4Vault (existing, USDC) | `0xaf98803a1f43afC14335360e089F6B12947924ED` | `DeployBaseHookUpgrade.DEFAULT_VAULT` |
 
 The full-stack `Deploy{Base,Arbitrum,Mainnet,Unichain}` broadcasts in the repo are dry runs only.
+
+## PR #40 follow-up deployment requirements
+
+- Deploy the updated vault, oracle, hook, fee controller, and action helpers as a compatible set.
+  Existing immutable vaults/oracles cannot receive these fixes through a hook-only upgrade. The
+  Base hook-upgrade script checks for the new API generation before broadcasting.
+- Register each hooked pool's trusted fee quoter on the oracle before admitting its collateral.
+- Review and admit only restricted, non-upgradeable executors before enabling bids/leases.
+- Set explicit token debt budgets where the global debt limit times concentration factor exceeds
+  the intended exposure. Deposits do not change these governance budgets.
+- Direct PositionManager clients must support fee-paying INCREASE(0) collection before removal.
+- Configure archive-rpc environment restrictions and verify historical key revocation with the provider.

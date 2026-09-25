@@ -22,6 +22,7 @@ import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol
 
 import {Constants} from "../shared/Constants.sol";
 import {IRemintMigrationHook} from "../vault/interfaces/IRemintMigrationHook.sol";
+import {IPositionFeeQuoter} from "./interfaces/IPositionFeeQuoter.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 
 // Chainlink Price Feed Interface
@@ -175,6 +176,72 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
     }
 
+    error HookFeeQuoterNotConfigured(address hook);
+    error InvalidFeeQuoter();
+    /// @notice Nonzero hooks must have an explicit trusted fee quoter. This oracle's address is
+    /// the explicit no-fee sentinel, only for hooks reviewed as not charging position fees.
+    mapping(address hook => address quoter) public hookFeeQuoters;
+    event SetHookFeeQuoter(address indexed hook, address quoter);
+
+    function setHookFeeQuoter(address hook, address quoter) external onlyOwner {
+        if (quoter != address(0) && quoter != address(this) && IPositionFeeQuoter(quoter).hook() != hook) {
+            revert InvalidFeeQuoter();
+        }
+        hookFeeQuoters[hook] = quoter;
+        emit SetHookFeeQuoter(hook, quoter);
+    }
+
+    function _feeObligation(PositionState memory state, uint128 fees0, uint128 fees1)
+        internal view returns (uint256 owed0, uint256 owed1)
+    {
+        address hook = address(state.poolKey.hooks);
+        if (hook == address(0)) return (0,0);
+        address quoter = hookFeeQuoters[hook];
+        if (quoter == address(0)) revert HookFeeQuoterNotConfigured(hook);
+        if (quoter == address(this)) return (0,0);
+        return IPositionFeeQuoter(quoter).quoteProtocolFees(state.tokenId,fees0,fees1);
+    }
+
+    function _netCurrency(uint256 principal, uint128 fees, uint256 owed)
+        internal pure returns (uint256 netPrincipal, uint128 netFees)
+    {
+        if (owed <= fees) return (principal, uint128(uint256(fees)-owed));
+        uint256 principalCharge = owed - fees;
+        return (principal > principalCharge ? principal-principalCharge : 0, 0);
+    }
+
+    function _netAmounts(PositionState memory state, uint256 amount0, uint256 amount1, uint128 fees0, uint128 fees1)
+        internal view returns (uint256,uint256,uint128,uint128)
+    {
+        (uint256 owed0,uint256 owed1) = _feeObligation(state,fees0,fees1);
+        (amount0,fees0) = _netCurrency(amount0,fees0,owed0);
+        (amount1,fees1) = _netCurrency(amount1,fees1,owed1);
+        return (amount0,amount1,fees0,fees1);
+    }
+
+    /// @notice Size a fee-first withdrawal, accounting for fixed liabilities consuming principal.
+    function getLiquidityForValue(uint256 tokenId, address quoteToken, uint256 target) external view returns (uint128) {
+        (uint256 value,uint256 netFeeValue,,) = getValue(tokenId,quoteToken);
+        PositionState memory state = _loadPositionState(tokenId);
+        if (target >= value) return state.liquidity;
+        (uint256 a0,uint256 a1) = _getAmounts(state);
+        (uint128 f0,uint128 f1) = _getFees(state);
+        (uint256 owed0,uint256 owed1) = _feeObligation(state,f0,f1);
+        uint256 c0 = owed0 > f0 ? owed0-f0 : 0;
+        uint256 c1 = owed1 > f1 ? owed1-f1 : 0;
+        uint256 quotePrice = _quoteTokenPrice(state, quoteToken);
+        uint256 charge = Math.mulDiv(c0,state.price0X96,quotePrice,Math.Rounding.Ceil)
+            + Math.mulDiv(c1,state.price1X96,quotePrice,Math.Rounding.Ceil);
+        uint256 principalValue = FullMath.mulDiv(a0,state.price0X96,quotePrice)
+            + FullMath.mulDiv(a1,state.price1X96,quotePrice);
+        uint256 needed = target + charge > netFeeValue ? target + charge - netFeeValue : 0;
+        uint256 liquidity = needed == 0 ? 0 : Math.mulDiv(needed,state.liquidity,principalValue,Math.Rounding.Ceil);
+        // Each charged currency must also be funded: surplus of the other currency cannot settle it.
+        if (c0 != 0) liquidity = a0 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c0,state.liquidity,a0,Math.Rounding.Ceil));
+        if (c1 != 0) liquidity = a1 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c1,state.liquidity,a1,Math.Rounding.Ceil));
+        return uint128(Math.min(liquidity,state.liquidity));
+    }
+
     // token => config mapping
     mapping(address => TokenConfig) public feedConfigs;
 
@@ -246,16 +313,9 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         PositionState memory state = _loadPositionState(tokenId);
         (uint256 amount0, uint256 amount1) = _getAmounts(state);
         (uint128 fees0, uint128 fees1) = _getFees(state);
+        (amount0,amount1,fees0,fees1) = _netAmounts(state,amount0,amount1,fees0,fees1);
 
-        // Get price of quote token in reference token
-        uint256 priceTokenX96;
-        if (state.currency0 == Currency.wrap(token)) {
-            priceTokenX96 = state.price0X96;
-        } else if (state.currency1 == Currency.wrap(token)) {
-            priceTokenX96 = state.price1X96;
-        } else {
-            (priceTokenX96,) = _getReferenceTokenPriceX96(token, state.cachedChainlinkReferencePriceX96);
-        }
+        uint256 priceTokenX96 = _quoteTokenPrice(state, token);
 
         // Calculate outputs. Each price-times-amount term is a 512-bit product (an extreme-tick price is
         // ~2^224 in Q96), so it is divided by the quote price with full precision instead of as a checked
@@ -266,6 +326,12 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             + FullMath.mulDiv(state.price1X96, fees1, priceTokenX96);
         price0X96 = FullMath.mulDiv(state.price0X96, Q96, priceTokenX96);
         price1X96 = FullMath.mulDiv(state.price1X96, Q96, priceTokenX96);
+    }
+
+    function _quoteTokenPrice(PositionState memory state, address token) internal view returns (uint256 price) {
+        if (state.currency0 == Currency.wrap(token)) return state.price0X96;
+        if (state.currency1 == Currency.wrap(token)) return state.price1X96;
+        (price,) = _getReferenceTokenPriceX96(token, state.cachedChainlinkReferencePriceX96);
     }
 
     /// @notice Gets liquidity and uncollected fees for a V4 position by tokenId
@@ -318,6 +384,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         PositionState memory state = _loadPositionState(tokenId);
         (amount0, amount1) = _getAmounts(state);
         (fees0, fees1) = _getFees(state);
+        (amount0,amount1,fees0,fees1) = _netAmounts(state,amount0,amount1,fees0,fees1);
         liquidity = state.liquidity;
         // Extract basic position data
         currency0 = state.currency0;

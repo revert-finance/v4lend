@@ -68,6 +68,7 @@ contract V4VaultLiquidationDripTest is V4VaultOracleLiquidationBase {
         address flags = address(uint160(Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG) ^ (0x5555 << 144));
         deployCodeTo("V4VaultLiquidationDrip.t.sol:DrippingHook", abi.encode(poolManager), flags);
         hook = DrippingHook(flags);
+        oracle.setHookFeeQuoter(address(hook), address(oracle));
         vault.setHookAllowList(address(hook), true);
 
         hookedKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));

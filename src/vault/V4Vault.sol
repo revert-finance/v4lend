@@ -1323,19 +1323,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // and the collected fees are split between liquidator and owner by value share
         bool feesOnly = state.liquidationValue <= state.feeValue;
 
-        uint128 liquidity;
-        if (state.liquidationValue == state.fullValue) {
-            // if full position is liquidated - no analysis needed
-            liquidity = positionManager.getPositionLiquidity(params.tokenId);
-        } else if (!feesOnly) {
-            // all fees plus the share of liquidity needed to cover the remaining value
-            liquidity = positionManager.getPositionLiquidity(params.tokenId);
-            liquidity = SafeCast.toUint128(
-                Math.mulDiv(state.liquidationValue - state.feeValue, liquidity, state.fullValue - state.feeValue)
-            );
-        }
+        uint128 liquidity = oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
+        feesOnly = liquidity == 0;
 
-        // everything is collected to the vault first and split afterwards
         (uint256 received0, uint256 received1) = _decreaseLiquidity(
             params.tokenId, liquidity, 0, 0, params.deadline, params.decreaseLiquidityHookData, address(this)
         );

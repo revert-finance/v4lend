@@ -43,12 +43,12 @@ This is an admission bound: interest accrual, repayments, and lender withdrawals
 Auction and lease registration require an owner-admitted deployed code hash, in addition to the
 denylist. An arbitrary bidder cannot admit a new public forwarder. Governance must review caller
 authorization and admit only non-upgradeable executors with an appropriately restricted caller
-policy (for example AuctionArbExecutor). Admission removal blocks new registrations; purchased
+policy (for example AuctionArbExecutor), including any ownership changes or forwarding paths. Admission removal blocks new registrations; purchased
 epochs/leases retain their agreed bounded terms. Code hashes do not prove authorization policy.
 
 ## V4LE-51: validate automation when admitting debt
 
-Debt-bearing health checks ask the allowlisted hook to validate compatibility with the vault asset,
+Debt admission and post-transform checks ask the hook to validate compatibility with the vault asset,
 including at the end of transforms. Configuring AUTO_EXIT before transferring an NFT to a third-asset
 vault can no longer bypass validation. Zero-debt exits remain available and native/WETH matches
 remain supported. Every allowlisted hook must implement validateVaultPosition as well as migration.
@@ -84,3 +84,28 @@ can collect net fees or pay an existing liability. Vault, hook, Swapper/V4Utils,
 paths prepend this collection before removing principal in the same unlock. Direct PositionManager
 clients must use that batch when a DECREASE cannot absorb the fee; DECREASE(0) alone is intentionally
 unsupported when a protocol fee is due. No governance write-off or voluntary-only debt is relied on.
+
+## V4LE-11: value net recoverable collateral
+
+HookFeeController quotes the exact active-time fee plus carried liabilities. V4Oracle subtracts
+these obligations from fees first, then principal, for getValue and getPositionBreakdown. The
+liquidation liquidity quote includes fixed principal charges and the funding needed in each currency;
+proportional scaling alone would underpay when a fixed liability consumes principal. Gross
+getLiquidityAndFees retains its collection-accounting semantics. Nonzero hooks without an explicitly
+registered trusted fee quoter fail closed; only reviewed fee-free hooks may use the oracle-address
+sentinel. Deployment scripts register each RevertHook fee controller.
+
+## Validation
+
+Validated with Foundry 1.5.0, Solidity 0.8.30, Cancun, and the repository optimizer settings.
+
+- Main credential-free suite: **1,534 passed, 0 failed** (`FOUNDRY_FFI=false forge test --offline`
+  with the CI fork-suite path exclusions). This includes the invariant campaigns.
+- Additional local executor/transformer suites excluded by that broad CI glob: **25 passed, 0 failed**.
+- `forge build --offline --sizes --skip test`: passed for production contracts and deployment scripts.
+- Runtime sizes: RevertHook **24,441**, RevertHookPositionActions **23,872**, V4Vault **23,353**,
+  V4Oracle **16,255** bytes; each is below the 24,576-byte limit.
+- Archive fork suites were not run: no MAINNET_RPC_URL or local .env was configured.
+
+These changes require new compatible deployments of the immutable contracts. Repository commits
+do not revoke the historical RPC credential or configure the protected GitHub environment.

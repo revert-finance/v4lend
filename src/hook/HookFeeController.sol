@@ -14,6 +14,12 @@ interface IHookSystemContractGetters {
     function positionManager() external view returns (address);
 }
 
+interface IHookFeeState {
+    function positionStates(uint256 tokenId) external view returns
+        (uint32,uint32,uint32,address,uint256,uint256,address,int24);
+    function pendingProtocolFees(uint256 tokenId) external view returns (uint128,uint128);
+}
+
 contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
     error InvalidConfig();
 
@@ -53,6 +59,25 @@ contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
         _protocolFeeRecipient = protocolFeeRecipient_;
         _lpFeeBps = lpFeeBps_;
         _autoLendFeeBps = autoLendFeeBps_;
+    }
+
+    /// @notice Mirrors the hook's time-weighted collection charge without advancing its checkpoints.
+    function quoteProtocolFees(uint256 tokenId, uint128 grossFees0, uint128 grossFees1)
+        external view returns (uint256 owed0, uint256 owed1)
+    {
+        (uint32 lastCollect,uint32 active,uint32 lastActivated,,,,,) = IHookFeeState(hook).positionStates(tokenId);
+        uint32 now32 = uint32(block.timestamp);
+        if (lastActivated != 0) active += now32 - lastActivated;
+        uint32 elapsed = lastCollect == 0 ? 0 : now32 - lastCollect;
+        if (active > elapsed) active = elapsed;
+        (uint128 pending0,uint128 pending1) = IHookFeeState(hook).pendingProtocolFees(tokenId);
+        owed0 = pending0;
+        owed1 = pending1;
+        if (elapsed != 0 && active != 0) {
+            uint256 denominator = 10000 * uint256(elapsed);
+            owed0 += uint256(grossFees0) * active * _lpFeeBps / denominator;
+            owed1 += uint256(grossFees1) * active * _lpFeeBps / denominator;
+        }
     }
 
     function protocolFeeRecipient() external view returns (address) {

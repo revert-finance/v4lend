@@ -20,6 +20,10 @@ import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 contract MockV4Oracle is IV4Oracle {
     using PoolIdLibrary for PoolKey;
 
+    function getLiquidityForValue(uint256 tokenId, address, uint256 target) external view returns (uint128) {
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        return target >= mockPositionValue ? liquidity : uint128(FullMath.mulDiv(target,liquidity,mockPositionValue));
+    }
     function getRiskScore(uint256, address, uint256) external pure returns (uint256) { return 0; }
     function validateRiskChange(uint256 id, address asset, uint256 debt, uint256) external view {
         if (debt != 0) validateBorrow(id, asset);

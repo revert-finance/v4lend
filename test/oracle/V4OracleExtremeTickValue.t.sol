@@ -106,6 +106,29 @@ contract V4OracleExtremeTickValueTest is BaseTest {
         assertEq(p1In1, Q96);
     }
 
+    function testLiquidationSizingPreservesSubQ96UnitPrices() public {
+        PoolKey memory key = PoolKey(currency0,currency1,500,TICK_SPACING,IHooks(address(0)));
+        uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(700000);
+        poolManager.initialize(key,sqrtPrice);
+        uint256 price = FullMath.mulDiv(uint256(sqrtPrice),uint256(sqrtPrice),Q96);
+        oracle = new V4Oracle(positionManager,Currency.unwrap(currency1),address(0xdead));
+        oracle.setMaxPoolPriceDifference(200);
+        _configureToken(Currency.unwrap(currency1),new MutableChainlinkFeed(1e8,8));
+        uint256 answer = Math.mulDiv(price,1e8,Q96,Math.Rounding.Ceil);
+        _configureToken(Currency.unwrap(currency0),new MutableChainlinkFeed(int256(answer),8));
+        deal(Currency.unwrap(currency1),address(this),uint256(1)<<126);
+        uint128 liquidity = uint128(1)<<75;
+        (uint256 id,) = positionManager.mint(key,699780,699960,liquidity,type(uint128).max,type(uint128).max,
+            address(this),block.timestamp,"");
+        (uint256 value,,,uint256 roundedUnitPrice) = oracle.getValue(id,Currency.unwrap(currency0));
+        assertGt(value,0);
+        assertEq(roundedUnitPrice,0,"unit price loses precision although the position has value");
+        uint128 removal = oracle.getLiquidityForValue(id,Currency.unwrap(currency0),value/2);
+        assertGt(removal,0);
+        assertLt(removal,liquidity);
+        assertApproxEqRel(uint256(removal),uint256(liquidity)/2,1e14);
+    }
+
     function _configureToken(address token, MutableChainlinkFeed feed) internal {
         oracle.setTokenConfig(
             token,

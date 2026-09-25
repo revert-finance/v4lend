@@ -126,6 +126,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Register vault with RevertHook so it can handle collateralized positions
         revertHook.setVault(address(vault));
         vault.setTransformer(address(revertHook), true);
+        v4Oracle.setHookFeeQuoter(address(revertHook), address(feeController));
         vault.setHookAllowList(address(revertHook), true);
 
         // Manual range changes go through the shared V4Utils transformer (deployed by the fork base).
