@@ -94,12 +94,7 @@ contract RevertHookPositionActions is RevertHookActionBase {
     ) internal {
         address lendAsset = vault.asset();
         Currency lendToken = Currency.wrap(lendAsset);
-        bool lendIsToken0 = (lendToken == currency0);
         bool swapOnExit = _shouldSwapOnAutoExit(tokenId, isUpperTrigger);
-
-        // Target token based on trigger direction: upper trigger -> token1, lower trigger -> token0
-        bool targetIsToken0 = !isUpperTrigger;
-        bool targetIsLendToken = (targetIsToken0 == lendIsToken0);
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
 
@@ -110,12 +105,13 @@ contract RevertHookPositionActions is RevertHookActionBase {
         }
         _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
 
-        if (swapOnExit && !targetIsLendToken) {
-            // Repay against the lend asset first, then rotate any residual value back
-            // into the trigger-side token the strategy wants to leave the user with.
-            uint256 remainingLend = _sweepableBalance(lendToken);
-            if (remainingLend > 0) {
-                _executeSwap(poolKey, lendIsToken0, remainingLend, tokenId, Mode.AUTO_EXIT);
+        if (swapOnExit) {
+            // Match debt-free exits: upper -> token0, lower -> token1. Consolidate the
+            // non-target balance even when repayment did not require an initial swap.
+            bool swapZeroForOne = !isUpperTrigger;
+            uint256 remainingInput = _sweepableBalance(swapZeroForOne ? currency0 : currency1);
+            if (remainingInput > 0) {
+                _executeSwap(poolKey, swapZeroForOne, remainingInput, tokenId, Mode.AUTO_EXIT);
             }
         }
 

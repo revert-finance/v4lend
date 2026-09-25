@@ -293,6 +293,8 @@ contract HookLeaseControllerInvariantTest is BaseTest {
         (address lessee,, uint256 price, uint256 rentBalance, uint64 lastAccrualTime,, uint256 pendingDonation) =
             controller.getPoolLeaseState(poolId);
 
+        assertLe(controller.minimumRentRemaining(poolId), rentBalance, "minimum commitment must remain funded");
+
         assertEq(hasPending, pendingDonation != 0, "hasPending diverged from pendingDonation");
         if (hasPending) {
             // every empty-to-nonempty transition initializes the drip clock, so a fresh bucket
@@ -319,6 +321,7 @@ contract HookLeaseControllerInvariantTest is BaseTest {
         } else {
             assertEq(paidThrough, 0, "vacant slot must have no rent runway");
             assertEq(price + rentBalance, 0, "vacant slot must hold no deposit");
+            assertEq(controller.minimumRentRemaining(poolId), 0, "vacant slot must have no minimum commitment");
         }
     }
 }

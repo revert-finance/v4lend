@@ -2045,7 +2045,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertVaultAutoExitCase(true, false, 0);
     }
 
-    function testSwapFees_VaultAutoExitUpperWithSwapChargesBothSwapOutputs() public {
+    function testSwapFees_VaultAutoExitUpperWithSwapChargesRepaymentSwapOutput() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_EXIT), 500);
 
@@ -2055,7 +2055,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertVaultAutoExitCase(true, true, 25_000000);
 
         assertGt(usdc.balanceOf(address(this)), usdcBefore, "first debt-repayment swap should pay USDC fee");
-        assertGt(weth.balanceOf(address(this)), wethBefore, "second exit swap should pay WETH fee");
+        assertEq(weth.balanceOf(address(this)), wethBefore, "upper exit should not swap USDC back to WETH");
     }
 
     function _assertVaultAutoExitCase(bool isUpperTrigger, bool swapOnExit, uint256 extraDebt) internal {
@@ -2140,8 +2140,8 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         if (isUpperTrigger) {
             if (swapOnExit) {
-                assertEq(usdcAfter, usdcBefore, "Upper AUTO_EXIT with swap should rotate out of USDC");
-                assertGt(wethAfter, wethBefore, "Upper AUTO_EXIT with swap should finish in WETH");
+                assertGt(usdcAfter, usdcBefore, "Upper AUTO_EXIT with swap should finish in token0 (USDC)");
+                assertEq(wethAfter, wethBefore, "Upper AUTO_EXIT with swap should rotate out of token1 (WETH)");
             } else {
                 assertGt(usdcAfter, usdcBefore, "Upper AUTO_EXIT without swap should keep USDC");
                 assertGt(wethAfter, wethBefore, "Upper AUTO_EXIT without swap should keep WETH already removed");
