@@ -28,3 +28,12 @@ Failed claims preserve the credit; liquidator transfers match returned amounts a
 Uses the V4LE-23 escrow payout path. The dedicated regression adds a before-remove donation and
 rejects transfers to the borrower, proving that even this newly credited surplus cannot increase
 the liquidator's payment. No duplicate production path is needed.
+
+## V4LE-77: governance-bounded collateral debt
+
+Every increase checks an absolute per-token debt budget as well as the existing supply-relative
+cap. Governance can set a token budget in asset units; zero selects the global debt limit times
+the concentration factor (the full-limit sentinel inherits the global debt limit exactly).
+Temporary deposits cannot increase either governance bound. Configure explicit budgets based on
+the intended collateral exposure, especially when the global debt limit is much larger than TVL.
+This is an admission bound: interest accrual, repayments, and lender withdrawals remain live.

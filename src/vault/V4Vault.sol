@@ -150,6 +150,16 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     uint256 public lastLendExchangeRateX96 = Q96;
 
     uint256 public globalDebtLimit;
+
+    /// @notice Optional absolute token debt budget in asset units; zero uses the governance global
+    /// debt limit multiplied by the token concentration factor. Neither bound depends on deposits.
+    mapping(address token => uint256) public tokenDebtLimits;
+    event SetTokenDebtLimit(address indexed token, uint256 limit);
+
+    function setTokenDebtLimit(address token, uint256 limit) external onlyOwner {
+        tokenDebtLimits[token] = limit;
+        emit SetTokenDebtLimit(token, limit);
+    }
     uint256 public globalLendLimit;
 
     // minimal size of loan (to protect from non-liquidatable positions because of gas-cost)
@@ -1592,28 +1602,23 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 tokenConfigs[token0].totalDebtShares += difference;
                 tokenConfigs[token1].totalDebtShares += difference;
 
-                // check if current value of used collateral is more than allowed limit
-                // if collateral is decreased - never revert
                 uint256 lentAssets = _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Ceil);
-                uint256 collateralValueLimitFactorX32 = tokenConfigs[token0].collateralValueLimitFactorX32;
-                if (
-                    collateralValueLimitFactorX32 < type(uint32).max
-                        && _convertToAssets(
-                                tokenConfigs[token0].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil
-                            ) > lentAssets * collateralValueLimitFactorX32 / Q32
-                ) {
-                    revert CollateralValueLimit();
-                }
-                collateralValueLimitFactorX32 = tokenConfigs[token1].collateralValueLimitFactorX32;
-                if (
-                    collateralValueLimitFactorX32 < type(uint32).max
-                        && _convertToAssets(
-                                tokenConfigs[token1].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil
-                            ) > lentAssets * collateralValueLimitFactorX32 / Q32
-                ) {
-                    revert CollateralValueLimit();
-                }
+                _checkTokenDebtLimit(token0, debtExchangeRateX96, lentAssets);
+                _checkTokenDebtLimit(token1, debtExchangeRateX96, lentAssets);
             }
+        }
+    }
+
+    function _checkTokenDebtLimit(address token, uint256 rate, uint256 lentAssets) internal view {
+        TokenConfig storage config = tokenConfigs[token];
+        uint256 debt = _convertToAssets(config.totalDebtShares, rate, Math.Rounding.Ceil);
+        uint256 factor = config.collateralValueLimitFactorX32;
+        uint256 budget = tokenDebtLimits[token];
+        if (budget == 0) {
+            budget = factor == type(uint32).max ? globalDebtLimit : globalDebtLimit.mulDiv(factor, Q32);
+        }
+        if (debt > budget || (factor < type(uint32).max && debt > lentAssets.mulDiv(factor, Q32))) {
+            revert CollateralValueLimit();
         }
     }
 
