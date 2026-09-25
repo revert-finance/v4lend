@@ -150,12 +150,23 @@ contract HookLeaseControllerTest is BaseTest {
 
         lesseeSwapper = new DirectSwapper(poolManager);
         otherSwapper = new DirectSwapper(poolManager);
+        leaseController.setExecutorAdmission(address(lesseeSwapper), true);
+        leaseController.setExecutorAdmission(address(otherSwapper), true);
         token0.transfer(address(lesseeSwapper), 100e18);
         token1.transfer(address(lesseeSwapper), 100e18);
         token0.transfer(address(otherSwapper), 100e18);
         token1.transfer(address(otherSwapper), 100e18);
 
         leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    function testUnadmittedPublicExecutorRejected() public {
+        address executor = address(new DirectSwapper(poolManager));
+        vm.expectRevert(HookLeaseController.InvalidExecutor.selector);
+        _startLease(lesseeA, executor, 1e18, 0.2e18);
+        vm.prank(makeAddr("unauthorized"));
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        leaseController.setExecutorAdmission(executor, true);
     }
 
     function _defaultConfig() internal view returns (HookLeaseController.PoolLeaseConfig memory) {
@@ -233,9 +244,7 @@ contract HookLeaseControllerTest is BaseTest {
         uint256 accrued = rent - rentBalance;
         assertEq(accrued, rps * (1800 + MIN_DRIP + 1), "rent accrues per second");
         uint256 fee = accrued * PROTOCOL_FEE_BPS / 10_000;
-        assertEq(
-            leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient), fee, "protocol fee split off"
-        );
+        assertEq(leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient), fee, "protocol fee split off");
         uint256 donated = token1.balanceOf(address(poolManager)) - pmBefore;
         assertGt(donated, 0, "rent dripped to the pool's LPs");
         assertEq(pending + donated + fee, accrued, "accrued rent = pending + donated + protocol fee");
@@ -606,6 +615,8 @@ contract HookLeaseControllerTest is BaseTest {
         uint256 maxRunway = leaseController.MAX_PREPAID_RUNWAY_SECONDS();
 
         PublicSwapper pub = new PublicSwapper(poolManager);
+        // Explicitly model a governance mistake to retain the wind-down regression.
+        leaseController.setExecutorAdmission(address(pub), true);
         token0.transfer(address(pub), 10e18);
         token1.transfer(address(pub), 10e18);
         address stranger = makeAddr("stranger");
@@ -774,9 +785,8 @@ contract HookLeaseControllerTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-        uint256 mintCost = pmBefore < token1.balanceOf(address(poolManager))
-            ? token1.balanceOf(address(poolManager)) - pmBefore
-            : 0;
+        uint256 mintCost =
+            pmBefore < token1.balanceOf(address(poolManager)) ? token1.balanceOf(address(poolManager)) - pmBefore : 0;
         leaseController.drip(leasePoolKey);
         assertEq(
             token1.balanceOf(address(poolManager)) - pmBefore,

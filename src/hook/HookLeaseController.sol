@@ -14,7 +14,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
+import {HookExecutorRegistry} from "./HookExecutorRegistry.sol";
 import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 import {IRevertHookDynamicFee} from "./HookAuctionController.sol";
 
@@ -39,7 +39,7 @@ import {IRevertHookDynamicFee} from "./HookAuctionController.sol";
 ///        is isolated inside this contract's own donate try/catch.
 ///      - The auction currency must be an ERC20 side of the pool. Pools with a native
 ///        currency0 are supported by leasing in the ERC20 currency1.
-contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
+contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using PoolIdLibrary for PoolKey;
 
@@ -180,7 +180,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     error OnlyPoolManager();
     error PrepaidRunwayTooLong();
 
-    constructor(address hook_, IPoolManager poolManager_) HookOwnedControllerBase(hook_) {
+    constructor(address hook_, IPoolManager poolManager_) HookExecutorRegistry(hook_) {
         if (address(poolManager_) == address(0)) {
             revert InvalidConfig();
         }
@@ -472,11 +472,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     }
 
     /// @notice Claims accrued protocol fees. Callable by the configured recipient account.
-    function claimProtocolFees(Currency currency, address recipient)
-        external
-        nonReentrant
-        returns (uint256 amount)
-    {
+    function claimProtocolFees(Currency currency, address recipient) external nonReentrant returns (uint256 amount) {
         amount = protocolFeesAccrued[currency][msg.sender];
         if (amount == 0) {
             revert NothingToClaim();
@@ -537,8 +533,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         // slot un-buyoutable. Economically this bounds the mandatory prepay to at most ~100%
         // of the self-assessed price - any config demanding more is nonsensical anyway.
         if (
-            FullMath.mulDivRoundingUp(MAX_ESCROW_AMOUNT, config.taxRatePerSecondX64, Q64)
-                * config.minRentDepositSeconds > MAX_ESCROW_AMOUNT
+            FullMath.mulDivRoundingUp(MAX_ESCROW_AMOUNT, config.taxRatePerSecondX64, Q64) * config.minRentDepositSeconds
+                > MAX_ESCROW_AMOUNT
         ) {
             revert InvalidConfig();
         }
@@ -824,8 +820,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
     function _checkExecutor(address executor) internal view {
         if (
-            executor == address(0) || executor == address(poolManager) || executor == address(this)
-                || executor == hook || executorDenied[executor]
+            executor == address(0) || executor == address(poolManager) || executor == address(this) || executor == hook
+                || executorDenied[executor] || !_executorAdmitted(executor)
         ) {
             revert InvalidExecutor();
         }

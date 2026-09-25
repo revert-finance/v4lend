@@ -151,7 +151,6 @@ contract HookAuctionControllerTest is BaseTest {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
-
     uint32 internal constant PPM = 1_000_000;
     uint32 internal constant EPOCH_LENGTH = 3600;
     uint32 internal constant MIN_DRIP = 60;
@@ -237,6 +236,8 @@ contract HookAuctionControllerTest is BaseTest {
 
         winnerSwapper = new DirectSwapper(poolManager);
         otherSwapper = new DirectSwapper(poolManager);
+        auctionController.setExecutorAdmission(address(winnerSwapper), true);
+        auctionController.setExecutorAdmission(address(otherSwapper), true);
         token0.transfer(address(winnerSwapper), 100e18);
         token1.transfer(address(winnerSwapper), 100e18);
         token0.transfer(address(otherSwapper), 100e18);
@@ -245,6 +246,15 @@ contract HookAuctionControllerTest is BaseTest {
         startTime = uint64(block.timestamp);
         auctionController.configurePool(auctionPoolKey, _defaultConfig());
         _initialPoolManagerBalance1 = IERC20(Currency.unwrap(currency1)).balanceOf(address(poolManager));
+    }
+
+    function testUnadmittedPublicExecutorRejected() public {
+        address executor = address(new DirectSwapper(poolManager));
+        vm.expectRevert(HookAuctionController.InvalidExecutor.selector);
+        _bid(bidderA, executor, RESERVE);
+        vm.prank(makeAddr("unauthorized"));
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        auctionController.setExecutorAdmission(executor, true);
     }
 
     function _defaultConfig() internal view returns (HookAuctionController.PoolAuctionConfig memory) {
@@ -361,17 +371,13 @@ contract HookAuctionControllerTest is BaseTest {
         positionManager.decreaseLiquidity(
             fullRangeTokenId, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES
         );
-        assertApproxEqAbs(
-            token1.balanceOf(address(this)) - lpBefore, expectedDrip, 10, "LP collects the whole drip"
-        );
+        assertApproxEqAbs(token1.balanceOf(address(this)) - lpBefore, expectedDrip, 10, "LP collects the whole drip");
 
         // ---- 6. The protocol fee is claimable by its recipient ----
         uint256 recipBefore = token1.balanceOf(protocolFeeRecipient);
         vm.prank(protocolFeeRecipient);
         auctionController.claimProtocolFees(currency1, protocolFeeRecipient);
-        assertEq(
-            token1.balanceOf(protocolFeeRecipient) - recipBefore, expectedProtocolFee, "protocol fee claimed"
-        );
+        assertEq(token1.balanceOf(protocolFeeRecipient) - recipBefore, expectedProtocolFee, "protocol fee claimed");
 
         // ---- 7. Conservation: everything taken in (A's + B's bids) has left the controller ----
         // A's bid refunded, B's bid -> LP drip + protocol fee, all now claimed/donated.
@@ -387,7 +393,8 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.configurePool(staticKey, config);
 
         // uninitialized dynamic pool is rejected
-        PoolKey memory uninitializedKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 120, IHooks(hook));
+        PoolKey memory uninitializedKey =
+            PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 120, IHooks(hook));
         vm.expectRevert(HookAuctionController.InvalidConfig.selector);
         auctionController.configurePool(uninitializedKey, config);
 
@@ -648,7 +655,7 @@ contract HookAuctionControllerTest is BaseTest {
     }
 
     function testExecutorDenylist() public {
-        // permissionless by default: any executor accepted
+        // bidding is permissionless through previously admitted executors
         _bid(bidderA, address(winnerSwapper), RESERVE);
 
         // deny a (mock) shared router; it can no longer be registered, but others still can
@@ -805,8 +812,15 @@ contract HookAuctionControllerTest is BaseTest {
 
         // JIT: add liquidity then immediately drip in the same timestamp
         positionManager.mint(
-            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            auctionPoolKey,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            10e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
         auctionController.drip(auctionPoolKey);
         (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
@@ -834,8 +848,15 @@ contract HookAuctionControllerTest is BaseTest {
 
         // JIT reappears and immediately drips in the same block
         positionManager.mint(
-            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            auctionPoolKey,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            10e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
         auctionController.drip(auctionPoolKey);
         (,, uint256 pendingAfter) = auctionController.getPoolAuctionState(auctionPoolId);
@@ -870,8 +891,15 @@ contract HookAuctionControllerTest is BaseTest {
 
         // dust LP appears alone, waits exactly one throttle interval, drips
         positionManager.mint(
-            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 1e6,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            auctionPoolKey,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            1e6,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
         vm.warp(block.timestamp + MIN_DRIP);
         auctionController.drip(auctionPoolKey);
@@ -1110,8 +1138,7 @@ contract HookAuctionControllerTest is BaseTest {
         _warpToEpoch(1);
         (,, uint256 rawActiveBid,,,,) = auctionController.getEpochAuction(auctionPoolId, false);
         assertEq(rawActiveBid, 0, "raw storage not yet synced");
-        (address bidder, address executor, uint256 bid, uint24 lpFee) =
-            auctionController.getActiveWinner(auctionPoolId);
+        (address bidder, address executor, uint256 bid, uint24 lpFee) = auctionController.getActiveWinner(auctionPoolId);
         assertEq(bidder, bidderA);
         assertEq(executor, address(winnerSwapper), "view promotes the queued winner across the boundary");
         assertEq(bid, 1e18);
@@ -1132,8 +1159,15 @@ contract HookAuctionControllerTest is BaseTest {
         PoolKey memory plainHooked = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
         poolManager.initialize(plainHooked, Constants.SQRT_PRICE_1_1);
         positionManager.mint(
-            plainHooked, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            plainHooked,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
         otherSwapper.swapExactIn(plainHooked, true, 1e18); // warm pool + token slots
         uint256 gasBefore = gasleft();
@@ -1166,7 +1200,9 @@ contract HookAuctionControllerTest is BaseTest {
         IERC20 asset = IERC20(Currency.unwrap(currency1));
 
         // ---- vault stack on top of the auction environment ----
-        InterestRateModel interestRateModel = new InterestRateModel(0, uint256(2 ** 64) * 5 / 100, uint256(2 ** 64) * 109 / 100, uint256(2 ** 64) * 80 / 100);
+        InterestRateModel interestRateModel = new InterestRateModel(
+            0, uint256(2 ** 64) * 5 / 100, uint256(2 ** 64) * 109 / 100, uint256(2 ** 64) * 80 / 100
+        );
         V4Vault vault = new V4Vault(
             "Revert Lend t1", "rlT1", address(asset), positionManager, interestRateModel, v4Oracle, IWETH9(address(0))
         );
@@ -1210,8 +1246,15 @@ contract HookAuctionControllerTest is BaseTest {
 
         // a second (non-collateral) LP so the pool keeps liquidity after the full liquidation
         positionManager.mint(
-            auctionPoolKey, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            auctionPoolKey,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            10e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
 
         // ---- liquidation still works mid-epoch on the auctioned pool ----
@@ -1266,8 +1309,15 @@ contract HookAuctionControllerTest is BaseTest {
         PoolId pid = key.toId();
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
         positionManager.mint(
-            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            key,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
 
         // configure the auction with the blacklisting token as the auction currency
@@ -1333,8 +1383,15 @@ contract HookAuctionControllerTest is BaseTest {
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
         // the incumbent LP, in range for the whole epoch
         positionManager.mint(
-            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            key,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
 
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
@@ -1365,8 +1422,15 @@ contract HookAuctionControllerTest is BaseTest {
 
         // JIT: 100x the incumbent's liquidity enters during the outage (its own mint touch cannot donate)
         positionManager.mint(
-            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10_000e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            key,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            10_000e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
         assertEq(bt.balanceOf(address(auctionController)), controllerBeforeJit, "nothing donated while blacklisted");
 
@@ -1389,9 +1453,7 @@ contract HookAuctionControllerTest is BaseTest {
         _drainPending(key);
         (,, pending) = auctionController.getPoolAuctionState(pid);
         assertEq(pending, 0, "pending fully drains");
-        assertEq(
-            bt.balanceOf(address(auctionController)), bid - totalDrip, "controller keeps only the protocol fee"
-        );
+        assertEq(bt.balanceOf(address(auctionController)), bid - totalDrip, "controller keeps only the protocol fee");
     }
 
     function testFeeOnTransferDonateIsIsolatedAndDoesNotBrickPool() public {
@@ -1414,8 +1476,15 @@ contract HookAuctionControllerTest is BaseTest {
         PoolId pid = key.toId();
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
         positionManager.mint(
-            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            key,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
 
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
@@ -1479,8 +1548,15 @@ contract HookAuctionControllerTest is BaseTest {
         PoolId pid = key.toId();
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
         positionManager.mint(
-            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            key,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
 
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
@@ -1531,8 +1607,15 @@ contract HookAuctionControllerTest is BaseTest {
         PoolKey memory key = PoolKey(c0, c1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
         poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
         positionManager.mint(
-            key, TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10e18,
-            type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+            key,
+            TickMath.minUsableTick(60),
+            TickMath.maxUsableTick(60),
+            10e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
         );
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
         config.auctionCurrency = Currency.wrap(address(fot));

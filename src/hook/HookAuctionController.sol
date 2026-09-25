@@ -14,7 +14,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
+import {HookExecutorRegistry} from "./HookExecutorRegistry.sol";
 import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 
 /// @notice Hook entrypoint used to mirror the configured baseline fee into the pool's
@@ -42,7 +42,7 @@ interface IRevertHookDynamicFee {
 ///        misbehaving auction currency still cannot block swaps, liquidity changes, or liquidations.
 ///      - The auction currency must be an ERC20 side of the pool. Pools with a native
 ///        currency0 are supported by auctioning in the ERC20 currency1.
-contract HookAuctionController is HookOwnedControllerBase, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
+contract HookAuctionController is HookExecutorRegistry, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using PoolIdLibrary for PoolKey;
 
@@ -126,13 +126,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
 
     IPoolManager public immutable poolManager;
 
-    // Owner-managed executor denylist: blocks a bidder from handing the discount to a shared
-    // router (which would give every trader routing through it the discounted fee for the whole
-    // epoch). Bidding stays permissionless; the owner blocks the known shared routers (Universal
-    // Router, aggregators, ...). A denylist is inherently incomplete - a custom or unknown shared
-    // executor bypasses it - but the vector is economically self-limiting: the bidder pays the
-    // bid, which is dripped to LPs, so registering a shared router subsidizes traffic at the
-    // bidder's own expense.
+    // Emergency admission denylist, additional to the mandatory reviewed executor registry.
+    // Changes affect new bids; already purchased epochs retain their agreed terms.
     mapping(address executor => bool denied) public executorDenied;
 
     mapping(PoolId poolId => PoolAuctionConfig config) internal _poolConfigs;
@@ -180,7 +175,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     error NothingToClaim();
     error OnlyPoolManager();
 
-    constructor(address hook_, IPoolManager poolManager_) HookOwnedControllerBase(hook_) {
+    constructor(address hook_, IPoolManager poolManager_) HookExecutorRegistry(hook_) {
         if (address(poolManager_) == address(0)) {
             revert InvalidConfig();
         }
@@ -274,13 +269,12 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     ///         claimable via claimRefund.
     /// @param key The pool key
     /// @param executor The contract that will call PoolManager.swap and receive the fee
-    ///        discount if this bid wins. Must not be a shared router (denied executors are
-    ///        rejected).
+    ///        discount if this bid wins. Must be governance-admitted and not denied.
     /// @param amount The bid amount in the pool's auction currency
     function bidNext(PoolKey calldata key, address executor, uint256 amount) external nonReentrant {
         if (
-            executor == address(0) || executor == address(poolManager) || executor == address(this)
-                || executor == hook || executorDenied[executor]
+            executor == address(0) || executor == address(poolManager) || executor == address(this) || executor == hook
+                || executorDenied[executor] || !_executorAdmitted(executor)
         ) {
             revert InvalidExecutor();
         }
@@ -372,11 +366,7 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
     /// @notice Claims accrued protocol fees. Callable by the configured recipient account.
     /// @dev Fee-on-transfer semantics as in claimRefund: the claimant bears any recipient-side
     ///      token fee, while a sender-side surcharge on the controller's balance reverts.
-    function claimProtocolFees(Currency currency, address recipient)
-        external
-        nonReentrant
-        returns (uint256 amount)
-    {
+    function claimProtocolFees(Currency currency, address recipient) external nonReentrant returns (uint256 amount) {
         amount = protocolFeesAccrued[currency][msg.sender];
         if (amount == 0) {
             revert NothingToClaim();
@@ -477,9 +467,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         }
 
         if (!enabled) {
-            PoolAuctionState storage state = block.timestamp >= config.epochStartTime
-                ? _syncPool(poolId, config)
-                : _poolStates[poolId];
+            PoolAuctionState storage state =
+                block.timestamp >= config.epochStartTime ? _syncPool(poolId, config) : _poolStates[poolId];
             EpochAuction storage auction = state.next;
             if (auction.bidder != address(0)) {
                 refunds[config.auctionCurrency][auction.bidder] += auction.bid;
@@ -714,8 +703,8 @@ contract HookAuctionController is HookOwnedControllerBase, IHookAuctionControlle
         view
         returns (bool)
     {
-        return state.epochsSynced && block.timestamp >= config.epochStartTime
-            && _currentEpoch(config) > state.activeEpoch;
+        return
+            state.epochsSynced && block.timestamp >= config.epochStartTime && _currentEpoch(config) > state.activeEpoch;
     }
 
     /// @notice The LP fee the epoch winner's executor pays on this pool.

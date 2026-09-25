@@ -37,3 +37,11 @@ the concentration factor (the full-limit sentinel inherits the global debt limit
 Temporary deposits cannot increase either governance bound. Configure explicit budgets based on
 the intended collateral exposure, especially when the global debt limit is much larger than TVL.
 This is an admission bound: interest accrual, repayments, and lender withdrawals remain live.
+
+## V4LE-1: restrict executor admission
+
+Auction and lease registration require an owner-admitted deployed code hash, in addition to the
+denylist. An arbitrary bidder cannot admit a new public forwarder. Governance must review caller
+authorization and admit only non-upgradeable executors with an appropriately restricted caller
+policy (for example AuctionArbExecutor). Admission removal blocks new registrations; purchased
+epochs/leases retain their agreed bounded terms. Code hashes do not prove authorization policy.
