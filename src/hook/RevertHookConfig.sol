@@ -128,6 +128,7 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         _removePositionTriggersWithConfig(tokenId, poolKey, oldConfig);
 
         _positionConfigs[tokenId] = config;
+        delete autoLeverageNeedsAttention[tokenId];
         _syncAutoLeverageBaseTick(tokenId, poolKey, config.modeFlags);
         if (PositionModeFlags.hasTriggers(config.modeFlags)) {
             _requireTriggerCursorFresh(poolKey.toId(), poolKey.tickSpacing);

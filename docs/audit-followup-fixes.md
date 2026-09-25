@@ -67,3 +67,11 @@ require post-restart Chainlink rounds (including the reference denominator) and 
 TWAP window for every used TWAP source. Governance can add per-token recovery delays. Transforms
 that worsen debt per unit of position value use the same guard; deleveraging that improves
 that ratio, repayments, and liquidations retain the ordinary oracle availability rules. L1 is a no-op.
+
+## V4LE-71: observable, bounded leverage recovery
+
+A failed or zero-sized leverage action sets autoLeverageNeedsAttention. The owner can repair the
+loan (for example repay the small excess) and submit setPositionConfig again for a single explicit
+retry/rearm. Success clears the marker; another failure leaves it set. No rounding-up liquidation
+or automatic swap-loop retry is introduced. The regression exercises failure, manual repair, and
+successful rearming at the current tick.

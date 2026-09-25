@@ -58,6 +58,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         }
 
         if (!success) {
+            autoLeverageNeedsAttention[tokenId] = true;
             emit HookActionFailed(tokenId, Mode.AUTO_LEVERAGE);
             return;
         }
@@ -75,6 +76,8 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
                     _LEVERAGE_OVERSHOOT_TOLERANCE_BPS
                 )
         ) revert NoImprovement();
+
+        delete autoLeverageNeedsAttention[tokenId];
 
         // Update triggers for new base tick
         _removePositionTriggers(tokenId, poolKey);

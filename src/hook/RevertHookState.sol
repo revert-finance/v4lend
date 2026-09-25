@@ -219,4 +219,7 @@ abstract contract RevertHookState is RevertHookAccess {
     ///         whose currency is a share token can then never pay another position's shares out.
     /// @dev Appended last: the delegatecall sidecars share this layout (docs/hook-hierarchy.md).
     mapping(address shareToken => uint256 shares) internal _custodiedShares;
+    /// @notice A failed leverage action needs owner attention. Retry once with setPositionConfig
+    /// after repairing funds/debt or adjusting the target; failures are never requeued in a swap loop.
+    mapping(uint256 tokenId => bool) public autoLeverageNeedsAttention;
 }

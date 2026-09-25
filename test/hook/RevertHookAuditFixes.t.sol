@@ -1149,6 +1149,14 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(debtAfter, debtBefore, "debt unchanged");
         (,,,,,,, int24 baseAfter) = hook.positionStates(levId);
         assertEq(baseAfter, baseBefore, "trigger window not re-centred around an unhandled loan");
+        assertTrue(hook.autoLeverageNeedsAttention(levId));
+        // The owner repays the small excess directly, then explicitly retries/rearms once.
+        IERC20(Currency.unwrap(currency0)).approve(address(lendVault), type(uint256).max);
+        lendVault.repay(levId, debtBefore - collateralValue * 7490 / 10000, false);
+        hook.setPositionConfig(levId, _leverageConfig(7490));
+        assertFalse(hook.autoLeverageNeedsAttention(levId));
+        (,,,,,,, int24 recoveredBase) = hook.positionStates(levId);
+        assertEq(recoveredBase, _getTickLowerAt(_currentTick(key), key.tickSpacing));
     }
 
     // ==================== V4LE-53 / V4LE-21: external-route planning ====================
