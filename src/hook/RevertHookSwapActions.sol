@@ -24,17 +24,27 @@ contract RevertHookSwapActions is RevertHookState {
 
     IPoolManager internal immutable poolManager;
     IHookFeeController internal immutable hookFeeController;
+    /// @dev This contract's own address: the state-mutating entries below run under delegatecall
+    ///      from the hook (address(this) is then the hook) and refuse a direct call, like the other
+    ///      sidecars. A direct call would run against this contract's own storage and balance with a
+    ///      caller-chosen PositionManager and emit spoofable events from this address.
+    address private immutable _selfAddress;
 
     constructor(IPoolManager _poolManager, IHookFeeController _hookFeeController) {
         poolManager = _poolManager;
         hookFeeController = _hookFeeController;
+        _selfAddress = address(this);
     }
 
     /// @dev Shared delegatecall encoder, including fee-first removals and native sweeps.
+    ///      Delegatecall-only: a direct call is rejected.
     function modifyLiquiditiesWithPair(
         IPositionManager positionManager, bytes memory actions, bytes memory primaryParams,
         Currency currency0, Currency currency1, uint256 nativeValue
     ) external payable returns (bool success) {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
         bool removing = uint8(actions[0]) == uint8(Actions.DECREASE_LIQUIDITY);
         uint256 offset = removing ? 1 : 0;
         bytes memory actionsWithSweep = removing ? abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), actions) : actions;
@@ -114,6 +124,9 @@ contract RevertHookSwapActions is RevertHookState {
         external
         returns (BalanceDelta delta)
     {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
         SwapProtectionConfig storage config = _swapProtectionConfigs[tokenId];
         uint128 priceMultiplier = zeroForOne ? config.sqrtPriceMultiplier0 : config.sqrtPriceMultiplier1;
 

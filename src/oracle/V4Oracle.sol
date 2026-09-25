@@ -219,17 +219,41 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         return (amount0,amount1,fees0,fees1);
     }
 
+    /// @dev Values the position net of its fee obligations (fees first, then principal) in the quote
+    ///      token. Each price-times-amount term is a 512-bit product (an extreme-tick price is ~2^224
+    ///      in Q96), so it is divided by the quote price with full precision instead of as a checked
+    ///      uint256 product, which overflowed for valid positions even though the quotient fits.
+    function _netValues(
+        PositionState memory state,
+        uint256 amount0,
+        uint256 amount1,
+        uint128 fees0,
+        uint128 fees1,
+        uint256 owed0,
+        uint256 owed1,
+        uint256 priceTokenX96
+    ) internal pure returns (uint256 value, uint256 feeValue) {
+        (amount0, fees0) = _netCurrency(amount0, fees0, owed0);
+        (amount1, fees1) = _netCurrency(amount1, fees1, owed1);
+        value = FullMath.mulDiv(state.price0X96, amount0 + fees0, priceTokenX96)
+            + FullMath.mulDiv(state.price1X96, amount1 + fees1, priceTokenX96);
+        feeValue = FullMath.mulDiv(state.price0X96, fees0, priceTokenX96)
+            + FullMath.mulDiv(state.price1X96, fees1, priceTokenX96);
+    }
+
     /// @notice Size a fee-first withdrawal, accounting for fixed liabilities consuming principal.
+    /// @dev One position-state load (sequencer guard, feed / TWAP reads, quoter calls) serves both the
+    ///      value the target is compared against and the sizing itself.
     function getLiquidityForValue(uint256 tokenId, address quoteToken, uint256 target) external view returns (uint128) {
-        (uint256 value,uint256 netFeeValue,,) = getValue(tokenId,quoteToken);
         PositionState memory state = _loadPositionState(tokenId);
-        if (target >= value) return state.liquidity;
         (uint256 a0,uint256 a1) = _getAmounts(state);
         (uint128 f0,uint128 f1) = _getFees(state);
         (uint256 owed0,uint256 owed1) = _feeObligation(state,f0,f1);
+        uint256 quotePrice = _quoteTokenPrice(state, quoteToken);
+        (uint256 value,uint256 netFeeValue) = _netValues(state,a0,a1,f0,f1,owed0,owed1,quotePrice);
+        if (target >= value) return state.liquidity;
         uint256 c0 = owed0 > f0 ? owed0-f0 : 0;
         uint256 c1 = owed1 > f1 ? owed1-f1 : 0;
-        uint256 quotePrice = _quoteTokenPrice(state, quoteToken);
         uint256 charge = Math.mulDiv(c0,state.price0X96,quotePrice,Math.Rounding.Ceil)
             + Math.mulDiv(c1,state.price1X96,quotePrice,Math.Rounding.Ceil);
         uint256 principalValue = FullMath.mulDiv(a0,state.price0X96,quotePrice)
@@ -313,17 +337,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         PositionState memory state = _loadPositionState(tokenId);
         (uint256 amount0, uint256 amount1) = _getAmounts(state);
         (uint128 fees0, uint128 fees1) = _getFees(state);
-        (amount0,amount1,fees0,fees1) = _netAmounts(state,amount0,amount1,fees0,fees1);
+        (uint256 owed0, uint256 owed1) = _feeObligation(state, fees0, fees1);
 
         uint256 priceTokenX96 = _quoteTokenPrice(state, token);
 
-        // Calculate outputs. Each price-times-amount term is a 512-bit product (an extreme-tick price is
-        // ~2^224 in Q96), so it is divided by the quote price with full precision instead of as a checked
-        // uint256 product, which overflowed for valid positions even though the quotient fits.
-        value = FullMath.mulDiv(state.price0X96, amount0 + fees0, priceTokenX96)
-            + FullMath.mulDiv(state.price1X96, amount1 + fees1, priceTokenX96);
-        feeValue = FullMath.mulDiv(state.price0X96, fees0, priceTokenX96)
-            + FullMath.mulDiv(state.price1X96, fees1, priceTokenX96);
+        (value, feeValue) = _netValues(state, amount0, amount1, fees0, fees1, owed0, owed1, priceTokenX96);
         price0X96 = FullMath.mulDiv(state.price0X96, Q96, priceTokenX96);
         price1X96 = FullMath.mulDiv(state.price1X96, Q96, priceTokenX96);
     }

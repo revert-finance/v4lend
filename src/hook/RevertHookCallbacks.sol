@@ -345,11 +345,18 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
+        // A zero-liquidity poke (the fee-first INCREASE(0) prelude every supported removal sends,
+        // or a plain fee collection) changes the position's value only by the fees it collects. When
+        // it collects none, nothing left the position and the value gate below would re-read the
+        // oracle for an unchanged answer; the principal removal that follows a prelude runs it anyway.
+        // A poke that does collect fees keeps the check: uncollected fees count toward the value
+        // minimum, so a fee-only collection can take a position below it.
+        bool valueUnchanged = params.liquidityDelta == 0 && feeDelta.amount0() == 0 && feeDelta.amount1() == 0;
         feeDelta = _takeProtocolFees(tokenId, key, params.liquidityDelta, delta, feeDelta);
 
         // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
         // hook-internal operations run the logic below, which is idempotent by design
-        if (sender == address(this)) {
+        if (sender == address(this) || valueUnchanged) {
             return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
         }
 
