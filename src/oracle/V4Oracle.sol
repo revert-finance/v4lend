@@ -21,6 +21,7 @@ import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 
 import {Constants} from "../shared/Constants.sol";
+import {IRemintMigrationHook} from "../vault/interfaces/IRemintMigrationHook.sol";
 import {IV4Oracle} from "./interfaces/IV4Oracle.sol";
 
 // Chainlink Price Feed Interface
@@ -116,6 +117,64 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint16 maxDifference; // Max difference between Chainlink-compatible and TWAP sources x10000
     }
 
+    error SourceNotRecovered(address token);
+    mapping(address token => uint32 secondsAfterRestart) public recoveryPeriods;
+    event SetRecoveryPeriod(address indexed token, uint32 period);
+
+    /// @notice Additional per-token recovery delay; the common grace and full TWAP window also apply.
+    function setRecoveryPeriod(address token, uint32 period) external onlyOwner {
+        recoveryPeriods[token] = period;
+        emit SetRecoveryPeriod(token, period);
+    }
+
+    /// @notice Compare debt shares per unit of collateral at one unchanged vault exchange rate.
+    function getRiskScore(uint256 tokenId, address quoteToken, uint256 debtShares) public view returns (uint256) {
+        if (debtShares == 0) return 0;
+        (uint256 value,,,) = getValue(tokenId, quoteToken);
+        return value == 0 ? type(uint256).max : Math.mulDiv(debtShares, Q96, value, Math.Rounding.Ceil);
+    }
+
+    function validateRiskChange(uint256 tokenId, address quoteToken, uint256 debtShares, uint256 previousRisk) external view {
+        if (debtShares != 0) _validateVaultPosition(tokenId, quoteToken);
+        if (getRiskScore(tokenId, quoteToken, debtShares) > previousRisk) validateBorrow(tokenId, quoteToken);
+    }
+
+    function validateBorrow(uint256 tokenId, address quoteToken) public view {
+        _validateVaultPosition(tokenId, quoteToken);
+        uint256 restart = _requireSequencerUp();
+        if (restart == 0) return;
+        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
+        _requireRecoveredToken(Currency.unwrap(key.currency0), restart);
+        _requireRecoveredToken(Currency.unwrap(key.currency1), restart);
+        _requireRecoveredToken(quoteToken, restart);
+    }
+
+    function _validateVaultPosition(uint256 tokenId, address asset) internal view {
+        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
+        if (address(key.hooks) != address(0)) IRemintMigrationHook(address(key.hooks)).validateVaultPosition(tokenId, asset);
+    }
+
+    function _requireRecoveredToken(address token, uint256 restart) internal view {
+        if (token == referenceToken) return; // identity price; its feed is checked when used as denominator
+        TokenConfig memory config = feedConfigs[token];
+        if (config.mode == Mode.NOT_SET) revert NotConfigured();
+        uint256 elapsed = block.timestamp - restart;
+        if (elapsed < recoveryPeriods[token]) revert SourceNotRecovered(token);
+        if (_usesChainlink(config.mode)) {
+            _requireRecoveredFeed(token, restart);
+            _requireRecoveredFeed(referenceToken, restart);
+        }
+        if (config.mode != Mode.CHAINLINK && elapsed < config.twapSeconds) revert SourceNotRecovered(token);
+    }
+
+    function _requireRecoveredFeed(address token, uint256 restart) internal view {
+        if (token == chainlinkReferenceToken) return;
+        (, , , uint256 updatedAt,) = feedConfigs[token].feed.latestRoundData();
+        if (updatedAt < restart || block.timestamp - restart < recoveryPeriods[token]) {
+            revert SourceNotRecovered(token);
+        }
+    }
+
     // token => config mapping
     mapping(address => TokenConfig) public feedConfigs;
 
@@ -179,7 +238,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     /// @return price0X96 Price of token0 normalized to Q96 format in the specified token
     /// @return price1X96 Price of token1 normalized to Q96 format in the specified token
     function getValue(uint256 tokenId, address token)
-        external
+        public
         view
         override
         returns (uint256 value, uint256 feeValue, uint256 price0X96, uint256 price1X96)
@@ -438,9 +497,9 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     ///         read consults the v3 pool's observations, which are just as frozen during a sequencer outage
     ///         as a Chainlink round, so the guard is not tied to the Chainlink path.
     /// @dev No-op on chains without a configured uptime feed (L1).
-    function _requireSequencerUp() internal view {
+    function _requireSequencerUp() internal view returns (uint256 restart) {
         if (sequencerUptimeFeed == address(0)) {
-            return;
+            return 0;
         }
         (
             uint80 sequencerRoundId,
@@ -459,7 +518,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         // Feed result must be valid
         if (
             sequencerRoundId == 0 || sequencerAnsweredInRound < sequencerRoundId || sequencerStartedAt == 0
-                || sequencerUpdatedAt == 0 || sequencerUpdatedAt > block.timestamp || sequencerAnswer != 0
+                || sequencerUpdatedAt < sequencerStartedAt || sequencerUpdatedAt > block.timestamp || sequencerAnswer != 0
         ) {
             revert SequencerUptimeFeedInvalid();
         }
@@ -469,6 +528,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         if (timeSinceUp <= SEQUENCER_GRACE_PERIOD_TIME) {
             revert SequencerGracePeriodNotOver();
         }
+        return sequencerStartedAt;
     }
 
     /// @notice Calculates Chainlink-compatible price with validation for given token address

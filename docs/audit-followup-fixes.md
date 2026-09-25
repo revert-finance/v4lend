@@ -59,3 +59,11 @@ The same-pool planner now receives the effective per-mode output fee. For nonzer
 the balance condition using net output and the ending price from a bounded tick-walking quote,
 including pool LP/protocol fees. Zero-fee plans retain the analytic path. The AUTO_RANGE regression
 checks the actual remint leftovers at the maximum supported automation fee.
+
+## V4LE-37: source-specific post-restart risk admission
+
+After the common sequencer grace period, new borrowing and collateral withdrawals additionally
+require post-restart Chainlink rounds (including the reference denominator) and a complete fresh
+TWAP window for every used TWAP source. Governance can add per-token recovery delays. Transforms
+that worsen debt per unit of position value use the same guard; deleveraging that improves
+that ratio, repayments, and liquidations retain the ordinary oracle availability rules. L1 is a no-op.

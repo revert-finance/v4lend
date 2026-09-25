@@ -11,6 +11,7 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
+import {IRemintMigrationHook} from "src/vault/interfaces/IRemintMigrationHook.sol";
 import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 
 /// @title MockV4Oracle
@@ -18,6 +19,15 @@ import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 /// @dev Other IV4Oracle methods are stubbed and return zero/default values
 contract MockV4Oracle is IV4Oracle {
     using PoolIdLibrary for PoolKey;
+
+    function getRiskScore(uint256, address, uint256) external pure returns (uint256) { return 0; }
+    function validateRiskChange(uint256 id, address asset, uint256 debt, uint256) external view {
+        if (debt != 0) validateBorrow(id, asset);
+    }
+    function validateBorrow(uint256 id, address asset) public view {
+        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(id);
+        if (address(key.hooks) != address(0)) IRemintMigrationHook(address(key.hooks)).validateVaultPosition(id, asset);
+    }
 
     error MockPoolPriceUnavailable();
 

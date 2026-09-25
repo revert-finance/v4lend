@@ -7,6 +7,11 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 
 // V4 Oracle Interface for position valuation
 interface IV4Oracle {
+    /// @notice Additional source-recovery requirements for increasing loan risk after an L2 restart.
+    function getRiskScore(uint256 tokenId, address quoteToken, uint256 debtShares) external view returns (uint256);
+    function validateRiskChange(uint256 tokenId, address quoteToken, uint256 debtShares, uint256 previousRisk) external view;
+    function validateBorrow(uint256 tokenId, address quoteToken) external view;
+
     function poolManager() external view returns (IPoolManager);
     function positionManager() external view returns (IPositionManager);
     function getPoolSqrtPriceX96(address token0, address token1) external view returns (uint160);

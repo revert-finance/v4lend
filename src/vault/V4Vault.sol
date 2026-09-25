@@ -683,6 +683,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Unauthorized();
         }
 
+        uint256 riskBefore = oracle.getRiskScore(tokenId, asset, loans[tokenId].debtShares);
+
         // give access to transformer
         IERC721(address(positionManager)).approve(transformer, tokenId);
 
@@ -724,6 +726,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         uint256 debt = _convertToAssets(loans[newTokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
         _requireLoanIsHealthy(newTokenId, debt);
+        oracle.validateRiskChange(newTokenId, asset, loans[newTokenId].debtShares, riskBefore);
 
         transformedTokenId = 0;
         assembly ("memory-safe") {
@@ -759,6 +762,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         if (!isTransformMode && owner != msg.sender) {
             revert Unauthorized();
         }
+
+        oracle.validateBorrow(tokenId, asset);
 
         (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
 
@@ -840,6 +845,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         );
 
         uint256 debt = _convertToAssets(loans[params.tokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
+        if (debt != 0) oracle.validateBorrow(params.tokenId, asset);
         _requireLoanIsHealthy(params.tokenId, debt);
 
         emit WithdrawCollateral(params.tokenId, owner, params.recipient, params.liquidity, amount0, amount1);
@@ -1573,12 +1579,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     function _requireLoanIsHealthy(uint256 tokenId, uint256 debt) internal view {
-        if (debt != 0) {
-            (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
-            if (address(key.hooks) != address(0)) {
-                IRemintMigrationHook(address(key.hooks)).validateVaultPosition(tokenId, asset);
-            }
-        }
         (bool isHealthy,,,,,) = _checkLoanIsHealthy(tokenId, debt);
         if (!isHealthy) {
             revert CollateralFail();
