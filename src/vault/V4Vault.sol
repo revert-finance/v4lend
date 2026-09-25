@@ -18,6 +18,7 @@ import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step
 import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
+import {LiquidationEscrow} from "./LiquidationEscrow.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IRemintMigrationHook} from "./interfaces/IRemintMigrationHook.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
@@ -71,6 +72,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     /// @notice interest rate model implementation
     IInterestRateModel public immutable interestRateModel;
+
+    LiquidationEscrow public immutable liquidationEscrow;
 
     /// @notice oracle implementation
     IV4Oracle public immutable oracle;
@@ -210,6 +213,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         IV4Oracle _oracle,
         IWETH9 _weth
     ) ERC20(name, symbol) Ownable(msg.sender) {
+        liquidationEscrow = new LiquidationEscrow();
         asset = _asset;
         assetDecimals = IERC20Metadata(_asset).decimals();
         positionManager = _positionManager;
@@ -1343,8 +1347,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     // pays the liquidator's share and hands the remainder to the loan owner. Native ETH is wrapped so a
-    // reverting owner cannot block the liquidation; an ERC20 the owner cannot receive (e.g. a blocklisted
-    // owner) leaves the remainder with the liquidator instead of blocking it - liquidation liveness first.
+    // reverting owner cannot block the liquidation. Rejected ERC20 surplus is escrowed for the owner.
     function _payLiquidationProceeds(
         Currency currency,
         uint256 share,
@@ -1362,7 +1365,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 token = address(weth);
             }
             if (!_tryTransfer(token, owner, remainder)) {
-                SafeERC20.safeTransfer(IERC20(token), recipient, remainder);
+                SafeERC20.safeTransfer(IERC20(token), address(liquidationEscrow), remainder);
+                liquidationEscrow.credit(token, owner, remainder);
             }
         }
     }
@@ -1444,9 +1448,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 // division: debt and fullValue can each approach 2^144 for a valid large position,
                 // so the checked product would overflow and block loanInfo() and liquidate().
                 uint256 startLiquidationValue = Math.mulDiv(debt, fullValue, collateralValue);
-                uint256 penaltyFractionX96 = (
-                    Q96 - Math.mulDiv(fullValue - maxPenaltyValue, Q96, startLiquidationValue - maxPenaltyValue)
-                );
+                uint256 penaltyFractionX96 =
+                    (Q96 - Math.mulDiv(fullValue - maxPenaltyValue, Q96, startLiquidationValue - maxPenaltyValue));
                 uint256 penaltyX32 = MIN_LIQUIDATION_PENALTY_X32
                     + (MAX_LIQUIDATION_PENALTY_X32 - MIN_LIQUIDATION_PENALTY_X32) * penaltyFractionX96 / Q96;
 

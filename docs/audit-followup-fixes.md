@@ -16,3 +16,9 @@ Use a dedicated restricted, quota-limited RPC key. Do not use `pull_request_targ
 
 V4LE-73 is an operational item: confirm historical key revocation/rotation in the provider's
 activity log. No repository edit or history rewrite proves that the old key is invalid.
+
+## V4LE-23: preserve the payout cap when the owner rejects surplus
+
+Rejected owner proceeds are transferred to a dedicated vault-owned LiquidationEscrow. Only the
+beneficiary can claim to an alternate address. These assets never enter vault cash/reserve accounting.
+Failed claims preserve the credit; liquidator transfers match returned amounts and stay capped.
