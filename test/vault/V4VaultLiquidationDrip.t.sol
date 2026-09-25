@@ -98,7 +98,10 @@ contract V4VaultLiquidationDripTest is V4VaultOracleLiquidationBase {
         assertLe(received, liquidationValue, "the drip must not raise the liquidator's payout above the quote");
         assertGt(received, liquidationValue * 999 / 1000, "the quote itself is paid");
         uint256 ownerGot = _oracleValue(
-            currency0.balanceOf(borrower) - owner0Before, currency1.balanceOf(borrower) - owner1Before, price0X96, price1X96
+            currency0.balanceOf(borrower) - owner0Before,
+            currency1.balanceOf(borrower) - owner1Before,
+            price0X96,
+            price1X96
         );
         assertGt(ownerGot, 9e18, "the dripped fees reach the owner");
     }
@@ -131,10 +134,37 @@ contract V4VaultLiquidationDripTest is V4VaultOracleLiquidationBase {
         assertLe(received, liquidationValue, "the drip must not raise the liquidator's fee share above the quote");
         assertGt(received, liquidationValue * 999 / 1000, "the quote itself is paid");
         uint256 ownerGot = _oracleValue(
-            currency0.balanceOf(borrower) - owner0Before, currency1.balanceOf(borrower) - owner1Before, price0X96, price1X96
+            currency0.balanceOf(borrower) - owner0Before,
+            currency1.balanceOf(borrower) - owner1Before,
+            price0X96,
+            price1X96
         );
         assertGt(ownerGot, 3.9e18, "the dripped fees reach the owner");
         assertGt(positionManager.getPositionLiquidity(tokenId), 0, "no liquidity removed");
+    }
+
+    function testDripSurplusRemainsWithBlockedOwner() public {
+        uint256 tokenId = _createLoan(hookedKey, -600, 600, 1e22);
+        (, uint256 fullValue,,,) = vault.loanInfo(tokenId);
+        vm.prank(borrower);
+        vault.borrow(tokenId, fullValue * 85 / 100);
+        _setCollateralFactor(uint32(Q32 * 8 / 10));
+        hook.setDrip(5e18, 5e18);
+        (,,,, uint256 quote) = vault.loanInfo(tokenId);
+        (,, uint256 p0, uint256 p1) = oracle.getValue(tokenId, asset);
+        vm.mockCallRevert(
+            Currency.unwrap(currency0), abi.encodeWithSelector(IERC20.transfer.selector, borrower), "blocked"
+        );
+        vm.mockCallRevert(
+            Currency.unwrap(currency1), abi.encodeWithSelector(IERC20.transfer.selector, borrower), "blocked"
+        );
+        (uint256 a0, uint256 a1) = _liquidateAs(liquidator, tokenId);
+        assertEq(currency0.balanceOf(liquidator), a0);
+        assertEq(currency1.balanceOf(liquidator), a1);
+        assertLe(_oracleValue(a0, a1, p0, p1), quote);
+        uint256 credit0 = vault.liquidationEscrow().claimable(Currency.unwrap(currency0), borrower);
+        uint256 credit1 = vault.liquidationEscrow().claimable(Currency.unwrap(currency1), borrower);
+        assertGt(_oracleValue(credit0, credit1, p0, p1), 9e18);
     }
 
     function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn) internal {

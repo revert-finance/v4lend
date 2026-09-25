@@ -22,3 +22,9 @@ activity log. No repository edit or history rewrite proves that the old key is i
 Rejected owner proceeds are transferred to a dedicated vault-owned LiquidationEscrow. Only the
 beneficiary can claim to an alternate address. These assets never enter vault cash/reserve accounting.
 Failed claims preserve the credit; liquidator transfers match returned amounts and stay capped.
+
+## V4LE-63: retain auction drips for a blocked owner
+
+Uses the V4LE-23 escrow payout path. The dedicated regression adds a before-remove donation and
+rejects transfers to the borrower, proving that even this newly credited surplus cannot increase
+the liquidator's payment. No duplicate production path is needed.
