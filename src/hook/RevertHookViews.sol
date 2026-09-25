@@ -3,6 +3,9 @@ pragma solidity ^0.8.30;
 
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
@@ -11,6 +14,19 @@ import {RevertHookBase} from "./RevertHookBase.sol";
 /// @title RevertHookViews
 /// @notice Hook read API grouped away from callbacks and execution flow
 abstract contract RevertHookViews is RevertHookBase {
+    /// @notice Vault admission guard, also checked after debt-bearing transforms.
+    function validateVaultPosition(uint256 tokenId, address asset) external view {
+        uint8 flags = _positionConfigs[tokenId].modeFlags;
+        if (PositionModeFlags.hasAutoExit(flags) || PositionModeFlags.hasAutoLeverage(flags)) {
+            (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
+            address token0 = Currency.unwrap(key.currency0);
+            address token1 = Currency.unwrap(key.currency1);
+            if (asset != token0 && asset != token1 && !(token0 == address(0) && asset == address(weth))) {
+                revert InvalidConfig();
+            }
+        }
+    }
+
     function autoCollectRewardBps() external pure returns (uint16) {
         return _AUTO_COLLECT_REWARD_BPS;
     }

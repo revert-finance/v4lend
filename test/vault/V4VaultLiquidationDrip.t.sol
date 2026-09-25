@@ -24,6 +24,8 @@ contract DrippingHook {
         poolManager = _poolManager;
     }
 
+    function validateVaultPosition(uint256, address) external pure {}
+
     function setDrip(uint256 _drip0, uint256 _drip1) external {
         drip0 = _drip0;
         drip1 = _drip1;

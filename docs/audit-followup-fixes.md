@@ -45,3 +45,10 @@ denylist. An arbitrary bidder cannot admit a new public forwarder. Governance mu
 authorization and admit only non-upgradeable executors with an appropriately restricted caller
 policy (for example AuctionArbExecutor). Admission removal blocks new registrations; purchased
 epochs/leases retain their agreed bounded terms. Code hashes do not prove authorization policy.
+
+## V4LE-51: validate automation when admitting debt
+
+Debt-bearing health checks ask the allowlisted hook to validate compatibility with the vault asset,
+including at the end of transforms. Configuring AUTO_EXIT before transferring an NFT to a third-asset
+vault can no longer bypass validation. Zero-debt exits remain available and native/WETH matches
+remain supported. Every allowlisted hook must implement validateVaultPosition as well as migration.

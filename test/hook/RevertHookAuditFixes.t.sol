@@ -337,9 +337,7 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         lendVault.create(token3Id, address(this));
 
         vm.expectRevert(abi.encodeWithSignature("TransformFailed()"));
-        lendVault.transform(
-            token3Id, address(hook), abi.encodeCall(hook.migrateVaultPosition, (token2Id, token3Id))
-        );
+        lendVault.transform(token3Id, address(hook), abi.encodeCall(hook.migrateVaultPosition, (token2Id, token3Id)));
 
         (uint8 bFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(bFlags, PositionModeFlags.MODE_AUTO_EXIT, "B keeps its automation");
@@ -909,7 +907,15 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), top);
         // above the price, so it holds token0 only: minted for a few wei
         (uint256 id,) = positionManager.mint(
-            top, maxUsable - 120, maxUsable, 1e3, type(uint256).max, type(uint256).max, address(this), block.timestamp, ""
+            top,
+            maxUsable - 120,
+            maxUsable,
+            1e3,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            ""
         );
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
         hook.setPositionConfig(id, _rangeConfig(type(int24).min, 0, -60, 60));
@@ -1028,7 +1034,9 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         int24 baseAfter;
         (,, lastActivated,,,,, baseAfter) = hook.positionStates(tokenId);
         assertGt(lastActivated, 0, "reactivated");
-        assertEq(baseAfter, _getTickLowerAt(_currentTick(poolKey), poolKey.tickSpacing), "base re-centred on the live tick");
+        assertEq(
+            baseAfter, _getTickLowerAt(_currentTick(poolKey), poolKey.tickSpacing), "base re-centred on the live tick"
+        );
     }
 
     // ==================== V4LE-51: AUTO_EXIT on a vault whose asset is not a pool token ====================
@@ -1058,37 +1066,22 @@ contract RevertHookAuditFixesTest is RevertHookTest {
     ///      swapped, failed on repay (the hook holds none of the vault asset), and the caught
     ///      transform left a zombie config with no trigger nodes. Now the exit is skipped up front,
     ///      the reason is emitted and the config retired; nothing else changes.
-    function testAutoExitSkipsAndRetiresConfigWhenVaultAssetIsNotInPool() public {
+    function testBorrowRejectsPreconfiguredAutoExitWithIncompatibleAsset() public {
         MockERC20 third = deployToken();
         V4Vault lendVault = _deployVaultWithAsset(address(third));
         third.approve(address(lendVault), 2e18);
         lendVault.deposit(2e18, address(this));
-
-        int24 s = poolKey.tickSpacing;
-        hook.setPositionConfig(token2Id, _autoExitConfig(tickLower2 - s, type(int24).max));
+        hook.setPositionConfig(token2Id, _autoExitConfig(tickLower2 - poolKey.tickSpacing, type(int24).max));
         IERC721(address(positionManager)).approve(address(lendVault), token2Id);
         lendVault.create(token2Id, address(this));
-        lendVault.approveTransform(token2Id, address(hook), true);
-        (,, uint256 collateralValue,,) = lendVault.loanInfo(token2Id);
-        lendVault.borrow(token2Id, collateralValue / 10);
-        (uint256 debtBefore,,,,) = lendVault.loanInfo(token2Id);
-        uint128 liquidityBefore = positionManager.getPositionLiquidity(token2Id);
-
-        vm.recordLogs();
-        _swap(poolKey, true, 12e17);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-
-        assertTrue(_sawHookActionFailed(logs, token2Id, RevertHookState.Mode.AUTO_EXIT), "action reported as failed");
-        assertTrue(
-            _sawIndexedTokenEvent(logs, RevertHookState.AutoExitIncompatibleVaultAsset.selector, token2Id),
-            "the incompatibility is emitted"
-        );
-        assertEq(positionManager.getPositionLiquidity(token2Id), liquidityBefore, "collateral untouched");
-        (uint256 debtAfter,,,,) = lendVault.loanInfo(token2Id);
-        assertEq(debtAfter, debtBefore, "debt untouched");
-        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
-        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "zombie config retired");
-        _verifyNoLeftoverBalances("skipped exit");
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        lendVault.borrow(token2Id, 1e16);
+        assertEq(lendVault.loans(token2Id), 0);
+        // Clearing the incompatible automation restores ordinary third-asset borrowing.
+        RevertHookState.PositionConfig memory empty;
+        hook.setPositionConfig(token2Id, empty);
+        lendVault.borrow(token2Id, 1e16);
+        assertGt(lendVault.loans(token2Id), 0);
     }
 
     /// @dev Negative control: the same vault shape without debt exits normally.
@@ -1151,9 +1144,7 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertGe(_currentTick(key), baseBefore + 10 * key.tickSpacing, "upper leverage trigger crossed");
 
         assertTrue(_sawHookActionFailed(logs, levId, RevertHookState.Mode.AUTO_LEVERAGE), "action reported as failed");
-        assertFalse(
-            _sawIndexedTokenEvent(logs, RevertHookState.AutoLeverage.selector, levId), "no success recorded"
-        );
+        assertFalse(_sawIndexedTokenEvent(logs, RevertHookState.AutoLeverage.selector, levId), "no success recorded");
         (uint256 debtAfter,,,,) = lendVault.loanInfo(levId);
         assertEq(debtAfter, debtBefore, "debt unchanged");
         (,,,,,,, int24 baseAfter) = hook.positionStates(levId);

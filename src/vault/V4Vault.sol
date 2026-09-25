@@ -1127,7 +1127,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @param hook Hook to configure (address(0) for positions without hooks)
     /// @param isAllowed Whether the hook is allowed
     /// @dev Every allowlisted non-zero hook must implement IRemintMigrationHook: `transform`
-    ///      calls `migrateVaultPosition` on it whenever a transformer replaces the NFT inside one of
+    ///      calls `validateVaultPosition` before accepting debt and `migrateVaultPosition` on it whenever a transformer replaces the NFT inside one of
     ///      its pools, and a hook without that function makes such remints revert. Remove a retired
     ///      hook deployment from the allowlist once its positions are unwound.
     function setHookAllowList(address hook, bool isAllowed) external onlyOwner {
@@ -1573,6 +1573,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     function _requireLoanIsHealthy(uint256 tokenId, uint256 debt) internal view {
+        if (debt != 0) {
+            (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
+            if (address(key.hooks) != address(0)) {
+                IRemintMigrationHook(address(key.hooks)).validateVaultPosition(tokenId, asset);
+            }
+        }
         (bool isHealthy,,,,,) = _checkLoanIsHealthy(tokenId, debt);
         if (!isHealthy) {
             revert CollateralFail();
