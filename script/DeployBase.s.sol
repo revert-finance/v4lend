@@ -415,6 +415,7 @@ contract DeployBase is Script {
         console.log("  RevertHook registered as vault transformer");
 
         // Allow RevertHook in vault hook allowlist
+        oracle.setHookFeeQuoter(address(revertHook), address(feeController));
         vault.setHookAllowList(address(revertHook), true);
         console.log("  RevertHook added to vault hook allowlist");
 

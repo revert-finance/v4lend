@@ -2,6 +2,9 @@
 
 This document is a concise protocol handoff for external auditors reviewing `v4lend`.
 
+PR #40 follow-up: [audit-followup-fixes.md](audit-followup-fixes.md) records the new implementation
+and [audit-deferred-findings.md](audit-deferred-findings.md) records remaining operational/policy items.
+
 Target snapshot:
 - commit: re-pin at merge of `fix/audit-readiness-2026-09` (findings from `docs/audit-readiness-review.md` fixed on that branch)
 - branch: `main`
@@ -89,6 +92,15 @@ Purpose:
 Notes:
 - `V4Vault` intentionally holds lender funds, reserves, and collateral NFTs
 - unlike automators and hook helpers, it is not expected to end operations with zero balances
+- `liquidate` refuses the loan owner as caller and as collateral recipient: the reserve-backed liquidation branch subsidizes an independent liquidator, and a borrower must not collect that subsidy on their own loan (a second address stays possible; the check closes the direct and flash-helper paths)
+- a liquidation whose uncovered reserve cost is socialized (lend exchange rate written down) also caps the same-day lend allowance (`dailyLendIncreaseLimitLeft`) at what a fresh day would grant on the surviving lender claims, so a later deposit cannot consume an allowance sized on erased claims
+- `repay` on a debt-free loan or an unknown token is a pure no-op (returns `(0, 0)`, no event) and in particular does not refresh the daily debt quota; only a repayment that moves debt shares does, so a zero-value call cannot pin the day's quota on a still unfunded lender pool
+- `transferLoan` moves the former owner's transform approval for the position's own allowlisted pool hook to the new owner (and clears it on the former owner): hook automation is token-id keyed and stays armed across the transfer, so without the approval every hook transform would fail and consume the trigger; the new owner can revoke it with `approveTransform`. Approvals for other targets (operators of the former owner) are not carried and stop working with the transfer
+- liquidation proceeds are collected to the vault and split there: the liquidator receives at most `liquidationValue` worth at the oracle's own token prices (the removal settles at the live pool price, up to `maxPoolPriceDifference` off the oracle, so the actual delta can exceed the quote); any excess goes to the loan owner, a shortfall (hook skim, pool below oracle) is the liquidator's, and native ETH remainders are wrapped. A remainder the owner cannot receive (ERC20 blocklist) goes to the liquidator rather than blocking the liquidation
+- the same cap applies to the fee-only split: whatever the pool hook credits to the position in its before-remove callback (the auction drip donated to in-range liquidity) lands in the collected amounts after the quote was taken and goes to the owner, never to the liquidator
+- `LeverageTransformer.leverageIn` accepts a native-ETH pool for a wrapped-native-asset vault (the alias the vault, the oracle and leverageUp/Down already use): the borrowed WETH is unwrapped for the pool and all pool-side arithmetic and the optional swap use the native currency
+- `Transformer._validateCaller` accepts only a registered vault inside its transform of that token or the NFT owner; a transformer's own custody of an NFT (e.g. one parked in `V4Utils` by a plain `transferFrom`) is not authority for a public caller. The `V4Utils` safe-transfer callback executes through an internal path bound to the token it just received
+- `V4Utils` forwards a tagged RevertHook remint claim (`abi.encodePacked(REMINT_MIGRATION_TAG, oldTokenId)` in mint / increase hookData) only from `execute` and only when it names the token that call is draining for its authorized caller; `swapAndMint` and `swapAndIncreaseLiquidity` refuse any claim, since the hook trusts the locker (V4Utils) being approved on the old token and would otherwise let anyone claim a drained position's automation
 
 ### V4Oracle
 
@@ -101,6 +113,16 @@ Purpose:
 - Chainlink normalization
 - oracle-vs-pool deviation checks
 - L2 sequencer guard integration
+
+Boundary behavior:
+- the feed-derived sqrt price in `_loadPositionState` only splits liquidity into token amounts, which saturates beyond the position's range, so it is clamped to `TickMath.MIN_SQRT_PRICE..MAX_SQRT_PRICE` (exact, no value change). A pool at the price boundary with an honest feed ratio slightly above it therefore stays valuable and liquidatable instead of reverting in a `uint160` cast
+- `getPoolSqrtPriceX96` is consumed numerically (swap floors, oracle ticks) and reverts with `SqrtPriceOutOfRange` for ratios outside the sqrt-price domain rather than overflowing above or returning zero below
+- `getValue` divides each price-times-amount term with `FullMath.mulDiv` (V4LE-64): a valid extreme-tick position (Q96 price ~2^224) no longer overflows a checked product while its quotient fits
+- uncollected fees are bounded at v4's `toInt128` settlement limit (V4LE-6): a fee amount >= 2^127 reverts with `SettlementBoundExceeded` instead of being counted as collateral, since `Pool.modifyLiquidity` settles fees on every collection and decrease and rejects that amount
+- principal amounts are bounded the same way (V4LE-61): `_getAmounts` reverts with `SettlementBoundExceeded` for a token amount >= 2^127, which v4 cannot pay out in the single decrease a liquidation or full withdrawal performs
+- the L2 sequencer uptime / grace guard runs once per external read in `getPoolSqrtPriceX96` and `_loadPositionState` (`_requireSequencerUp`, V4LE-2), so `Mode.TWAP` reads are guarded like Chainlink ones and a Chainlink read no longer consults the uptime feed once per leg
+- an unverified Chainlink read (`Mode.CHAINLINK`, or a two-source mode with `maxDifference == type(uint16).max`) re-reads `feed.decimals()` and reverts with `FeedDecimalsChanged` when it differs from the value cached at `setTokenConfig` (V4LE-15); the owner re-runs `setTokenConfig` to accept a feed precision migration. Verified two-source reads pay nothing: a 10^k mis-scaling always trips the deviation check
+- the same unverified reads re-read `token.decimals()` (and the reference token's, once per read) and revert with `TokenDecimalsChanged` on a mismatch with the cached exponent (V4LE-25); native ETH is fixed at 18. A configured token is re-accepted through `setTokenConfig`; `referenceTokenDecimals` is immutable, so a reference-token unit change needs a new oracle deployment and fails closed until then
 
 ### RevertHook
 
@@ -119,6 +141,18 @@ Purpose:
 Important implementation detail:
 - the deployed hook delegates execution into sidecar contracts
 - storage layout compatibility matters across the shared hook/action state spine
+
+External audit 2026-09 fixes (hook):
+- V4LE-4: the `_afterSwap` oracle window is exact - `oracleTick +- maxTicksFromOracle` on unrounded ticks, compared with the exact live tick (`_outsideOracleWindow`); bucket rounding is only used for the cursor walk, so a spacing-200 pool no longer dispatches up to 399 ticks off-oracle
+- V4LE-41: a full removal by AUTO_LEND / AUTO_RANGE / AUTO_EXIT that succeeds but credits nothing in either currency (the carried protocol fee consumed the whole principal inside the remove callback) reverts with `RemovalConsumedByFees` in `_decreaseLiquidity`, the same rule the partial deleverage removal already had; the action fails (`HookActionFailed`) and rolls back instead of leaving an emptied NFT with no shares, remint or exit proceeds
+- V4LE-16: the range an AUTO_RANGE remint produces is fixed by the config (`[B + lowerDelta, B + upperDelta]` from the fired bucket B), so whether the replacement's own range trigger or a relative exit is already satisfied at B is a pure config property; `_validateRangeConfig` refuses such configs (`lowerDelta >= lowerLimit`, `upperDelta + upperLimit <= 0`, relative exit offsets inside the shift) at `setPositionConfig` and on vault remints, instead of arming a trigger behind the traversal cursor after the remint. A trigger the action's own swap carried the price past is strictly beyond the fired bucket and is consumed by the continued walk
+- V4LE-74: `AutoRangeLib.plan` clamps the shifted range to `[minUsableTick, maxUsableTick]` so a trigger fired at a TickMath edge remints into the nearest mintable range instead of failing the planner and consuming the trigger; `autoRange` also refuses a collapsed (invalid) range, and the config-time same-range check evaluates the clamped plan, so an edge position whose clamped replacement is itself is rejected at `setPositionConfig`
+- V4LE-70: reactivating a configured, inactive position through an ordinary (non-hook) liquidity add now evaluates its triggers at the live tick (`_checkTriggerConditions`, auto-leverage re-centred first like a remint) and reverts with `TriggerAlreadySatisfied` when one is satisfied, instead of arming it behind the fresh cursor where no walk would visit it; execution inside the add callback is not possible (PositionManager lock), so the owner reconfigures (immediate execution) or disables automation before adding. The hook's own restore adds are exempt as before
+- V4LE-49: vault-backed actions resolve the vault asset to a pool currency through `_lendCurrency`, which treats WETH as the alias of native ETH like the oracle, the vaults and `NativeAssetLib` do: a WETH-asset vault position in a native pool is accepted by `_validateAutoLeverageMode`, a leverage-up unwraps the borrowed WETH into the pool's native side and every repayment (`_repayDebtToVault`) wraps native proceeds before the vault pulls WETH
+- V4LE-51: the oracle debt-admission API validates the hook automation against the vault asset at borrow and after transforms. The configure-before-deposit bypass is rejected before debt is accepted; zero-debt exits remain supported.
+- V4LE-71: failed leverage actions set `autoLeverageNeedsAttention`. The owner repairs debt/funds or the target and submits `setPositionConfig` for a bounded retry/rearm; success clears the marker. No rounding-up or automatic swap-loop retry is used.
+- V4LE-53 / V4LE-21: both external-route and same-pool plans include the automation output fee. Same-pool plans with nonzero output fees use a bounded balance solve against net tick-walking output and final pool price; zero-fee plans retain the analytic path.
+- V4LE-72: withdrawals cannot create unsecured protocol-fee receivables. Supported paths collect/pay fees using `INCREASE_LIQUIDITY(0)` before removing principal in the same unlock. Direct PositionManager clients must use the fee-paying collection/batch when fees are due.
 
 See also:
 - [`docs/hook-hierarchy.md`](/Users/kalinbas/Code/v4lend/docs/hook-hierarchy.md)
@@ -140,6 +174,12 @@ Purpose:
 Important implementation detail:
 - protocol fees are sent directly to `protocolFeeRecipient`
 - automators no longer retain protocol fees or use a withdrawer model
+- `AutoLeverage` operators supply swap routing, so every execution must land the debt ratio inside the owner's configured band (`AutoLeverageLib.landsWithinTolerance`): leverage-up may not overshoot `target + rebalanceThresholdBps`, and deleverage may not stop above it. A strict ratio decrease is not enough on deleverage because liquidity removal is sized for the full planned repayment; the band check is what bounds an operator that swaps only part of the removed tokens or routes part of the swap output elsewhere. The hook's own auto-leverage keeps the looser `improvesTowardTarget` rule since its swaps go through protocol-managed routes
+- `maxSwapSlippageBps == 10000` still disables the oracle output floor per swap; in that mode the band check is the only on-chain bound on how far an execution may fall short of the plan
+- `AutoExit` trigger evaluation is inclusive on both sides (lower reached at or below `token0TriggerTick`, upper at or above `token1TriggerTick`), the same convention as the hook's trigger evaluator
+- `AutoExit` vault exits settle the debt before the automation reward: when the proceeds net of the reserved reward do not cover the debt, the reward reserved in the lend token pays the remainder and is reduced by it
+- `AutoLend` deactivation (`configToken` with `isActive == false`) revokes the operator for both legs; `withdraw` rejects a deactivated position and the owner's `forceExit` is the recovery path for an already-lent one
+- `AutoExit` vault exits require the vault asset to be a pool token only when the loan carries debt; a zero-debt loan in any accepted collateral pair exits with the removed tokens sent to the owner
 
 ### Controllers
 
@@ -153,11 +193,14 @@ Files:
 
 Purpose:
 - keep fee governance, swap routing, and the fee-discount market out of `RevertHook` storage
-- `HookFeeController`: LP protocol fee, auto-lend gain fee, per-mode hook swap fee, protocol fee recipient
+- `HookFeeController`: LP protocol fee, auto-lend gain fee, per-mode hook swap fee, protocol fee recipient. The recipient is direct-sent, so the system addresses are refused: zero, hook, controller, PoolManager and (external audit V4LE-27) the v4 PositionManager, whose permissionless SWEEP hands its whole balance to any caller - the latter two via tolerant staticcalls to the hook's `poolManager()` / `positionManager()` getters, so the PositionManager rejection is live only once the hook exposes `positionManager()`
 - `HookRouteController`: protocol-managed single-pool routes per ordered token pair
 - `HookAuctionController`: per-epoch English auction selling a discounted-LP-fee executor slot; the winning bid minus a protocol fee is dripped to in-range LPs through `PoolManager.donate` over the following epoch
-- `HookLeaseController`: Harberger-lease alternative with the same hook-facing interface; one lessee self-assesses a price, pays per-second rent on it, can be bought out at that price, and rent minus a protocol fee is dripped to in-range LPs
+- `HookLeaseController`: Harberger-lease alternative with the same hook-facing interface; one lessee self-assesses a price, pays per-second rent on it, can be bought out at that price, and rent minus a protocol fee is dripped to in-range LPs. The prepaid runway is bounded by `MAX_PREPAID_RUNWAY_SECONDS` (365 days) at install, top-up and price cut (external audit V4LE-22): rent rounds up to 1 raw unit/second, so a minimum-price lessee used to reach the uint40 `paidThrough` sentinel for ~1e-6 tokens and become unevictable, blocking wind-down and `configurePool`
 - `AuctionArbExecutor`: owner-operated executor a bidder registers as the discount recipient; the controllers recognise the executor as the address that calls `PoolManager.swap` directly
+- the hook exposes `positionManager()` (public immutable) so `HookFeeController` can refuse the PositionManager, whose permissionless SWEEP would let anyone take fees sent there, as protocol fee recipient
+- `HookAuctionController` pending bucket: value that could not be donated (zero in-range liquidity, failed donates, carried epochs) aggregates in `pendingDonation` and releases gradually. Each release is paced by `pendingReleasePerEpoch`, the largest single epoch's `totalDrip` that fed the bucket, over `epochLengthSeconds`, never by a fraction of the aggregate: a dust LP that appears after several zero-liquidity epochs can capture at most one epoch's slice per `minDripSeconds`, the same exposure as the live epoch drip. A bucket of N epochs therefore takes about N epochs to drain; `sweepPendingDonation` remains the wind-down path. A FAILED active-epoch donate (blacklisting / fee-on-transfer auction currency) parks the vested slice into this bucket too (external audit V4LE-42): it used to stay claimable and pay out in one lump to whoever was in range when the currency recovered
+- `HookLeaseController` pending bucket: same shape. Parked rent releases at `pendingReleasePerHorizon`, one `dripHorizonSeconds` of rent at the lease price the value accrued at (largest among contributions), over the horizon, so a dust LP after a long gap gets at most the rent the lease would have paid over its holding interval
 
 Auth model:
 - all controllers are administered through `hook.owner()`
@@ -168,10 +211,11 @@ Known design points auditors should read first:
 - the discount applies only when `sender == executor`; hook-internal swaps never receive it
 - drips `sync`/`settle` inside the caller's unlock, which assumes integrators sync immediately before paying
 - controllers hold bidder escrow and prepaid rent; refunds are pull-based
+- lease wind-down is finite (external audit V4LE-36): `setLeasingEnabled(false)` freezes top-ups and runway-extending price cuts, and the prepaid runway is capped at `MAX_PREPAID_RUNWAY_SECONDS`, so a running lease - including one whose registered executor is a permissionless forwarder that hands the discount to every caller - ends within that bound and `evictLease` (permissionless) then frees the slot for `configurePool`
 
 ### Hook Protocol Fee Deferral
 
-`PositionManager` derives principal as `callerDelta - feesAccrued` and casts it to `uint128` on removes, so a hook delta on a fee-only `DECREASE_LIQUIDITY(0)` would revert. The hook therefore caps the LP protocol fee at what the operation can absorb and carries any shortfall per position (`_pendingProtocolFees`, `ProtocolFeeDeferred`), settling it on later removes with principal or on the hook's own fee collection. The logic lives in `RevertHookAutoLendActions` via delegatecall. Accepted leak: dust withdrawals after long fee-only collecting escape part of the carried fee, and a carried fee larger than the final principal is stranded on the burned token.
+`PositionManager` attributes hook fees to principal for slippage checks. Fee-paying collections therefore use `INCREASE_LIQUIDITY(0)` with max inputs; supported withdrawals prepend that collection in the same unlock. A removal that cannot settle all protocol fees reverts. `HookFeeController` quotes fresh and carried liabilities; the oracle values collateral net of them and sizes withdrawals to cover fixed principal charges. Historical carried-fee migration checks remain defensive, but new withdrawals cannot create those receivables.
 
 ### Remint Migration
 
@@ -350,22 +394,25 @@ Recent tests of note:
 ## Suggested Audit Focus
 
 Highest-value review areas:
-- `V4Vault` borrow / repay / liquidation / transform flows
+- `V4Vault` borrow / repay / liquidation / transform flows (liquidation sizing uses full-precision `Math.mulDiv` for the penalty interpolation and the liquidity fraction, so positions whose debt and value each approach 2^144 stay computable and liquidatable)
 - `RevertHook` delegatecall safety and trigger accounting
 - `HookFeeController` and `HookRouteController` trust boundaries
 - `AutoLeverage` leverage-down / third-token paths
 - `V4Oracle` valuation assumptions and stale / deviating price behavior
+- `LiquidityCalculator.calculateSamePool` input domain: a 100% total swap fee is rejected with `Invalid_Fee` (the analytic branches divide by `1 - fee`), matching `calculateSimple`; zero active liquidity where the tick traversal stops (a sole position crossed at its boundary by an exact-limit swap) returns a no-swap plan at the current price instead of reverting `Math_Overflow` out of the solvers (external audit V4LE-89); with a zero total fee and the price exactly at a requested range bound the solvers' coefficient guards accept the equality (`a == amount0Target` / `c == amount1Target`) and solve the balancing swap - no swap when nothing is held on the swappable side - instead of reverting a valid boundary state (external audit V4LE-85); the quadratic discriminant `b*b + a*c` is formed on signed magnitudes with overflow checks - a coefficient set that does not fit 256 bits reverts `Math_Overflow` instead of wrapping into a plausible but wrong plan (external audit V4LE-33, Low; a negative discriminant keeps the current price, the M-5 degradation)
 - shared swap helpers and native ETH handling
 
 ## Things We Intentionally Want Auditors To Know Up Front
 
-- whole-balance accounting in hook/helpers/transformers/automators is intentional
+- whole-balance accounting in hook/helpers/transformers/automators is intentional; where an operation compares its own amounts against a whole balance (the leverage transformer's added-amount checks) the subtraction saturates, so unsolicited dust pushed into a transformer can only end up with the recipient, never revert the operation
 - `AutoLend` intentionally holds ERC4626 shares while a position is lent
+- the vault records the token a transform started with in transient storage (`transformOriginTokenId`); the hook's `migrateVaultPosition` accepts only that token as the retired one, so borrower-chosen transform calldata cannot point the migration at another position of the same owner
+- the hook's `_custodiedShares` reserve is honored on every balance the running action may spend, including the zero-share-deposit guard and the liquidity restore that follows it: a pool whose currency is another auto-lend vault's share token can never have another position's shares consumed by a rebuild
 - hook swap routing is protocol-managed, not user-managed
 - hook swap fees are direct-send, not retained
 - dynamic-fee hook routes are intentionally unsupported
 - controllers are governed by `hook.owner()`
 - hook automation migrates across a position remint for vault-held positions (vault notification) and for direct range changes whose mint `hookData` carries the tagged old token id (`REMINT_MIGRATION_TAG`), checked against the minter's ERC721 authority over it; a direct range change without that opt-in intentionally leaves the replacement without automation (`AUDIT-ACCEPTED-NONVAULT-REMINT-AUTOMATION-LOSS`) ; a tagged mint that cannot be honoured reverts the mint, including while the pool's trigger cursor lags the live price (`TriggerCursorStale`)
-- hook-managed swaps intentionally have no default `amountOutMin` floor. What bounds them is that no hook action starts while the pool price is outside the oracle window: `_afterSwap` dispatches no trigger while the live tick is outside `oracleTick +- maxTicksFromOracle`, re-checks after every executed action and requeues the rest of a tick when an action's own swap leaves the window (triggers stay armed for a later in-window swap); while dispatch is deferred the trigger cursor lags the live price and new trigger registrations revert with `TriggerCursorStale` so none can be placed where the resumed walk would miss it (operationally: `setPositionConfig` with triggers, and vault remints that carry automation, are unavailable in a pool while its price sits more than `maxTicksFromOracle` from the oracle, until a swap ends back inside the window); the hook's action entry points are reachable from a vault only during a transform the hook itself started; the permissionless `autoCollect` path and configured external routes are price-checked immediately before their swap. Per-position price limits remain available opt-in (`AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR` states the assumed parameters and worst case)
+- hook-managed swaps intentionally have no default `amountOutMin` floor. What bounds them is that no hook action starts while the pool price is outside the oracle window: `_afterSwap` dispatches no trigger while the live tick is outside `oracleTick +- maxTicksFromOracle`, re-checks after every executed action and requeues the rest of a tick when an action's own swap leaves the window (triggers stay armed for a later in-window swap); when an action's swap reverses the walk's direction while still inside the window, the entries left at the fired tick (requeued, or never popped under the per-swap cap) stay reachable because the cursor rests one bucket short of that tick rather than on it, and the continued walk consumes them in the same swap if the price is still past the tick; while dispatch is deferred the trigger cursor lags the live price and new trigger registrations revert with `TriggerCursorStale` so none can be placed where the resumed walk would miss it (operationally: `setPositionConfig` with triggers, and vault remints that carry automation, are unavailable in a pool while its price sits more than `maxTicksFromOracle` from the oracle, until a swap ends back inside the window); the hook's action entry points are reachable from a vault only during a transform the hook itself started; the permissionless `autoCollect` path and configured external routes are price-checked immediately before their swap. Per-position price limits remain available opt-in (`AUDIT-ACCEPTED-HOOK-SWAP-NO-SLIPPAGE-FLOOR` states the assumed parameters and worst case)
 - the hook custodies ERC4626 shares for auto-lend positions and tracks them per share token (`_custodiedShares`); every whole-balance read that feeds a payout subtracts that amount, so a pool whose currency is a share token cannot pay another position's shares out. `AutoLend` (standalone) does the same with `custodiedShares` and additionally refuses to execute on share-token pools
 

@@ -273,6 +273,7 @@ contract UnichainForkHookathonE2E is Script {
             deployment.autoLendActions,
             migrationActions
         );
+        deployment.oracle.setHookFeeQuoter(address(deployment.revertHook), address(feeController));
         require(address(deployment.revertHook) == expectedHookAddress, "Demo: hook address mismatch");
         deployment.revertHook.setMaxTicksFromOracle(MAX_TICKS_FROM_ORACLE);
         deployment.revertHook.setMinPositionValueNative(MIN_POSITION_VALUE_NATIVE);

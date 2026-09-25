@@ -44,6 +44,7 @@ This checklist captures deployment gates that should be completed before a produ
 - Wind-down runbook: `setBiddingEnabled(pool, false)` stops new bids and refunds the queued bid; the running epoch is honored; after it ends and dripping finishes, `sweepPendingDonation` (credits the refund escrow) clears any stuck remainder and unblocks `configurePool`.
 - Monitor `DonateFailed` (drip problems), `EpochMaterialized`/`EpochDripped` (auction health), and bid activity per epoch; run a floor bidder via `AuctionArbExecutor` on flagship pools at launch.
 - Mechanism choice: `HookLeaseController` (continuous Harberger lease) is a drop-in alternative implementing the same `IHookAuctionController` interface. The hook takes exactly ONE controller at deploy time - decide the mechanism per chain BEFORE mining the hook address (the controller address is a constructor arg and part of the CREATE2 mining). The deploy scripts wire the epoch auction by default; to use the lease instead, deploy `HookLeaseController` at the sidecar nonce and pass it to the hook. Lease-specific wind-down: `setLeasingEnabled(pool, false)`, wait for rent insolvency (or lessee exit), `evictLease` if needed, then `sweepPendingDonation`.
+- Lease pricing: `minRentDepositSeconds` is a nonrefundable minimum rent commitment at the entry price, not merely a refundable deposit requirement. Confirm the tax rate and minimum duration together. Early exits, buyouts, and evictions settle any unpaid commitment before refunds; normal elapsed rent counts toward it. `minimumRentRemaining(poolId)` exposes the outstanding commitment included in the reported rent balance.
 
 ## Emergency Runbook
 
@@ -64,3 +65,15 @@ Addresses recorded in `broadcast/` (`transactions[].contractAddress` for `contra
 | Base (8453) | V4Vault (existing, USDC) | `0xaf98803a1f43afC14335360e089F6B12947924ED` | `DeployBaseHookUpgrade.DEFAULT_VAULT` |
 
 The full-stack `Deploy{Base,Arbitrum,Mainnet,Unichain}` broadcasts in the repo are dry runs only.
+
+## PR #40 follow-up deployment requirements
+
+- Deploy the updated vault, oracle, hook, fee controller, and action helpers as a compatible set.
+  Existing immutable vaults/oracles cannot receive these fixes through a hook-only upgrade. The
+  Base hook-upgrade script checks for the new API generation before broadcasting.
+- Register each hooked pool's trusted fee quoter on the oracle before admitting its collateral.
+- Review and admit only restricted, non-upgradeable executors before enabling bids/leases.
+- Set explicit token debt budgets where the global debt limit times concentration factor exceeds
+  the intended exposure. Deposits do not change these governance budgets.
+- Direct PositionManager clients must support fee-paying INCREASE(0) collection before removal.
+- Configure archive-rpc environment restrictions and verify historical key revocation with the provider.

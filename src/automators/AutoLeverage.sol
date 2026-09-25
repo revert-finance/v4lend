@@ -201,8 +201,12 @@ contract AutoLeverage is Automator {
         _sendRemainingBalances(owner, ctx.token0, ctx.token1);
 
         (uint256 newDebt,, uint256 newCollateralValue,,) = vault.loanInfo(params.tokenId);
-        // the user's rebalance band doubles as the accepted overshoot above target
-        if (!AutoLeverageLib.improvesTowardTarget(
+        // The operator supplies swap routing, so the postcondition must bind settlement to the plan:
+        // the ratio has to land inside the user's band (or below target), not merely move. The rebalance
+        // band doubles as the accepted deviation above target in both directions. A strict decrease
+        // alone would let a deleverage remove target-sized liquidity while only part of the swap
+        // output reaches the automator and is repaid.
+        if (!AutoLeverageLib.landsWithinTolerance(
                 ctx.currentDebt, ctx.collateralValue, newDebt, newCollateralValue, targetRatio, threshold
             )) revert NoImprovement();
         emit AutoLeverageExecuted(params.tokenId, params.leverageUp, ctx.currentDebt, newDebt);

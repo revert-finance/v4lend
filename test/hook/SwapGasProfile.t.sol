@@ -185,6 +185,7 @@ contract SwapGasProfileTest is BaseTest {
             })
         );
         t1.approve(address(auctionController), type(uint256).max);
+        auctionController.setExecutorAdmission(address(winnerSwapper), true);
         auctionController.bidNext(auctionKey, address(winnerSwapper), 1e18);
 
         // Prime every pool with one large swap so tick cursors and hook slots hold nonzero

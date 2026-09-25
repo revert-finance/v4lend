@@ -137,8 +137,9 @@ contract AutoExit is Automator {
         // Get current tick
         (, int24 tick,,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(poolKey));
 
-        // Check trigger condition
-        if (config.token0TriggerTick <= tick && tick < config.token1TriggerTick) {
+        // Check trigger condition: the lower trigger is reached at or below its tick, the upper one
+        // at or above, matching the hook's inclusive trigger evaluation on both sides.
+        if (config.token0TriggerTick < tick && tick < config.token1TriggerTick) {
             revert NotReady();
         }
 
@@ -170,17 +171,20 @@ contract AutoExit is Automator {
             state.owner = vault.ownerOf(params.tokenId);
             state.lendToken = Currency.wrap(vault.asset());
 
-            // Vault asset must be one of the pool tokens for debt repayment to work
+            // The vault asset must be one of the pool tokens only when there is debt to repay: a
+            // zero-debt loan in any accepted collateral pair exits with its tokens sent to the owner.
             if (!(state.lendToken == token0) && !(state.lendToken == token1)) {
-                revert InvalidConfig();
+                (uint256 debt,,,,) = vault.loanInfo(params.tokenId);
+                if (debt > 0) {
+                    revert InvalidConfig();
+                }
             }
 
             // Swap sells (isAbove ? token1 : token0) and buys the other
             // Repay before swap when lend token is on the sell side (or no swap)
             bool repayBeforeSwap = !isSwap || (isAbove ? (state.lendToken == token1) : (state.lendToken == token0));
             if (repayBeforeSwap) {
-                (state.amount0, state.amount1) =
-                    _repayVaultDebt(vault, params.tokenId, state.lendToken, token0, token1, state.amount0, state.amount1);
+                _repayVaultDebt(vault, params.tokenId, token0, token1, state);
             }
         } else {
             state.owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
@@ -214,9 +218,7 @@ contract AutoExit is Automator {
             bool repayAfterSwap =
                 isSwap && (isAbove ? (state.lendToken == token0) : (state.lendToken == token1));
             if (repayAfterSwap) {
-                (state.amount0, state.amount1) = _repayVaultDebt(
-                    IVault(msg.sender), params.tokenId, state.lendToken, token0, token1, state.amount0, state.amount1
-                );
+                _repayVaultDebt(IVault(msg.sender), params.tokenId, token0, token1, state);
             }
         }
 
@@ -239,39 +241,53 @@ contract AutoExit is Automator {
         );
     }
 
+    /// @dev Settles the vault debt from the lend-token proceeds. The debt is senior to the automation
+    ///      reward: when the proceeds net of the reserved reward do not cover it, the reward reserved in
+    ///      the lend token pays the remainder and is reduced by exactly that amount. Without this a
+    ///      loan with net proceeds below the debt but gross proceeds above it could not be exited at
+    ///      all (the vault's final health check rejects an emptied position with debt left).
     function _repayVaultDebt(
         IVault vault,
         uint256 tokenId,
-        Currency lendToken,
         Currency token0,
         Currency token1,
-        uint256 amount0,
-        uint256 amount1
-    ) internal returns (uint256, uint256) {
-        uint256 lendAmount;
-        if (lendToken == token0) {
-            lendAmount = amount0;
-        } else if (lendToken == token1) {
-            lendAmount = amount1;
+        ExecuteState memory state
+    ) internal {
+        bool lendIsToken0 = state.lendToken == token0;
+        if (!lendIsToken0 && !(state.lendToken == token1)) {
+            return;
+        }
+        uint256 lendAmount = lendIsToken0 ? state.amount0 : state.amount1;
+        uint256 reserved = lendIsToken0 ? state.protocolFee0 : state.protocolFee1;
+
+        (uint256 debt,,,,) = vault.loanInfo(tokenId);
+        if (debt == 0) {
+            return;
+        }
+        uint256 repayAmount = lendAmount > debt ? debt : lendAmount;
+        if (repayAmount < debt && reserved > 0) {
+            uint256 shortfall = debt - repayAmount;
+            repayAmount += shortfall > reserved ? reserved : shortfall;
+        }
+        if (repayAmount == 0) {
+            return;
         }
 
-        if (lendAmount > 0) {
-            (uint256 debt,,,,) = vault.loanInfo(tokenId);
-            if (debt > 0) {
-                uint256 repayAmount = lendAmount > debt ? debt : lendAmount;
-                SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), address(vault), repayAmount);
-                (uint256 repaid,) = vault.repay(tokenId, repayAmount, false);
-                // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
-                SafeERC20.forceApprove(IERC20(Currency.unwrap(lendToken)), address(vault), 0);
-                if (lendToken == token0) {
-                    amount0 -= repaid;
-                } else {
-                    amount1 -= repaid;
-                }
-            }
-        }
+        SafeERC20.forceApprove(IERC20(Currency.unwrap(state.lendToken)), address(vault), repayAmount);
+        (uint256 repaid,) = vault.repay(tokenId, repayAmount, false);
+        // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
+        SafeERC20.forceApprove(IERC20(Currency.unwrap(state.lendToken)), address(vault), 0);
 
-        return (amount0, amount1);
+        // the net proceeds pay first, the reserved reward covers the rest
+        uint256 fromNet = repaid > lendAmount ? lendAmount : repaid;
+        uint256 fromReward = repaid - fromNet;
+        if (lendIsToken0) {
+            state.amount0 = lendAmount - fromNet;
+            state.protocolFee0 = reserved - fromReward;
+        } else {
+            state.amount1 = lendAmount - fromNet;
+            state.protocolFee1 = reserved - fromReward;
+        }
     }
 
     /// @notice Configure a token for auto-exit

@@ -6,6 +6,10 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 interface IVault is IERC4626 {
     function transformedTokenId() external view returns (uint256 tokenId);
 
+    /// @notice The token id the running transform was started with (0 outside a transform). A remint
+    ///         moves `transformedTokenId` to the replacement while this stays on the retired token.
+    function transformOriginTokenId() external view returns (uint256 tokenId);
+
     function notifyERC721Received(uint256 tokenId, address recipient) external;
 
     function loans(uint256 tokenId) external view returns (uint256 debtShares);

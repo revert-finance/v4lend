@@ -22,7 +22,9 @@ import {RevertHookLookupBase} from "./RevertHookLookupBase.sol";
 /// @title RevertHookBase
 /// @notice Hook-only shared base for constructor wiring, common lookups, and delegatecall helpers
 abstract contract RevertHookBase is RevertHookLookupBase, BaseHook, IUnlockCallback {
-    IPositionManager internal immutable positionManager;
+    /// @dev Public so the fee controller can refuse the PositionManager as fee recipient (its
+    ///      permissionless SWEEP would let anyone take fees parked there).
+    IPositionManager public immutable positionManager;
     IWETH9 internal immutable weth;
     IV4Oracle internal immutable v4Oracle;
     IHookFeeController internal immutable hookFeeController;

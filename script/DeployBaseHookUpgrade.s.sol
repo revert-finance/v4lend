@@ -4,6 +4,7 @@ pragma solidity ^0.8.30;
 import {Script, console} from "forge-std/Script.sol";
 
 import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
+import {LiquidationEscrow} from "src/vault/LiquidationEscrow.sol";
 import {V4Vault} from "src/vault/V4Vault.sol";
 import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
@@ -102,6 +103,14 @@ contract DeployBaseHookUpgrade is Script {
 
         require(address(oracle).code.length > 0, "DeployBaseHookUpgrade: oracle missing");
         require(address(vault).code.length > 0, "DeployBaseHookUpgrade: vault missing");
+        // These immutable contracts cannot acquire the new fee/risk APIs through a hook-only upgrade.
+        // Fail before broadcasting any deployments when pointed at an older vault/oracle generation.
+        try oracle.hookFeeQuoters(address(0)) returns (address) {} catch {
+            revert("DeployBaseHookUpgrade: redeploy net-fee oracle first");
+        }
+        try vault.liquidationEscrow() returns (LiquidationEscrow) {} catch {
+            revert("DeployBaseHookUpgrade: redeploy updated vault first");
+        }
         require(oldHook != address(0), "DeployBaseHookUpgrade: OLD_HOOK not set");
         require(oldV4Utils != address(0), "DeployBaseHookUpgrade: OLD_V4UTILS not set");
         // The old hook must be the one the vault currently trusts; anything else is a typo.
@@ -213,6 +222,7 @@ contract DeployBaseHookUpgrade is Script {
         revertHook.setVault(address(vault));
         revertHook.setAutoLendVault(USDC, vault);
         vault.setTransformer(address(revertHook), true);
+        oracle.setHookFeeQuoter(address(revertHook), address(feeController));
         vault.setHookAllowList(address(revertHook), true);
 
         v4Utils =

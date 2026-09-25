@@ -153,6 +153,7 @@ abstract contract RevertHookExecution is RevertHookConfig {
 
         if (!_transformViaVault(owner, tokenId, abi.encodeCall(this.autoLeverage, (poolKey, tokenId, isUpperTrigger))))
         {
+            autoLeverageNeedsAttention[tokenId] = true;
             _emitActionFailed(tokenId, Mode.AUTO_LEVERAGE);
         }
     }

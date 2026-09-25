@@ -224,12 +224,13 @@ abstract contract Swapper is Constants {
 
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory paramsArray = new bytes[](2);
+        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory paramsArray = new bytes[](3);
+        paramsArray[0] = abi.encode(tokenId, 0, type(uint128).max, type(uint128).max, bytes(""));
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
         // Uniswap v4 encodes amount minima as uint128. Callers/operators are trusted
         // to pass uint128-sized slippage minima; larger values intentionally narrow.
-        paramsArray[0] = abi.encode(
+        paramsArray[1] = abi.encode(
             tokenId,
             uint256(liquidityRemove),
             // forge-lint: disable-next-line(unsafe-typecast)
@@ -238,7 +239,7 @@ abstract contract Swapper is Constants {
             uint128(amount1Min),
             decreaseLiquidityHookData
         );
-        paramsArray[1] = abi.encode(currency0, currency1, address(this));
+        paramsArray[2] = abi.encode(currency0, currency1, address(this));
 
         positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
 

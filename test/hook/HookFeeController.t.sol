@@ -30,6 +30,17 @@ contract HookOwnerWithPoolManagerMock is HookOwnerMock {
     }
 }
 
+/// @dev A hook exposing both system-contract getters the fee controller consults.
+contract HookOwnerWithSystemContractsMock is HookOwnerWithPoolManagerMock {
+    address public positionManager;
+
+    constructor(address initialOwner, address poolManager_, address positionManager_)
+        HookOwnerWithPoolManagerMock(initialOwner, poolManager_)
+    {
+        positionManager = positionManager_;
+    }
+}
+
 contract HookFeeControllerTest is Test {
     address internal constant OWNER = address(0xA11CE);
     address internal constant RECIPIENT = address(0xBEEF);
@@ -197,6 +208,31 @@ contract HookFeeControllerTest is Test {
         vm.prank(OWNER);
         pmController.setProtocolFeeRecipient(other);
         assertEq(pmController.protocolFeeRecipient(), other);
+    }
+
+    /// @notice External audit V4LE-27: the v4 PositionManager's SWEEP action is permissionless and
+    ///         hands its whole balance of a currency to any caller, so fees direct-sent there belong
+    ///         to the first sweeper. It must be refused like the PoolManager; other recipients and a
+    ///         hook without the getter (every other test in this file) keep working.
+    function test_RevertWhenProtocolFeeRecipientIsPositionManager() public {
+        address poolManager = makeAddr("poolManager");
+        address posm = makeAddr("positionManager");
+        HookOwnerWithSystemContractsMock sysHook = new HookOwnerWithSystemContractsMock(OWNER, poolManager, posm);
+
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        new HookFeeController(address(sysHook), posm, 200, 300);
+
+        HookFeeController sysController = new HookFeeController(address(sysHook), RECIPIENT, 200, 300);
+        vm.startPrank(OWNER);
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        sysController.setProtocolFeeRecipient(posm);
+        vm.expectRevert(HookFeeController.InvalidConfig.selector);
+        sysController.setProtocolFeeRecipient(poolManager);
+
+        address other = makeAddr("other");
+        sysController.setProtocolFeeRecipient(other);
+        vm.stopPrank();
+        assertEq(sysController.protocolFeeRecipient(), other, "any other recipient is accepted");
     }
 
     /// @notice The deploy scripts create the controller BEFORE the hook, at the hook's predicted

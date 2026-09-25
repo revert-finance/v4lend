@@ -47,6 +47,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
         int24 tickLower = _getTickLower(tick, key.tickSpacing);
         _triggerCursors[key.toId()].tickLowerLast = tickLower;
+        _triggerCursors[key.toId()].tickLowerOpposite = tickLower;
         return BaseHook.afterInitialize.selector;
     }
 
@@ -74,21 +75,35 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
     /// @dev Isolates the oracle read so a failing oracle aborts trigger processing (never the swap):
     ///      the price call is tried directly and bounds-checked before the tick conversion, instead
     ///      of an external self-call wrapper (saves the call overhead and the extra entrypoint).
-    function _tryOracleMaxEndTick(PoolKey calldata key, bool up) internal view returns (bool ok, int24 maxEndTick) {
+    ///      The bounds are exact ticks: `oracleTick +- _maxTicksFromOracle` with no rounding to the
+    ///      pool's tick spacing, and they are compared against the exact live tick
+    ///      (_outsideOracleWindow). Flooring both sides to the spacing let the effective window grow
+    ///      by up to two spacings less two ticks (399 instead of 100 ticks at spacing 200), so
+    ///      same-pool actions could dispatch materially off-oracle. Bucket rounding belongs to the
+    ///      cursor walk only.
+    function _tryOracleTickBounds(PoolKey calldata key)
+        internal
+        view
+        returns (bool ok, int24 lowerBound, int24 upperBound)
+    {
         try v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(key.currency0), Currency.unwrap(key.currency1)) returns (
             uint160 oracleSqrtPriceX96
         ) {
             if (oracleSqrtPriceX96 < TickMath.MIN_SQRT_PRICE || oracleSqrtPriceX96 >= TickMath.MAX_SQRT_PRICE) {
-                return (false, 0);
+                return (false, 0, 0);
             }
-            int24 oracleTick = _getTickLower(TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96), key.tickSpacing);
-            maxEndTick = up
-                ? _getTickLower(oracleTick + _maxTicksFromOracle, key.tickSpacing)
-                : _getTickLower(oracleTick - _maxTicksFromOracle, key.tickSpacing);
-            return (true, maxEndTick);
+            int24 oracleTick = TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96);
+            return (true, oracleTick - _maxTicksFromOracle, oracleTick + _maxTicksFromOracle);
         } catch {
-            return (false, 0);
+            return (false, 0, 0);
         }
+    }
+
+    /// @dev Exact live tick against the exact oracle bounds. Re-reads slot0 instead of reusing the
+    ///      walk's bucket-rounded `liveTick`: the walk is at its stack limit and the slot is warm.
+    function _outsideOracleWindow(PoolId poolId, int24 lowerBound, int24 upperBound) internal view returns (bool) {
+        int24 tick = _getTick(poolId);
+        return tick > upperBound || tick < lowerBound;
     }
 
     /// @dev Fail-open value gate for the remove callback: an oracle that reverts (stale feed,
@@ -125,6 +140,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
         TriggerCursor storage triggerCursor = _triggerCursors[poolId];
         int24 cursor = triggerCursor.tickLowerLast;
+        int24 oppositeCursor = triggerCursor.tickLowerOpposite;
         // No trigger has ever registered: skip the oracle bound, the list walks, and the cursor
         // write entirely (the dominant per-swap costs), from the slot already loaded. The cursor
         // is left stale on purpose - _addPositionTriggers re-baselines it when the first trigger
@@ -133,49 +149,36 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return (this.afterSwap.selector, 0);
         }
         int24 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
-        if (cursor == liveTick) {
+        if (cursor == liveTick && oppositeCursor == liveTick) {
             return (this.afterSwap.selector, 0);
         }
 
-        bool hasCachedUpperOracleMaxEndTick;
-        bool hasCachedLowerOracleMaxEndTick;
-        int24 upperOracleMaxEndTick;
-        int24 lowerOracleMaxEndTick;
+        (bool oracleOk, int24 lowerOracleBound, int24 upperOracleBound) = _tryOracleTickBounds(key);
+        if (!oracleOk) {
+            return (this.afterSwap.selector, 0);
+        }
         uint256 executedActions;
         while (executedActions < _MAX_EXECUTIONS_PER_SWAP) {
             liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
-            if (cursor == liveTick) {
+            if (cursor == liveTick && oppositeCursor == liveTick) {
                 break;
             }
 
+            // The lower endpoint resumes upper triggers; the higher endpoint resumes lower
+            // triggers. Drain the current direction first, then any pending return walk.
+            // An action can rearm between these endpoints before the old walk has caught up.
+            if (
+                cursor == liveTick || (cursor < liveTick && oppositeCursor < cursor)
+                    || (cursor > liveTick && oppositeCursor > cursor)
+            ) {
+                (cursor, oppositeCursor) = (oppositeCursor, cursor);
+            }
             bool increasing = cursor < liveTick;
             int24 tickEnd = liveTick;
-            int24 oracleBound;
-            {
-                // single _tryOracleMaxEndTick call site: its inlined tick-math body must exist
-                // exactly once in the bytecode (one copy per call site would blow EIP-170)
-                if (increasing ? !hasCachedUpperOracleMaxEndTick : !hasCachedLowerOracleMaxEndTick) {
-                    (bool ok, int24 bound) = _tryOracleMaxEndTick(key, increasing);
-                    if (!ok) {
-                        return (this.afterSwap.selector, 0);
-                    }
-                    if (increasing) {
-                        upperOracleMaxEndTick = bound;
-                        hasCachedUpperOracleMaxEndTick = true;
-                    } else {
-                        lowerOracleMaxEndTick = bound;
-                        hasCachedLowerOracleMaxEndTick = true;
-                    }
-                }
-                // Nothing runs while the live price sits outside the oracle window. Trigger
-                // actions swap at the live price, so dispatching the triggers whose tick is inside
-                // the window while the pool has overshot it would execute them at the overshot
-                // price (M-03). They stay armed and the cursor stays put: the next swap that ends
-                // inside the window walks from the cursor and processes them at a bounded price.
-                oracleBound = increasing ? upperOracleMaxEndTick : lowerOracleMaxEndTick;
-                if (increasing ? liveTick > oracleBound : liveTick < oracleBound) {
-                    break;
-                }
+            // Both bounds apply even when a pending return walk starts beyond the live bucket.
+            // Keep the oracle window fixed across the action's own swaps and direction changes.
+            if (_outsideOracleWindow(poolId, lowerOracleBound, upperOracleBound)) {
+                break;
             }
 
             TickLinkedList.List storage list =
@@ -184,6 +187,9 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             (bool exists, int24 tick) = list.searchFirstAfter(cursor);
             if (!exists || (increasing ? tick > tickEnd : tick < tickEnd)) {
                 cursor = tickEnd;
+                if (increasing ? oppositeCursor < tickEnd : oppositeCursor > tickEnd) {
+                    oppositeCursor = tickEnd;
+                }
                 continue;
             }
 
@@ -192,6 +198,9 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
             uint256 length = tokenIdsAtTick.length;
             int24 previousLiveTick = liveTick;
+            if (increasing ? oppositeCursor < liveTick : oppositeCursor > liveTick) {
+                oppositeCursor = liveTick;
+            }
             bool directionReversed;
             for (uint256 i; i < length;) {
                 PositionConfig storage config = _positionConfigs[tokenIdsAtTick[i]];
@@ -211,16 +220,23 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 }
 
                 liveTick = _getTickLower(_getTick(poolId), key.tickSpacing);
+                // Preserve the action's final bucket for the opposite traversal before stopping
+                // for an oracle overshoot or the action cap. Advancing only the original cursor
+                // would lose queued positions; retaining only it would miss rearmed return triggers.
+                if (increasing ? oppositeCursor < liveTick : oppositeCursor > liveTick) {
+                    oppositeCursor = liveTick;
+                }
                 directionReversed = _hasDirectionReversed(previousLiveTick, liveTick, increasing);
                 // The action's own swap may also have carried the pool past the oracle bound in
                 // the traversal direction; the positions still queued at this tick would execute
                 // at that price. Either way put them back. A reversal continues the walk from this
                 // tick; leaving the window stops it with the cursor before the tick, so the next
                 // in-window swap finds them again (same bookkeeping as the per-swap cap).
-                bool leftWindow = !directionReversed && (increasing ? liveTick > oracleBound : liveTick < oracleBound);
+                bool leftWindow = _outsideOracleWindow(poolId, lowerOracleBound, upperOracleBound);
                 if (directionReversed || leftWindow) {
                     if (i < length) {
                         _requeueTokenIdsAtTick(list, tick, tokenIdsAtTick, i);
+                        tickDrained = false;
                     }
                     if (leftWindow) {
                         tickDrained = false;
@@ -232,12 +248,27 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
 
             if (directionReversed || tickDrained) {
                 cursor = tick;
-            } else {
+                // A reversal that leaves entries at `tick` (put back above, or never popped under
+                // the per-swap cap) must keep them reachable. The next search in this direction is
+                // strictly past the cursor, so parking it on the fired tick would strand them until
+                // a full recross; rest one bucket short instead, and the continued walk consumes
+                // them now if the price is still past the tick.
+                if (!tickDrained) {
+                    cursor = increasing ? tick - key.tickSpacing : tick + key.tickSpacing;
+                }
+            }
+            // A reversal may pass the original cursor as well. Retain that final bucket so
+            // triggers rearmed there are reachable on the next move in the original direction.
+            if (increasing ? liveTick < cursor : liveTick > cursor) {
+                cursor = liveTick;
+            }
+            if (!directionReversed && !tickDrained) {
                 break;
             }
         }
 
         triggerCursor.tickLowerLast = cursor;
+        triggerCursor.tickLowerOpposite = oppositeCursor;
         return (this.afterSwap.selector, 0);
     }
 
@@ -314,11 +345,18 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
         uint256 tokenId = uint256(params.salt);
+        // A zero-liquidity poke (the fee-first INCREASE(0) prelude every supported removal sends,
+        // or a plain fee collection) changes the position's value only by the fees it collects. When
+        // it collects none, nothing left the position and the value gate below would re-read the
+        // oracle for an unchanged answer; the principal removal that follows a prelude runs it anyway.
+        // A poke that does collect fees keeps the check: uncollected fees count toward the value
+        // minimum, so a fee-only collection can take a position below it.
+        bool valueUnchanged = params.liquidityDelta == 0 && feeDelta.amount0() == 0 && feeDelta.amount1() == 0;
         feeDelta = _takeProtocolFees(tokenId, key, params.liquidityDelta, delta, feeDelta);
 
         // defensive: sender is always the PositionManager today (see _beforeAddLiquidity note);
         // hook-internal operations run the logic below, which is idempotent by design
-        if (sender == address(this)) {
+        if (sender == address(this) || valueUnchanged) {
             return (BaseHook.afterRemoveLiquidity.selector, feeDelta);
         }
 

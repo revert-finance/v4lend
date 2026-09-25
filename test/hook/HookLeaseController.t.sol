@@ -7,7 +7,9 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -23,6 +25,43 @@ import {DirectSwapper, BlacklistingToken} from "test/hook/HookAuctionController.
 
 import {RevertHook} from "src/RevertHook.sol";
 import {HookLeaseController} from "src/hook/HookLeaseController.sol";
+
+/// @notice Permissionless forwarder: ANYONE can swap through it. Models the public executor of
+///         external audit V4LE-36 - a lessee registering it hands its discount to every caller.
+contract PublicSwapper is IUnlockCallback {
+    IPoolManager internal immutable poolManager;
+
+    constructor(IPoolManager _poolManager) {
+        poolManager = _poolManager;
+    }
+
+    function swapExactIn(PoolKey memory key, bool zeroForOne, uint256 amountIn) external returns (uint256 amountOut) {
+        amountOut = abi.decode(poolManager.unlock(abi.encode(key, zeroForOne, amountIn)), (uint256));
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(poolManager), "PublicSwapper: not poolManager");
+        (PoolKey memory key, bool zeroForOne, uint256 amountIn) = abi.decode(data, (PoolKey, bool, uint256));
+        BalanceDelta delta = poolManager.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(amountIn),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            ""
+        );
+        Currency inCurrency = zeroForOne ? key.currency0 : key.currency1;
+        Currency outCurrency = zeroForOne ? key.currency1 : key.currency0;
+        uint256 owed = uint256(uint128(-(zeroForOne ? delta.amount0() : delta.amount1())));
+        uint256 received = uint256(uint128(zeroForOne ? delta.amount1() : delta.amount0()));
+        poolManager.sync(inCurrency);
+        IERC20(Currency.unwrap(inCurrency)).transfer(address(poolManager), owed);
+        poolManager.settle();
+        poolManager.take(outCurrency, address(this), received);
+        return abi.encode(received);
+    }
+}
 
 contract HookLeaseControllerTest is BaseTest {
     using EasyPosm for IPositionManager;
@@ -111,12 +150,23 @@ contract HookLeaseControllerTest is BaseTest {
 
         lesseeSwapper = new DirectSwapper(poolManager);
         otherSwapper = new DirectSwapper(poolManager);
+        leaseController.setExecutorAdmission(address(lesseeSwapper), true);
+        leaseController.setExecutorAdmission(address(otherSwapper), true);
         token0.transfer(address(lesseeSwapper), 100e18);
         token1.transfer(address(lesseeSwapper), 100e18);
         token0.transfer(address(otherSwapper), 100e18);
         token1.transfer(address(otherSwapper), 100e18);
 
         leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    function testUnadmittedPublicExecutorRejected() public {
+        address executor = address(new DirectSwapper(poolManager));
+        vm.expectRevert(HookLeaseController.InvalidExecutor.selector);
+        _startLease(lesseeA, executor, 1e18, 0.2e18);
+        vm.prank(makeAddr("unauthorized"));
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        leaseController.setExecutorAdmission(executor, true);
     }
 
     function _defaultConfig() internal view returns (HookLeaseController.PoolLeaseConfig memory) {
@@ -153,6 +203,85 @@ contract HookLeaseControllerTest is BaseTest {
     }
 
     // ==================== Lifecycle ====================
+
+    function testSameTransactionLeaseChargesMinimumRent() public {
+        uint256 beforeBalance = token1.balanceOf(lesseeA);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumRent = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        (uint256 discounted, uint256 normal) = _swapOutcomes(1e18);
+        assertGt(discounted, normal, "lease grants the discount immediately");
+        lesseeSwapper.swapExactIn(leasePoolKey, true, 1e18);
+
+        vm.prank(lesseeA);
+        uint256 refund = leaseController.exitLease(leasePoolKey);
+        assertEq(refund, 1.2e18 - minimumRent, "minimum rent cannot be refunded");
+        assertEq(beforeBalance - token1.balanceOf(lesseeA), minimumRent, "discount has a real cost");
+        (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 fees = leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient);
+        assertEq(fees, minimumRent * PROTOCOL_FEE_BPS / 10_000);
+        assertEq(pending + fees, minimumRent, "minimum rent belongs to LPs and protocol");
+        assertEq(token1.balanceOf(address(leaseController)), pending + fees, "escrow remains backed");
+    }
+
+    function testSameTransactionBuyoutChargesBothMinimumRents() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumA = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        uint256 priceB = leaseController.minBuyoutPrice(leasePoolId);
+        vm.prank(lesseeB);
+        leaseController.buyout(leasePoolKey, address(otherSwapper), priceB, 0.2e18);
+        uint256 minimumB = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        assertEq(leaseController.refunds(currency1, lesseeA), 1.2e18 - minimumA);
+        otherSwapper.swapExactIn(leasePoolKey, true, 1e18);
+
+        vm.prank(lesseeB);
+        assertEq(leaseController.exitLease(leasePoolKey), priceB + 0.2e18 - minimumB);
+        vm.prank(lesseeA);
+        leaseController.claimRefund(currency1, lesseeA);
+        (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 fees = leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient);
+        assertEq(pending + fees, minimumA + minimumB, "buyout cannot recover committed rent");
+        assertEq(token1.balanceOf(address(leaseController)), pending + fees);
+    }
+
+    function testLoweringPriceCannotEraseMinimumRent() public {
+        uint256 beforeBalance = token1.balanceOf(lesseeA);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumRent = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        vm.prank(lesseeA);
+        leaseController.setPrice(leasePoolKey, 0.5e18);
+        vm.prank(lesseeA);
+        leaseController.exitLease(leasePoolKey);
+        assertEq(beforeBalance - token1.balanceOf(lesseeA), minimumRent);
+    }
+
+    function testFuzzLeaseExitCreditsElapsedRentTowardMinimum(uint32 elapsed) public {
+        elapsed = uint32(bound(elapsed, 0, 2 * MIN_RENT_SECONDS));
+        uint256 beforeBalance = token1.balanceOf(lesseeA);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.3e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId);
+        vm.warp(block.timestamp + elapsed);
+        // Force an intermediate accrual to check that previously paid rent is not charged twice.
+        leaseController.drip(leasePoolKey);
+        vm.prank(lesseeA);
+        leaseController.exitLease(leasePoolKey);
+        uint256 chargedSeconds = elapsed > MIN_RENT_SECONDS ? elapsed : MIN_RENT_SECONDS;
+        assertEq(beforeBalance - token1.balanceOf(lesseeA), rps * chargedSeconds);
+        assertEq(leaseController.minimumRentRemaining(leasePoolId), 0, "closed lease clears commitment");
+    }
+
+    function testImmediateEvictionCannotRefundMinimumRent() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumRent = leaseController.minimumRentRemaining(leasePoolId);
+        token1.transfer(lesseeA, 10_000e18);
+        vm.prank(lesseeA);
+        leaseController.setPrice(leasePoolKey, 10_000e18);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(paidThrough, block.timestamp, "price raise makes prepaid runway less than one second");
+        uint256 refund = leaseController.evictLease(leasePoolKey);
+        assertEq(refund, 10_000e18 + 0.2e18 - minimumRent);
+        assertEq(leaseController.refunds(currency1, lesseeA), refund);
+        assertEq(leaseController.minimumRentRemaining(leasePoolId), 0);
+    }
 
     /// @notice READ THIS ONE to understand the mechanism. Walks the whole Harberger-lease
     ///         lifecycle end to end; every other test isolates one property of it.
@@ -194,9 +323,7 @@ contract HookLeaseControllerTest is BaseTest {
         uint256 accrued = rent - rentBalance;
         assertEq(accrued, rps * (1800 + MIN_DRIP + 1), "rent accrues per second");
         uint256 fee = accrued * PROTOCOL_FEE_BPS / 10_000;
-        assertEq(
-            leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient), fee, "protocol fee split off"
-        );
+        assertEq(leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient), fee, "protocol fee split off");
         uint256 donated = token1.balanceOf(address(poolManager)) - pmBefore;
         assertGt(donated, 0, "rent dripped to the pool's LPs");
         assertEq(pending + donated + fee, accrued, "accrued rent = pending + donated + protocol fee");
@@ -505,18 +632,154 @@ contract HookLeaseControllerTest is BaseTest {
         assertGt(outLessee, outOther, "a positive-duration top-up restores the discount");
     }
 
-    function testPaidThroughSaturation() public {
-        // a huge prepaid rent saturates paidThrough at uint40 max instead of overflowing
+    /// @notice External audit V4LE-22: paidThrough used to saturate at uint40.max. At the minimum
+    ///         price (1 raw unit) rent rounds up to 1 raw unit per second, so ~1e-6 tokens of
+    ///         prepaid rent reached the sentinel and the lease could never be evicted (evictLease
+    ///         reverts while now < paidThrough) nor the pool reconfigured. The prepaid runway is now
+    ///         bounded at install, top-up and price cut, so the sentinel is unreachable.
+    function testPrepaidRunwayIsBoundedSoPaidThroughCannotSaturate() public {
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
-        config.taxRatePerSecondX64 = 1; // ~zero tax: rps rounds up to 1 wei/second
+        config.taxRatePerSecondX64 = 1; // ~zero tax: rps rounds up to 1 wei/second at any price
         leaseController.configurePool(leasePoolKey, config);
+        uint256 maxRunway = leaseController.MAX_PREPAID_RUNWAY_SECONDS();
 
-        _startLease(lesseeA, address(lesseeSwapper), 1e18, 50e18); // 50e18 seconds of rent
+        // the audit's exploit: minimum price, a deposit that reaches the uint40 sentinel
+        uint256 sentinelDeposit = uint256(type(uint40).max) - block.timestamp + 1;
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.startLease(leasePoolKey, address(lesseeSwapper), 1, sentinelDeposit);
+
+        // one second past the bound is refused, the bound itself is accepted
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.startLease(leasePoolKey, address(lesseeSwapper), 1, maxRunway + 1);
+        _startLease(lesseeA, address(lesseeSwapper), 1, maxRunway);
         (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
-        assertEq(paidThrough, type(uint40).max, "paidThrough saturates");
-
+        assertEq(paidThrough, block.timestamp + maxRunway, "runway exactly at the bound");
         (uint256 outLessee, uint256 outOther) = _swapOutcomes(1e18);
-        assertGt(outLessee, outOther, "discount active with saturated paidThrough");
+        assertGt(outLessee, outOther, "discount active within the bound");
+
+        // a top-up cannot push past the bound either...
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.fundRent(leasePoolKey, 1);
+        // ...but refilling what has accrued back up to the bound is fine
+        vm.warp(block.timestamp + 100);
+        vm.prank(lesseeA);
+        leaseController.fundRent(leasePoolKey, 100);
+        (,,,,, paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(paidThrough, block.timestamp + maxRunway, "top-up refills the runway to the bound");
+
+        // wind-down terminates the lease within the bound: solvent until then, evictable after
+        leaseController.setLeasingEnabled(leasePoolKey, false);
+        vm.warp(uint256(paidThrough) - 1);
+        vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
+        leaseController.evictLease(leasePoolKey);
+        vm.warp(uint256(paidThrough));
+        leaseController.evictLease(leasePoolKey);
+        leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    /// @notice External audit V4LE-36 (V4LE-22 composed with a public executor): a lessee registers
+    ///         a permissionless forwarder as executor, so EVERY caller routing through it trades at
+    ///         the discount. With the saturated runway of V4LE-22 that subsidy survived the owner's
+    ///         wind-down for ~34,000 years: evictLease reverted while now < paidThrough == uint40.max
+    ///         and configurePool stayed blocked. With the bounded runway, setLeasingEnabled(false)
+    ///         freezes top-ups and runway-extending price cuts, so the lease - and the public
+    ///         discount - ends within MAX_PREPAID_RUNWAY_SECONDS and eviction opens to anyone.
+    function testWindDownEndsPublicExecutorDiscountWithinBoundedRunway() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1; // rent rounds up to 1 wei/second at the minimum price
+        leaseController.configurePool(leasePoolKey, config);
+        uint256 maxRunway = leaseController.MAX_PREPAID_RUNWAY_SECONDS();
+
+        PublicSwapper pub = new PublicSwapper(poolManager);
+        // Explicitly model a governance mistake to retain the wind-down regression.
+        leaseController.setExecutorAdmission(address(pub), true);
+        token0.transfer(address(pub), 10e18);
+        token1.transfer(address(pub), 10e18);
+        address stranger = makeAddr("stranger");
+
+        // the saturating deposit of the audit is refused; the lessee prepays the maximum instead
+        uint256 sentinelDeposit = uint256(type(uint40).max) - block.timestamp + 1;
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.startLease(leasePoolKey, address(pub), 1, sentinelDeposit);
+        _startLease(lesseeA, address(pub), 1, maxRunway);
+
+        // anyone routing through the public executor gets the discount
+        (uint256 outPublic, uint256 outOther) = _publicVsOther(pub, stranger, 1e18);
+        assertGt(outPublic, outOther, "the public executor forwards the discount to a stranger");
+
+        // wind-down: the prepaid lease is honored, but only up to the bounded runway
+        leaseController.setLeasingEnabled(leasePoolKey, false);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertLe(paidThrough, block.timestamp + maxRunway, "runway bounded");
+        vm.warp(uint256(paidThrough) - 1);
+        vm.expectRevert(HookLeaseController.LeaseStillSolvent.selector);
+        leaseController.evictLease(leasePoolKey);
+        (outPublic, outOther) = _publicVsOther(pub, stranger, 1e18);
+        assertGt(outPublic, outOther, "still honored inside the runway");
+
+        // at the bound the discount is gone, anyone can evict, the owner can retire the pool
+        vm.warp(uint256(paidThrough));
+        (outPublic, outOther) = _publicVsOther(pub, stranger, 1e18);
+        assertEq(outPublic, outOther, "no discount through the public executor after the runway");
+        vm.prank(stranger);
+        leaseController.evictLease(leasePoolKey);
+        (address lessee,,,) = leaseController.getActiveLessee(leasePoolId);
+        assertEq(lessee, address(0), "slot freed");
+        leaseController.configurePool(leasePoolKey, _defaultConfig());
+    }
+
+    /// @dev Swap output of a stranger routing through the public executor vs a plain swapper, at
+    ///      the same pool state (each in its own snapshot).
+    function _publicVsOther(PublicSwapper pub, address caller, uint256 amountIn)
+        internal
+        returns (uint256 outPublic, uint256 outOther)
+    {
+        uint256 snap = vm.snapshotState();
+        vm.prank(caller);
+        outPublic = pub.swapExactIn(leasePoolKey, true, amountIn);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        outOther = otherSwapper.swapExactIn(leasePoolKey, true, amountIn);
+        vm.revertToState(snap);
+    }
+
+    /// @notice External audit V4LE-22: a price cut lowers the rent and stretches the remaining
+    ///         balance over a longer runway, so it is bounded like a deposit.
+    function testPriceCutCannotStretchRunwayPastBound() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1;
+        leaseController.configurePool(leasePoolKey, config);
+        uint256 maxRunway = leaseController.MAX_PREPAID_RUNWAY_SECONDS();
+
+        // price 3e19 -> rps = ceil(3e19 / 2^64) = 2 wei/s; a deposit of 2 * maxRunway is exactly the bound
+        _startLease(lesseeA, address(lesseeSwapper), 3e19, 2 * maxRunway);
+        assertEq(leaseController.rentPerSecond(leasePoolId), 2, "precondition: 2 wei/s");
+
+        // cutting the price to rps = 1 would double the runway -> refused
+        vm.prank(lesseeA);
+        vm.expectRevert(HookLeaseController.PrepaidRunwayTooLong.selector);
+        leaseController.setPrice(leasePoolKey, 1e18);
+
+        // raising the price shortens the runway and is fine
+        vm.prank(lesseeA);
+        leaseController.setPrice(leasePoolKey, 4e19);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertLt(paidThrough, block.timestamp + maxRunway, "raising the price shortens the runway");
+    }
+
+    /// @notice A mandatory deposit longer than the runway bound could never be installed.
+    function testConfigureRejectsMinRentDepositBeyondRunwayBound() public {
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.taxRatePerSecondX64 = 1; // so a year of mandatory rent stays escrowable at the price cap
+        config.minRentDepositSeconds = uint32(leaseController.MAX_PREPAID_RUNWAY_SECONDS() + 1);
+        vm.expectRevert(HookLeaseController.InvalidConfig.selector);
+        leaseController.configurePool(leasePoolKey, config);
+        config.minRentDepositSeconds = uint32(leaseController.MAX_PREPAID_RUNWAY_SECONDS());
+        leaseController.configurePool(leasePoolKey, config);
     }
 
     // ==================== Rent accrual and dripping ====================
@@ -601,9 +864,8 @@ contract HookLeaseControllerTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-        uint256 mintCost = pmBefore < token1.balanceOf(address(poolManager))
-            ? token1.balanceOf(address(poolManager)) - pmBefore
-            : 0;
+        uint256 mintCost =
+            pmBefore < token1.balanceOf(address(poolManager)) ? token1.balanceOf(address(poolManager)) - pmBefore : 0;
         leaseController.drip(leasePoolKey);
         assertEq(
             token1.balanceOf(address(poolManager)) - pmBefore,
@@ -617,6 +879,65 @@ contract HookLeaseControllerTest is BaseTest {
         (,,,,,, uint256 pendingAfter) = leaseController.getPoolLeaseState(leasePoolId);
         assertGt(pendingAfter, 0, "bounded slice: the bucket does not dump at once");
         jitTokenId; // silence unused
+    }
+
+    /// @notice Audit follow-up (auction twin): the pending bucket aggregates every parked accrual,
+    ///         so a release sized as a fraction of the WHOLE bucket lets a dust LP that appears after
+    ///         a long zero-liquidity gap capture many horizons of rent per throttle slice. The release
+    ///         must be paced by one horizon of rent, so the slice is what the lease itself would have
+    ///         paid over the same interval however long the gap was.
+    function testPendingSliceIsBoundedByRentRateNotByAggregate() public {
+        uint256 price = 1e18;
+        uint256 rps = _ceilRentPerSecond(price);
+        _startLease(lesseeA, address(lesseeSwapper), price, 0.8e18);
+
+        // no LPs for five horizons: all of that rent parks in the bucket
+        _removeAllFullRangeLiquidity();
+        vm.warp(block.timestamp + 5 * DRIP_HORIZON);
+        leaseController.drip(leasePoolKey);
+        (,,,,,, uint256 pendingBefore) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 netRent = rps * 5 * DRIP_HORIZON * (10_000 - PROTOCOL_FEE_BPS) / 10_000;
+        assertGt(pendingBefore, netRent * 99 / 100, "five horizons of net rent parked");
+        assertEq(
+            leaseController.getPendingReleasePerHorizon(leasePoolId),
+            rps * DRIP_HORIZON,
+            "pace is one horizon of gross rent"
+        );
+
+        // dust LP appears alone (its mint touch advances the clock at zero liquidity), holds one
+        // throttle interval, drips: the bucket may release one interval of rent, not five horizons' share
+        _mintFullRangeLiquidity(1e6);
+        // via-ir treats block.timestamp as loop-invariant, so drive time from a local accumulator
+        uint256 t = block.timestamp;
+        uint256 hold = MIN_DRIP + 1;
+        t += hold;
+        vm.warp(t);
+        leaseController.drip(leasePoolKey);
+        (,,,,,, uint256 pendingAfter) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 released = pendingBefore - pendingAfter;
+        assertGt(released, 0, "a held slice is released");
+        assertLe(released, rps * hold + 1, "pending slice bounded by the rent rate over the interval");
+
+        // later slices are bounded the same way and the bucket still drains completely
+        for (uint256 i = 0; i < 5; i++) {
+            (,,,,,, uint256 before) = leaseController.getPoolLeaseState(leasePoolId);
+            t += hold;
+            vm.warp(t);
+            leaseController.drip(leasePoolKey);
+            (,,,,,, uint256 after_) = leaseController.getPoolLeaseState(leasePoolId);
+            assertGt(before - after_, 0, "later slices keep flowing");
+            assertLe(before - after_, rps * hold + 1, "later slices bounded too");
+        }
+        for (uint256 i = 0; i < 60; i++) {
+            t += DRIP_HORIZON;
+            vm.warp(t);
+            leaseController.drip(leasePoolKey);
+            (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+            if (pending == 0) break;
+        }
+        (,,,,,, uint256 pendingFinal) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(pendingFinal, 0, "aggregate still drains completely");
+        assertEq(leaseController.getPendingReleasePerHorizon(leasePoolId), 0, "pace resets with the drained bucket");
     }
 
     /// @notice Codex P2 (fresh-clock): a pending bucket created by a LEASE ACTION outside the
@@ -657,10 +978,11 @@ contract HookLeaseControllerTest is BaseTest {
         // rps = 1 wei/second so an exit parks a tiny, countable bucket
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
         config.taxRatePerSecondX64 = 1;
+        config.minRentDepositSeconds = 10;
         leaseController.configurePool(leasePoolKey, config);
         uint256 t0 = 1_900_000_000;
         vm.warp(t0);
-        _startLease(lesseeA, address(lesseeSwapper), 1e18, 1e18);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 30 days); // 30 days of 1 wei/s rent
 
         // 10 seconds of rent (10 wei, 1 wei protocol fee) parked by the exit at zero liquidity
         _removeAllFullRangeLiquidity();
@@ -787,7 +1109,8 @@ contract HookLeaseControllerTest is BaseTest {
     }
 
     function testMinBuyoutPriceRoundsUpForTinyPrices() public {
-        _startLease(lesseeA, address(lesseeSwapper), 1, 0.1e18); // 1 wei price
+        // 1 wei price -> rent rounds up to 1 wei/second; the deposit is a runway, not a value
+        _startLease(lesseeA, address(lesseeSwapper), 1, 30 days);
         assertEq(leaseController.minBuyoutPrice(leasePoolId), 2, "bump is at least 1 wei");
     }
 
@@ -839,7 +1162,7 @@ contract HookLeaseControllerTest is BaseTest {
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
         config.taxRatePerSecondX64 = 1;
         leaseController.configurePool(leasePoolKey, config);
-        _startLease(lesseeA, address(lesseeSwapper), 1e18, 1e18);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 30 days); // 30 days of 1 wei/s rent
 
         for (uint256 i = 1; i <= 30; i++) {
             vm.warp(base + i);
@@ -912,7 +1235,7 @@ contract HookLeaseControllerTest is BaseTest {
         uint256 balBefore = token1.balanceOf(lesseeA);
         vm.prank(lesseeA);
         uint256 refund = leaseController.exitLease(leasePoolKey);
-        assertEq(refund, 1e18 + 0.2e18 - rps * 1000, "deposit + unused rent");
+        assertEq(refund, 1e18 + 0.2e18 - rps * MIN_RENT_SECONDS, "deposit + rent beyond the minimum");
         assertEq(token1.balanceOf(lesseeA) - balBefore, refund);
     }
 

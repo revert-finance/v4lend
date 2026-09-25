@@ -126,6 +126,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         // Register vault with RevertHook so it can handle collateralized positions
         revertHook.setVault(address(vault));
         vault.setTransformer(address(revertHook), true);
+        v4Oracle.setHookFeeQuoter(address(revertHook), address(feeController));
         vault.setHookAllowList(address(revertHook), true);
 
         // Manual range changes go through the shared V4Utils transformer (deployed by the fork base).
@@ -2045,7 +2046,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertVaultAutoExitCase(true, false, 0);
     }
 
-    function testSwapFees_VaultAutoExitUpperWithSwapChargesBothSwapOutputs() public {
+    function testSwapFees_VaultAutoExitUpperWithSwapChargesRepaymentSwapOutput() public {
         feeController.setLpFeeBps(0);
         feeController.setDefaultSwapFeeBps(uint8(RevertHookState.Mode.AUTO_EXIT), 500);
 
@@ -2055,7 +2056,7 @@ contract V4VaultHookTest is V4ForkTestBase {
         _assertVaultAutoExitCase(true, true, 25_000000);
 
         assertGt(usdc.balanceOf(address(this)), usdcBefore, "first debt-repayment swap should pay USDC fee");
-        assertGt(weth.balanceOf(address(this)), wethBefore, "second exit swap should pay WETH fee");
+        assertEq(weth.balanceOf(address(this)), wethBefore, "upper exit should not swap USDC back to WETH");
     }
 
     function _assertVaultAutoExitCase(bool isUpperTrigger, bool swapOnExit, uint256 extraDebt) internal {
@@ -2140,8 +2141,8 @@ contract V4VaultHookTest is V4ForkTestBase {
 
         if (isUpperTrigger) {
             if (swapOnExit) {
-                assertEq(usdcAfter, usdcBefore, "Upper AUTO_EXIT with swap should rotate out of USDC");
-                assertGt(wethAfter, wethBefore, "Upper AUTO_EXIT with swap should finish in WETH");
+                assertGt(usdcAfter, usdcBefore, "Upper AUTO_EXIT with swap should finish in token0 (USDC)");
+                assertEq(wethAfter, wethBefore, "Upper AUTO_EXIT with swap should rotate out of token1 (WETH)");
             } else {
                 assertGt(usdcAfter, usdcBefore, "Upper AUTO_EXIT without swap should keep USDC");
                 assertGt(wethAfter, wethBefore, "Upper AUTO_EXIT without swap should keep WETH already removed");
@@ -3681,6 +3682,12 @@ contract V4VaultHookTest is V4ForkTestBase {
         _configurePositionForAutoLeverage(leverageDownTokenId, 5000);
         _alignLoanToTargetBps(leverageDownTokenId, 3500);
         _movePriceUp(hookedPoolKey);
+        // Above target before the down move, so the crossing dispatches a leverage-DOWN (which
+        // sells WETH through the reverse route). Before the depth-aware route planner (V4LE-53)
+        // the loan stayed under target here because every leverage-up through the off-price
+        // route fixture failed NoImprovement, and the assertion below was satisfied by another
+        // failed leverage-up rather than by the reverse route being rejected.
+        _alignLoanToTargetBps(leverageDownTokenId, 6500);
 
         routeController.setRoute(
             address(weth), address(usdc), invalidRoutePoolKey.fee, invalidRoutePoolKey.tickSpacing, invalidRoutePoolKey.hooks

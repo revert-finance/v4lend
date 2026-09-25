@@ -18,6 +18,8 @@ import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step
 import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
+import {V4VaultPositionActions} from "./V4VaultPositionActions.sol";
+import {LiquidationEscrow} from "./LiquidationEscrow.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IRemintMigrationHook} from "./interfaces/IRemintMigrationHook.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
@@ -71,6 +73,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     /// @notice interest rate model implementation
     IInterestRateModel public immutable interestRateModel;
+
+    LiquidationEscrow public immutable liquidationEscrow;
+    V4VaultPositionActions private immutable positionActions;
 
     /// @notice oracle implementation
     IV4Oracle public immutable oracle;
@@ -147,6 +152,16 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     uint256 public lastLendExchangeRateX96 = Q96;
 
     uint256 public globalDebtLimit;
+
+    /// @notice Optional absolute token debt budget in asset units; zero uses the governance global
+    /// debt limit multiplied by the token concentration factor. Neither bound depends on deposits.
+    mapping(address token => uint256) public tokenDebtLimits;
+    event SetTokenDebtLimit(address indexed token, uint256 limit);
+
+    function setTokenDebtLimit(address token, uint256 limit) external onlyOwner {
+        tokenDebtLimits[token] = limit;
+        emit SetTokenDebtLimit(token, limit);
+    }
     uint256 public globalLendLimit;
 
     // minimal size of loan (to protect from non-liquidatable positions because of gas-cost)
@@ -175,6 +190,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     mapping(uint256 => address) private tokenOwner; // Mapping from token ID to owner
 
     uint256 public override transformedTokenId; // stores currently transformed token (is always reset to 0 after tx)
+
+    /// @dev Transient slot holding the token id a running transform started with. A remint moves
+    ///      transformedTokenId to the replacement, so the hook's migration entry needs the origin to
+    ///      bind the retired token it is asked to migrate from to this very transform.
+    bytes32 internal constant _TRANSFORM_ORIGIN_SLOT = keccak256("V4Vault.transformOriginTokenId");
     uint256 private liquidatingTokenId; // stores currently liquidated token during collateral payout callbacks
 
     mapping(address => bool) public transformerAllowList; // contracts allowed to transform positions (selected audited contracts e.g. V4Utils)
@@ -205,6 +225,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         IV4Oracle _oracle,
         IWETH9 _weth
     ) ERC20(name, symbol) Ownable(msg.sender) {
+        liquidationEscrow = new LiquidationEscrow();
+        positionActions = new V4VaultPositionActions(_positionManager);
         asset = _asset;
         assetDecimals = IERC20Metadata(_asset).decimals();
         positionManager = _positionManager;
@@ -275,7 +297,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         debt = _convertToAssets(loans[tokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
 
         bool isHealthy;
-        (isHealthy, fullValue, collateralValue,) = _checkLoanIsHealthy(tokenId, debt);
+        (isHealthy, fullValue, collateralValue,,,) = _checkLoanIsHealthy(tokenId, debt);
 
         if (!isHealthy) {
             (liquidationValue, liquidationCost,) = _calculateLiquidation(debt, fullValue, collateralValue);
@@ -577,6 +599,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     /// @notice Transfers ownership of a loan to a new owner
+    /// @dev Transform approvals are keyed by owner, so the former owner's approvals stop working with the
+    ///      transfer. The one for the position's own (allowlisted) pool hook is moved to the new owner: the
+    ///      hook's automation is keyed by token id and stays armed across the transfer, and without the
+    ///      approval every hook transform would fail and consume the trigger while the position looked
+    ///      protected. The new owner can revoke it with approveTransform. Approvals for other targets
+    ///      (operators of the former owner) are not carried; they cannot be enumerated and are not
+    ///      bound to the position.
     /// @param tokenId The token ID of the loan to transfer
     /// @param newOwner The address of the new owner
     function transferLoan(uint256 tokenId, address newOwner) external override {
@@ -601,6 +630,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         _removeTokenFromOwner(currentOwner, tokenId);
         _addTokenToOwner(newOwner, tokenId);
+
+        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
+        address hook = address(poolKey.hooks);
+        if (hook != address(0) && hookAllowList[hook] && transformApprovals[currentOwner][tokenId][hook]) {
+            transformApprovals[currentOwner][tokenId][hook] = false;
+            transformApprovals[newOwner][tokenId][hook] = true;
+            emit ApprovedTransform(tokenId, currentOwner, hook, false);
+            emit ApprovedTransform(tokenId, newOwner, hook, true);
+        }
 
         emit Transfer(tokenId, currentOwner, newOwner);
     }
@@ -634,6 +672,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Reentrancy();
         }
         transformedTokenId = tokenId;
+        bytes32 originSlot = _TRANSFORM_ORIGIN_SLOT;
+        assembly ("memory-safe") {
+            tstore(originSlot, tokenId)
+        }
 
         (uint256 newDebtExchangeRateX96,) = _updateGlobalInterest();
 
@@ -643,6 +685,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         if (loanOwner != msg.sender && !transformApprovals[loanOwner][tokenId][msg.sender]) {
             revert Unauthorized();
         }
+
+        uint256 riskBefore = oracle.getRiskScore(tokenId, asset, loans[tokenId].debtShares);
 
         // give access to transformer
         IERC721(address(positionManager)).approve(transformer, tokenId);
@@ -685,8 +729,20 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         uint256 debt = _convertToAssets(loans[newTokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
         _requireLoanIsHealthy(newTokenId, debt);
+        oracle.validateRiskChange(newTokenId, asset, loans[newTokenId].debtShares, riskBefore);
 
         transformedTokenId = 0;
+        assembly ("memory-safe") {
+            tstore(originSlot, 0)
+        }
+    }
+
+    /// @inheritdoc IVault
+    function transformOriginTokenId() external view override returns (uint256 tokenId) {
+        bytes32 originSlot = _TRANSFORM_ORIGIN_SLOT;
+        assembly ("memory-safe") {
+            tokenId := tload(originSlot)
+        }
     }
 
     /// @notice Borrows specified amount of the vault's asset using the position as collateral
@@ -709,6 +765,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         if (!isTransformMode && owner != msg.sender) {
             revert Unauthorized();
         }
+
+        oracle.validateBorrow(tokenId, asset);
 
         (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
 
@@ -790,6 +848,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         );
 
         uint256 debt = _convertToAssets(loans[params.tokenId].debtShares, newDebtExchangeRateX96, Math.Rounding.Ceil);
+        if (debt != 0) oracle.validateBorrow(params.tokenId, asset);
         _requireLoanIsHealthy(params.tokenId, debt);
 
         emit WithdrawCollateral(params.tokenId, owner, params.recipient, params.liquidity, amount0, amount1);
@@ -823,6 +882,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 fullValue;
         uint256 collateralValue;
         uint256 feeValue;
+        uint256 price0X96;
+        uint256 price1X96;
     }
 
     /// @notice Liquidates an unhealthy position by repaying debt and receiving collateral
@@ -843,6 +904,16 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             revert Reentrancy();
         }
 
+        // The reserve-backed branch of _calculateLiquidation charges the liquidator less than the debt and
+        // socializes the rest, a subsidy meant for an independent liquidator. A borrower must not collect
+        // it on their own loan, neither directly nor by naming themselves as the collateral recipient
+        // (the flash-loan helper path). A second address remains possible; that residual is a property of
+        // the subsidy design, this closes the documented direct paths.
+        address loanOwner = tokenOwner[params.tokenId];
+        if (msg.sender == loanOwner || params.recipient == loanOwner) {
+            revert Unauthorized();
+        }
+
         LiquidateState memory state;
 
         (state.newDebtExchangeRateX96, state.newLendExchangeRateX96) = _updateGlobalInterest();
@@ -856,7 +927,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // @custom:accepted-risk AUDIT-ACCEPTED-ORACLE-LIQUIDATION-LIVENESS
         // Liquidation intentionally depends on live oracle data. Stale or missing
         // feeds revert here until governance refreshes feed configuration.
-        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue) =
+        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue, state.price0X96, state.price1X96) =
             _checkLoanIsHealthy(params.tokenId, state.debt);
         if (state.isHealthy) {
             revert NotLiquidatable();
@@ -887,7 +958,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         _cleanupLoan(params.tokenId, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
 
         // send promised collateral tokens to liquidator
-        (amount0, amount1) = _sendPositionValue(params, state.liquidationValue, state.fullValue, state.feeValue);
+        (amount0, amount1) = _sendPositionValue(params, state);
 
         liquidatingTokenId = 0;
 
@@ -898,7 +969,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         emit Liquidate(
             params.tokenId,
             msg.sender,
-            tokenOwner[params.tokenId],
+            loanOwner,
             state.fullValue,
             state.liquidatorCost,
             amount0,
@@ -1065,7 +1136,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     /// @param hook Hook to configure (address(0) for positions without hooks)
     /// @param isAllowed Whether the hook is allowed
     /// @dev Every allowlisted non-zero hook must implement IRemintMigrationHook: `transform`
-    ///      calls `migrateVaultPosition` on it whenever a transformer replaces the NFT inside one of
+    ///      calls `validateVaultPosition` before accepting debt and `migrateVaultPosition` on it whenever a transformer replaces the NFT inside one of
     ///      its pools, and a hook without that function makes such remints revert. Remove a retired
     ///      hook deployment from the allowlist once its positions are unwound.
     function setHookAllowList(address hook, bool isAllowed) external onlyOwner {
@@ -1161,7 +1232,6 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
     function _repay(uint256 tokenId, uint256 amount, bool isShare) internal returns (uint256 assets, uint256 shares) {
         (uint256 newDebtExchangeRateX96, uint256 newLendExchangeRateX96) = _updateGlobalInterest();
-        _resetDailyDebtIncreaseLimit(newLendExchangeRateX96, false);
 
         Loan storage loan = loans[tokenId];
 
@@ -1184,6 +1254,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             shares = currentShares;
             assets = _convertToAssets(shares, newDebtExchangeRateX96, Math.Rounding.Ceil);
         }
+
+        // nothing to repay (debt-free loan or unknown token): this must stay a pure no-op. In particular
+        // the daily debt quota is only refreshed by a real repayment, otherwise anyone could pin the
+        // day's quota on a still unfunded lender pool with a zero-value call.
+        if (shares == 0) {
+            return (0, 0);
+        }
+
+        _resetDailyDebtIncreaseLimit(newLendExchangeRateX96, false);
 
         if (assets > 0) {
             // fails if not enough token approved
@@ -1234,89 +1313,77 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         reserves = balance + debt > lent ? balance + debt - lent : 0;
     }
 
-    // removes correct amount from position to send to liquidator
+    // removes the liquidation share from the position and pays it out
     // returns the amounts the liquidator (params.recipient) actually received
-    function _sendPositionValue(
-        LiquidateParams calldata params,
-        uint256 liquidationValue,
-        uint256 fullValue,
-        uint256 feeValue
-    ) internal returns (uint256 amount0, uint256 amount1) {
+    function _sendPositionValue(LiquidateParams calldata params, LiquidateState memory state)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
         // when the uncollected fees alone cover the liquidation value no liquidity is removed
         // and the collected fees are split between liquidator and owner by value share
-        bool feesOnly = liquidationValue <= feeValue;
+        bool feesOnly = state.liquidationValue <= state.feeValue;
 
-        uint128 liquidity;
-        if (liquidationValue == fullValue) {
-            // if full position is liquidated - no analysis needed
-            liquidity = positionManager.getPositionLiquidity(params.tokenId);
-        } else if (!feesOnly) {
-            // all fees plus the share of liquidity needed to cover the remaining value
-            liquidity = positionManager.getPositionLiquidity(params.tokenId);
-            liquidity = SafeCast.toUint128((liquidationValue - feeValue) * liquidity / (fullValue - feeValue));
-        }
+        uint128 liquidity = oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
+        feesOnly = liquidity == 0;
 
-        // decrease liquidity and collect fees/tokens
-        // fee-only liquidations are collected to the vault first and split in _transferPartialFees
-        (amount0, amount1) = _decreaseLiquidity(
-            params.tokenId,
-            liquidity,
-            0,
-            0,
-            params.deadline,
-            params.decreaseLiquidityHookData,
-            feesOnly ? address(this) : params.recipient
+        (uint256 received0, uint256 received1) = _decreaseLiquidity(
+            params.tokenId, liquidity, 0, 0, params.deadline, params.decreaseLiquidityHookData, address(this)
         );
 
-        if (feesOnly) {
-            (amount0, amount1) =
-                _transferPartialFees(params.tokenId, params.recipient, amount0, amount1, liquidationValue, feeValue);
+        // The quote (fullValue, feeValue, liquidationValue) is oracle-priced and taken before the removal,
+        // while the amounts that actually come out are settled at the live pool price (up to
+        // maxPoolPriceDifference away) and include whatever the pool hook credits to the position in its
+        // before-remove callback (an auction drip donated to in-range liquidity). Both can make the removal
+        // worth more than the quote at the oracle's own prices. The liquidator's share is what the quote
+        // authorizes: liquidationValue out of the value the removal was sized on, and never more than
+        // liquidationValue worth at oracle prices. Anything above stays with the loan owner. Receiving less
+        // (a hook skim, a pool price below the oracle) is the liquidator's risk, covered by the penalty; the
+        // split is applied to what was actually received so a skim is carried proportionally (L-02).
+        uint256 base = feesOnly ? state.feeValue : state.liquidationValue;
+        uint256 receivedValue = received0.mulDiv(state.price0X96, Q96) + received1.mulDiv(state.price1X96, Q96);
+        if (receivedValue > base) {
+            base = receivedValue;
         }
+        if (base > 0) {
+            amount0 = received0.mulDiv(state.liquidationValue, base);
+            amount1 = received1.mulDiv(state.liquidationValue, base);
+        }
+
+        (Currency currency0, Currency currency1) = _getPositionTokens(params.tokenId);
+        address owner = tokenOwner[params.tokenId];
+        _payLiquidationProceeds(currency0, amount0, received0 - amount0, params.recipient, owner);
+        _payLiquidationProceeds(currency1, amount1, received1 - amount1, params.recipient, owner);
     }
 
-    // splits collected fees between liquidator (recipient) and position owner by value share
-    // The split is applied to the amounts actually received from the DECREASE, not to the oracle's gross fee
-    // estimate: hooks may skim part of the collected fees (e.g. RevertHook protocol fees), so the received
-    // amounts can be lower than the estimate. Because liquidationValue <= feeValue, each liquidator share is
-    // bounded by the received amount, the owner remainder can never underflow, and the skim is carried
-    // proportionally by both parties (L-02).
-    function _transferPartialFees(
-        uint256 tokenId,
+    // pays the liquidator's share and hands the remainder to the loan owner. Native ETH is wrapped so a
+    // reverting owner cannot block the liquidation. Rejected ERC20 surplus is escrowed for the owner.
+    function _payLiquidationProceeds(
+        Currency currency,
+        uint256 share,
+        uint256 remainder,
         address recipient,
-        uint256 amount0,
-        uint256 amount1,
-        uint256 liquidationValue,
-        uint256 feeValue
-    ) internal returns (uint256 share0, uint256 share1) {
-        if (feeValue > 0) {
-            share0 = Math.mulDiv(amount0, liquidationValue, feeValue);
-            share1 = Math.mulDiv(amount1, liquidationValue, feeValue);
+        address owner
+    ) internal {
+        if (share > 0) {
+            currency.transfer(recipient, share);
         }
-
-        (Currency currency0, Currency currency1) = _getPositionTokens(tokenId);
-        if (share0 > 0) {
-            currency0.transfer(recipient, share0);
-        }
-        if (share1 > 0) {
-            currency1.transfer(recipient, share1);
-        }
-        address owner = tokenOwner[tokenId];
-
-        // wrap native ETH to WETH to prevent revert attacks from owner
-        _transferTokenOrWeth(currency0, amount0 - share0, owner);
-        _transferTokenOrWeth(currency1, amount1 - share1, owner);
-    }
-
-    // transfers token to recipient, wrapping native ETH to WETH to prevent revert attacks
-    function _transferTokenOrWeth(Currency currency, uint256 amount, address recipient) internal {
-        if (amount > 0) {
+        if (remainder > 0) {
+            address token = Currency.unwrap(currency);
             if (currency.isAddressZero()) {
-                weth.deposit{value: amount}();
-                require(weth.transfer(recipient, amount), "WETH_TRANSFER_FAILED");
-            } else {
-                currency.transfer(recipient, amount);
+                weth.deposit{value: remainder}();
+                token = address(weth);
+            }
+            if (!_tryTransfer(token, owner, remainder)) {
+                SafeERC20.safeTransfer(IERC20(token), address(liquidationEscrow), remainder);
+                liquidationEscrow.credit(token, owner, remainder);
             }
         }
+    }
+
+    // ERC20 transfer that reports failure instead of reverting
+    function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
+        (bool success, bytes memory data) = token.call(abi.encodeCall(IERC20.transfer, (to, amount)));
+        return success && (data.length == 0 || (data.length >= 32 && abi.decode(data, (bool))));
     }
 
     // decreases liquidity from uniswap v4 position
@@ -1329,29 +1396,14 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         bytes memory decreaseLiquidityHookData,
         address recipient
     ) internal returns (uint256 amount0, uint256 amount1) {
-        // Get position info to determine currencies for TAKE_PAIR
-        (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(tokenId);
-
-        // Cache currencies to save gas
-        Currency currency0 = poolKey.currency0;
-        Currency currency1 = poolKey.currency1;
-
-        // check balance before decreasing liquidity
-        amount0 = currency0.balanceOf(recipient);
-        amount1 = currency1.balanceOf(recipient);
-
-        // V4 uses different approach - need to use modifyLiquidities with encoded actions
-        // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory paramsArray = new bytes[](2);
-        paramsArray[0] = abi.encode(tokenId, liquidityRemove, amount0Min, amount1Min, decreaseLiquidityHookData);
-        paramsArray[1] = abi.encode(currency0, currency1, recipient);
-
-        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
-
-        // calculate delta
-        amount0 = currency0.balanceOf(recipient) - amount0;
-        amount1 = currency1.balanceOf(recipient) - amount1;
+        (bool ok, bytes memory result) = address(positionActions).delegatecall(abi.encodeCall(
+            positionActions.decreaseLiquidity,
+            (tokenId,liquidityRemove,amount0Min,amount1Min,deadline,decreaseLiquidityHookData,recipient)
+        ));
+        if (!ok) {
+            assembly ("memory-safe") { revert(add(result,32),mload(result)) }
+        }
+        return abi.decode(result,(uint256,uint256));
     }
 
     // cleans up loan when it is closed because of replacement, repayment or liquidation
@@ -1386,10 +1438,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // if position is more valuable than debt with max penalty
         if (fullValue >= maxPenaltyValue) {
             if (collateralValue > 0) {
-                // position value when position started to be liquidatable
-                uint256 startLiquidationValue = debt * fullValue / collateralValue;
+                // position value when position started to be liquidatable. Full-precision
+                // division: debt and fullValue can each approach 2^144 for a valid large position,
+                // so the checked product would overflow and block loanInfo() and liquidate().
+                uint256 startLiquidationValue = Math.mulDiv(debt, fullValue, collateralValue);
                 uint256 penaltyFractionX96 =
-                    (Q96 - ((fullValue - maxPenaltyValue) * Q96 / (startLiquidationValue - maxPenaltyValue)));
+                    (Q96 - Math.mulDiv(fullValue - maxPenaltyValue, Q96, startLiquidationValue - maxPenaltyValue));
                 uint256 penaltyX32 = MIN_LIQUIDATION_PENALTY_X32
                     + (MAX_LIQUIDATION_PENALTY_X32 - MIN_LIQUIDATION_PENALTY_X32) * penaltyFractionX96 / Q96;
 
@@ -1443,6 +1497,14 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             }
             lastLendExchangeRateX96 = newLendExchangeRateX96;
             emit ExchangeRateUpdate(newDebtExchangeRateX96, newLendExchangeRateX96);
+
+            // the same-day lend allowance was sized on claims that were just written off: never let a
+            // later deposit consume more than a fresh day's allowance on the surviving claims would grant
+            uint256 allowance =
+                _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
+            if (dailyLendIncreaseLimitLeft > allowance) {
+                dailyLendIncreaseLimitLeft = allowance;
+            }
         }
     }
 
@@ -1495,7 +1557,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     }
 
     function _requireLoanIsHealthy(uint256 tokenId, uint256 debt) internal view {
-        (bool isHealthy,,,) = _checkLoanIsHealthy(tokenId, debt);
+        (bool isHealthy,,,,,) = _checkLoanIsHealthy(tokenId, debt);
         if (!isHealthy) {
             revert CollateralFail();
         }
@@ -1524,28 +1586,23 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 tokenConfigs[token0].totalDebtShares += difference;
                 tokenConfigs[token1].totalDebtShares += difference;
 
-                // check if current value of used collateral is more than allowed limit
-                // if collateral is decreased - never revert
                 uint256 lentAssets = _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Ceil);
-                uint256 collateralValueLimitFactorX32 = tokenConfigs[token0].collateralValueLimitFactorX32;
-                if (
-                    collateralValueLimitFactorX32 < type(uint32).max
-                        && _convertToAssets(
-                                tokenConfigs[token0].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil
-                            ) > lentAssets * collateralValueLimitFactorX32 / Q32
-                ) {
-                    revert CollateralValueLimit();
-                }
-                collateralValueLimitFactorX32 = tokenConfigs[token1].collateralValueLimitFactorX32;
-                if (
-                    collateralValueLimitFactorX32 < type(uint32).max
-                        && _convertToAssets(
-                                tokenConfigs[token1].totalDebtShares, debtExchangeRateX96, Math.Rounding.Ceil
-                            ) > lentAssets * collateralValueLimitFactorX32 / Q32
-                ) {
-                    revert CollateralValueLimit();
-                }
+                _checkTokenDebtLimit(token0, debtExchangeRateX96, lentAssets);
+                _checkTokenDebtLimit(token1, debtExchangeRateX96, lentAssets);
             }
+        }
+    }
+
+    function _checkTokenDebtLimit(address token, uint256 rate, uint256 lentAssets) internal view {
+        TokenConfig storage config = tokenConfigs[token];
+        uint256 debt = _convertToAssets(config.totalDebtShares, rate, Math.Rounding.Ceil);
+        uint256 factor = config.collateralValueLimitFactorX32;
+        uint256 budget = tokenDebtLimits[token];
+        if (budget == 0) {
+            budget = factor == type(uint32).max ? globalDebtLimit : globalDebtLimit.mulDiv(factor, Q32);
+        }
+        if (debt > budget || (factor < type(uint32).max && debt > lentAssets.mulDiv(factor, Q32))) {
+            revert CollateralValueLimit();
         }
     }
 
@@ -1580,9 +1637,16 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     function _checkLoanIsHealthy(uint256 tokenId, uint256 debt)
         internal
         view
-        returns (bool isHealthy, uint256 fullValue, uint256 collateralValue, uint256 feeValue)
+        returns (
+            bool isHealthy,
+            uint256 fullValue,
+            uint256 collateralValue,
+            uint256 feeValue,
+            uint256 price0X96,
+            uint256 price1X96
+        )
     {
-        (fullValue, feeValue,,) = oracle.getValue(tokenId, address(asset));
+        (fullValue, feeValue, price0X96, price1X96) = oracle.getValue(tokenId, address(asset));
         uint256 collateralFactorX32 = _calculateTokenCollateralFactorX32(tokenId);
         collateralValue = fullValue.mulDiv(collateralFactorX32, Q32);
         isHealthy = collateralValue >= debt;

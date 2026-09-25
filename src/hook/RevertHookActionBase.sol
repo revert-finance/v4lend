@@ -7,7 +7,6 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
-import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -37,10 +36,9 @@ import {RevertHookSwapActions} from "./RevertHookSwapActions.sol";
 abstract contract RevertHookActionBase is RevertHookLookupBase {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
-    using ProtocolFeeLibrary for uint24;
-    using ProtocolFeeLibrary for uint16;
 
     error SwapPoolPriceOutOfBounds(int24 swapTick, int24 oracleTick);
+    error RemovalConsumedByFees();
 
     struct SwapPlan {
         PoolKey poolKey;
@@ -149,6 +147,12 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     }
 
     /// @notice Migrates configuration from an old position to its reminted replacement
+    /// @dev No live-tick trigger check here, unlike the vault remint path: an AUTO_RANGE
+    ///      replacement whose trigger would already be satisfied in the bucket it fired from is
+    ///      refused at configuration time (_validateRangeConfig, V4LE-16), and a trigger the
+    ///      action's own swap carried the price past sits strictly beyond the fired bucket, where the
+    ///      continued walk consumes it in the same swap. The AUTO_LEND re-entry mint places its
+    ///      deposit trigger by construction one spacing away from the price and is left as is.
     function _migrateRemintedPosition(uint256 tokenId, uint256 newTokenId) internal {
         // auto-lend accounting never follows a remint (see migrateVaultPosition); callers reset or
         // never hold shares here, so this only guards against a future path stranding them
@@ -174,7 +178,7 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         uint256 amount1,
         Mode mode
     ) internal returns (uint256, uint256) {
-        SwapPlan memory swapPlan = _buildSwapPlan(poolKey, tickLower, tickUpper, amount0, amount1);
+        SwapPlan memory swapPlan = _buildSwapPlan(poolKey, tickLower, tickUpper, amount0, amount1, mode);
         if (swapPlan.amountIn > 0) {
             return _applyBalanceDelta(
                 _executeSwapResolved(
@@ -187,11 +191,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         return (amount0, amount1);
     }
 
-    function _buildSwapPlan(PoolKey memory poolKey, int24 tickLower, int24 tickUpper, uint256 amount0, uint256 amount1)
-        internal
-        view
-        returns (SwapPlan memory plan)
-    {
+    function _buildSwapPlan(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0,
+        uint256 amount1,
+        Mode mode
+    ) internal view returns (SwapPlan memory plan) {
         (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolKey.toId());
 
         plan.zeroForOne = _determineSwapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
@@ -199,27 +206,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         (plan.poolKey, isSamePool) = _resolveSwapPool(poolKey, plan.zeroForOne);
         plan.isExternalRoute = !isSamePool;
 
-        if (isSamePool) {
-            (plan.amountIn,, plan.zeroForOne,) = liquidityCalculator.calculateSamePool(
-                ILiquidityCalculator.V4PoolInfo({
-                    poolMgr: poolManager, poolIdentifier: poolKey.toId(), tickSpacing: poolKey.tickSpacing
-                }),
-                tickLower,
-                tickUpper,
-                amount0,
-                amount1
-            );
-            return plan;
-        }
-
-        (uint160 swapSqrtPriceX96,, uint24 packedProtocolFee, uint24 lpFee) =
-            StateLibrary.getSlot0(poolManager, plan.poolKey.toId());
-        uint16 protocolFee =
-            plan.zeroForOne ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
-        uint24 swapFee = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
-
-        (plan.amountIn,, plan.zeroForOne) = liquidityCalculator.calculateSimple(
-            sqrtPriceX96, swapSqrtPriceX96, tickLower, tickUpper, amount0, amount1, swapFee
+        // Sized against the route's depth and net of the hook's output fee; see
+        // RevertHookSwapActions.planExternalRoute.
+        (plan.amountIn, plan.zeroForOne) = swapActions.planExternalRoute(
+            liquidityCalculator, sqrtPriceX96, plan.poolKey, tickLower, tickUpper, amount0, amount1, mode, isSamePool
         );
     }
 
@@ -325,21 +315,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         Currency currency1,
         uint256 nativeValue
     ) internal returns (bool success) {
-        bytes memory actionsWithSweep = actions;
-        bytes[] memory params = new bytes[](nativeValue == 0 ? 2 : 3);
-        params[0] = primaryParams;
-        params[1] = abi.encode(currency0, currency1, address(this));
-        if (nativeValue > 0) {
-            actionsWithSweep = abi.encodePacked(actions, uint8(Actions.SWEEP));
-            params[2] = abi.encode(address(0), address(this));
+        (bool ok, bytes memory result) = address(swapActions).delegatecall(abi.encodeCall(
+            swapActions.modifyLiquiditiesWithPair,
+            (positionManager, actions, primaryParams, currency0, currency1, nativeValue)
+        ));
+        if (!ok) {
+            assembly ("memory-safe") { revert(add(result,32),mload(result)) }
         }
-
-        try positionManager.modifyLiquiditiesWithoutUnlock{value: nativeValue}(actionsWithSweep, params) {
-            return true;
-        } catch (bytes memory reason) {
-            emit HookModifyLiquiditiesFailed(actionsWithSweep, params, reason);
-            return false;
-        }
+        return abi.decode(result,(bool));
     }
 
     /// @notice Increases liquidity for a position
@@ -420,6 +403,14 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
     ///      Successful flows are expected to drain the hook back to zero, so the returned amounts
     ///      represent all balances currently attributable to the action. If unsolicited balances
     ///      are present, they will be swept by the next execution by design.
+    /// @dev A full removal that succeeds but credits nothing in either currency means the
+    ///      position's legacy carried protocol fee consumed the
+    ///      whole principal inside the remove callback. Every caller treats `(0, 0)` as a soft
+    ///      failure and returns, which is right when the removal itself failed (nothing changed)
+    ///      but would otherwise leave an emptied NFT behind with no shares, no remint and no exit
+    ///      proceeds (V4LE-41). Revert instead so the action rolls back: direct actions run under
+    ///      a caught delegatecall, vault-backed ones inside a caught vault transform, so this only
+    ///      fails the action (HookActionFailed); the owner can settle fees with a fee-paying INCREASE(0).
     function _decreaseLiquidity(PoolKey memory poolKey, uint256 tokenId, bool feesOnly)
         internal
         returns (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1)
@@ -442,6 +433,9 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
             )) {
             amount0 = _sweepableBalance(currency0);
             amount1 = _sweepableBalance(currency1);
+            if (liquidity != 0 && amount0 == 0 && amount1 == 0) {
+                revert RemovalConsumedByFees();
+            }
         }
     }
 
@@ -500,6 +494,11 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         }
     }
 
+    function _approvePair(Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) internal {
+        _approveToken(currency0, amount0);
+        _approveToken(currency1, amount1);
+    }
+
     /// @notice Swaps tokens to the lend token
     /// @dev Returns the full lend-token balance after the swap. This is intentional so later
     ///      repayment/leftover handling operates on the hook's complete transient balance for
@@ -527,22 +526,45 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         }
     }
 
+    /// @notice Resolves the pool currency a vault's asset is held as inside this pool
+    /// @dev The oracle, the vaults and NativeAssetLib treat WETH as the alias of native ETH, so a
+    ///      WETH-asset vault position in a native pool is a supported shape: the lend currency is the
+    ///      pool's native side and the borrow/repay legs wrap and unwrap at the vault boundary
+    ///      (V4LE-49). Native always sorts as currency0. `inPool` is false when the asset is neither
+    ///      pool currency nor that alias; the returned currency is then the raw asset.
+    function _lendCurrency(PoolKey memory poolKey, address lendAsset)
+        internal
+        view
+        returns (Currency lendCurrency, bool inPool)
+    {
+        if (lendAsset == Currency.unwrap(poolKey.currency0)) return (poolKey.currency0, true);
+        if (lendAsset == Currency.unwrap(poolKey.currency1)) return (poolKey.currency1, true);
+        if (lendAsset == address(weth) && poolKey.currency0.isAddressZero()) return (poolKey.currency0, true);
+        return (Currency.wrap(lendAsset), false);
+    }
+
     /// @notice Repays debt to a vault up to the available amount
     /// @param tokenId The position token ID
     /// @param vault The vault to repay to
-    /// @param lendAsset The address of the lend asset
+    /// @param lendCurrency The pool currency the repayment is held as (native for a WETH vault
+    ///        in a native pool; wrapped here before the vault pulls WETH)
+    /// @param lendAsset The vault's asset
     /// @param availableAmount The amount available for repayment
     /// @param currentDebt The current debt amount
     /// @return repaidAmount The amount that was actually repaid
     function _repayDebtToVault(
         uint256 tokenId,
         IVault vault,
+        Currency lendCurrency,
         address lendAsset,
         uint256 availableAmount,
         uint256 currentDebt
     ) internal returns (uint256 repaidAmount) {
         if (availableAmount > 0 && currentDebt > 0) {
             repaidAmount = availableAmount > currentDebt ? currentDebt : availableAmount;
+            if (lendCurrency.isAddressZero()) {
+                weth.deposit{value: repaidAmount}();
+            }
             SafeERC20.forceApprove(IERC20(lendAsset), address(vault), repaidAmount);
             vault.repay(tokenId, repaidAmount, false);
         }

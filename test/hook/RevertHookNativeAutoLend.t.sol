@@ -36,6 +36,8 @@ import {LiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {MockV4Oracle} from "test/utils/MockV4Oracle.sol";
 import {MockERC4626Vault} from "test/utils/MockERC4626Vault.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
+import {V4Vault} from "src/vault/V4Vault.sol";
+import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 import {V4PositionManagerDeployer} from "hookmate/artifacts/V4PositionManager.sol";
 
 contract NativeFeeRecipientProbe {
@@ -297,6 +299,91 @@ contract RevertHookNativeAutoLendTest is BaseTest {
 
         assertGt(address(feeRecipient).balance, 0, "native output swap fee should arrive as ETH");
         assertEq(feeRecipient.wethBalance(), 0, "native output swap fee should not arrive as WETH");
+    }
+
+    // ==================== V4LE-49: WETH-asset vault positions in a native pool ====================
+
+    function _deployWethVault() internal returns (V4Vault lendVault) {
+        InterestRateModel interestRateModel = new InterestRateModel(0, 0, 0, 0);
+        lendVault = new V4Vault(
+            "WETH lending vault", "lWETH", address(weth), positionManager, interestRateModel, v4Oracle, weth
+        );
+        uint32 collateralFactor = uint32(uint256(2 ** 32) * 9 / 10);
+        lendVault.setTokenConfig(address(0), collateralFactor, type(uint32).max);
+        lendVault.setTokenConfig(address(token1), collateralFactor, type(uint32).max);
+        lendVault.setHookAllowList(address(hook), true);
+        lendVault.setTransformer(address(hook), true);
+        lendVault.setLimits(0, 100e18, 100e18, 100e18, 100e18);
+        hook.setVault(address(lendVault));
+
+        weth.deposit{value: 20e18}();
+        IERC20(address(weth)).approve(address(lendVault), 20e18);
+        lendVault.deposit(20e18, address(this));
+    }
+
+    function _leverageConfig(uint16 targetBps) internal pure returns (RevertHookState.PositionConfig memory) {
+        return RevertHookState.PositionConfig({
+            modeFlags: PositionModeFlags.MODE_AUTO_LEVERAGE,
+            autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+            autoExitIsRelative: false,
+            autoExitTickLower: type(int24).min,
+            autoExitTickUpper: type(int24).max,
+            autoExitSwapOnLowerTrigger: true,
+            autoExitSwapOnUpperTrigger: true,
+            autoRangeLowerLimit: 0,
+            autoRangeUpperLimit: 0,
+            autoRangeLowerDelta: 0,
+            autoRangeUpperDelta: 0,
+            autoLendToleranceTick: 0,
+            autoLeverageTargetBps: targetBps
+        });
+    }
+
+    function _assertHookFlat(string memory context) internal view {
+        assertEq(address(hook).balance, 0, string.concat(context, ": hook retains ETH"));
+        assertEq(weth.balanceOf(address(hook)), 0, string.concat(context, ": hook retains WETH"));
+        assertEq(token1.balanceOf(address(hook)), 0, string.concat(context, ": hook retains token1"));
+    }
+
+    /// @dev The oracle, the vault and NativeAssetLib treat WETH as the alias of native ETH, so a
+    ///      WETH vault may hold a native/token1 position as collateral. The hook compared raw
+    ///      currencies: setPositionConfig(AUTO_LEVERAGE) reverted InvalidConfig, and the leverage
+    ///      legs would have swapped into the wrong token. Now the config is accepted, a leverage-up
+    ///      unwraps the borrowed WETH into the pool's native side, and a deleverage wraps the native
+    ///      proceeds before repaying the vault.
+    function testAutoLeverage_WethVaultServesNativePool() public {
+        V4Vault lendVault = _deployWethVault();
+        int24 spacing = poolKey.tickSpacing;
+        int24 base = _getTickLower(_getCurrentTick(), spacing);
+        uint256 levId = _mintPositionEth(poolKey, base - 20 * spacing, base + 20 * spacing, 10e18);
+        IERC721(address(positionManager)).approve(address(lendVault), levId);
+        lendVault.create(levId, address(this));
+        lendVault.approveTransform(levId, address(hook), true);
+
+        // slightly under target: the config-time immediate action is a leverage-up
+        (,, uint256 collateralValue,,) = lendVault.loanInfo(levId);
+        lendVault.borrow(levId, collateralValue * 7460 / 10000);
+        (uint256 debtBefore,,,,) = lendVault.loanInfo(levId);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(levId);
+
+        hook.setPositionConfig(levId, _leverageConfig(7490));
+
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(levId);
+        assertEq(modeFlags, PositionModeFlags.MODE_AUTO_LEVERAGE, "WETH vault on a native pool is a valid pair");
+        (uint256 debtUp,,,,) = lendVault.loanInfo(levId);
+        assertGt(debtUp, debtBefore, "immediate leverage-up borrowed WETH");
+        assertGt(positionManager.getPositionLiquidity(levId), liquidityBefore, "borrowed WETH became native liquidity");
+        _assertHookFlat("leverage-up");
+
+        // above target: the next trigger crossing deleverages, repaying WETH out of native proceeds
+        lendVault.borrow(levId, collateralValue * 400 / 10000);
+        (uint256 debtOver,,,,) = lendVault.loanInfo(levId);
+        (,,,,,,, int24 baseTick) = hook.positionStates(levId);
+        _pushTickToOrAbove(baseTick + 10 * spacing);
+
+        (uint256 debtDown,,,,) = lendVault.loanInfo(levId);
+        assertLt(debtDown, debtOver, "deleverage repaid WETH from native proceeds");
+        _assertHookFlat("deleverage");
     }
 
     function _mintPositionEth(PoolKey memory key, int24 tickLower, int24 tickUpper, uint128 liquidity)

@@ -14,8 +14,11 @@ env:
   # Fork suites (test/automators, test/oracle/V4OracleTest, test/vault except invariants) fork
   # mainnet at a fixed block and need an archive RPC. Public endpoints rate-limit a fresh runner,
   # so those suites run only when the MAINNET_RPC_URL secret is configured.
-  MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+  FOUNDRY_FFI: "false"
   FORK_SUITES: "{test/automators/**,test/oracle/V4OracleTest.t.sol,test/vault/V4Vault.t.sol,test/vault/V4VaultHook.t.sol,test/vault/transformers/**}"
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -25,6 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -41,11 +45,26 @@ jobs:
         run: forge test --no-match-path "$FORK_SUITES" -vvv
         id: test
 
+  fork:
+    name: Reviewed mainnet fork tests
+    # Never execute a PR merge/head with credentials, including same-repository PRs.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: archive-rpc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
       - name: Test (mainnet fork suites)
-        if: env.MAINNET_RPC_URL != ''
-        run: forge test --match-path "$FORK_SUITES" -vvv
-        id: test-fork
-
-      - name: Fork suites skipped
-        if: env.MAINNET_RPC_URL == ''
-        run: echo "::warning::MAINNET_RPC_URL secret not set - mainnet fork suites were skipped"
+        env:
+          MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+        run: |
+          if [ -z "$MAINNET_RPC_URL" ]; then
+            echo "::error::Configure the archive-rpc environment credential before running fork tests"
+            exit 1
+          fi
+          forge test --match-path "$FORK_SUITES" -vvv

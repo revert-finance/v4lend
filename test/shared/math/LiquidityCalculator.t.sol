@@ -44,6 +44,11 @@ contract LiquidityCalculatorHelper {
         return liquidityCalculator.calculateSamePool(cfg, lower, upper, amt0, amt1);
     }
 
+    /// @dev Route liquidity deep enough that the constant-liquidity quote is the spot quote for
+    ///      any test-sized swap (price impact around 1e-11) while a 6-decimal input still moves
+    ///      the price by a resolvable amount; the spot-price tests below rely on it.
+    uint128 internal constant DEEP_ROUTE_LIQUIDITY = 1e31;
+
     function getSimpleSwap(
         uint160 sqrtPrice,
         int24 lower,
@@ -52,7 +57,9 @@ contract LiquidityCalculatorHelper {
         uint256 amt1,
         uint24 feeRate
     ) external view returns (uint256 inAmt, uint256 outAmt, bool dir) {
-        return liquidityCalculator.calculateSimple(sqrtPrice, sqrtPrice, lower, upper, amt0, amt1, feeRate);
+        return liquidityCalculator.calculateSimple(
+            sqrtPrice, sqrtPrice, DEEP_ROUTE_LIQUIDITY, lower, upper, amt0, amt1, feeRate, 0
+        );
     }
 
     function getSimpleSwapWithRoutePrice(
@@ -65,7 +72,35 @@ contract LiquidityCalculatorHelper {
         uint24 feeRate
     ) external view returns (uint256 inAmt, uint256 outAmt, bool dir) {
         return liquidityCalculator.calculateSimple(
-            positionSqrtPrice, swapSqrtPrice, lower, upper, amt0, amt1, feeRate
+            positionSqrtPrice, swapSqrtPrice, DEEP_ROUTE_LIQUIDITY, lower, upper, amt0, amt1, feeRate, 0
+        );
+    }
+
+    function getSimpleSwapThroughPool(
+        uint160 positionSqrtPrice,
+        ILiquidityCalculator.V4PoolInfo memory swapPool,
+        int24 lower,
+        int24 upper,
+        uint256 amt0,
+        uint256 amt1,
+        uint24 outputFeePips
+    ) external view returns (uint256 inAmt, uint256 outAmt, bool dir) {
+        return liquidityCalculator.calculateSimple(positionSqrtPrice, swapPool, lower, upper, amt0, amt1, outputFeePips);
+    }
+
+    function getSimpleSwapWithRoute(
+        uint160 positionSqrtPrice,
+        uint160 swapSqrtPrice,
+        uint128 swapLiquidity,
+        int24 lower,
+        int24 upper,
+        uint256 amt0,
+        uint256 amt1,
+        uint24 feeRate,
+        uint24 outputFeePips
+    ) external view returns (uint256 inAmt, uint256 outAmt, bool dir) {
+        return liquidityCalculator.calculateSimple(
+            positionSqrtPrice, swapSqrtPrice, swapLiquidity, lower, upper, amt0, amt1, feeRate, outputFeePips
         );
     }
 }
@@ -496,18 +531,50 @@ contract LiquidityCalculatorTest is Test {
         assertGt(sqrtPriceX96, 0, "Should have final price");
     }
 
-    /// @notice Test with empty pool (no initial liquidity)
-    function test_LiquidityCalculator_EmptyPool() public {
+    /// @notice Test with empty pool (no initial liquidity): nothing to swap against, so the plan is
+    ///         deterministically "no swap at the current price" (external audit V4LE-89; it used to
+    ///         revert Math_Overflow out of the analytic solver).
+    function test_LiquidityCalculator_EmptyPool() public view {
         // Don't add initial liquidity
+        (uint256 amountIn, uint256 amountOut,, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, -600, 600, 10 ether, 10 ether);
+        assertEq(amountIn, 0, "no input without liquidity");
+        assertEq(amountOut, 0, "no output without liquidity");
+        assertEq(sqrtPriceX96, SQRT_PRICE_1_0, "price unchanged without liquidity");
+    }
 
-        vm.expectRevert(ILiquidityCalculator.Math_Overflow.selector);
-        helper.getOptimalSwap(
-                poolCallee,
-                -600,
-                600,
-                10 ether,
-                10 ether
-            );
+    /// @notice External audit V4LE-89: the sole in-range position is crossed at its upper tick by an
+    ///         exact-limit swap, leaving the pool at that tick with ZERO active liquidity while the
+    ///         position still exists. The same-pool planner for a replacement range around the new
+    ///         tick, holding only token1 (what the crossed position is made of), used to revert
+    ///         Math_Overflow - and the hook's caught AUTO_RANGE action consumed the trigger. It must
+    ///         return a no-swap plan at the current price instead.
+    function test_LiquidityCalculator_ZeroLiquidityAfterSolePositionBoundaryCrossing() public {
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
+
+        // swap token1 -> token0 with the price limit exactly at the position's upper tick
+        SwapParams memory swapParams =
+            SwapParams({zeroForOne: false, amountSpecified: -int256(10_000 ether), sqrtPriceLimitX96: sqrtUpper});
+        poolManager.unlock(abi.encode(SwapCallbackData(poolKey, swapParams, address(this))));
+        (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
+        assertEq(sqrtPriceX96, sqrtUpper, "precondition: price at the upper tick");
+        assertEq(tick, 600, "precondition: upper tick crossed");
+        assertEq(poolManager.getLiquidity(poolId), 0, "precondition: zero active liquidity");
+
+        // centered replacement range around the new tick, one-sided token1 holdings
+        (uint256 amountIn, uint256 amountOut, bool zeroForOne, uint160 planSqrtPrice) =
+            helper.getOptimalSwap(poolCallee, 300, 900, 0, 500 ether);
+        assertEq(amountIn, 0, "nothing to swap against");
+        assertEq(amountOut, 0, "no output");
+        assertFalse(zeroForOne, "direction of the one-sided token1 holdings");
+        assertEq(planSqrtPrice, sqrtUpper, "current price returned");
+
+        // the mirror: token0-only holdings plan a 0->1 swap that re-enters the crossed position's
+        // liquidity, so the planner keeps producing a real swap there
+        (amountIn,, zeroForOne,) = helper.getOptimalSwap(poolCallee, 300, 900, 500 ether, 0);
+        assertTrue(zeroForOne);
+        assertGt(amountIn, 0, "liquidity below the tick is still usable");
     }
 
     /// @notice Test with imbalanced amounts (much more token0)
@@ -676,6 +743,35 @@ contract LiquidityCalculatorTest is Test {
     }
 
     /// @notice Test with price exactly at lower bound
+    /// @notice V4LE-81: a pool with the maximum (100%) LP fee is a valid v4 pool. The same-pool
+    ///         planner divided by (1 - fee) == 0 for an in-range position; it must reject the fee
+    ///         deterministically like calculateSimple does.
+    function test_LiquidityCalculator_RejectsHundredPercentFeePool() public {
+        PoolKey memory fullFeeKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 1_000_000,
+            tickSpacing: DEFAULT_TICK_SPACING,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(fullFeeKey, SQRT_PRICE_1_0);
+        // in-range liquidity so the analytic branch is reached
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] =
+            abi.encode(fullFeeKey, int24(-600), int24(600), uint256(1e18), 1000 ether, 1000 ether, address(this), "");
+        paramsArray[1] = abi.encode(fullFeeKey.currency0, fullFeeKey.currency1, address(positionManager));
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
+
+        ILiquidityCalculator.V4PoolInfo memory fullFeePool = ILiquidityCalculator.V4PoolInfo({
+            poolMgr: poolManager,
+            poolIdentifier: fullFeeKey.toId(),
+            tickSpacing: DEFAULT_TICK_SPACING
+        });
+        vm.expectRevert(ILiquidityCalculator.Invalid_Fee.selector);
+        helper.getOptimalSwap(fullFeePool, -600, 600, 10 ether, 1 ether);
+    }
+
     function test_LiquidityCalculator_PriceAtLowerBound() public {
         int24 tickLower = -600;
         // Move price to lower bound by swapping
@@ -1000,12 +1096,156 @@ contract LiquidityCalculatorTest is Test {
 
     function test_calculateSimple_RejectsInvalidPoolPriceAndFee() public {
         vm.expectRevert(ILiquidityCalculator.Invalid_Pool.selector);
-        liquidityCalculator.calculateSimple(SQRT_PRICE_1_0, 0, -600, 600, 1 ether, 0, 3000);
+        liquidityCalculator.calculateSimple(SQRT_PRICE_1_0, 0, 1e18, -600, 600, 1 ether, 0, 3000, 0);
 
         vm.expectRevert(ILiquidityCalculator.Invalid_Fee.selector);
         liquidityCalculator.calculateSimple(
-            SQRT_PRICE_1_0, SQRT_PRICE_1_0, -600, 600, 1 ether, 0, 1_000_000
+            SQRT_PRICE_1_0, SQRT_PRICE_1_0, 1e18, -600, 600, 1 ether, 0, 1_000_000, 0
         );
+
+        vm.expectRevert(ILiquidityCalculator.Invalid_Fee.selector);
+        liquidityCalculator.calculateSimple(
+            SQRT_PRICE_1_0, SQRT_PRICE_1_0, 1e18, -600, 600, 1 ether, 0, 3000, 1_000_000
+        );
+    }
+
+    /// @notice A route without active liquidity cannot deliver anything: no swap is planned.
+    function test_calculateSimple_ZeroRouteLiquidityPlansNoSwap() public view {
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) =
+            helper.getSimpleSwapWithRoute(SQRT_PRICE_1_0, SQRT_PRICE_1_0, 0, -600, 600, 10 ether, 0, 3000, 0);
+        assertTrue(swapDir0to1, "direction still reported");
+        assertEq(inputAmount, 0, "no input planned against an empty route");
+        assertEq(outputAmount, 0, "no output planned against an empty route");
+    }
+
+    /// @notice V4LE-53: the finding's shape. Position pool at 1:1 with (0, 1000e18) for [-600, 600],
+    ///         a full-range route holding ~1000e18 per side at 0.3%. Spot pricing planned ~500.75 in
+    ///         for ~499.25 out, but the route only returns ~333 for that input, so the mint was short
+    ///         a third of its token0 and the surplus token1 left as leftover. The plan must match
+    ///         the route's real output and balance the position within 0.1%.
+    function test_calculateSimple_ExternalRouteAccountsForDepth() public {
+        _addLiquidity(TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 1000 ether, 1000 ether);
+        (uint160 routeSqrtPrice,,,) = poolManager.getSlot0(poolId);
+        uint128 routeLiquidity = poolManager.getLiquidity(poolId);
+        uint256 amount1 = 1000 ether;
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = helper.getSimpleSwapWithRoute(
+            SQRT_PRICE_1_0, routeSqrtPrice, routeLiquidity, -600, 600, 0, amount1, DEFAULT_FEE, 0
+        );
+        assertFalse(swapDir0to1, "token1-only input swaps token1 to token0");
+        assertGt(inputAmount, 500 ether, "depth-aware plan swaps more than the spot plan (~500.75e18)");
+        assertLt(outputAmount, 499 ether, "and expects less than the spot quote (~499.25e18)");
+
+        // the route delivers what was planned
+        BalanceDelta delta = _executeSwap(inputAmount, false);
+        uint256 actualOut = uint256(int256(delta.amount0()));
+        assertApproxEqRel(actualOut, outputAmount, 1e12, "planned output matches the route's real output");
+
+        // and the post-swap amounts fund the range evenly
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-600);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
+        uint128 liquidityFromToken0 = LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_0, sqrtUpper, actualOut);
+        uint128 liquidityFromToken1 =
+            LiquidityAmounts.getLiquidityForAmount1(sqrtLower, SQRT_PRICE_1_0, amount1 - inputAmount);
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 10, "post-swap amounts within 0.1%");
+    }
+
+    /// @notice Same shape through the pool-reading overload (what the hook calls).
+    function test_calculateSimple_PoolOverloadAccountsForDepth() public {
+        _addLiquidity(TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 1000 ether, 1000 ether);
+        uint256 amount1 = 1000 ether;
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) =
+            helper.getSimpleSwapThroughPool(SQRT_PRICE_1_0, poolCallee, -600, 600, 0, amount1, 0);
+        assertFalse(swapDir0to1);
+        BalanceDelta delta = _executeSwap(inputAmount, false);
+        uint256 actualOut = uint256(int256(delta.amount0()));
+        assertApproxEqRel(actualOut, outputAmount, 1e12, "planned output matches the route's real output");
+
+        uint128 liquidityFromToken0 =
+            LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_0, TickMath.getSqrtPriceAtTick(600), actualOut);
+        uint128 liquidityFromToken1 = LiquidityAmounts.getLiquidityForAmount1(
+            TickMath.getSqrtPriceAtTick(-600), SQRT_PRICE_1_0, amount1 - inputAmount
+        );
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 10, "post-swap amounts within 0.1%");
+    }
+
+    /// @notice A route whose liquidity is thin at the current tick and thick beyond it (a hole
+    ///         around the price, as low-TVL pools have after the price left the main positions).
+    ///         The constant-liquidity model alone would price the whole swap against the thin
+    ///         book; the tick walk picks up the thick liquidity once the first tick is crossed
+    ///         and the plan matches the pool's real output.
+    function test_calculateSimple_PoolOverloadWalksThroughLiquidityHole() public {
+        _addLiquidity(-60, 60, 1 ether, 1 ether); // thin around the price
+        _addLiquidity(-6000, -60, 0, 5000 ether); // thick below
+        _addLiquidity(60, 6000, 5000 ether, 0); // thick above
+        uint256 amount0 = 300 ether;
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) =
+            helper.getSimpleSwapThroughPool(SQRT_PRICE_1_0, poolCallee, -600, 600, amount0, 0, 0);
+        assertTrue(swapDir0to1);
+        assertGt(inputAmount, 100 ether, "a thin-book-only plan would swap almost nothing");
+        BalanceDelta delta = _executeSwap(inputAmount, true);
+        uint256 actualOut = uint256(int256(delta.amount1()));
+        assertApproxEqRel(actualOut, outputAmount, 1e12, "planned output matches the real multi-tick output");
+
+        uint128 liquidityFromToken0 = LiquidityAmounts.getLiquidityForAmount0(
+            SQRT_PRICE_1_0, TickMath.getSqrtPriceAtTick(600), amount0 - inputAmount
+        );
+        uint128 liquidityFromToken1 =
+            LiquidityAmounts.getLiquidityForAmount1(TickMath.getSqrtPriceAtTick(-600), SQRT_PRICE_1_0, actualOut);
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 50, "post-swap amounts within 0.5%");
+    }
+
+    /// @notice The same route, below range: all token1 is swapped and the output is the route's
+    ///         real output for that input, not the spot quote.
+    function test_calculateSimple_BelowRangeUsesRouteDepth() public {
+        _addLiquidity(TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 1000 ether, 1000 ether);
+        (uint160 routeSqrtPrice,,,) = poolManager.getSlot0(poolId);
+        uint128 routeLiquidity = poolManager.getLiquidity(poolId);
+        uint160 positionSqrtPrice = TickMath.getSqrtPriceAtTick(-1200);
+
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = helper.getSimpleSwapWithRoute(
+            positionSqrtPrice, routeSqrtPrice, routeLiquidity, -600, 600, 0, 300 ether, DEFAULT_FEE, 0
+        );
+        assertFalse(swapDir0to1);
+        assertEq(inputAmount, 300 ether, "all token1 is swapped below range");
+        BalanceDelta delta = _executeSwap(inputAmount, false);
+        assertApproxEqRel(uint256(int256(delta.amount0())), outputAmount, 1e12, "output is the route's real output");
+    }
+
+    /// @notice V4LE-21: an output fee the caller takes before minting is planned for, so the net
+    ///         output funds the range evenly instead of leaving the input side over-supplied.
+    function test_calculateSimple_OutputFeeIsPlannedFor() public view {
+        uint24 outputFeePips = 100_000; // 10%, the hook's maximum swap fee
+        (uint256 inputNoFee, uint256 outputNoFee,) = helper.getSimpleSwapWithRoute(
+            SQRT_PRICE_1_0, SQRT_PRICE_1_0, 1_000_000 ether, -600, 600, 100 ether, 0, 0, 0
+        );
+        (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1) = helper.getSimpleSwapWithRoute(
+            SQRT_PRICE_1_0, SQRT_PRICE_1_0, 1_000_000 ether, -600, 600, 100 ether, 0, 0, outputFeePips
+        );
+        assertTrue(swapDir0to1);
+        assertGt(inputAmount, inputNoFee, "more input is swapped to make up for the fee");
+        assertLt(outputAmount, outputNoFee, "net output is what reaches the mint");
+
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-600);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
+        uint128 liquidityFromToken0 =
+            LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_0, sqrtUpper, 100 ether - inputAmount);
+        uint128 liquidityFromToken1 = LiquidityAmounts.getLiquidityForAmount1(sqrtLower, SQRT_PRICE_1_0, outputAmount);
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 10, "net-of-fee amounts within 0.1%");
     }
 
     function test_calculateSimple_BelowRangeUsesSpotPrice() public view {
@@ -1019,7 +1259,7 @@ contract LiquidityCalculatorTest is Test {
             / uint256(sqrtPrice);
         assertFalse(swapDir0to1, "below range swaps token1 to token0");
         assertEq(inputAmount, amount1, "all token1 is swapped below range");
-        assertApproxEqAbs(outputAmount, expectedOutput, 2, "output must use spot price, not lower boundary");
+        assertApproxEqRel(outputAmount, expectedOutput, 1e9, "output must use spot price, not lower boundary");
     }
 
     function test_calculateSimple_AboveRangeUsesSpotPrice() public view {
@@ -1033,7 +1273,7 @@ contract LiquidityCalculatorTest is Test {
             / SQRT_PRICE_1_0;
         assertTrue(swapDir0to1, "above range swaps token0 to token1");
         assertEq(inputAmount, amount0, "all token0 is swapped above range");
-        assertApproxEqAbs(outputAmount, expectedOutput, 2, "output must use spot price, not upper boundary");
+        assertApproxEqRel(outputAmount, expectedOutput, 1e9, "output must use spot price, not upper boundary");
     }
 
     /// @notice Test calculateSimple with different fee rates
@@ -1335,18 +1575,13 @@ contract LiquidityCalculatorTest is Test {
         if (inputAmount > 0) {
             assertGt(outputAmount, 0, "Output amount should be positive when input is positive");
             
-            // External-route output is valued at the current spot price, not
-            // at a position boundary. At price 1 and zero fee it is exactly
-            // one token1 unit per token0 unit.
+            // External-route output is valued at the route's current price, not
+            // at a position boundary. At price 1, zero fee and the helper's deep
+            // route it is one token1 unit per token0 unit up to the route's
+            // (negligible) price impact.
             uint256 expectedOutputApprox = inputAmount;
-            uint256 tolerance = 1;
-            
             console.log("Expected Output (approx):", expectedOutputApprox);
-            console.log("Tolerance:", tolerance);
-            
-            // Output should be within reasonable range of expected value
-            assertGe(outputAmount, expectedOutputApprox - tolerance, "Output should be close to expected");
-            assertLe(outputAmount, expectedOutputApprox + tolerance, "Output should be close to expected");
+            assertApproxEqRel(outputAmount, expectedOutputApprox, 1e9, "Output should be close to expected");
         }
         
         // Verify amounts after swap would be more balanced
@@ -1370,6 +1605,131 @@ contract LiquidityCalculatorTest is Test {
             // Since we had 10:1 ratio before, after swap it should be closer to balanced
             assertLt(ratioAfter, ratioBefore, "Ratio should be more balanced after swap");
         }
+    }
+
+    // ==================== Zero-fee exact-boundary states (external audit V4LE-85) ====================
+    // With a zero total fee and the live price exactly at a requested range bound, the solver's
+    // coefficient guards used to reject the state as invalid (strict `a > amount0Target` /
+    // `c > amount1Target`) although it is a valid, exactly balanced boundary: the pool accepts fee 0
+    // and any initialized tick is a normal post-swap price. The planner must return a real plan.
+
+    /// @dev Executes the planned swap and asserts the resulting holdings fit the range with a
+    ///      negligible one-sided leftover, i.e. the plan was the balancing swap.
+    function _assertPlanBalancesHoldings(
+        int24 lower,
+        int24 upper,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 amountIn,
+        uint256 predictedOut,
+        bool dir0to1
+    ) internal {
+        BalanceDelta delta = _executeSwap(amountIn, dir0to1);
+        uint256 actualOut = dir0to1 ? uint256(int256(delta.amount1())) : uint256(int256(delta.amount0()));
+        assertApproxEqRel(actualOut, predictedOut, PREDICTION_TOLERANCE, "executed output deviates from prediction");
+        uint256 have0 = dir0to1 ? amount0 - amountIn : amount0 + actualOut;
+        uint256 have1 = dir0to1 ? amount1 + actualOut : amount1 - amountIn;
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(lower);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upper);
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtLower, sqrtUpper, have0, have1);
+        (uint256 used0, uint256 used1) =
+            LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, sqrtLower, sqrtUpper, liquidity);
+        // prices sit at ~1:1 in these scenarios, so summing the two tokens' leftovers is fair
+        assertLt((have0 - used0) + (have1 - used1), (have0 + have1) / 1000, "leftover above 0.1%");
+    }
+
+    /// @notice Price exactly at the requested LOWER bound of a zero-fee pool, holding token1: the
+    ///         1->0 solver's `c == amount1Target` equality used to revert Math_Overflow.
+    function test_calculateSamePool_ZeroFee_PriceAtLowerBound_SwapsToken1() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut, bool dir0to1,) = helper.getOptimalSwap(poolCallee, 0, 60, 0, 1 ether);
+        assertFalse(dir0to1, "token1 -> token0 into the range");
+        assertGt(amountIn, 0, "a real balancing swap is planned");
+        _assertPlanBalancesHoldings(0, 60, 0, 1 ether, amountIn, amountOut, false);
+    }
+
+    /// @notice Same state with token0 only: already balanced (the range is all token0 at its lower
+    ///         bound), so the plan is deterministically "no swap" instead of a revert.
+    function test_calculateSamePool_ZeroFee_PriceAtLowerBound_Token0OnlyNoSwap() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut,, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, 0, 60, 1 ether, 0);
+        assertEq(amountIn, 0, "nothing to swap");
+        assertEq(amountOut, 0);
+        assertEq(sqrtPriceX96, SQRT_PRICE_1_0, "current price");
+    }
+
+    /// @notice Price exactly at the requested UPPER bound of a zero-fee pool, holding token0: the
+    ///         0->1 solver's `a == amount0Target` equality used to revert Math_Overflow.
+    function test_calculateSamePool_ZeroFee_PriceAtUpperBound_SwapsToken0() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut, bool dir0to1,) = helper.getOptimalSwap(poolCallee, -60, 0, 1 ether, 0);
+        assertTrue(dir0to1, "token0 -> token1 into the range");
+        assertGt(amountIn, 0, "a real balancing swap is planned");
+        _assertPlanBalancesHoldings(-60, 0, 1 ether, 0, amountIn, amountOut, true);
+    }
+
+    /// @notice Same state with token1 only: already balanced, no swap.
+    function test_calculateSamePool_ZeroFee_PriceAtUpperBound_Token1OnlyNoSwap() public {
+        _usePoolAtTick(0, 0);
+        _addLiquidity(-600, 600, 1000 ether, 1000 ether);
+
+        (uint256 amountIn, uint256 amountOut,, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, -60, 0, 0, 1 ether);
+        assertEq(amountIn, 0, "nothing to swap");
+        assertEq(amountOut, 0);
+        assertEq(sqrtPriceX96, SQRT_PRICE_1_0, "current price");
+    }
+
+    // ==================== Discriminant overflow (external audit V4LE-33) ====================
+
+    /// @dev The audit's state: tick spacing 60, price at tick 400000, ~0.3% fee (2500 pips here so
+    ///      the key differs from the default 3000-pip pool), active liquidity 2e30 from the range
+    ///      [396480, 404040] (its token1 requirement ~1.56e38 fits int128).
+    function _setUpHighTickHeavyLiquidityPool() internal {
+        _usePoolAtTick(2500, 400000);
+        token0.mint(address(this), type(uint128).max);
+        token1.mint(address(this), type(uint128).max);
+        permit2.approve(address(token0), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(token1), address(positionManager), type(uint160).max, type(uint48).max);
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] = abi.encode(
+            poolKey, int24(396480), int24(404040), uint256(2e30), type(uint128).max, type(uint128).max, address(this), ""
+        );
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(positionManager));
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
+        assertEq(poolManager.getLiquidity(poolId), 2e30, "precondition: active liquidity");
+    }
+
+    /// @notice For a valid but extreme same-pool state the quadratic's b*b wrapped modulo 2^256 in
+    ///         unchecked arithmetic and the planner returned a plausible but WRONG plan (input,
+    ///         output and final price for a price outside the requested range). The discriminant is
+    ///         now checked: the state reverts Math_Overflow instead of misplanning.
+    function test_calculateSamePool_RevertsOnDiscriminantOverflowInsteadOfWrapping() public {
+        _setUpHighTickHeavyLiquidityPool();
+        vm.expectRevert(ILiquidityCalculator.Math_Overflow.selector);
+        helper.getOptimalSwap(poolCallee, 399720, 400320, 1e30, 1e12);
+    }
+
+    /// @notice The same pool with a smaller token0 target keeps a 218-bit discriminant and plans a
+    ///         normal swap: the check only fires where the arithmetic really overflows.
+    function test_calculateSamePool_LargeButFittingDiscriminantStillPlans() public {
+        _setUpHighTickHeavyLiquidityPool();
+        (uint256 amountIn, uint256 amountOut, bool dir0to1, uint160 sqrtPriceX96) =
+            helper.getOptimalSwap(poolCallee, 399720, 400320, 1e24, 1e12);
+        assertTrue(dir0to1, "token0 -> token1");
+        assertGt(amountIn, 0);
+        assertGt(amountOut, 0);
+        assertGe(sqrtPriceX96, TickMath.getSqrtPriceAtTick(399720), "final price inside the requested range");
+        assertLe(sqrtPriceX96, TickMath.getSqrtPriceAtTick(400000), "final price does not exceed the current price");
     }
 
     // ==================== Tick bitmap search regressions (M-04) ====================

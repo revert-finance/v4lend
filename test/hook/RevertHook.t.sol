@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
+import {stdStorage, StdStorage} from "forge-std/StdStorage.sol";
 
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
@@ -46,6 +47,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {V4Utils} from "src/vault/transformers/V4Utils.sol";
 
 contract RevertHookTest is BaseTest {
+    using stdStorage for StdStorage;
+
     using EasyPosm for IPositionManager;
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
@@ -371,10 +374,12 @@ contract RevertHookTest is BaseTest {
         );
         _swapHookedPoolBothWays(1e17);
         vm.warp(block.timestamp + 1 days);
-        positionManager.decreaseLiquidity(token3Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
+        _collectNetFees(token3Id);
+        _seedLegacyFees(token3Id, 1e12, 1e12);
         (uint128 carried0, uint128 carried1) = hook.pendingProtocolFees(token3Id);
         assertGt(carried0, 0, "token0 fee should be carried");
         assertGt(carried1, 0, "token1 fee should be carried");
+        _collectNetFees(token3Id); // settle the synthetic legacy obligation before remint
 
         hook.setPositionConfig(
             token3Id,
@@ -414,7 +419,7 @@ contract RevertHookTest is BaseTest {
         assertEq(uint256(old0) + old1, 0, "retired token must not keep a carried fee");
         (uint128 new0, uint128 new1) = hook.pendingProtocolFees(newTokenId);
         assertEq(new0, 0, "token0 fee is absorbed by the one-sided withdrawal");
-        assertEq(new1, carried1, "unabsorbed token1 fee should follow the replacement");
+        assertEq(new1, 0, "fee-first withdrawal settles legacy fees before remint");
 
         // A later removal on the replacement settles the carried token1 fee.
         uint256 recipient1Before = currency1.balanceOf(protocolFeeRecipient);
@@ -427,7 +432,7 @@ contract RevertHookTest is BaseTest {
             block.timestamp,
             Constants.ZERO_BYTES
         );
-        assertGe(currency1.balanceOf(protocolFeeRecipient) - recipient1Before, carried1, "carried fee settled");
+        assertEq(currency1.balanceOf(protocolFeeRecipient) - recipient1Before, 0, "no remaining fee after remint");
         (, uint128 after1) = hook.pendingProtocolFees(newTokenId);
         assertEq(after1, 0, "carried token1 fee should be cleared");
     }
@@ -984,6 +989,9 @@ contract RevertHookTest is BaseTest {
     }
 
     function testAutoExit_MultiplePositionsOnSameTriggerExecuteOnceEach() public {
+        // The oracle is this pool itself and the exits' own swaps move the price well past the
+        // 100-tick default window (V4LE-4 made that bound exact); this test is about dispatch, not the window.
+        hook.setMaxTicksFromOracle(1000);
         uint128 extraLiquidity = 10e18;
         (uint256 token4Id,) = positionManager.mint(
             poolKey,
@@ -1377,10 +1385,10 @@ contract RevertHookTest is BaseTest {
         assertEq(lowerAfter, lowerBaseline, "fee collection should remove the stale lower trigger");
         assertEq(upperAfter, upperBaseline, "fee collection should remove the stale upper trigger");
         (uint128 pending0, uint128 pending1) = hook.pendingProtocolFees(token2Id);
-        assertGt(uint256(pending0) + pending1, 0, "protocol fee on a fee-only removal must be carried, not taken");
+        assertEq(uint256(pending0) + pending1, 0, "fee collection settles the protocol fee");
     }
 
-    function testFeeOnlyDecreaseThroughPositionManagerSucceedsForActivePosition() public {
+    function testFeeOnlyCollectionRequiresFeePayingIncrease() public {
         assertGt(feeController.lpFeeBps(), 0, "lpFeeBps must be > 0 to reach protocol fee accounting");
 
         v4Oracle.setMockPositionValue(1 ether);
@@ -1404,8 +1412,9 @@ contract RevertHookTest is BaseTest {
         uint256 balance0Before = currency0.balanceOf(address(this));
         uint256 balance1Before = currency1.balanceOf(address(this));
 
-        // The standard v4 fee collection call: DECREASE_LIQUIDITY(0) + TAKE_PAIR.
-        positionManager.decreaseLiquidity(token2Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
+        // DECREASE(0) cannot pay the hook fee; it must not turn the fee into a receivable.
+        _expectUnsettledRemoval(token2Id, 0);
+        _collectNetFees(token2Id);
 
         assertEq(positionManager.getPositionLiquidity(token2Id), liquidityBefore, "fee collection must keep liquidity");
         assertGt(
@@ -1417,38 +1426,65 @@ contract RevertHookTest is BaseTest {
 
     /// @dev Activates token2Id, accrues LP fees, lets a day of active time pass and collects fees
     ///      through a plain DECREASE_LIQUIDITY(0). Returns the protocol fee carried afterwards.
+    /// @dev Synthetic legacy liability fixture for recovery/migration regressions. New operations
+    /// can no longer create an unsecured liability; protocol fees settle before collection.
     function _collectFeesOnlyAndCarryProtocolFee() internal returns (uint128 pending0, uint128 pending1) {
-        assertGt(feeController.lpFeeBps(), 0, "lpFeeBps must be > 0 to reach protocol fee accounting");
-        v4Oracle.setMockPositionValue(1 ether);
-        hook.setPositionConfig(
-            token2Id,
-            _buildNonVaultModeConfig(
-                PositionModeFlags.MODE_AUTO_COLLECT, false, false, type(int24).min, type(int24).max
-            )
-        );
+        hook.setPositionConfig(token2Id, _buildNonVaultModeConfig(
+            PositionModeFlags.MODE_AUTO_COLLECT, false, false, type(int24).min, type(int24).max));
         _swapHookedPoolBothWays(1e17);
         vm.warp(block.timestamp + 1 days);
+        _collectNetFees(token2Id);
+        pending0 = 1e12;
+        pending1 = 1e12;
+        _seedLegacyFees(token2Id, pending0, pending1);
+    }
 
-        uint256 recipient0Before = currency0.balanceOf(protocolFeeRecipient);
-        uint256 recipient1Before = currency1.balanceOf(protocolFeeRecipient);
-        vm.recordLogs();
-        positionManager.decreaseLiquidity(token2Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
-        SendProtocolFeeEvent memory feeEvent = _findSendProtocolFee(vm.getRecordedLogs(), token2Id);
+    function _seedLegacyFees(uint256 id, uint128 pending0, uint128 pending1) internal {
+        uint256 slot = stdstore.target(address(hook)).sig(hook.pendingProtocolFees.selector).with_key(id).find();
+        vm.store(address(hook), bytes32(slot), bytes32(uint256(pending0) | (uint256(pending1) << 128)));
+    }
 
-        assertFalse(feeEvent.found, "nothing can be taken inside a fee-only removal");
-        assertEq(currency0.balanceOf(protocolFeeRecipient), recipient0Before, "recipient must not receive token0 yet");
-        assertEq(currency1.balanceOf(protocolFeeRecipient), recipient1Before, "recipient must not receive token1 yet");
-        (pending0, pending1) = hook.pendingProtocolFees(token2Id);
-        assertGt(pending0, 0, "token0 protocol fee should be carried");
-        assertGt(pending1, 0, "token1 protocol fee should be carried");
+    function testFeesCannotBeAbandonedByOneSidedExitAndBurn() public {
+        hook.setPositionConfig(token2Id, _buildNonVaultModeConfig(
+            PositionModeFlags.MODE_AUTO_COLLECT,false,false,type(int24).min,type(int24).max));
+        _swapHookedPoolBothWays(1e17);
+        vm.warp(block.timestamp+1 days);
+        _expectUnsettledRemoval(token2Id,0);
+        uint256 before1 = currency1.balanceOf(protocolFeeRecipient);
+        _collectNetFees(token2Id);
+        assertGt(currency1.balanceOf(protocolFeeRecipient),before1);
+        for (uint256 i; i < 20 && _feeExitTick() >= tickLower2; ++i) {
+            swapRouter.swapExactTokensForTokens({amountIn:1e18,amountOutMin:0,zeroForOne:true,poolKey:poolKey,
+                hookData:bytes(""),receiver:address(this),deadline:block.timestamp});
+        }
+        positionManager.decreaseLiquidity(token2Id,positionManager.getPositionLiquidity(token2Id),0,0,address(this),block.timestamp,"");
+        positionManager.burn(token2Id,0,0,address(this),block.timestamp,"");
+        (uint128 owed0,uint128 owed1) = hook.pendingProtocolFees(token2Id);
+        assertEq(uint256(owed0)+owed1,0);
+    }
+
+    function _feeExitTick() internal view returns (int24 tick) {
+        (,tick,,) = StateLibrary.getSlot0(poolManager,poolId);
+    }
+
+    function _expectUnsettledRemoval(uint256 id, uint128 liquidity) internal {
+        bytes[] memory params = new bytes[](2);
+        params[0] = abi.encode(id,liquidity,0,0,bytes(""));
+        params[1] = abi.encode(currency0,currency1,address(this));
+        bytes memory data = abi.encode(abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY),uint8(Actions.TAKE_PAIR)),params);
+        vm.expectRevert();
+        positionManager.modifyLiquidities(data,block.timestamp);
+    }
+
+    function _collectNetFees(uint256 id) internal {
+        positionManager.increaseLiquidity(id, 0, type(uint128).max, type(uint128).max, block.timestamp, "");
     }
 
     function testFeeOnlyDecreaseDefersProtocolFeeAndSettlesOnLaterRemoval() public {
         (uint128 pending0, uint128 pending1) = _collectFeesOnlyAndCarryProtocolFee();
 
-        // Same-block second fee-only collect: nothing new accrues and nothing can be taken, so the
-        // carried amount is unchanged and the call still succeeds.
-        positionManager.decreaseLiquidity(token2Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
+        // An unpaid legacy obligation cannot be extracted as an unsecured receivable.
+        _expectUnsettledRemoval(token2Id, 0);
         (uint128 pendingAgain0, uint128 pendingAgain1) = hook.pendingProtocolFees(token2Id);
         assertEq(pendingAgain0, pending0, "repeat fee-only collect must not change carried token0");
         assertEq(pendingAgain1, pending1, "repeat fee-only collect must not change carried token1");
@@ -1476,23 +1512,14 @@ contract RevertHookTest is BaseTest {
         assertEq(pendingAfter1, 0, "carried token1 fee should be cleared");
     }
 
-    function testCarriedProtocolFeeIsCappedByRemovedPrincipal() public {
-        (uint128 pending0, uint128 pending1) = _collectFeesOnlyAndCarryProtocolFee();
-        uint256 recipient0Before = currency0.balanceOf(protocolFeeRecipient);
-        uint256 recipient1Before = currency1.balanceOf(protocolFeeRecipient);
-
-        // Removing a single unit of liquidity frees at most ~1 wei of principal per token, so the
-        // hook may take at most that much and must carry the rest instead of reverting.
-        positionManager.decreaseLiquidity(token2Id, 1, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
-
-        uint256 taken0 = currency0.balanceOf(protocolFeeRecipient) - recipient0Before;
-        uint256 taken1 = currency1.balanceOf(protocolFeeRecipient) - recipient1Before;
-        assertLe(taken0, 1, "token0 take must not exceed removed principal");
-        assertLe(taken1, 1, "token1 take must not exceed removed principal");
-        (uint128 pendingAfter0, uint128 pendingAfter1) = hook.pendingProtocolFees(token2Id);
-        assertEq(uint256(pendingAfter0) + taken0, pending0, "token0 carried + taken must equal owed");
-        assertEq(uint256(pendingAfter1) + taken1, pending1, "token1 carried + taken must equal owed");
-        assertGt(pendingAfter0, 0, "most of the token0 fee should still be carried");
+    function testRemovalCannotLeaveUnsecuredProtocolFees() public {
+        (uint128 pending0,uint128 pending1) = _collectFeesOnlyAndCarryProtocolFee();
+        uint128 beforeLiquidity = positionManager.getPositionLiquidity(token2Id);
+        _expectUnsettledRemoval(token2Id, 1);
+        assertEq(positionManager.getPositionLiquidity(token2Id),beforeLiquidity);
+        (uint128 after0,uint128 after1) = hook.pendingProtocolFees(token2Id);
+        assertEq(after0,pending0);
+        assertEq(after1,pending1);
     }
 
     function testHookAutoCollectSettlesCarriedProtocolFee() public {
@@ -1525,21 +1552,13 @@ contract RevertHookTest is BaseTest {
         assertEq(pendingAfter1, 0, "carried token1 fee should be cleared");
     }
 
-    function testThirdPartyZeroIncreaseAlsoDefersProtocolFee() public {
-        (uint128 pending0, uint128 pending1) = _collectFeesOnlyAndCarryProtocolFee();
-        _swapHookedPoolBothWays(1e17);
-        vm.warp(block.timestamp + 1 days);
-        uint256 recipient0Before = currency0.balanceOf(protocolFeeRecipient);
-
-        // The hook cannot tell a third-party INCREASE(0) from a DECREASE(0) and must not guess.
-        positionManager.increaseLiquidity(
-            token2Id, 0, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
-        );
-
-        assertEq(currency0.balanceOf(protocolFeeRecipient), recipient0Before, "nothing may be taken");
-        (uint128 pendingAfter0, uint128 pendingAfter1) = hook.pendingProtocolFees(token2Id);
-        assertGt(pendingAfter0, pending0, "new token0 period fee should be added to the carried amount");
-        assertGt(pendingAfter1, pending1, "new token1 period fee should be added to the carried amount");
+    function testThirdPartyZeroIncreaseSettlesProtocolFees() public {
+        (uint128 pending0,) = _collectFeesOnlyAndCarryProtocolFee();
+        uint256 before0 = currency0.balanceOf(protocolFeeRecipient);
+        _collectNetFees(token2Id);
+        assertEq(currency0.balanceOf(protocolFeeRecipient)-before0,pending0);
+        (uint128 after0,uint128 after1) = hook.pendingProtocolFees(token2Id);
+        assertEq(uint256(after0)+after1,0);
     }
 
     /// @dev Auto-lend accounting is keyed by token id and cannot follow a remint. A vault remint
@@ -1565,6 +1584,7 @@ contract RevertHookTest is BaseTest {
         IERC721(address(positionManager)).transferFrom(address(this), fakeVault, oldTokenId);
         IERC721(address(positionManager)).transferFrom(address(this), fakeVault, newTokenId);
         vm.mockCall(fakeVault, abi.encodeWithSignature("transformedTokenId()"), abi.encode(newTokenId));
+        vm.mockCall(fakeVault, abi.encodeWithSignature("transformOriginTokenId()"), abi.encode(oldTokenId));
         vm.mockCall(
             fakeVault, abi.encodeWithSignature("ownerOf(uint256)", oldTokenId), abi.encode(address(this))
         );
@@ -1887,7 +1907,8 @@ contract RevertHookTest is BaseTest {
         hook.setPositionConfig(token2Id, _relativeExitConfig());
         _swapHookedPoolBothWays(1e17);
         vm.warp(block.timestamp + 1 days);
-        positionManager.decreaseLiquidity(token2Id, 0, 0, 0, address(this), block.timestamp, Constants.ZERO_BYTES);
+        _collectNetFees(token2Id);
+        _seedLegacyFees(token2Id, 1e12, 1e12);
         (uint128 owed0, uint128 owed1) = hook.pendingProtocolFees(token2Id);
         assertGt(owed0 + owed1, 0, "old position should carry a protocol fee");
 
@@ -2337,7 +2358,7 @@ contract RevertHookTest is BaseTest {
                 autoRangeLowerLimit: 0,
                 autoRangeUpperLimit: 0,
                 autoRangeLowerDelta: -spacing,
-                autoRangeUpperDelta: 0,
+                autoRangeUpperDelta: spacing, // upperDelta 0 would re-trigger on the fired bucket (V4LE-16)
                 autoLendToleranceTick: 0,
                 autoLeverageTargetBps: 0
             })
@@ -3869,8 +3890,10 @@ contract RevertHookTest is BaseTest {
         vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
         hook.setPositionConfig(token3Id, config);
 
+        // upperDelta 0 with upperLimit 0 would put the replacement's upper trigger on the bucket it
+        // fired from (refused since V4LE-16); a symmetric shift is the ordinary valid shape
         config.autoRangeLowerDelta = -poolKey.tickSpacing;
-        config.autoRangeUpperDelta = 0;
+        config.autoRangeUpperDelta = poolKey.tickSpacing;
         hook.setPositionConfig(token3Id, config);
 
         (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
@@ -5870,6 +5893,48 @@ contract RevertHookTest is BaseTest {
         );
     }
 
+    /// @notice V4LE-19: a zero-share deposit that DID take the assets must not pass the
+    ///         zero-share guard on the strength of ERC4626 shares the hook custodies for other
+    ///         auto-lend positions, and the restore must not be funded out of that custody.
+    /// @dev currency0 stands in for another auto-lend vault's share token: the custody reserve is
+    ///      written into `_custodiedShares[currency0]` (storage slot 13) and matched by balance.
+    function testAutoLendZeroShareDeposit_CannotSpendCustodiedShares() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        AssetTakingZeroShareVault takingVault =
+            new AssetTakingZeroShareVault(IERC20(Currency.unwrap(currency0)), "Taking Zero Share Vault", "TZERO");
+        hook.setAutoLendVault(Currency.unwrap(currency0), takingVault);
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        // a victim's custodied shares, denominated in the pool currency
+        uint256 custodied = 5e18;
+        deal(Currency.unwrap(currency0), address(hook), custodied);
+        vm.store(
+            address(hook), keccak256(abi.encode(Currency.unwrap(currency0), uint256(13))), bytes32(custodied)
+        );
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(token3Id);
+        uint256 vaultAssetsBefore = takingVault.totalAssets();
+
+        vm.recordLogs();
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertTrue(_sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND), "action fails");
+        assertEq(positionManager.getPositionLiquidity(token3Id), liquidityBefore, "position untouched");
+        assertEq(takingVault.totalAssets(), vaultAssetsBefore, "taking vault keeps nothing");
+        assertGe(
+            IERC20(Currency.unwrap(currency0)).balanceOf(address(hook)), custodied, "custodied shares fully intact"
+        );
+        (,,, address autoLendToken, uint256 autoLendShares,,,) = hook.positionStates(token3Id);
+        assertEq(autoLendShares, 0);
+        assertEq(autoLendToken, address(0));
+    }
+
     function testAutoLendZeroShareDeposit_RestoresLiquidityAndConsumesTriggeredTick() public {
         hook.setMaxTicksFromOracle(1000);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
@@ -6584,6 +6649,9 @@ contract RevertHookTest is BaseTest {
     }
 
     function testAutoExitFailureIsolation_OnePositionCanFailWithoutBlockingOthers() public {
+        // The oracle is this pool itself and the exits' own swaps move the price well past the
+        // 100-tick default window (V4LE-4 made that bound exact); this test is about dispatch, not the window.
+        hook.setMaxTicksFromOracle(1000);
         uint128 extraLiquidity = 10e18;
         (uint256 token4Id,) = positionManager.mint(
             poolKey,
@@ -7044,6 +7112,17 @@ contract ZeroShareERC4626Vault is MockERC4626Vault {
     constructor(IERC20 asset_, string memory name_, string memory symbol_) MockERC4626Vault(asset_, name_, symbol_) {}
 
     function deposit(uint256, address) public pure override returns (uint256) {
+        return 0;
+    }
+}
+
+/// @dev Standard-shaped zero-share vault: pulls the assets (like OpenZeppelin's ERC4626 does before
+///      minting) and then mints nothing, e.g. because of inflation-state floor rounding.
+contract AssetTakingZeroShareVault is MockERC4626Vault {
+    constructor(IERC20 asset_, string memory name_, string memory symbol_) MockERC4626Vault(asset_, name_, symbol_) {}
+
+    function deposit(uint256 assets, address) public override returns (uint256) {
+        IERC20(asset()).transferFrom(msg.sender, address(this), assets);
         return 0;
     }
 }

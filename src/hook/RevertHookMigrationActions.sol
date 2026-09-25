@@ -66,7 +66,16 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         if (address(this) == _selfAddress) {
             revert Unauthorized();
         }
-        if (!_vaults[msg.sender] || oldTokenId == newTokenId || IVault(msg.sender).transformedTokenId() != newTokenId) {
+        // The vault forwards borrower-chosen calldata to any allowlisted transformer, this hook
+        // included, so `oldTokenId` must be the token the running transform started with: the
+        // vault records it when the transform begins and the remint moves transformedTokenId to
+        // the replacement. Otherwise a borrower could name any other position they own and have
+        // its automation, swap protection and carried fee rewritten onto the transformed one.
+        IVault vault = IVault(msg.sender);
+        if (
+            !_vaults[msg.sender] || oldTokenId == newTokenId || vault.transformedTokenId() != newTokenId
+                || vault.transformOriginTokenId() != oldTokenId
+        ) {
             revert Unauthorized();
         }
         IERC721 nft = IERC721(address(positionManager));
@@ -78,7 +87,6 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         // owner: the old token's owner record is the account that now owns the replacement. A
         // different owner means a borrower is pointing at someone else's position (M-02). The old
         // token may keep liquidity (partial range changes leave some behind).
-        IVault vault = IVault(msg.sender);
         if (vault.ownerOf(oldTokenId) != vault.ownerOf(newTokenId)) {
             revert Unauthorized();
         }
@@ -113,15 +121,39 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         // position's value, so below-minimum deactivation belongs to the remove callback; reading
         // the oracle on every add of an active position would make plain deposits depend on feed
         // freshness.
-        if (!PositionModeFlags.isNone(_positionConfigs[tokenId].modeFlags) && !_isActivated(tokenId)) {
+        PositionConfig storage config = _positionConfigs[tokenId];
+        if (!PositionModeFlags.isNone(config.modeFlags) && !_isActivated(tokenId)) {
             (uint256 positionValueNative,,,) = v4Oracle.getValue(tokenId, address(0));
             if (positionValueNative >= _minPositionValueNative) {
                 // A third party arming a configured position while the trigger cursor lags the live
                 // bucket would place its triggers where the resumed walk never visits them
                 // (TriggerCursorStale, see RevertHookTriggers._requireTriggerCursorFresh). The hook's
-                // own adds inside a walk are exempt: there the stored cursor is stale by construction.
+                // own adds inside a walk are exempt: there the stored cursor is stale by construction,
+                // and the restore paths re-add liquidity right after the fired trigger emptied the
+                // position, so its condition is satisfied by construction and removed again by the
+                // caller.
                 if (IMsgSender(address(positionManager)).msgSender() != address(this)) {
                     _requireTriggerCursorFresh(key.toId(), key.tickSpacing);
+                    // The position was deactivated by a removal (empty, or below the value minimum)
+                    // and the price may have crossed its trigger since. A fresh cursor sits on the
+                    // live bucket and the walk searches strictly past it, so a trigger that is
+                    // already satisfied would be armed on the wrong side of every future walk and
+                    // stay dormant until a recross (V4LE-70). It cannot execute here either: the
+                    // PositionManager holds its reentrancy lock for the caller's own operation.
+                    // Refuse the add; the owner reconfigures (which executes the trigger at once)
+                    // or disables automation first. Auto-leverage is re-centred on the live tick
+                    // like a remint, so only range, exit and lend triggers can be satisfied.
+                    (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+                    if (PositionModeFlags.hasAutoLeverage(config.modeFlags)) {
+                        _positionStates[tokenId].autoLeverageBaseTick =
+                            _getTickLower(_getCurrentTick(key.toId()), key.tickSpacing);
+                    }
+                    (bool alreadyTriggered,,) = _checkTriggerConditions(
+                        tokenId, key, config, positionInfo.tickLower(), positionInfo.tickUpper()
+                    );
+                    if (alreadyTriggered) {
+                        revert TriggerAlreadySatisfied();
+                    }
                 }
                 _addPositionTriggers(tokenId, key);
                 _activatePosition(tokenId);
@@ -134,7 +166,10 @@ contract RevertHookMigrationActions is RevertHookActionBase {
     ///      (`positionManager.msgSender()`) must own the old token, hold its per-token approval, or be
     ///      an operator for the owner (`isApprovedForAll`, which is how the standalone AutoRange is
     ///      approved), and the new token must be in the locker's custody (V4Utils mints to itself
-    ///      before forwarding) or already with the old owner. A blanket operator could name any of the
+    ///      before forwarding) or already with the old owner. A shared locker must not lend that
+    ///      authority to its callers: V4Utils forwards a tagged claim only when it names the token its
+    ///      caller is authorized on and draining in that very call, and refuses one on its
+    ///      permissionless mint / increase entries (V4LE-9). A blanket operator could name any of the
     ///      owner's positions here, but the claim only succeeds once that position is drained, so
     ///      misdirecting automation would first require closing a position the operator was already
     ///      trusted with; the cross-position claim adds nothing to what the approval already permits. The callback also fires for

@@ -117,6 +117,7 @@ contract AuctionArbExecutorTest is BaseTest {
         });
         auctionController.configurePool(auctionPoolKey, config);
         IERC20(Currency.unwrap(currency1)).approve(address(auctionController), type(uint256).max);
+        auctionController.setExecutorAdmission(address(executor), true);
         auctionController.bidNext(auctionPoolKey, address(executor), 1e15);
         vm.warp(uint256(startTime) + EPOCH_LENGTH + 1);
 
@@ -141,15 +142,11 @@ contract AuctionArbExecutorTest is BaseTest {
         AuctionArbExecutor.V4Hop[] memory hops = new AuctionArbExecutor.V4Hop[](2);
         // hop 1: currency1 -> currency0 in the plain pool (currency0 is cheap there)
         hops[0] = AuctionArbExecutor.V4Hop({
-            key: plainPoolKey,
-            zeroForOne: false,
-            sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+            key: plainPoolKey, zeroForOne: false, sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
         });
         // hop 2: currency0 -> currency1 in the auction pool at the winner's zero fee
         hops[1] = AuctionArbExecutor.V4Hop({
-            key: auctionPoolKey,
-            zeroForOne: true,
-            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            key: auctionPoolKey, zeroForOne: true, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
         });
         route = AuctionArbExecutor.V4Route({
             startCurrency: currency1,
