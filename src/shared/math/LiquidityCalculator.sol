@@ -92,6 +92,16 @@ interface ILiquidityCalculator {
         uint24 outputFeePips
     ) external view returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1);
 
+    /// @notice Same-pool planner accounting for the caller's output fee and final pool price.
+    function calculateSamePool(
+        V4PoolInfo memory pool,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0,
+        uint256 amount1,
+        uint24 outputFeePips
+    ) external view returns (uint256 inputAmount, uint256 outputAmount, bool zeroForOne, uint160 sqrtPrice);
+
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit (same pool version)
     function calculateSamePool(
         V4PoolInfo memory pool,
@@ -226,8 +236,7 @@ contract LiquidityCalculator is ILiquidityCalculator {
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(lowerTick);
         uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(upperTick);
         swapDir0to1 = _shouldSwap0to1(amount0, amount1, positionSqrtPrice, sqrtLower, sqrtUpper);
-        uint16 protocolFee =
-            swapDir0to1 ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
+        uint16 protocolFee = swapDir0to1 ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
         route.feeRate = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
         if (route.feeRate >= MAX_FEE_PIPS) revert Invalid_Fee();
         route.outputMultiplier = MAX_FEE_PIPS - uint256(outputFeePips);
@@ -256,7 +265,11 @@ contract LiquidityCalculator is ILiquidityCalculator {
             uint256 requiredRatio = _calculateRequiredRatio(positionSqrtPrice, sqrtLower, sqrtUpper);
             for (uint256 round; round < ROUTE_REFINEMENT_ROUNDS; ++round) {
                 uint256 refined = _solveWithEffectivePrice(
-                    requiredRatio, amount0, amount1, swapDir0to1, FullMath.mulDiv(outputAmount, FixedPoint96.Q96, inputAmount)
+                    requiredRatio,
+                    amount0,
+                    amount1,
+                    swapDir0to1,
+                    FullMath.mulDiv(outputAmount, FixedPoint96.Q96, inputAmount)
                 );
                 if (refined == 0 || refined == inputAmount) break;
                 inputAmount = refined;
@@ -286,12 +299,20 @@ contract LiquidityCalculator is ILiquidityCalculator {
         view
         returns (uint256 amountOut)
     {
-        uint160 sqrtPrice = route.sqrtPrice;
+        (amountOut,,) = _quoteThroughTicksState(route, zeroForOne, amountIn);
+    }
+
+    function _quoteThroughTicksState(RouteState memory route, bool zeroForOne, uint256 amountIn)
+        private
+        view
+        returns (uint256 amountOut, uint160 sqrtPrice, uint256 remaining)
+    {
+        sqrtPrice = route.sqrtPrice;
         uint128 liquidity = route.liquidity;
         int24 tick = route.tick;
         int16 wordPosition = type(int16).min;
         uint256 tickBitmap;
-        uint256 remaining = amountIn;
+        remaining = amountIn;
         for (uint256 crossings; remaining > 0 && crossings < MAX_ROUTE_QUOTE_CROSSINGS; ++crossings) {
             NextInitializedTickResult memory next = _locateNextTick(
                 NextInitializedTickParams({
@@ -310,9 +331,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
             if (nextTick > TickMath.MAX_TICK) nextTick = TickMath.MAX_TICK;
             uint160 sqrtPriceNext = TickMath.getSqrtPriceAtTick(nextTick);
 
-            (uint160 sqrtPriceAfter, uint256 stepIn, uint256 stepOut, uint256 stepFee) = SwapMath.computeSwapStep(
-                sqrtPrice, sqrtPriceNext, liquidity, -int256(remaining), route.feeRate
-            );
+            (uint160 sqrtPriceAfter, uint256 stepIn, uint256 stepOut, uint256 stepFee) =
+                SwapMath.computeSwapStep(sqrtPrice, sqrtPriceNext, liquidity, -int256(remaining), route.feeRate);
             amountOut += stepOut;
             remaining -= stepIn + stepFee;
             sqrtPrice = sqrtPriceAfter;
@@ -347,7 +367,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
         } else {
             if (requiredAmount0 <= amount0) return 0;
             // amount0 + p * in == ratio * (amount1 - in)
-            inputAmount = FullMath.mulDiv(requiredAmount0 - amount0, FixedPoint96.Q96, effectivePriceX96 + requiredRatio);
+            inputAmount =
+                FullMath.mulDiv(requiredAmount0 - amount0, FixedPoint96.Q96, effectivePriceX96 + requiredRatio);
             if (inputAmount > amount1) inputAmount = amount1;
         }
     }
@@ -408,16 +429,14 @@ contract LiquidityCalculator is ILiquidityCalculator {
 
         uint160 nextSqrtPrice;
         if (zeroForOne) {
-            nextSqrtPrice =
-                SqrtPriceMath.getNextSqrtPriceFromInput(route.sqrtPrice, route.liquidity, amountInNet, true);
+            nextSqrtPrice = SqrtPriceMath.getNextSqrtPriceFromInput(route.sqrtPrice, route.liquidity, amountInNet, true);
             if (nextSqrtPrice <= TickMath.MIN_SQRT_PRICE) nextSqrtPrice = TickMath.MIN_SQRT_PRICE + 1;
             outputAmount = SqrtPriceMath.getAmount1Delta(nextSqrtPrice, route.sqrtPrice, route.liquidity, false);
         } else {
             // getNextSqrtPriceFromInput's uint160 cast reverts past the price ceiling; the real
             // swap stops there instead, so cap the price the same way.
             uint256 nextRaw = uint256(route.sqrtPrice) + FullMath.mulDiv(amountInNet, FixedPoint96.Q96, route.liquidity);
-            nextSqrtPrice =
-                nextRaw >= TickMath.MAX_SQRT_PRICE ? TickMath.MAX_SQRT_PRICE - 1 : uint160(nextRaw);
+            nextSqrtPrice = nextRaw >= TickMath.MAX_SQRT_PRICE ? TickMath.MAX_SQRT_PRICE - 1 : uint160(nextRaw);
             outputAmount = SqrtPriceMath.getAmount0Delta(route.sqrtPrice, nextSqrtPrice, route.liquidity, false);
         }
         outputAmount = FullMath.mulDiv(outputAmount, route.outputMultiplier, MAX_FEE_PIPS);
@@ -460,16 +479,14 @@ contract LiquidityCalculator is ILiquidityCalculator {
     /// @param sqrtLower Lower bound sqrt price
     /// @param sqrtUpper Upper bound sqrt price
     /// @return requiredRatio Required ratio scaled by Q96
-    function _calculateRequiredRatio(
-        uint160 sqrtPrice,
-        uint160 sqrtLower,
-        uint160 sqrtUpper
-    ) private pure returns (uint256 requiredRatio) {
+    function _calculateRequiredRatio(uint160 sqrtPrice, uint160 sqrtLower, uint160 sqrtUpper)
+        private
+        pure
+        returns (uint256 requiredRatio)
+    {
         uint256 numerator = sqrtUpper - sqrtPrice;
         uint256 denominator = FullMath.mulDiv(
-            FullMath.mulDiv(sqrtUpper, sqrtPrice, FixedPoint96.Q96),
-            sqrtPrice - sqrtLower,
-            FixedPoint96.Q96
+            FullMath.mulDiv(sqrtUpper, sqrtPrice, FixedPoint96.Q96), sqrtPrice - sqrtLower, FixedPoint96.Q96
         );
         requiredRatio = FullMath.mulDiv(numerator, FixedPoint96.Q96, denominator);
     }
@@ -479,12 +496,66 @@ contract LiquidityCalculator is ILiquidityCalculator {
     /// @param pool Pool configuration
     /// @param lowerTick Lower bound of the position
     /// @param upperTick Upper bound of the position
-    /// @param amount0Target Desired amount of token0
-    /// @param amount1Target Desired amount of token1
+    /// @param amount0 Desired amount of token0
+    /// @param amount1 Desired amount of token1
     /// @return inputAmount Optimal swap input amount
     /// @return outputAmount Expected swap output amount
-    /// @return swapDir0to1 Direction: true for token0->token1, false for token1->token0
+    /// @return zeroForOne Direction: true for token0->token1, false for token1->token0
     /// @return sqrtPrice Final sqrt price after optimal swap
+    function calculateSamePool(
+        V4PoolInfo memory pool,
+        int24 lowerTick,
+        int24 upperTick,
+        uint256 amount0,
+        uint256 amount1,
+        uint24 outputFeePips
+    ) external view returns (uint256 inputAmount, uint256 outputAmount, bool zeroForOne, uint160 sqrtPrice) {
+        if (outputFeePips >= MAX_FEE_PIPS) revert Invalid_Fee();
+        if (lowerTick >= upperTick || lowerTick < TickMath.MIN_TICK || upperTick > TickMath.MAX_TICK) {
+            revert Invalid_Tick_Range();
+        }
+        RouteState memory route;
+        route.pool = pool;
+        uint24 packedProtocolFee;
+        uint24 lpFee;
+        (route.sqrtPrice, route.tick, packedProtocolFee, lpFee) = pool.poolMgr.getSlot0(pool.poolIdentifier);
+        if (route.sqrtPrice == 0) revert Invalid_Pool();
+        route.liquidity = pool.poolMgr.getLiquidity(pool.poolIdentifier);
+        uint160 lower = TickMath.getSqrtPriceAtTick(lowerTick);
+        uint160 upper = TickMath.getSqrtPriceAtTick(upperTick);
+        zeroForOne = _shouldSwap0to1(amount0, amount1, route.sqrtPrice, lower, upper);
+        uint16 protocolFee = zeroForOne ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
+        route.feeRate = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
+        if (route.feeRate >= MAX_FEE_PIPS) revert Invalid_Fee();
+        route.outputMultiplier = MAX_FEE_PIPS - uint256(outputFeePips);
+        uint256 low;
+        uint256 high = zeroForOne ? amount0 : amount1;
+        uint256 tolerance = (high >> ROUTE_SOLVE_PRECISION_SHIFT) + 1;
+        // The balance condition is monotone: more input both buys the deficient token and moves
+        // the pool price and the range ratio. Every candidate uses
+        // the exact tick-walking output and ending price, including initialized tick crossings.
+        while (high - low > tolerance) {
+            uint256 mid = low + (high - low) / 2;
+            (uint256 out, uint160 price, uint256 unspent) = _quoteThroughTicksState(route, zeroForOne, mid);
+            if (unspent != 0) {
+                high = mid;
+                continue;
+            }
+            bool stillExcess0 = _shouldSwap0to1(
+                zeroForOne ? amount0 - mid : amount0 + out,
+                zeroForOne ? amount1 + out : amount1 - mid,
+                price,
+                lower,
+                upper
+            );
+            if (stillExcess0 == zeroForOne) low = mid;
+            else high = mid;
+        }
+        inputAmount = low;
+        (outputAmount, sqrtPrice,) = _quoteThroughTicksState(route, zeroForOne, inputAmount);
+        if (outputAmount == 0) inputAmount = 0;
+    }
+
     function calculateSamePool(
         V4PoolInfo memory pool,
         int24 lowerTick,
@@ -526,9 +597,7 @@ contract LiquidityCalculator is ILiquidityCalculator {
         }
         // Determine swap direction
         swapDir0to1 = _shouldSwap0to1(amount0Target, amount1Target, sqrtPrice, sqrtLower, sqrtUpper);
-        uint16 protocolFee = swapDir0to1
-            ? packedProtocolFee.getZeroForOneFee()
-            : packedProtocolFee.getOneForZeroFee();
+        uint16 protocolFee = swapDir0to1 ? packedProtocolFee.getZeroForOneFee() : packedProtocolFee.getOneForZeroFee();
         state.feeRate = protocolFee == 0 ? lpFeeRate : protocolFee.calculateSwapFee(lpFeeRate);
         // A 100% total fee is a valid pool state (LPFeeLibrary allows it) but leaves nothing to
         // swap: both analytic branches divide by (1 - fee). Reject it like calculateSimple does
@@ -595,9 +664,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
                 if (sqrtPriceLast >= sqrtLower) {
                     sqrtPrice = _calculateSwap1to0(state);
                     inputAmount = amount1Target - lastAmount1
-                        + SqrtPriceMath.getAmount1Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, true).mulDiv(
-                            MAX_FEE_PIPS, MAX_FEE_PIPS - state.feeRate
-                        );
+                        + SqrtPriceMath.getAmount1Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, true)
+                            .mulDiv(MAX_FEE_PIPS, MAX_FEE_PIPS - state.feeRate);
                 }
                 outputAmount = lastAmount0 - amount0Target
                     + SqrtPriceMath.getAmount0Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, false);
@@ -629,9 +697,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
                 if (sqrtPriceLast <= sqrtUpper) {
                     sqrtPrice = _calculateSwap0to1(state);
                     inputAmount = amount0Target - lastAmount0
-                        + SqrtPriceMath.getAmount0Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, true).mulDiv(
-                            MAX_FEE_PIPS, MAX_FEE_PIPS - state.feeRate
-                        );
+                        + SqrtPriceMath.getAmount0Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, true)
+                            .mulDiv(MAX_FEE_PIPS, MAX_FEE_PIPS - state.feeRate);
                 }
                 outputAmount = lastAmount1 - amount1Target
                     + SqrtPriceMath.getAmount1Delta(sqrtPrice, sqrtPriceLast, lastLiquidity, false);
@@ -698,13 +765,11 @@ contract LiquidityCalculator is ILiquidityCalculator {
     /// @param searchLeft Whether to search left (true) or right (false)
     /// @return initialized Whether an initialized tick was found in the word
     /// @return nextTick The next initialized tick, or the far edge of the word if none is set
-    function _findTickInWord(
-        uint256 word,
-        int24 compressedTick,
-        uint8 bitPosition,
-        int24 tickSpacing,
-        bool searchLeft
-    ) private pure returns (bool initialized, int24 nextTick) {
+    function _findTickInWord(uint256 word, int24 compressedTick, uint8 bitPosition, int24 tickSpacing, bool searchLeft)
+        private
+        pure
+        returns (bool initialized, int24 nextTick)
+    {
         unchecked {
             if (searchLeft) {
                 // Mask all bits at or to the right of current position
@@ -803,8 +868,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
             if (params.sqrtPrice != sqrtPriceNext) break;
             if (
                 _shouldSwap0to1(
-                    amount0Target, amount1Target, params.sqrtPrice, params.state.sqrtLower, params.state.sqrtUpper
-                ) != params.swapDir0to1
+                        amount0Target, amount1Target, params.sqrtPrice, params.state.sqrtLower, params.state.sqrtUpper
+                    ) != params.swapDir0to1
             ) {
                 break;
             } else {

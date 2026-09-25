@@ -46,9 +46,22 @@ contract RevertHookSwapActions is RevertHookState {
         int24 tickUpper,
         uint256 amount0,
         uint256 amount1,
-        Mode mode
+        Mode mode,
+        bool samePool
     ) external view returns (uint256 amountIn, bool zeroForOne) {
         PoolId swapPoolId = swapPool.toId();
+        if (samePool) {
+            ILiquidityCalculator.V4PoolInfo memory pool =
+                ILiquidityCalculator.V4PoolInfo(poolManager, swapPoolId, swapPool.tickSpacing);
+            uint24 outputFeePips = uint24(hookFeeController.swapFeeBps(swapPoolId, uint8(mode))) * 100;
+            if (outputFeePips == 0) {
+                (amountIn,, zeroForOne,) = calculator.calculateSamePool(pool, tickLower, tickUpper, amount0, amount1);
+            } else {
+                (amountIn,, zeroForOne,) =
+                    calculator.calculateSamePool(pool, tickLower, tickUpper, amount0, amount1, outputFeePips);
+            }
+            return (amountIn, zeroForOne);
+        }
         (amountIn,, zeroForOne) = calculator.calculateSimple(
             positionSqrtPriceX96,
             ILiquidityCalculator.V4PoolInfo({

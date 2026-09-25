@@ -206,23 +206,10 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         (plan.poolKey, isSamePool) = _resolveSwapPool(poolKey, plan.zeroForOne);
         plan.isExternalRoute = !isSamePool;
 
-        if (isSamePool) {
-            (plan.amountIn,, plan.zeroForOne,) = liquidityCalculator.calculateSamePool(
-                ILiquidityCalculator.V4PoolInfo({
-                    poolMgr: poolManager, poolIdentifier: poolKey.toId(), tickSpacing: poolKey.tickSpacing
-                }),
-                tickLower,
-                tickUpper,
-                amount0,
-                amount1
-            );
-            return plan;
-        }
-
         // Sized against the route's depth and net of the hook's output fee; see
         // RevertHookSwapActions.planExternalRoute.
         (plan.amountIn, plan.zeroForOne) = swapActions.planExternalRoute(
-            liquidityCalculator, sqrtPriceX96, plan.poolKey, tickLower, tickUpper, amount0, amount1, mode
+            liquidityCalculator, sqrtPriceX96, plan.poolKey, tickLower, tickUpper, amount0, amount1, mode, isSamePool
         );
     }
 

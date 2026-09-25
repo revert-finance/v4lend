@@ -52,3 +52,10 @@ Debt-bearing health checks ask the allowlisted hook to validate compatibility wi
 including at the end of transforms. Configuring AUTO_EXIT before transferring an NFT to a third-asset
 vault can no longer bypass validation. Zero-debt exits remain available and native/WETH matches
 remain supported. Every allowlisted hook must implement validateVaultPosition as well as migration.
+
+## V4LE-21: size same-pool swaps after automation fees
+
+The same-pool planner now receives the effective per-mode output fee. For nonzero fees it solves
+the balance condition using net output and the ending price from a bounded tick-walking quote,
+including pool LP/protocol fees. Zero-fee plans retain the analytic path. The AUTO_RANGE regression
+checks the actual remint leftovers at the maximum supported automation fee.
