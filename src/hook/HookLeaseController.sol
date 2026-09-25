@@ -79,7 +79,7 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         Currency auctionCurrency; // ERC20 side of the pool used for deposits, rent and fees
         uint32 minBuyoutBumpPpm; // relative price increment a buyout must offer
         uint16 protocolFeeBps; // share of accrued rent sent to protocolFeeRecipient
-        uint32 minRentDepositSeconds; // a (re)starting lease must prepay at least this much rent
+        uint32 minRentDepositSeconds; // nonrefundable minimum rent commitment at the entry price
         // slot 2
         address protocolFeeRecipient;
         uint64 taxRatePerSecondX64; // rent per second as a Q64 fraction of the self-assessed price
@@ -115,6 +115,9 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         // capture does not grow with the length of the gap that filled the bucket.
         // Read only when a release actually happens; reset to 0 whenever the bucket drains.
         uint128 pendingReleasePerHorizon;
+        // Entry-price minimum rent still owed. Time-accrued rent pays it down; termination
+        // charges any remainder before refunding rentBalance. Always <= rentBalance.
+        uint128 minimumRentRemaining;
     }
 
     // ==================== State ====================
@@ -269,6 +272,8 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
     /// @notice Starts a lease on a vacant pool: escrows the self-assessed `price` as a deposit
     ///         and prepays `rentDeposit` of rent. The registered executor gets the fee discount
     ///         while the rent balance covers the current time.
+    ///         At least entry rent-per-second * minRentDepositSeconds is nonrefundable, even
+    ///         when the lease exits or is bought out in the same transaction.
     /// @dev A rent-INSOLVENT incumbent (now >= paidThrough: no discount, no rent accruing) does not
     ///      count as active: it is evicted first (final accrual delivered, deposit and rent dust
     ///      escrowed for pull-refund, see evictLease) and the caller enters at their own price - no
@@ -297,7 +302,8 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
 
     /// @notice Takes over an active lease Harberger-style: pay a price at least minBuyoutBumpPpm
     ///         above the current self-assessed price (escrowed as the new deposit) plus a fresh
-    ///         rent deposit. The old lessee's deposit and unused rent go to pull-refund escrow.
+    ///         rent deposit. The old lessee's deposit and rent left after settling their
+    ///         minimum commitment go to pull-refund escrow.
     function buyout(PoolKey calldata key, address executor, uint256 newPrice, uint256 rentDeposit)
         external
         nonReentrant
@@ -318,6 +324,7 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
             revert InvalidPrice();
         }
 
+        _settleMinimumRent(poolId, config, state);
         uint256 oldRefund = uint256(state.price) + state.rentBalance;
         _installLease(config, state, executor, newPrice, rentDeposit);
         if (oldRefund != 0) {
@@ -338,7 +345,8 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
     ) internal {
         _checkPrice(price);
         uint256 rps = _rentPerSecond(config, price);
-        if (rentDeposit < rps * config.minRentDepositSeconds || rentDeposit > MAX_ESCROW_AMOUNT) {
+        uint256 minimumRent = rps * config.minRentDepositSeconds;
+        if (rentDeposit < minimumRent || rentDeposit > MAX_ESCROW_AMOUNT) {
             revert InvalidRentDeposit();
         }
         _checkPrepaidRunway(rentDeposit, rps);
@@ -347,6 +355,7 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         state.lastAccrualTime = uint64(block.timestamp);
         state.price = uint128(price);
         state.rentBalance = uint128(rentDeposit);
+        state.minimumRentRemaining = uint128(minimumRent); // bounded by rentDeposit above
         state.executor = executor;
         state.paidThrough = _paidThrough(block.timestamp, rentDeposit, rps);
 
@@ -375,6 +384,7 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
     /// @notice Changes the caller's self-assessed price. Raising it pulls the difference into
     ///         escrow (and raises the rent); lowering it refunds the difference (and lowers the
     ///         rent, but also the buyout threshold - the Harberger honesty incentive).
+    ///         The unpaid entry-price minimum rent commitment does not change.
     /// @dev Raising requires leasing to be enabled. Lowering stays allowed while leasing is
     ///      disabled only as long as it does not stretch the prepaid runway: a lower rent rate
     ///      would otherwise revive a run-out lease from its remaining balance and block the
@@ -413,7 +423,8 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         emit LeasePriceChanged(poolId, msg.sender, oldPrice, newPrice);
     }
 
-    /// @notice Ends the caller's lease and returns the price deposit plus unaccrued rent.
+    /// @notice Ends the caller's lease and returns the price deposit plus rent left after
+    ///         settling the minimum rent commitment. Elapsed rent counts toward the minimum.
     ///         Always allowed, including while leasing is disabled.
     function exitLease(PoolKey calldata key) external nonReentrant returns (uint256 refund) {
         PoolId poolId = key.toId();
@@ -425,6 +436,7 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
 
         // a lease can only exist once startTime has passed, so accrual is always safe here
         _settleAccrualForLeaseAction(key, poolId, config, state);
+        _settleMinimumRent(poolId, config, state);
         refund = uint256(state.price) + state.rentBalance;
         _clearLease(state);
         if (refund != 0) {
@@ -648,6 +660,8 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         address lessee
     ) internal returns (uint256 refund) {
         _settleAccrualForLeaseAction(key, poolId, config, state);
+        // A price raise can make the lease insolvent before its minimum has been earned.
+        _settleMinimumRent(poolId, config, state);
         refund = uint256(state.price) + state.rentBalance;
         _clearLease(state);
         if (refund != 0) {
@@ -699,6 +713,12 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
 
     function getPoolLeaseConfig(PoolId poolId) external view returns (PoolLeaseConfig memory) {
         return _poolConfigs[poolId];
+    }
+
+    /// @notice Nonrefundable commitment included in the stored rent balance, before any
+    ///         unaccrued elapsed rent is applied. Price changes cannot reduce this commitment.
+    function minimumRentRemaining(PoolId poolId) external view returns (uint256) {
+        return _poolStates[poolId].minimumRentRemaining;
     }
 
     function getPoolLeaseState(PoolId poolId)
@@ -891,6 +911,7 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         state.lastAccrualTime = 0;
         state.price = 0;
         state.rentBalance = 0;
+        state.minimumRentRemaining = 0;
     }
 
     /// @dev Moves rent owed since lastAccrualTime out of the lease: the protocol-fee share to
@@ -926,7 +947,18 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         if (owed == 0) {
             return 0;
         }
-        state.rentBalance = uint128(rentBalance - owed);
+        return _chargeRent(poolId, config, state, owed);
+    }
+
+    /// @dev Both elapsed rent and the final minimum charge use the same fee accounting.
+    ///      The entry commitment is backed by rentBalance and only decreases when rent is paid.
+    function _chargeRent(PoolId poolId, PoolLeaseConfig storage config, PoolLeaseState storage state, uint256 owed)
+        internal
+        returns (uint256 netAccrued)
+    {
+        state.rentBalance -= uint128(owed);
+        uint256 remaining = state.minimumRentRemaining;
+        state.minimumRentRemaining = owed >= remaining ? 0 : uint128(remaining - owed);
 
         // carry the sub-bps remainder across accruals: fundRent-forced per-second slices would
         // otherwise floor every slice's fee to zero, starving the protocol of its share
@@ -939,6 +971,16 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         emit RentAccrued(poolId, owed, protocolFee, state.rentBalance);
         // protocolFee <= owed always (bps <= 2000, carry < 10000: even owed == 1 yields fee <= 1)
         return owed - protocolFee;
+    }
+
+    /// @dev Finalize the nonrefundable entry commitment on every termination path. Parking
+    ///      the LP share uses the existing anti-JIT throttle rather than donating an entire
+    ///      minimum payment to liquidity inserted in the same transaction as the exit.
+    function _settleMinimumRent(PoolId poolId, PoolLeaseConfig storage config, PoolLeaseState storage state) internal {
+        uint256 remaining = state.minimumRentRemaining;
+        if (remaining != 0) {
+            _addPending(config, state, _chargeRent(poolId, config, state, remaining));
+        }
     }
 
     /// @dev Lease actions (buyout, fundRent, setPrice, exitLease, evictLease) accrue outside the hook

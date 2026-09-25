@@ -204,6 +204,85 @@ contract HookLeaseControllerTest is BaseTest {
 
     // ==================== Lifecycle ====================
 
+    function testSameTransactionLeaseChargesMinimumRent() public {
+        uint256 beforeBalance = token1.balanceOf(lesseeA);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumRent = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        (uint256 discounted, uint256 normal) = _swapOutcomes(1e18);
+        assertGt(discounted, normal, "lease grants the discount immediately");
+        lesseeSwapper.swapExactIn(leasePoolKey, true, 1e18);
+
+        vm.prank(lesseeA);
+        uint256 refund = leaseController.exitLease(leasePoolKey);
+        assertEq(refund, 1.2e18 - minimumRent, "minimum rent cannot be refunded");
+        assertEq(beforeBalance - token1.balanceOf(lesseeA), minimumRent, "discount has a real cost");
+        (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 fees = leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient);
+        assertEq(fees, minimumRent * PROTOCOL_FEE_BPS / 10_000);
+        assertEq(pending + fees, minimumRent, "minimum rent belongs to LPs and protocol");
+        assertEq(token1.balanceOf(address(leaseController)), pending + fees, "escrow remains backed");
+    }
+
+    function testSameTransactionBuyoutChargesBothMinimumRents() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumA = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        uint256 priceB = leaseController.minBuyoutPrice(leasePoolId);
+        vm.prank(lesseeB);
+        leaseController.buyout(leasePoolKey, address(otherSwapper), priceB, 0.2e18);
+        uint256 minimumB = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        assertEq(leaseController.refunds(currency1, lesseeA), 1.2e18 - minimumA);
+        otherSwapper.swapExactIn(leasePoolKey, true, 1e18);
+
+        vm.prank(lesseeB);
+        assertEq(leaseController.exitLease(leasePoolKey), priceB + 0.2e18 - minimumB);
+        vm.prank(lesseeA);
+        leaseController.claimRefund(currency1, lesseeA);
+        (,,,,,, uint256 pending) = leaseController.getPoolLeaseState(leasePoolId);
+        uint256 fees = leaseController.protocolFeesAccrued(currency1, protocolFeeRecipient);
+        assertEq(pending + fees, minimumA + minimumB, "buyout cannot recover committed rent");
+        assertEq(token1.balanceOf(address(leaseController)), pending + fees);
+    }
+
+    function testLoweringPriceCannotEraseMinimumRent() public {
+        uint256 beforeBalance = token1.balanceOf(lesseeA);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumRent = leaseController.rentPerSecond(leasePoolId) * MIN_RENT_SECONDS;
+        vm.prank(lesseeA);
+        leaseController.setPrice(leasePoolKey, 0.5e18);
+        vm.prank(lesseeA);
+        leaseController.exitLease(leasePoolKey);
+        assertEq(beforeBalance - token1.balanceOf(lesseeA), minimumRent);
+    }
+
+    function testFuzzLeaseExitCreditsElapsedRentTowardMinimum(uint32 elapsed) public {
+        elapsed = uint32(bound(elapsed, 0, 2 * MIN_RENT_SECONDS));
+        uint256 beforeBalance = token1.balanceOf(lesseeA);
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.3e18);
+        uint256 rps = leaseController.rentPerSecond(leasePoolId);
+        vm.warp(block.timestamp + elapsed);
+        // Force an intermediate accrual to check that previously paid rent is not charged twice.
+        leaseController.drip(leasePoolKey);
+        vm.prank(lesseeA);
+        leaseController.exitLease(leasePoolKey);
+        uint256 chargedSeconds = elapsed > MIN_RENT_SECONDS ? elapsed : MIN_RENT_SECONDS;
+        assertEq(beforeBalance - token1.balanceOf(lesseeA), rps * chargedSeconds);
+        assertEq(leaseController.minimumRentRemaining(leasePoolId), 0, "closed lease clears commitment");
+    }
+
+    function testImmediateEvictionCannotRefundMinimumRent() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        uint256 minimumRent = leaseController.minimumRentRemaining(leasePoolId);
+        token1.transfer(lesseeA, 10_000e18);
+        vm.prank(lesseeA);
+        leaseController.setPrice(leasePoolKey, 10_000e18);
+        (,,,,, uint40 paidThrough,) = leaseController.getPoolLeaseState(leasePoolId);
+        assertEq(paidThrough, block.timestamp, "price raise makes prepaid runway less than one second");
+        uint256 refund = leaseController.evictLease(leasePoolKey);
+        assertEq(refund, 10_000e18 + 0.2e18 - minimumRent);
+        assertEq(leaseController.refunds(currency1, lesseeA), refund);
+        assertEq(leaseController.minimumRentRemaining(leasePoolId), 0);
+    }
+
     /// @notice READ THIS ONE to understand the mechanism. Walks the whole Harberger-lease
     ///         lifecycle end to end; every other test isolates one property of it.
     ///
@@ -899,6 +978,7 @@ contract HookLeaseControllerTest is BaseTest {
         // rps = 1 wei/second so an exit parks a tiny, countable bucket
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
         config.taxRatePerSecondX64 = 1;
+        config.minRentDepositSeconds = 10;
         leaseController.configurePool(leasePoolKey, config);
         uint256 t0 = 1_900_000_000;
         vm.warp(t0);
@@ -1155,7 +1235,7 @@ contract HookLeaseControllerTest is BaseTest {
         uint256 balBefore = token1.balanceOf(lesseeA);
         vm.prank(lesseeA);
         uint256 refund = leaseController.exitLease(leasePoolKey);
-        assertEq(refund, 1e18 + 0.2e18 - rps * 1000, "deposit + unused rent");
+        assertEq(refund, 1e18 + 0.2e18 - rps * MIN_RENT_SECONDS, "deposit + rent beyond the minimum");
         assertEq(token1.balanceOf(lesseeA) - balBefore, refund);
     }
 
