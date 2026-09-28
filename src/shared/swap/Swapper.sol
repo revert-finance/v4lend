@@ -21,6 +21,7 @@ import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import {IUniversalRouter} from "./IUniversalRouter.sol";
 import {Constants} from "../Constants.sol";
 import {NativeAssetLib} from "../NativeAssetLib.sol";
+import {FeeFirstRemovalLib} from "../FeeFirstRemovalLib.sol";
 
 // base functionality to do swaps with different routing protocols
 abstract contract Swapper is Constants {
@@ -222,26 +223,25 @@ abstract contract Swapper is Constants {
         amount0 = currency0.balanceOfSelf();
         amount1 = currency1.balanceOfSelf();
 
-        // V4 uses different approach - need to use modifyLiquidities with encoded actions
-        // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory paramsArray = new bytes[](3);
-        paramsArray[0] = abi.encode(tokenId, 0, type(uint128).max, type(uint128).max, bytes(""));
+        // fee-first removal: INCREASE(0) settles the hook's protocol fee, then DECREASE and TAKE_PAIR
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
         // Uniswap v4 encodes amount minima as uint128. Callers/operators are trusted
         // to pass uint128-sized slippage minima; larger values intentionally narrow.
-        paramsArray[1] = abi.encode(
-            tokenId,
-            uint256(liquidityRemove),
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint128(amount0Min),
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint128(amount1Min),
-            decreaseLiquidityHookData
+        positionManager.modifyLiquidities(
+            FeeFirstRemovalLib.encodeDecrease(
+                tokenId,
+                liquidityRemove,
+                // forge-lint: disable-next-line(unsafe-typecast)
+                uint128(amount0Min),
+                // forge-lint: disable-next-line(unsafe-typecast)
+                uint128(amount1Min),
+                decreaseLiquidityHookData,
+                currency0,
+                currency1,
+                address(this)
+            ),
+            deadline
         );
-        paramsArray[2] = abi.encode(currency0, currency1, address(this));
-
-        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), deadline);
 
         // calculate delta
         amount0 = currency0.balanceOfSelf() - amount0;

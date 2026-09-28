@@ -13,6 +13,7 @@ import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
+import {FeeFirstRemovalLib} from "../shared/FeeFirstRemovalLib.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {RevertHookState} from "./RevertHookState.sol";
 
@@ -50,8 +51,7 @@ contract RevertHookSwapActions is RevertHookState {
         bytes memory actionsWithSweep = removing ? abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), actions) : actions;
         bytes[] memory params = new bytes[](offset + (nativeValue == 0 ? 2 : 3));
         if (removing) {
-            uint256 tokenId = abi.decode(primaryParams, (uint256));
-            params[0] = abi.encode(tokenId, 0, type(uint128).max, type(uint128).max, bytes(""));
+            params[0] = FeeFirstRemovalLib.collectParams(abi.decode(primaryParams, (uint256)));
         }
         params[offset] = primaryParams;
         params[offset + 1] = abi.encode(currency0, currency1, address(this));

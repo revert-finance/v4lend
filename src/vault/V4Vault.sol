@@ -1319,12 +1319,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         internal
         returns (uint256 amount0, uint256 amount1)
     {
-        // when the uncollected fees alone cover the liquidation value no liquidity is removed
+        // when the uncollected fees alone cover the liquidation value the oracle sizes no liquidity
         // and the collected fees are split between liquidator and owner by value share
-        bool feesOnly = state.liquidationValue <= state.feeValue;
-
         uint128 liquidity = oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
-        feesOnly = liquidity == 0;
+        bool feesOnly = liquidity == 0;
 
         (uint256 received0, uint256 received1) = _decreaseLiquidity(
             params.tokenId, liquidity, 0, 0, params.deadline, params.decreaseLiquidityHookData, address(this)
