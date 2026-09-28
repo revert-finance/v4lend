@@ -20,6 +20,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {Swapper} from "../../shared/swap/Swapper.sol";
 import {NativeAssetLib} from "../../shared/NativeAssetLib.sol";
+import {FeeFirstRemovalLib} from "../../shared/FeeFirstRemovalLib.sol";
 import {IVault} from "../interfaces/IVault.sol";
 import {Transformer} from "./Transformer.sol";
 
@@ -231,24 +232,23 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
 
-        // V4 uses different approach - need to use modifyLiquidities with encoded actions
-        // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory paramsArray = new bytes[](3);
-        paramsArray[0] = abi.encode(params.tokenId, 0, type(uint128).max, type(uint128).max, bytes(""));
+        // fee-first removal: INCREASE(0) settles the hook's protocol fee, then DECREASE and TAKE_PAIR
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
         // Uniswap v4 encodes amount minima as uint128. Transformer callers are trusted
         // to pass uint128-sized slippage minima; larger values intentionally narrow.
-        paramsArray[1] = abi.encode(
-            params.tokenId,
-            uint256(params.liquidity),
-            uint128(params.amountRemoveMin0), // amount0Min
-            uint128(params.amountRemoveMin1), // amount1Min
-            params.decreaseLiquidityHookData
+        positionManager.modifyLiquidities(
+            FeeFirstRemovalLib.encodeDecrease(
+                params.tokenId,
+                params.liquidity,
+                uint128(params.amountRemoveMin0),
+                uint128(params.amountRemoveMin1),
+                params.decreaseLiquidityHookData,
+                token0,
+                token1,
+                address(this)
+            ),
+            params.deadline
         );
-        paramsArray[2] = abi.encode(token0, token1, address(this));
-
-        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), params.deadline);
 
         // amounts recieved from decreasing liquidity
         uint256 amount0 = token0.balanceOfSelf();
