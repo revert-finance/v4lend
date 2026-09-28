@@ -233,18 +233,24 @@ forge build
 
 ## Testing
 
-A large part of the suite runs against a mainnet fork.
+A large part of the suite runs against a mainnet fork at a fixed block and needs an archive RPC.
+GitHub CI holds no RPC credential and runs only the local (non-fork) suites; the fork suites are
+run locally before merging.
 
-Fork tests read `MAINNET_RPC_URL` and fall back to `https://ethereum-rpc.publicnode.com`:
+Fork tests read `MAINNET_RPC_URL` and fall back to `https://ethereum-rpc.publicnode.com`, which
+rate-limits and is not an archive endpoint, so set your own:
 
 ```sh
 MAINNET_RPC_URL=<your archive RPC URL> forge test
 ```
 
-Run the full suite:
+The fork suites are the `AutomatorTestBase` suites (`test/automators/Auto*.t.sol`),
+`test/oracle/V4OracleTest.t.sol`, and the `V4ForkTestBase` suites (`test/vault/V4Vault.t.sol`,
+`test/vault/V4VaultHook.t.sol`, `test/vault/transformers/V4Utils*Test.sol`). To run only what CI
+runs, exclude them with the same glob as `.github/workflows/test.yml`:
 
 ```sh
-forge test
+forge test --no-match-path "{test/automators/Auto*.t.sol,test/oracle/V4OracleTest.t.sol,test/vault/V4Vault.t.sol,test/vault/V4VaultHook.t.sol,test/vault/transformers/V4Utils*Test.sol}"
 ```
 
 Run with traces:

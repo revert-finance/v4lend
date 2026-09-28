@@ -13,8 +13,9 @@ Fee settlement, net valuation, source recovery, and debt admission must be deplo
 
 - **V4LE-73:** confirm provider-side revocation/rotation of the historically published RPC key.
   A repository edit cannot prove revocation. No request was made using the historical key.
-- **V4LE-57 deployment:** configure the archive-rpc environment to allow protected main only and
-  store its dedicated credential there; repository/inherited organization RPC secrets must be removed.
+- **V4LE-57:** CI runs no fork suites and holds no RPC credential (the `main`-only fork job was
+  removed in PR #43; fork suites run locally). Keep repository/inherited organization RPC secrets
+  removed, and run the fork suites locally before merging changes to the forked code paths.
 
 ## Disputed or accepted policy findings
 

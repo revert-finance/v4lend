@@ -76,4 +76,4 @@ The full-stack `Deploy{Base,Arbitrum,Mainnet,Unichain}` broadcasts in the repo a
 - Set explicit token debt budgets where the global debt limit times concentration factor exceeds
   the intended exposure. Deposits do not change these governance budgets.
 - Direct PositionManager clients must support fee-paying INCREASE(0) collection before removal.
-- Configure archive-rpc environment restrictions and verify historical key revocation with the provider.
+- Run the mainnet fork suites locally with `MAINNET_RPC_URL` (CI does not run them) and verify historical key revocation with the provider.

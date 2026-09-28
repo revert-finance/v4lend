@@ -13,11 +13,11 @@ env:
   FOUNDRY_VERSION: v1.5.0
   # Fork suites fork mainnet at a fixed block and need an archive RPC: the AutomatorTestBase suites
   # (test/automators/Auto*.t.sol), V4OracleTest, and the V4ForkTestBase suites (V4Vault, V4VaultHook,
-  # test/vault/transformers/V4Utils*Test.sol). Public endpoints rate-limit a fresh runner, so those
-  # run only in the credentialed job below. The glob names the fork files precisely: the local
-  # suites next to them (AuctionArbExecutor, V4UtilsSimple/Custody/RemintClaim,
-  # LeverageTransformerNativeLeverageIn) belong to the PR job. Keep it in sync when adding a suite
-  # that inherits one of the fork bases.
+  # test/vault/transformers/V4Utils*Test.sol). CI holds no RPC credential and does not run them;
+  # they are run locally with MAINNET_RPC_URL set (see README, Testing). The glob names the fork
+  # files precisely: the local suites next to them (AuctionArbExecutor,
+  # V4UtilsSimple/Custody/RemintClaim, LeverageTransformerNativeLeverageIn) run here. Keep it in
+  # sync when adding a suite that inherits one of the fork bases.
   FOUNDRY_FFI: "false"
   FORK_SUITES: "{test/automators/Auto*.t.sol,test/oracle/V4OracleTest.t.sol,test/vault/V4Vault.t.sol,test/vault/V4VaultHook.t.sol,test/vault/transformers/V4Utils*Test.sol}"
 
@@ -48,27 +48,3 @@ jobs:
       - name: Test (mock suites)
         run: forge test --no-match-path "$FORK_SUITES" -vvv
         id: test
-
-  fork:
-    name: Reviewed mainnet fork tests
-    # Never execute a PR merge/head with credentials, including same-repository PRs.
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    environment: archive-rpc
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          persist-credentials: false
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: ${{ env.FOUNDRY_VERSION }}
-      - name: Test (mainnet fork suites)
-        env:
-          MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
-        run: |
-          if [ -z "$MAINNET_RPC_URL" ]; then
-            echo "::error::Configure the archive-rpc environment credential before running fork tests"
-            exit 1
-          fi
-          forge test --match-path "$FORK_SUITES" -vvv
