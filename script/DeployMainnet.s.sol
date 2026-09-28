@@ -332,6 +332,7 @@ contract DeployMainnet is Script {
         vault.setTransformer(address(revertHook), true);
         console.log("  RevertHook registered as vault transformer");
 
+        oracle.setHookFeeQuoter(address(revertHook), address(feeController));
         vault.setHookAllowList(address(revertHook), true);
         console.log("  RevertHook added to vault hook allowlist");
 

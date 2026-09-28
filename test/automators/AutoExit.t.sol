@@ -9,6 +9,8 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 
 import {AutoExit} from "../../src/automators/AutoExit.sol";
 import {Constants} from "src/shared/Constants.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
 import {ProtocolFeeRecipientProbe} from "./utils/ProtocolFeeRecipientProbe.sol";
 
@@ -220,6 +222,43 @@ contract AutoExitTest is AutomatorTestBase {
         vm.prank(operator);
         vm.expectRevert(Constants.NotReady.selector);
         autoExit.execute(params);
+    }
+
+    /// @notice V4LE-60: the lower trigger is reached when the pool tick equals it, like the upper one
+    ///         and like the hook's inclusive evaluation; the operator could not exit at the exact tick.
+    function test_ExecuteAtExactLowerTriggerTick() public {
+        PoolKey memory poolKey = _createPool();
+        uint256 tokenId = _createFullRangePosition(poolKey);
+        int24 tick = _getCurrentTick(poolKey);
+
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: tick,
+            token1TriggerTick: tick + 100000,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: 0,
+            onlyFees: false
+        });
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        IERC721(address(positionManager)).approve(address(autoExit), tokenId);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0
+        });
+        _execute(operator, params);
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "exit executes at the exact lower trigger tick");
     }
 
     function test_ExecuteWithSwap() public {
@@ -529,6 +568,138 @@ contract AutoExitTest is AutomatorTestBase {
     }
 
     // --- Vault Exit Test ---
+
+    /// @notice V4LE-14: the automation reward was reserved before the vault debt was repaid, so a
+    ///         loan whose gross proceeds cover the debt but whose reward-reduced proceeds do not could
+    ///         never be exited: repayment left debt on an emptied position and the vault's health
+    ///         check rolled the whole exit back. Debt is senior to the reward.
+    function test_ExecuteWithVaultRepaysDebtBeforeReservingReward() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        uint64 reward = uint64(Q64 / 5); // 20% of the proceeds
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: reward,
+            onlyFees: false
+        });
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoExit), true);
+
+        // price below the range: the position is all USDC (the lend token). Borrow 88% of full value:
+        // gross proceeds cover it, proceeds after a 20% reward do not.
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        (, uint256 fullValue,,,) = vault.loanInfo(tokenId);
+        uint256 debt = fullValue * 88 / 100;
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, debt);
+        uint256 recipientBefore = usdc.balanceOf(protocolFeeRecipient);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: reward
+        });
+        _executeWithVault(params);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "position exited");
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "debt fully repaid from gross proceeds");
+        uint256 rewardPaid = usdc.balanceOf(protocolFeeRecipient) - recipientBefore;
+        assertGt(rewardPaid, 0, "the reward is capped to the residual, not dropped");
+        assertLt(rewardPaid, fullValue / 5, "reward reduced by what the debt needed");
+    }
+
+    /// @notice V4LE-34: a zero-debt vault position whose pool omits the lend asset needs no repayment
+    ///         and no conversion; the exit must not be blocked by the pair check meant for debt repayment.
+    function test_ExecuteWithVaultZeroDebtThirdTokenPair() public {
+        vault.setTokenConfig(address(dai), uint32(Q32 * 9 / 10), type(uint32).max);
+        v4Oracle.setMaxPoolPriceDifference(type(uint16).max);
+        PoolKey memory poolKey = _createDaiWethPool();
+        uint256 tokenId = _createFullRangePositionDaiWeth(poolKey);
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        // trigger already satisfied on the upper side: no price movement needed
+        int24 tick = _getCurrentTick(poolKey);
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: tick - 1000,
+            token1TriggerTick: tick - 500,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: 0,
+            onlyFees: false
+        });
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoExit), true);
+        uint256 daiBefore = dai.balanceOf(WHALE_ACCOUNT);
+        uint256 wethBefore = weth.balanceOf(WHALE_ACCOUNT);
+
+        _executeWithVault(
+            AutoExit.ExecuteParams({
+                tokenId: tokenId,
+                swapData: bytes(""),
+                amountRemoveMin0: 0,
+                amountRemoveMin1: 0,
+                amountOutMin: 0,
+                deadline: block.timestamp,
+                hookData: bytes(""),
+                rewardX64: 0
+            })
+        );
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "zero-debt third-token position exited");
+        assertTrue(
+            dai.balanceOf(WHALE_ACCOUNT) > daiBefore || weth.balanceOf(WHALE_ACCOUNT) > wethBefore,
+            "owner received the removed tokens"
+        );
+    }
+
+    function _createDaiWethPool() internal returns (PoolKey memory poolKey) {
+        poolKey = PoolKey({
+            currency0: Currency.wrap(address(dai)),
+            currency1: Currency.wrap(address(weth)),
+            fee: 7778,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(poolKey, v4Oracle.getPoolSqrtPriceX96(address(dai), address(weth)));
+    }
+
+    function _createFullRangePositionDaiWeth(PoolKey memory poolKey) internal returns (uint256 tokenId) {
+        deal(address(dai), WHALE_ACCOUNT, 1_000_000e18);
+        deal(address(weth), WHALE_ACCOUNT, 1_000e18);
+        vm.startPrank(WHALE_ACCOUNT);
+        dai.approve(address(permit2), type(uint256).max);
+        weth.approve(address(permit2), type(uint256).max);
+        permit2.approve(address(dai), address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(weth), address(positionManager), type(uint160).max, type(uint48).max);
+        vm.stopPrank();
+        tokenId = _mintPosition(poolKey, -887220, 887220, 1e16);
+    }
 
     function test_ExecuteWithVault() public {
         // Increase oracle tolerance for large swap price impact

@@ -7,9 +7,17 @@ import {RevertHookState} from "./RevertHookState.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
 import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
 
-/// @dev The hook's PoolManager getter (BaseHook's public immutable), read to reject it as a fee recipient.
-interface IHookPoolManagerGetter {
+/// @dev The hook's PoolManager getter (BaseHook's public immutable) and PositionManager getter, read
+///      to reject both system contracts as a fee recipient.
+interface IHookSystemContractGetters {
     function poolManager() external view returns (address);
+    function positionManager() external view returns (address);
+}
+
+interface IHookFeeState {
+    function positionStates(uint256 tokenId) external view returns
+        (uint32,uint32,uint32,address,uint256,uint256,address,int24);
+    function pendingProtocolFees(uint256 tokenId) external view returns (uint128,uint128);
 }
 
 contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
@@ -51,6 +59,25 @@ contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
         _protocolFeeRecipient = protocolFeeRecipient_;
         _lpFeeBps = lpFeeBps_;
         _autoLendFeeBps = autoLendFeeBps_;
+    }
+
+    /// @notice Mirrors the hook's time-weighted collection charge without advancing its checkpoints.
+    function quoteProtocolFees(uint256 tokenId, uint128 grossFees0, uint128 grossFees1)
+        external view returns (uint256 owed0, uint256 owed1)
+    {
+        (uint32 lastCollect,uint32 active,uint32 lastActivated,,,,,) = IHookFeeState(hook).positionStates(tokenId);
+        uint32 now32 = uint32(block.timestamp);
+        if (lastActivated != 0) active += now32 - lastActivated;
+        uint32 elapsed = lastCollect == 0 ? 0 : now32 - lastCollect;
+        if (active > elapsed) active = elapsed;
+        (uint128 pending0,uint128 pending1) = IHookFeeState(hook).pendingProtocolFees(tokenId);
+        owed0 = pending0;
+        owed1 = pending1;
+        if (elapsed != 0 && active != 0) {
+            uint256 denominator = 10000 * uint256(elapsed);
+            owed0 += uint256(grossFees0) * active * _lpFeeBps / denominator;
+            owed1 += uint256(grossFees1) * active * _lpFeeBps / denominator;
+        }
     }
 
     function protocolFeeRecipient() external view returns (address) {
@@ -142,22 +169,36 @@ contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
     ///        settlement sweeps to whoever that user is;
     ///      - this controller: it has no withdrawal path, the fees would be stranded;
     ///      - the PoolManager: a `take` to it is a self-transfer that debits the hook's delta while
-    ///        the tokens never leave the manager - the fee is destroyed.
-    ///      The PoolManager is read from the hook's public immutable. The deploy scripts create this
-    ///      controller BEFORE the hook, at the hook's predicted address, so the constructor cannot
-    ///      rely on that call: it is a tolerant staticcall (no code / no such getter = skip that
-    ///      check) and the PoolManager rejection is guaranteed only on setProtocolFeeRecipient.
+    ///        the tokens never leave the manager - the fee is destroyed;
+    ///      - the v4 PositionManager (external audit V4LE-27): its SWEEP action is permissionless
+    ///        (`modifyLiquiditiesWithoutUnlock` needs no NFT or approval) and hands its ENTIRE
+    ///        balance of a currency to any caller, so fees taken there belong to the first sweeper.
+    ///      Both are read from the hook's getters. The deploy scripts create this controller BEFORE
+    ///      the hook, at the hook's predicted address, so the constructor cannot rely on those calls:
+    ///      they are tolerant staticcalls (no code / no such getter = skip that check) and the
+    ///      rejections are guaranteed only on setProtocolFeeRecipient, and only for the getters the
+    ///      hook actually exposes.
     function _validateProtocolFeeRecipient(address newProtocolFeeRecipient) internal view {
         if (
             newProtocolFeeRecipient == address(0) || newProtocolFeeRecipient == hook
                 || newProtocolFeeRecipient == address(this)
+                || newProtocolFeeRecipient == _hookAddressGetter(IHookSystemContractGetters.poolManager.selector)
+                || newProtocolFeeRecipient == _hookAddressGetter(IHookSystemContractGetters.positionManager.selector)
         ) {
             revert InvalidConfig();
         }
-        (bool ok, bytes memory ret) = hook.staticcall(abi.encodeCall(IHookPoolManagerGetter.poolManager, ()));
-        if (ok && ret.length == 32 && abi.decode(ret, (address)) == newProtocolFeeRecipient) {
-            revert InvalidConfig();
+    }
+
+    /// @dev Tolerant read of an address-returning, argument-less getter on the hook: address(0)
+    ///      when the hook has no code, lacks the getter or returns anything else (a recipient of
+    ///      address(0) is rejected before these comparisons, so 0 can never match).
+    function _hookAddressGetter(bytes4 selector) internal view returns (address) {
+        (bool ok, bytes memory ret) = hook.staticcall(abi.encodeWithSelector(selector));
+        if (!ok || ret.length != 32) {
+            return address(0);
         }
+        uint256 word = abi.decode(ret, (uint256));
+        return word <= type(uint160).max ? address(uint160(word)) : address(0);
     }
 
     function _isSupportedSwapMode(uint8 mode) internal pure returns (bool) {

@@ -1203,8 +1203,11 @@ contract V4VaultTest is V4ForkTestBase {
 
         assertEq(liquidationValue - liquidationCost, 13341628); // promised liquidation premium
 
-        assertEq(token0.balanceOf(address(this)) - token0Before, 7901404);
-        assertEq(token1.balanceOf(address(this)) - token1Before, 1235549817247049); // leftover WETH not consumed by the swap
+        // both legs ~3.4e-6 below the pre-V4LE-23 figures (7901404 / 1235549817247049): the live pool sat a
+        // hair above the oracle price, and the liquidator's payout is now capped at the oracle-priced
+        // liquidationValue with the excess going to the owner
+        assertEq(token0.balanceOf(address(this)) - token0Before, 7901396);
+        assertEq(token1.balanceOf(address(this)) - token1Before, 1235545631841841); // leftover WETH not consumed by the swap
 
         (debt,,,,) = vault.loanInfo(nft1TokenId);
         assertEq(debt, 0);
@@ -1652,6 +1655,57 @@ contract V4VaultTest is V4ForkTestBase {
         assertGt(finalLiquidity - liquidityAfterBorrow, 0, "Liquidity should increase significantly");
 
         vm.stopPrank();
+    }
+
+    /// @notice V4LE-5: an unsolicited donation of a pool token larger than what the operation adds
+    ///         of it must not revert leverageUp. No swap into WETH is requested, so the operation's
+    ///         own WETH is only the position's collected fees; the donation exceeds that, which is
+    ///         the 1-wei case for a position without fees.
+    function test_LeverageUp_UnsolicitedDustDoesNotRevert() public {
+        LeverageTransformer leverageTransformer =
+            new LeverageTransformer(positionManager, address(swapRouter), EX0x, permit2);
+        vault.setTransformer(address(leverageTransformer), true);
+        leverageTransformer.setVault(address(vault));
+        _deposit(10000000, WHALE_ACCOUNT);
+
+        // anyone can push dust into the allowlisted transformer
+        uint256 dust = 1e18;
+        deal(address(weth), address(leverageTransformer), dust);
+
+        vm.startPrank(nft1Owner);
+        IERC721(address(positionManager)).approve(address(vault), nft1TokenId);
+        vault.create(nft1TokenId, nft1Owner);
+        (uint256 debtBefore,,,,) = vault.loanInfo(nft1TokenId);
+        uint256 ownerWethBefore = weth.balanceOf(nft1Owner);
+
+        LeverageTransformer.LeverageUpParams memory params = LeverageTransformer.LeverageUpParams({
+            tokenId: nft1TokenId,
+            borrowAmount: 1000000,
+            amountIn0: 0,
+            amountOut0Min: 0,
+            swapData0: "",
+            amountIn1: 0,
+            amountOut1Min: 0,
+            swapData1: "",
+            amountAddMin0: 0,
+            amountAddMin1: 0,
+            recipient: nft1Owner,
+            deadline: block.timestamp,
+            decreaseLiquidityHookData: "",
+            increaseLiquidityHookData: ""
+        });
+        vault.transform(
+            nft1TokenId,
+            address(leverageTransformer),
+            abi.encodeWithSelector(LeverageTransformer.leverageUp.selector, params)
+        );
+        vm.stopPrank();
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(nft1TokenId);
+        assertGt(debtAfter, debtBefore, "borrow went through despite the dust");
+        assertEq(weth.balanceOf(address(leverageTransformer)), 0, "dust swept out of the transformer");
+        assertEq(usdc.balanceOf(address(leverageTransformer)), 0, "no lend token retained");
+        assertGe(weth.balanceOf(nft1Owner) - ownerWethBefore, dust, "dust goes to the recipient");
     }
 
     // leverage in tests

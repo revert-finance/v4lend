@@ -162,8 +162,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         uint256 amount0,
         uint256 amount1
     ) internal {
-        uint256 added0 = amount0 - token0.balanceOfSelf();
-        uint256 added1 = amount1 - token1.balanceOfSelf();
+        // Whole-balance accounting: the remaining balances are the leftovers owed to the recipient.
+        // Anyone can push unsolicited dust into the transformer, so a balance can exceed this
+        // operation's own amount for a token the operation did not consume; saturate instead of
+        // letting a 1-wei donation revert every leverage-up that does not add that token.
+        uint256 leftover0 = token0.balanceOfSelf();
+        uint256 leftover1 = token1.balanceOfSelf();
+        uint256 added0 = amount0 > leftover0 ? amount0 - leftover0 : 0;
+        uint256 added1 = amount1 > leftover1 ? amount1 - leftover1 : 0;
 
         if (added0 < params.amountAddMin0) {
             revert InsufficientAmountAdded();
@@ -172,12 +178,12 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             revert InsufficientAmountAdded();
         }
 
-        // send leftover tokens
-        if (amount0 > added0) {
-            token0.transfer(params.recipient, amount0 - added0);
+        // send leftover tokens (including any dust) to the recipient
+        if (leftover0 > 0) {
+            token0.transfer(params.recipient, leftover0);
         }
-        if (amount1 > added1) {
-            token1.transfer(params.recipient, amount1 - added1);
+        if (leftover1 > 0) {
+            token1.transfer(params.recipient, leftover1);
         }
         if (!(token == token0) && !(token == token1)) {
             uint256 leftover = token.balanceOfSelf();
@@ -227,19 +233,20 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
 
         // V4 uses different approach - need to use modifyLiquidities with encoded actions
         // Include both DECREASE_LIQUIDITY and TAKE_PAIR actions
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory paramsArray = new bytes[](2);
+        bytes memory actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory paramsArray = new bytes[](3);
+        paramsArray[0] = abi.encode(params.tokenId, 0, type(uint128).max, type(uint128).max, bytes(""));
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
         // Uniswap v4 encodes amount minima as uint128. Transformer callers are trusted
         // to pass uint128-sized slippage minima; larger values intentionally narrow.
-        paramsArray[0] = abi.encode(
+        paramsArray[1] = abi.encode(
             params.tokenId,
             uint256(params.liquidity),
             uint128(params.amountRemoveMin0), // amount0Min
             uint128(params.amountRemoveMin1), // amount1Min
             params.decreaseLiquidityHookData
         );
-        paramsArray[1] = abi.encode(token0, token1, address(this));
+        paramsArray[2] = abi.encode(token0, token1, address(this));
 
         positionManager.modifyLiquidities(abi.encode(actions, paramsArray), params.deadline);
 
@@ -358,12 +365,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             revert Unauthorized();
         }
 
-        // Validate that one token is the lend token
+        // Validate that one pool currency is the lend token. A WETH-asset vault also serves a native-ETH
+        // pool: the vault and oracle price address(0) as WETH, and the borrowed WETH is unwrapped for the
+        // pool (see _removeBorrowAndSwap).
         Currency lendToken = Currency.wrap(IVault(params.vault).asset());
         Currency otherToken;
-        if (lendToken == params.token0) {
+        if (_isLendCurrency(lendToken, params.token0)) {
             otherToken = params.token1;
-        } else if (lendToken == params.token1) {
+        } else if (_isLendCurrency(lendToken, params.token1)) {
             otherToken = params.token0;
         } else {
             revert InvalidToken();
@@ -545,13 +554,21 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         _finalizeLeverageIn(params, amount0, amount1, newTokenId);
     }
 
+    /// @dev A pool currency stands for the vault's lend token when it is that token, or native ETH for a
+    ///      wrapped-native lend token (the alias the vault, the oracle and leverageUp/Down already use).
+    function _isLendCurrency(Currency lendToken, Currency poolCurrency) internal view returns (bool) {
+        return poolCurrency == lendToken || (poolCurrency.isAddressZero() && lendToken == Currency.wrap(address(weth)));
+    }
+
     /// @dev Helper function to remove dummy position, borrow, and swap
     function _removeBorrowAndSwap(LeverageInTransformParams calldata params, Currency lendToken)
         internal
         returns (uint256 amount0, uint256 amount1)
     {
-        // Determine which token is the other (non-lend) token
-        Currency otherToken = lendToken == params.token0 ? params.token1 : params.token0;
+        // Determine which pool currency carries the lend token (native ETH for a WETH lend token) and
+        // which is the other (non-lend) token
+        Currency lendCurrency = _isLendCurrency(lendToken, params.token0) ? params.token0 : params.token1;
+        Currency otherToken = lendCurrency == params.token0 ? params.token1 : params.token0;
 
         // Get current liquidity of the dummy position
         uint128 dummyLiquidity = positionManager.getPositionLiquidity(params.tokenId);
@@ -565,11 +582,12 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         amount0 = params.token0.balanceOfSelf();
         amount1 = params.token1.balanceOfSelf();
 
-        // Borrow from the vault
+        // Borrow from the vault; a native pool gets the borrowed WETH unwrapped
         IVault(msg.sender).borrow(params.tokenId, params.borrowAmount);
+        NativeAssetLib.unwrapIfNative(weth, lendCurrency, params.borrowAmount);
 
-        // Add borrowed amount to the lend token balance
-        if (lendToken == params.token0) {
+        // Add borrowed amount to the lend currency balance
+        if (lendCurrency == params.token0) {
             amount0 += params.borrowAmount;
         } else {
             amount1 += params.borrowAmount;
@@ -581,13 +599,13 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             Currency tokenOut;
 
             if (params.swapDirection) {
-                // Swap lend token to other token
-                tokenIn = lendToken;
+                // Swap lend currency to other token
+                tokenIn = lendCurrency;
                 tokenOut = otherToken;
             } else {
-                // Swap other token to lend token
+                // Swap other token to lend currency
                 tokenIn = otherToken;
-                tokenOut = lendToken;
+                tokenOut = lendCurrency;
             }
 
             (uint256 amountIn, uint256 amountOut) = _routerSwap(
@@ -662,9 +680,12 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         // Whole-balance accounting is intentional here: the transformer is expected to finish
         // successful executions without retaining position tokens, so the remaining balances are
         // treated as the full leftovers owed back to the recipient.
-        // Calculate amounts added
-        uint256 added0 = amount0 - params.token0.balanceOfSelf();
-        uint256 added1 = amount1 - params.token1.balanceOfSelf();
+        // Calculate amounts added; saturate so unsolicited dust in a token this operation did
+        // not consume cannot revert the whole leverage-in (see _leverageUpFinalize)
+        uint256 balance0 = params.token0.balanceOfSelf();
+        uint256 balance1 = params.token1.balanceOfSelf();
+        uint256 added0 = amount0 > balance0 ? amount0 - balance0 : 0;
+        uint256 added1 = amount1 > balance1 ? amount1 - balance1 : 0;
 
         // Check minimum amounts were added
         if (added0 < params.amountAddMin0) {
@@ -678,7 +699,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         // The vault's onERC721Received will handle replacing the old position with the new one
         IERC721(address(positionManager)).safeTransferFrom(address(this), msg.sender, newTokenId);
 
-        // Send leftover tokens to recipient (lendToken is always one of token0 or token1)
+        // Send leftover tokens to recipient (the lend currency is always one of token0 or token1)
         uint256 leftover0 = params.token0.balanceOfSelf();
         uint256 leftover1 = params.token1.balanceOfSelf();
 

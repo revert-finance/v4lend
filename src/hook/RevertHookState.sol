@@ -50,9 +50,9 @@ abstract contract RevertHookState is RevertHookAccess {
         int24 autoLeverageBaseTick; // Base tick for auto-leverage triggers (triggers at baseTick ± 10 * tickSpacing)
     }
 
-    /// @notice Protocol fee owed by a position that could not be taken inside a liquidity callback.
-    /// @dev PositionManager attributes every hook delta to principal, so a fee-only removal cannot
-    ///      carry a fee. The shortfall is parked here and settled on a later operation with room.
+    /// @notice Carried fee accounting retained for valuation, migration and defensive recovery.
+    /// @dev New liquidity operations settle the entire obligation or revert; no unsecured
+    /// shortfall is created. An INCREASE(0) can settle a pre-existing obligation.
     struct PendingProtocolFee {
         uint128 amount0;
         uint128 amount1;
@@ -83,6 +83,12 @@ abstract contract RevertHookState is RevertHookAccess {
         int24 autoLendToleranceTick;
         uint16 autoLeverageTargetBps; // target debt/collateral ratio (0-10000 bps, e.g., 5000 = 50%)
     }
+
+    // ==================== Errors ====================
+
+    /// @notice A configured, inactive position was re-activated by an external liquidity add while
+    ///         one of its triggers is already satisfied at the live tick (V4LE-70).
+    error TriggerAlreadySatisfied();
 
     // ==================== Events ====================
 
@@ -144,6 +150,10 @@ abstract contract RevertHookState is RevertHookAccess {
 
     // Special events for swap failures / modifyLiquidities failures
     event HookActionFailed(uint256 indexed tokenId, Mode mode);
+    /// @notice A debt-bearing vault position reached its AUTO_EXIT trigger but the vault's asset is
+    ///         not a pool currency (nor the native alias), so the debt cannot be repaid from the
+    ///         proceeds: the exit is skipped and the config disabled (V4LE-51).
+    event AutoExitIncompatibleVaultAsset(uint256 indexed tokenId, address vault, address asset);
     event HookSwapFailed(PoolKey poolKey, SwapParams swapParams, bytes reason);
     event HookSwapPartial(uint256 indexed tokenId, bool zeroForOne, uint256 requested, uint256 swapped);
     event HookModifyLiquiditiesFailed(bytes actions, bytes[] params, bytes reason);
@@ -189,6 +199,7 @@ abstract contract RevertHookState is RevertHookAccess {
     struct TriggerCursor {
         int24 tickLowerLast; // last processed tick bucket
         bool hasTriggers; // set when the first trigger registers; gates the afterSwap list walk
+        int24 tickLowerOpposite; // opposite end of a walk left pending by action-induced price movement
     }
 
     // Position trigger mappings
@@ -199,7 +210,7 @@ abstract contract RevertHookState is RevertHookAccess {
     // Permit2 approval tracking
     mapping(address => bool) internal _permit2Approved;
 
-    // Protocol fee carried per position until a liquidity operation can absorb it
+    // Carried protocol fee state; new operations cannot create an unpaid shortfall
     mapping(uint256 tokenId => PendingProtocolFee pendingProtocolFee) internal _pendingProtocolFees;
 
     /// @notice ERC4626 shares the hook custodies for auto-lend positions, per share token (the
@@ -208,4 +219,7 @@ abstract contract RevertHookState is RevertHookAccess {
     ///         whose currency is a share token can then never pay another position's shares out.
     /// @dev Appended last: the delegatecall sidecars share this layout (docs/hook-hierarchy.md).
     mapping(address shareToken => uint256 shares) internal _custodiedShares;
+    /// @notice A failed leverage action needs owner attention. Retry once with setPositionConfig
+    /// after repairing funds/debt or adjusting the target; failures are never requeued in a swap loop.
+    mapping(uint256 tokenId => bool) public autoLeverageNeedsAttention;
 }

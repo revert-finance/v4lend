@@ -267,6 +267,7 @@ contract V4VaultHandler is BaseTest {
 
     address[3] public lenders;
     uint256[3] public tokenIds;
+    address public liquidatorAccount = makeAddr("liquidatorAccount");
 
     uint256 public liquidations;
     uint256 public socialisedLosses;
@@ -362,8 +363,13 @@ contract V4VaultHandler is BaseTest {
         (,,, uint256 liquidationCost, uint256 liquidationValue) = vault.loanInfo(tokenId);
         if (liquidationValue == 0) return;
         uint256 lendRateBefore = vault.lastLendExchangeRateX96();
-        asset.mint(address(this), liquidationCost);
-        vault.liquidate(IVault.LiquidateParams(tokenId, 0, 0, address(this), block.timestamp, ""));
+        // the handler owns every loan and the vault refuses the owner as liquidator or recipient
+        // (V4LE-18), so an unrelated account liquidates
+        asset.mint(liquidatorAccount, liquidationCost);
+        vm.startPrank(liquidatorAccount);
+        asset.approve(address(vault), liquidationCost);
+        vault.liquidate(IVault.LiquidateParams(tokenId, 0, 0, liquidatorAccount, block.timestamp, ""));
+        vm.stopPrank();
         liquidations++;
         if (vault.lastLendExchangeRateX96() < lendRateBefore) socialisedLosses++;
 

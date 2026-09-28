@@ -46,18 +46,18 @@ abstract contract Transformer is Ownable2Step, Constants {
         }
     }
 
-    // validates if caller is allowed to process position
+    // validates if caller is allowed to process position: a registered vault inside its transform of this
+    // very token, or the NFT owner. The transformer's own custody of an NFT is never authority for a
+    // public caller - an NFT parked here by a plain transferFrom would otherwise be anyone's to drain; the
+    // safe-transfer callback flow runs an internal path bound to the token it just received instead.
     function _validateCaller(IPositionManager positionManager, uint256 tokenId) internal view {
         if (vaults[msg.sender]) {
             uint256 transformedTokenId = IVault(msg.sender).transformedTokenId();
             if (tokenId != transformedTokenId) {
                 revert Unauthorized();
             }
-        } else {
-            address owner = IERC721(address(positionManager)).ownerOf(tokenId);
-            if (owner != msg.sender && owner != address(this)) {
-                revert Unauthorized();
-            }
+        } else if (IERC721(address(positionManager)).ownerOf(tokenId) != msg.sender) {
+            revert Unauthorized();
         }
     }
 }

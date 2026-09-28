@@ -234,6 +234,11 @@ contract AutoLend is Automator {
         }
 
         PositionConfig memory config = positionConfigs[params.tokenId];
+        // deactivation revokes the operator's authority for both strategy legs; the owner-only
+        // forceExit remains the recovery path for an already-lent position
+        if (!config.isActive) {
+            revert NotConfigured();
+        }
 
         address posOwner = _requireNonVaultPosition(params.tokenId);
 

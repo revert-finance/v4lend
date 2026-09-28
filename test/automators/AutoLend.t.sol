@@ -253,6 +253,43 @@ contract AutoLendTest is AutomatorTestBase {
         assertEq(sharesAfter, 0, "shares should be cleared");
     }
 
+    /// @notice V4LE-31: deactivating a position must stop the operator's withdraw leg too, not only
+    ///         deposits; the owner keeps forceExit as the recovery path.
+    function test_WithdrawRejectsDeactivatedPosition() public {
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+        _configureAndApprove(tokenId, _defaultConfig(0));
+        _swapExactInputSingle(poolKey, true, 10000e6, 0);
+        _deposit(
+            operator,
+            AutoLend.DepositParams({
+                tokenId: tokenId,
+                amountRemoveMin0: 0,
+                amountRemoveMin1: 0,
+                deadline: block.timestamp,
+                hookData: bytes(""),
+                rewardX64: 0
+            })
+        );
+        (, uint256 shares,,) = autoLend.lendStates(tokenId);
+        assertGt(shares, 0);
+
+        AutoLend.PositionConfig memory disabled = _defaultConfig(0);
+        disabled.isActive = false;
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.configToken(tokenId, disabled);
+
+        _swapExactInputSingle(poolKey, false, 2e18, 0);
+        AutoLend.WithdrawParams memory withdrawParams =
+            AutoLend.WithdrawParams({tokenId: tokenId, deadline: block.timestamp, hookData: bytes(""), rewardX64: 0});
+        vm.prank(operator);
+        vm.expectRevert(Constants.NotConfigured.selector);
+        autoLend.withdraw(withdrawParams);
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, shares, "disabled position keeps its lend state for the owner");
+    }
+
     function test_WithdrawSweepsDustedBalances() public {
         PoolKey memory poolKey = _createPool();
         _createFullRangePosition(poolKey);

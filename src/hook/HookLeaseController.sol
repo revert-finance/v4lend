@@ -14,7 +14,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
+import {HookExecutorRegistry} from "./HookExecutorRegistry.sol";
 import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 import {IRevertHookDynamicFee} from "./HookAuctionController.sol";
 
@@ -39,7 +39,7 @@ import {IRevertHookDynamicFee} from "./HookAuctionController.sol";
 ///        is isolated inside this contract's own donate try/catch.
 ///      - The auction currency must be an ERC20 side of the pool. Pools with a native
 ///        currency0 are supported by leasing in the ERC20 currency1.
-contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
+contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using PoolIdLibrary for PoolKey;
 
@@ -49,6 +49,12 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     uint16 internal constant BPS_DENOMINATOR = 10_000;
     uint16 internal constant MAX_PROTOCOL_FEE_BPS = 2_000;
     uint32 internal constant MAX_DRIP_HORIZON_SECONDS = 30 days;
+    /// @notice Longest runway a lease's prepaid rent may cover (external audit V4LE-22/36). Bounds
+    ///         how long a disabled pool's running lease - and, through a public executor, its
+    ///         discount - can survive the owner's wind-down, and keeps paidThrough far from the
+    ///         uint40 saturation sentinel. A solvent lessee can top up any time while leasing is
+    ///         enabled, so the bound costs nothing in normal operation.
+    uint256 public constant MAX_PREPAID_RUNWAY_SECONDS = 365 days;
     uint256 internal constant MAX_ESCROW_AMOUNT = uint256(uint128(type(int128).max));
     uint256 internal constant Q64 = 1 << 64;
 
@@ -73,7 +79,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         Currency auctionCurrency; // ERC20 side of the pool used for deposits, rent and fees
         uint32 minBuyoutBumpPpm; // relative price increment a buyout must offer
         uint16 protocolFeeBps; // share of accrued rent sent to protocolFeeRecipient
-        uint32 minRentDepositSeconds; // a (re)starting lease must prepay at least this much rent
+        uint32 minRentDepositSeconds; // nonrefundable minimum rent commitment at the entry price
         // slot 2
         address protocolFeeRecipient;
         uint64 taxRatePerSecondX64; // rent per second as a Q64 fraction of the self-assessed price
@@ -102,6 +108,16 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         // donates, lease-action accruals); released gradually. uint256 so a long-lived lease
         // can never overflow the accumulator.
         uint256 pendingDonation;
+        // Release pace of the pending bucket: the largest "one horizon of rent" (gross rent per
+        // second times dripHorizonSeconds; an upper bound on the net-of-fee rent the bucket
+        // receives) among the accruals that fed it. Bounds every release to what the lease
+        // itself would have delivered over the same interval, so the slice a JIT position can
+        // capture does not grow with the length of the gap that filled the bucket.
+        // Read only when a release actually happens; reset to 0 whenever the bucket drains.
+        uint128 pendingReleasePerHorizon;
+        // Entry-price minimum rent still owed. Time-accrued rent pays it down; termination
+        // charges any remainder before refunding rentBalance. Always <= rentBalance.
+        uint128 minimumRentRemaining;
     }
 
     // ==================== State ====================
@@ -165,8 +181,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     error ExactTransferFailed();
     error NothingToClaim();
     error OnlyPoolManager();
+    error PrepaidRunwayTooLong();
 
-    constructor(address hook_, IPoolManager poolManager_) HookOwnedControllerBase(hook_) {
+    constructor(address hook_, IPoolManager poolManager_) HookExecutorRegistry(hook_) {
         if (address(poolManager_) == address(0)) {
             revert InvalidConfig();
         }
@@ -255,6 +272,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @notice Starts a lease on a vacant pool: escrows the self-assessed `price` as a deposit
     ///         and prepays `rentDeposit` of rent. The registered executor gets the fee discount
     ///         while the rent balance covers the current time.
+    ///         At least entry rent-per-second * minRentDepositSeconds is nonrefundable, even
+    ///         when the lease exits or is bought out in the same transaction.
     /// @dev A rent-INSOLVENT incumbent (now >= paidThrough: no discount, no rent accruing) does not
     ///      count as active: it is evicted first (final accrual delivered, deposit and rent dust
     ///      escrowed for pull-refund, see evictLease) and the caller enters at their own price - no
@@ -283,7 +302,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
     /// @notice Takes over an active lease Harberger-style: pay a price at least minBuyoutBumpPpm
     ///         above the current self-assessed price (escrowed as the new deposit) plus a fresh
-    ///         rent deposit. The old lessee's deposit and unused rent go to pull-refund escrow.
+    ///         rent deposit. The old lessee's deposit and rent left after settling their
+    ///         minimum commitment go to pull-refund escrow.
     function buyout(PoolKey calldata key, address executor, uint256 newPrice, uint256 rentDeposit)
         external
         nonReentrant
@@ -304,6 +324,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             revert InvalidPrice();
         }
 
+        _settleMinimumRent(poolId, config, state);
         uint256 oldRefund = uint256(state.price) + state.rentBalance;
         _installLease(config, state, executor, newPrice, rentDeposit);
         if (oldRefund != 0) {
@@ -324,14 +345,17 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     ) internal {
         _checkPrice(price);
         uint256 rps = _rentPerSecond(config, price);
-        if (rentDeposit < rps * config.minRentDepositSeconds || rentDeposit > MAX_ESCROW_AMOUNT) {
+        uint256 minimumRent = rps * config.minRentDepositSeconds;
+        if (rentDeposit < minimumRent || rentDeposit > MAX_ESCROW_AMOUNT) {
             revert InvalidRentDeposit();
         }
+        _checkPrepaidRunway(rentDeposit, rps);
 
         state.lessee = msg.sender;
         state.lastAccrualTime = uint64(block.timestamp);
         state.price = uint128(price);
         state.rentBalance = uint128(rentDeposit);
+        state.minimumRentRemaining = uint128(minimumRent); // bounded by rentDeposit above
         state.executor = executor;
         state.paidThrough = _paidThrough(block.timestamp, rentDeposit, rps);
 
@@ -350,7 +374,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
         _settleAccrualForLeaseAction(key, poolId, config, state);
         state.rentBalance += uint128(amount);
-        state.paidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, state.price));
+        uint256 rps = _rentPerSecond(config, state.price);
+        _checkPrepaidRunway(state.rentBalance, rps);
+        state.paidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, rps);
         _pullExact(config.auctionCurrency, amount);
         emit LeaseRentFunded(poolId, msg.sender, amount);
     }
@@ -358,6 +384,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @notice Changes the caller's self-assessed price. Raising it pulls the difference into
     ///         escrow (and raises the rent); lowering it refunds the difference (and lowers the
     ///         rent, but also the buyout threshold - the Harberger honesty incentive).
+    ///         The unpaid entry-price minimum rent commitment does not change.
     /// @dev Raising requires leasing to be enabled. Lowering stays allowed while leasing is
     ///      disabled only as long as it does not stretch the prepaid runway: a lower rent rate
     ///      would otherwise revive a run-out lease from its remaining balance and block the
@@ -378,11 +405,13 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         _checkPrice(newPrice);
 
         _settleAccrualForLeaseAction(key, poolId, config, state);
-        uint40 newPaidThrough =
-            _paidThrough(state.lastAccrualTime, state.rentBalance, _rentPerSecond(config, newPrice));
+        uint256 newRps = _rentPerSecond(config, newPrice);
+        uint40 newPaidThrough = _paidThrough(state.lastAccrualTime, state.rentBalance, newRps);
         if (!config.leasingEnabled && (newPrice > oldPrice || newPaidThrough > state.paidThrough)) {
             revert LeasingDisabled();
         }
+        // a lower price lowers the rent, stretching the remaining balance over a longer runway
+        _checkPrepaidRunway(state.rentBalance, newRps);
         state.price = uint128(newPrice);
         state.paidThrough = newPaidThrough;
 
@@ -394,7 +423,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         emit LeasePriceChanged(poolId, msg.sender, oldPrice, newPrice);
     }
 
-    /// @notice Ends the caller's lease and returns the price deposit plus unaccrued rent.
+    /// @notice Ends the caller's lease and returns the price deposit plus rent left after
+    ///         settling the minimum rent commitment. Elapsed rent counts toward the minimum.
     ///         Always allowed, including while leasing is disabled.
     function exitLease(PoolKey calldata key) external nonReentrant returns (uint256 refund) {
         PoolId poolId = key.toId();
@@ -406,6 +436,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
         // a lease can only exist once startTime has passed, so accrual is always safe here
         _settleAccrualForLeaseAction(key, poolId, config, state);
+        _settleMinimumRent(poolId, config, state);
         refund = uint256(state.price) + state.rentBalance;
         _clearLease(state);
         if (refund != 0) {
@@ -453,11 +484,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     }
 
     /// @notice Claims accrued protocol fees. Callable by the configured recipient account.
-    function claimProtocolFees(Currency currency, address recipient)
-        external
-        nonReentrant
-        returns (uint256 amount)
-    {
+    function claimProtocolFees(Currency currency, address recipient) external nonReentrant returns (uint256 amount) {
         amount = protocolFeesAccrued[currency][msg.sender];
         if (amount == 0) {
             revert NothingToClaim();
@@ -508,7 +535,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             config.minDripSeconds == 0 || config.dripHorizonSeconds < config.minDripSeconds
                 || config.dripHorizonSeconds > MAX_DRIP_HORIZON_SECONDS || config.minBuyoutBumpPpm == 0
                 || config.minBuyoutBumpPpm > PPM || config.minRentDepositSeconds == 0
-                || config.taxRatePerSecondX64 == 0
+                || config.minRentDepositSeconds > MAX_PREPAID_RUNWAY_SECONDS || config.taxRatePerSecondX64 == 0
         ) {
             revert InvalidConfig();
         }
@@ -518,8 +545,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         // slot un-buyoutable. Economically this bounds the mandatory prepay to at most ~100%
         // of the self-assessed price - any config demanding more is nonsensical anyway.
         if (
-            FullMath.mulDivRoundingUp(MAX_ESCROW_AMOUNT, config.taxRatePerSecondX64, Q64)
-                * config.minRentDepositSeconds > MAX_ESCROW_AMOUNT
+            FullMath.mulDivRoundingUp(MAX_ESCROW_AMOUNT, config.taxRatePerSecondX64, Q64) * config.minRentDepositSeconds
+                > MAX_ESCROW_AMOUNT
         ) {
             revert InvalidConfig();
         }
@@ -547,6 +574,9 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     /// @notice Enables or disables leasing for a pool. Disabling stops new leases, buyouts,
     ///         rent top-ups and price raises immediately; the running lease is honored until
     ///         its prepaid rent runs out (or the lessee exits) and accrued rent keeps dripping.
+    ///         The prepaid runway is bounded by MAX_PREPAID_RUNWAY_SECONDS and cannot be extended
+    ///         while disabled, so the lease ends - and evictLease opens to anyone - within that
+    ///         bound at the latest.
     function setLeasingEnabled(PoolKey calldata key, bool enabled) external {
         _checkOwner();
         PoolId poolId = key.toId();
@@ -630,6 +660,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         address lessee
     ) internal returns (uint256 refund) {
         _settleAccrualForLeaseAction(key, poolId, config, state);
+        // A price raise can make the lease insolvent before its minimum has been earned.
+        _settleMinimumRent(poolId, config, state);
         refund = uint256(state.price) + state.rentBalance;
         _clearLease(state);
         if (refund != 0) {
@@ -672,6 +704,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         }
         state.pendingDonation = 0;
         state.hasPending = false;
+        state.pendingReleasePerHorizon = 0;
         refunds[config.auctionCurrency][recipient] += amount;
         emit PendingDonationSwept(poolId, config.auctionCurrency, recipient, amount);
     }
@@ -680,6 +713,12 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
     function getPoolLeaseConfig(PoolId poolId) external view returns (PoolLeaseConfig memory) {
         return _poolConfigs[poolId];
+    }
+
+    /// @notice Nonrefundable commitment included in the stored rent balance, before any
+    ///         unaccrued elapsed rent is applied. Price changes cannot reduce this commitment.
+    function minimumRentRemaining(PoolId poolId) external view returns (uint256) {
+        return _poolStates[poolId].minimumRentRemaining;
     }
 
     function getPoolLeaseState(PoolId poolId)
@@ -705,6 +744,11 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             state.paidThrough,
             state.pendingDonation
         );
+    }
+
+    /// @notice Release pace of the pool's pending-donation bucket (see PoolLeaseState).
+    function getPendingReleasePerHorizon(PoolId poolId) external view returns (uint128) {
+        return _poolStates[poolId].pendingReleasePerHorizon;
     }
 
     /// @notice Whether a pool has a lease configuration (independent of any activity).
@@ -796,8 +840,8 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
 
     function _checkExecutor(address executor) internal view {
         if (
-            executor == address(0) || executor == address(poolManager) || executor == address(this)
-                || executor == hook || executorDenied[executor]
+            executor == address(0) || executor == address(poolManager) || executor == address(this) || executor == hook
+                || executorDenied[executor] || !_executorAdmitted(executor)
         ) {
             revert InvalidExecutor();
         }
@@ -834,9 +878,25 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         return FullMath.mulDivRoundingUp(price, config.taxRatePerSecondX64, Q64);
     }
 
+    /// @dev Bounds the prepaid runway to MAX_PREPAID_RUNWAY_SECONDS (external audit V4LE-22/36).
+    ///      paidThrough is the lease's solvency boundary: the discount is served and eviction is
+    ///      refused strictly while now < paidThrough, and configurePool needs the slot vacant. Left
+    ///      unbounded, a lessee at the minimum price (1 raw unit; rent rounds UP to 1 raw unit per
+    ///      second) could prepay ~uint40.max seconds for ~1e-6 tokens and saturate paidThrough at
+    ///      the uint40 sentinel, keeping the discount - through a public executor, for anyone -
+    ///      past any wind-down and blocking reconfiguration forever. Checked wherever the runway
+    ///      can grow: install, top-up and price cuts (a lower rent stretches the balance).
+    function _checkPrepaidRunway(uint256 rentBalance, uint256 rps) internal pure {
+        if (rentBalance / rps > MAX_PREPAID_RUNWAY_SECONDS) {
+            revert PrepaidRunwayTooLong();
+        }
+    }
+
     /// @dev The timestamp through which `rentBalance` covers rent starting at `fromTime`.
     ///      Invariant under accrual (accruing k seconds consumes exactly k*rps), so it is only
-    ///      recomputed when rentBalance, price or the tax base change. Saturates at uint40 max.
+    ///      recomputed when rentBalance, price or the tax base change. The runway is bounded by
+    ///      _checkPrepaidRunway, so the uint40 clamp below is unreachable in practice and kept
+    ///      only as a defensive cast.
     function _paidThrough(uint256 fromTime, uint256 rentBalance, uint256 rps) internal pure returns (uint40) {
         uint256 through = fromTime + rentBalance / rps;
         return through > type(uint40).max ? type(uint40).max : uint40(through);
@@ -851,6 +911,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         state.lastAccrualTime = 0;
         state.price = 0;
         state.rentBalance = 0;
+        state.minimumRentRemaining = 0;
     }
 
     /// @dev Moves rent owed since lastAccrualTime out of the lease: the protocol-fee share to
@@ -886,7 +947,18 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         if (owed == 0) {
             return 0;
         }
-        state.rentBalance = uint128(rentBalance - owed);
+        return _chargeRent(poolId, config, state, owed);
+    }
+
+    /// @dev Both elapsed rent and the final minimum charge use the same fee accounting.
+    ///      The entry commitment is backed by rentBalance and only decreases when rent is paid.
+    function _chargeRent(PoolId poolId, PoolLeaseConfig storage config, PoolLeaseState storage state, uint256 owed)
+        internal
+        returns (uint256 netAccrued)
+    {
+        state.rentBalance -= uint128(owed);
+        uint256 remaining = state.minimumRentRemaining;
+        state.minimumRentRemaining = owed >= remaining ? 0 : uint128(remaining - owed);
 
         // carry the sub-bps remainder across accruals: fundRent-forced per-second slices would
         // otherwise floor every slice's fee to zero, starving the protocol of its share
@@ -899,6 +971,16 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
         emit RentAccrued(poolId, owed, protocolFee, state.rentBalance);
         // protocolFee <= owed always (bps <= 2000, carry < 10000: even owed == 1 yields fee <= 1)
         return owed - protocolFee;
+    }
+
+    /// @dev Finalize the nonrefundable entry commitment on every termination path. Parking
+    ///      the LP share uses the existing anti-JIT throttle rather than donating an entire
+    ///      minimum payment to liquidity inserted in the same transaction as the exit.
+    function _settleMinimumRent(PoolId poolId, PoolLeaseConfig storage config, PoolLeaseState storage state) internal {
+        uint256 remaining = state.minimumRentRemaining;
+        if (remaining != 0) {
+            _addPending(config, state, _chargeRent(poolId, config, state, remaining));
+        }
     }
 
     /// @dev Lease actions (buyout, fundRent, setPrice, exitLease, evictLease) accrue outside the hook
@@ -923,7 +1005,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             poolManager.unlock(abi.encode(key));
             return;
         }
-        _addPending(state, _accrue(poolId, config, state));
+        _addPending(config, state, _accrue(poolId, config, state));
     }
 
     /// @dev Adds to the pending bucket, maintaining the hasPending slot-0 mirror and
@@ -931,13 +1013,22 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     ///      non-empty. Without this, a lastDripTime left stale by a long-drained previous
     ///      bucket would let the first drip of a fresh bucket compute a full-horizon elapsed
     ///      interval and release the entire new bucket to a same-block JIT position.
-    function _addPending(PoolLeaseState storage state, uint256 amount) internal {
+    ///      Also raises the bucket's release pace to one horizon of rent at the current lease
+    ///      price (the rate the parked value accrued at), see pendingReleasePerHorizon.
+    function _addPending(PoolLeaseConfig storage config, PoolLeaseState storage state, uint256 amount) internal {
         if (amount == 0) {
             return;
         }
         if (state.pendingDonation == 0) {
             state.hasPending = true;
             state.lastDripTime = uint40(block.timestamp);
+        }
+        uint256 pace = _rentPerSecond(config, state.price) * config.dripHorizonSeconds;
+        if (pace > MAX_ESCROW_AMOUNT) {
+            pace = MAX_ESCROW_AMOUNT; // releases are clamped to int128 range anyway
+        }
+        if (pace > state.pendingReleasePerHorizon) {
+            state.pendingReleasePerHorizon = uint128(pace);
         }
         state.pendingDonation += amount;
     }
@@ -952,7 +1043,10 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
     ///         departing LP (beforeRemoveLiquidity) collect the rent of its own tenure.
     ///      2) The PENDING bucket - value that could not be delivered (zero liquidity, failed
     ///         donates, lease-action accruals) - releases gradually: throttled by
-    ///         minDripSeconds, bounded to (elapsed / dripHorizonSeconds) per release, clock
+    ///         minDripSeconds, bounded per release to (elapsed / dripHorizonSeconds) of
+    ///         pendingReleasePerHorizon - one horizon of rent at the pace the value accrued -
+    ///         and NOT of the whole bucket (a fraction of the aggregate would hand a dust LP that
+    ///         appears after a long zero-liquidity gap a slice that grows with the gap), clock
     ///         (re)initialized on every empty-to-nonempty transition and advanced over
     ///         zero-liquidity stretches, so no stale interval can dump the bucket to a JIT.
     ///      The shared throttle runs FIRST, from state slot 0 alone, so throttled touches skip
@@ -986,10 +1080,15 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
             if (elapsed > config.dripHorizonSeconds) {
                 elapsed = config.dripHorizonSeconds; // cap the catch-up at one horizon's worth
             }
-            // round UP so every release moves at least one base unit - the bucket self-drains
-            // without a flush-on-zero branch, which for a small bucket against a long horizon
-            // (e.g. low-decimal currencies) would dump the whole bucket to the first LP
-            uint256 release = FullMath.mulDivRoundingUp(pending, elapsed, config.dripHorizonSeconds);
+            // Pace by one horizon of rent, never by the aggregate. Round UP so every release
+            // moves at least one base unit - the bucket self-drains without a flush-on-zero
+            // branch, which for a small bucket against a long horizon (e.g. low-decimal
+            // currencies) would dump the whole bucket to the first LP.
+            uint256 pace = state.pendingReleasePerHorizon;
+            if (pace > pending) {
+                pace = pending;
+            }
+            uint256 release = FullMath.mulDivRoundingUp(pace, elapsed, config.dripHorizonSeconds);
             if (release > pending) {
                 release = pending;
             }
@@ -1002,6 +1101,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
                 state.pendingDonation = pendingRemaining;
                 if (pendingRemaining == 0) {
                     state.hasPending = false;
+                    state.pendingReleasePerHorizon = 0;
                 }
                 amountToDonate = released;
                 emit PendingDonationDripped(poolId, released, pendingRemaining);
@@ -1022,7 +1122,7 @@ contract HookLeaseController is HookOwnedControllerBase, IHookAuctionController,
                 }
             }
             if (freshDonated != fresh) {
-                _addPending(state, fresh - freshDonated);
+                _addPending(config, state, fresh - freshDonated);
             }
         }
 

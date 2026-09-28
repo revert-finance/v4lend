@@ -58,6 +58,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         }
 
         if (!success) {
+            autoLeverageNeedsAttention[tokenId] = true;
             emit HookActionFailed(tokenId, Mode.AUTO_LEVERAGE);
             return;
         }
@@ -75,6 +76,8 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
                     _LEVERAGE_OVERSHOOT_TOLERANCE_BPS
                 )
         ) revert NoImprovement();
+
+        delete autoLeverageNeedsAttention[tokenId];
 
         // Update triggers for new base tick
         _removePositionTriggers(tokenId, poolKey);
@@ -104,11 +107,16 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         uint256 borrowAmount = AutoLeverageLib.borrowAmountToTarget(
             currentDebt, fullValue, collateralValue, targetRatioBps
         );
-        if (borrowAmount == 0) return true;
+        // Sized to nothing while the loan is off target (a valueless position): nothing was done,
+        // so this is a failed action, not a success that re-centres the triggers (V4LE-71).
+        if (borrowAmount == 0) return false;
 
-        // Borrow from vault
-        Currency lendToken = Currency.wrap(vault.asset());
+        // Borrow from vault; a WETH vault on a native pool is unwrapped into the pool's native side
+        (Currency lendToken,) = _lendCurrency(poolKey, vault.asset());
         vault.borrow(tokenId, borrowAmount);
+        if (lendToken.isAddressZero()) {
+            weth.withdraw(borrowAmount);
+        }
 
         // Swap to optimal ratio and add liquidity
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -157,21 +165,38 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         );
 
         address lendAsset = vault.asset();
-        Currency lendToken = Currency.wrap(lendAsset);
+        (Currency lendToken,) = _lendCurrency(poolKey, lendAsset);
         uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
         (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, lendAsset);
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
-        if (positionValue == 0 || currentLiquidity == 0) return true;
+        // Nothing to remove, or a removal that floors to zero liquidity (the raw liquidity is small
+        // next to the position's value, e.g. a fee-heavy or low-decimal position): the loan stays
+        // above target and nothing was repaid. Reporting success here let autoLeverage treat the
+        // unchanged loan as done and re-centre the trigger window around the current tick, so a
+        // permissionless crossing consumed the debt-reduction trigger without reducing debt
+        // (V4LE-71). Report a failed action instead: HookActionFailed, the fired node consumed,
+        // no re-centring. Removing one liquidity unit instead would credit nothing either.
+        if (positionValue == 0 || currentLiquidity == 0) return false;
 
         // Calculate liquidity to remove based on value ratio
         uint128 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
-        if (liquidityToRemove == 0) return true;
+        if (liquidityToRemove == 0) return false;
 
         // Remove partial liquidity and swap to lend token
         (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
             _decreaseLiquidityPartial(poolKey, tokenId, liquidityToRemove);
         if (amount0 == 0 && amount1 == 0) {
+            // No credit to repay with. If the removal itself failed nothing changed and a soft
+            // failure is right. If it succeeded, the position's carried protocol fees (deferred by
+            // earlier fee-only collections) consumed the whole principal credit: liquidity is gone
+            // and there is nothing to repay or to restore it with. Returning false here would skip
+            // the postcondition and let the vault transform commit lower collateral against
+            // unchanged debt, so the action has to roll back instead (the hook runs vault-backed
+            // actions inside a caught transform, so this only fails the action).
+            if (positionManager.getPositionLiquidity(tokenId) < currentLiquidity) {
+                revert RemovalConsumedByFees();
+            }
             return false;
         }
 
@@ -179,7 +204,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1, Mode.AUTO_LEVERAGE);
 
         // Repay debt
-        _repayDebtToVault(tokenId, vault, lendAsset, lendAmount, currentDebt);
+        _repayDebtToVault(tokenId, vault, lendToken, lendAsset, lendAmount, currentDebt);
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
         if (newDebt < currentDebt) {
             _sendLeftoverTokens(tokenId, currency0, currency1, vault.ownerOf(tokenId));
@@ -226,7 +251,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         );
 
         (uint256 currentDebt,,,,) = vault.loanInfo(tokenId);
-        _repayDebtToVault(tokenId, vault, Currency.unwrap(lendToken), lendAmount, currentDebt);
+        _repayDebtToVault(tokenId, vault, lendToken, vault.asset(), lendAmount, currentDebt);
         (debtAfterRollback,,,,) = vault.loanInfo(tokenId);
     }
 }

@@ -6,6 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {AutoLendLib} from "src/shared/planning/AutoLendLib.sol";
 import {AutoLeverageLib} from "src/shared/planning/AutoLeverageLib.sol";
 import {AutoRangeLib} from "src/shared/planning/AutoRangeLib.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 contract SharedPlanningLibrariesHarness {
     function planOneSidedReentry(
@@ -69,6 +70,19 @@ contract SharedPlanningLibrariesHarness {
         uint256 toleranceBps
     ) external pure returns (bool) {
         return AutoLeverageLib.improvesTowardTarget(
+            debtBefore, collateralBefore, debtAfter, collateralAfter, targetRatioBps, toleranceBps
+        );
+    }
+
+    function landsWithinTolerance(
+        uint256 debtBefore,
+        uint256 collateralBefore,
+        uint256 debtAfter,
+        uint256 collateralAfter,
+        uint256 targetRatioBps,
+        uint256 toleranceBps
+    ) external pure returns (bool) {
+        return AutoLeverageLib.landsWithinTolerance(
             debtBefore, collateralBefore, debtAfter, collateralAfter, targetRatioBps, toleranceBps
         );
     }
@@ -177,6 +191,29 @@ contract SharedPlanningLibrariesTest is Test {
         assertTrue(harness.improvesTowardTargetWithTolerance(8_000, 10_000, 1_000, 10_000, 5_000, 0));
     }
 
+    /// @notice Operator-driven adjustments must land inside the band in both directions. A deleverage
+    ///         that removes target-sized liquidity but repays only part of the proceeds still lowers the
+    ///         ratio, and is exactly what the strict variant has to reject.
+    function testAutoLeverageLibLandsWithinToleranceBindsDeleverageToBand() public view {
+        // target 30%, band 100bps: 70% -> 57% is a decrease but far above the band -> rejected
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 2_875, 5_070, 3_000, 100));
+        // honest landing on target passes, as does landing below it
+        assertTrue(harness.landsWithinTolerance(7_000, 10_000, 1_521, 5_070, 3_000, 100));
+        assertTrue(harness.landsWithinTolerance(7_000, 10_000, 1_000, 5_070, 3_000, 100));
+        // boundary: exactly target + tolerance passes, one bp more fails
+        assertTrue(harness.landsWithinTolerance(7_000, 10_000, 3_100, 10_000, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 3_101, 10_000, 3_000, 100));
+        // the ratio still has to move: starting on the band edge and staying there is rejected
+        assertFalse(harness.landsWithinTolerance(3_100, 10_000, 3_100, 10_000, 3_000, 100));
+        // leverage-up keeps the overshoot rule and must still increase the ratio
+        assertTrue(harness.landsWithinTolerance(1_000, 10_000, 3_050, 10_000, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(1_000, 10_000, 3_101, 10_000, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(1_000, 10_000, 1_000, 10_000, 3_000, 100));
+        // degenerate collateral is never an acceptable landing
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 0, 0, 3_000, 100));
+        assertFalse(harness.landsWithinTolerance(7_000, 0, 0, 10_000, 3_000, 100));
+    }
+
     function testAutoLeverageLibDegenerateInputsReturnZero() public view {
         assertEq(harness.currentRatio(1, 0), 0);
         assertEq(harness.borrowAmountToTarget(6_000, 10_000, 10_000, 5_000), 0);
@@ -246,6 +283,26 @@ contract SharedPlanningLibrariesTest is Test {
         (int24 newTickLower, int24 newTickUpper) = harness.planRange(-125, 60, -120, 120);
         assertEq(newTickLower, -300);
         assertEq(newTickUpper, -60);
+    }
+
+    /// @dev V4LE-74: a shift from a bucket at the TickMath edge is clamped to the usable range
+    ///      instead of producing ticks the liquidity planner rejects.
+    function testAutoRangeLibClampsPlannedRangeToUsableTicks() public view {
+        int24 maxUsable = TickMath.maxUsableTick(60); // 887220
+        int24 minUsable = TickMath.minUsableTick(60); // -887220
+        (int24 newTickLower, int24 newTickUpper) = harness.planRange(TickMath.MAX_TICK - 1, 60, -60, 60);
+        assertEq(newTickLower, maxUsable - 60, "lower side untouched");
+        assertEq(newTickUpper, maxUsable, "upper side clamped to maxUsableTick");
+
+        (newTickLower, newTickUpper) = harness.planRange(TickMath.MIN_TICK, 60, -60, 60);
+        assertEq(newTickLower, minUsable, "lower side clamped to minUsableTick");
+        assertEq(newTickUpper, minUsable, "the shift from the sub-usable bucket collapses onto the edge");
+        assertFalse(harness.isValidRange(newTickLower, newTickUpper), "callers must reject the collapsed range");
+
+        (newTickLower, newTickUpper) = harness.planRange(minUsable, 60, -60, 120);
+        assertEq(newTickLower, minUsable);
+        assertEq(newTickUpper, minUsable + 120);
+        assertTrue(harness.isValidRange(newTickLower, newTickUpper));
     }
 
     function testAutoRangeLibValidityAndSameRangeHelpers() public view {
