@@ -12,14 +12,31 @@ interface IV4Oracle {
     ///      removal actually pays out with the same precision (`amount * priceX96 / quotePriceX96` per leg)
     ///      instead of with per-leg prices already rounded to Q96 in quote terms, which are zero for a leg
     ///      whose per-unit quote price is below one Q96 unit although the leg has value.
-    /// @return liquidity Liquidity to remove; zero when the uncollected fees alone cover the target
-    /// @return price0X96 Price of token0 in reference-token terms (Q96)
-    /// @return price1X96 Price of token1 in reference-token terms (Q96)
-    /// @return quotePriceX96 Price of the quote token in reference-token terms (Q96)
+    /// @notice What a fee-first removal of `target` worth of a position needs (see `getLiquidityForValue`).
+    /// @param liquidity Liquidity to remove; zero when the uncollected fees alone cover the target
+    /// @param chunk Largest liquidity one v4 decrease can pay out at the live pool price (the whole
+    ///        position's liquidity when its payout is below the int128 bound); a larger removal is split into
+    ///        decreases of at most this size inside the same unlock
+    /// @param price0X96 Price of token0 in reference-token terms (Q96)
+    /// @param price1X96 Price of token1 in reference-token terms (Q96)
+    /// @param quotePriceX96 Price of the quote token in reference-token terms (Q96)
+    /// @param charge0 Part of the hook's token0 obligation the accrued fees do not cover, paid from the
+    ///        removed principal inside the fee-first unlock (zero without a hook or when fees cover it)
+    /// @param charge1 Same for token1
+    struct RemovalPlan {
+        uint128 liquidity;
+        uint128 chunk;
+        uint256 price0X96;
+        uint256 price1X96;
+        uint256 quotePriceX96;
+        uint256 charge0;
+        uint256 charge1;
+    }
+
     function getLiquidityForValue(uint256 tokenId, address quoteToken, uint256 target)
         external
         view
-        returns (uint128 liquidity, uint256 price0X96, uint256 price1X96, uint256 quotePriceX96);
+        returns (RemovalPlan memory plan);
     /// @notice Additional source-recovery requirements for increasing loan risk after an L2 restart.
     function getRiskScore(uint256 tokenId, address quoteToken, uint256 debtShares) external view returns (uint256);
     function validateRiskChange(uint256 tokenId, address quoteToken, uint256 debtShares, uint256 previousRisk) external view;

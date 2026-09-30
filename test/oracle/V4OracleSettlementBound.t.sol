@@ -21,11 +21,14 @@ import {EasyPosm} from "test/utils/libraries/EasyPosm.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
 import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {MutableChainlinkFeed} from "test/oracle/support/OracleMocks.sol";
+import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 
 /// @title V4OracleSettlementBoundTest
 /// @notice Uniswap v4 settles every fee and principal amount of a `modifyLiquidity` call through
 ///         `SafeCast.toInt128`, which rejects amounts >= 2^127. The oracle must not certify such amounts as
-///         collateral: it reports them with `SettlementBoundExceeded`.
+///         collateral (fees: reported with `SettlementBoundExceeded`; principal: never a valuation revert, the
+///         liquidation sizing reports the largest liquidity one decrease settles and the vault splits the
+///         removal, V4LE-156).
 ///         - External audit V4LE-6: `_calculateUncollectedFees` narrowed with `SafeCast.toUint128` and so
 ///           accepted fee amounts in [2^127, 2^128) that v4 can never pay out (fees are settled on every
 ///           collection and liquidity decrease of the position).
@@ -122,7 +125,7 @@ contract V4OracleSettlementBoundTest is BaseTest {
 
     // ---------------------------------------------------------------- V4LE-61: principal
 
-    function testPrincipalAtSettlementBoundIsRejectedLikeV4() public {
+    function testPrincipalAtSettlementBoundIsSettledInChunks() public {
         // minted below its range with a small token0 amount, then the pool price crosses above it
         uint128 liquidity = 2 ** 93;
         uint256 tokenId = _mintPrincipalPosition(liquidity);
@@ -130,15 +133,37 @@ contract V4OracleSettlementBoundTest is BaseTest {
         uint256 amount1 = _principalAmount1(liquidity);
         assertGe(amount1, V4_SETTLEMENT_BOUND, "scenario: token1 principal at or above the v4 bound");
 
-        // v4 ground truth: the full decrease (liquidation / withdrawal) reverts at the int128 narrowing
+        // v4 ground truth: one decrease of everything reverts at the int128 narrowing
         vm.expectRevert(SafeCast.SafeCastOverflow.selector);
         positionManager.modifyLiquidities(_decreaseCalldata(tokenId, liquidity), block.timestamp);
 
-        // the oracle no longer certifies the amount (the old code valued it at amount1)
-        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
-        oracle.getValue(tokenId, Currency.unwrap(currency1));
-        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
-        oracle.getPositionBreakdown(tokenId);
+        // the oracle keeps valuing the position: a loan on it must stay liquidatable (V4LE-156)
+        (uint256 value, uint256 feeValue,,) = oracle.getValue(tokenId, Currency.unwrap(currency1));
+        assertEq(value, amount1, "valued at its token1 principal");
+        assertEq(feeValue, 0);
+        (,,,,, uint256 breakdown1,,) = oracle.getPositionBreakdown(tokenId);
+        assertEq(breakdown1, amount1);
+
+        // a full liquidation is sized to all of it, with the chunk one decrease can settle
+        IV4Oracle.RemovalPlan memory plan = oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), value);
+        (uint128 sized, uint128 chunk) = (plan.liquidity, plan.chunk);
+        assertEq(sized, liquidity, "the whole position is removed");
+        assertGt(chunk, 0);
+        assertLt(chunk, liquidity, "in more than one decrease");
+        assertLt(_principalAmount1(chunk), V4_SETTLEMENT_BOUND, "each decrease is below the v4 bound");
+
+        // v4 settles it chunk by chunk, each decrease in its own call (as the vault does)
+        deal(Currency.unwrap(currency1), address(poolManager), type(uint256).max / 2);
+        uint256 remaining = liquidity;
+        uint256 decreases;
+        while (remaining != 0) {
+            uint256 part = remaining > chunk ? chunk : remaining;
+            positionManager.modifyLiquidities(_decreaseCalldata(tokenId, part), block.timestamp);
+            remaining -= part;
+            decreases++;
+        }
+        assertGt(decreases, 1);
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "settled whole");
     }
 
     function testPrincipalJustBelowSettlementBoundIsValued() public {
@@ -155,11 +180,15 @@ contract V4OracleSettlementBoundTest is BaseTest {
         (,,,, uint256 breakdown0, uint256 breakdown1,,) = oracle.getPositionBreakdown(tokenId);
         assertEq(breakdown0, 0);
         assertEq(breakdown1, amount1);
+        IV4Oracle.RemovalPlan memory plan = oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), value);
+        (uint128 sized, uint128 chunk) = (plan.liquidity, plan.chunk);
+        assertEq(sized, liquidity);
+        assertEq(chunk, liquidity, "one decrease settles it");
     }
 
     // ---------------------------------------------------------------- V4LE-98: live-price principal
 
-    function testV4LE98_LivePrincipalAtSettlementBoundIsRejectedLikeV4() public {
+    function testV4LE98_LivePrincipalAtSettlementBoundIsSettledInChunks() public {
         uint128 liquidity = 2 ** 95;
         (PoolKey memory key, uint256 tokenId) = _mintLiveDeviationPosition(liquidity);
 
@@ -171,17 +200,31 @@ contract V4OracleSettlementBoundTest is BaseTest {
         assertGe(live1, V4_SETTLEMENT_BOUND, "scenario: live-side token1 principal at or above the v4 bound");
         assertLe(_priceDeviationBps(key), 200, "scenario: live price inside the deviation tolerance");
 
-        // v4 ground truth: the decrease reverts at the int128 narrowing of the live token1 delta
+        // v4 ground truth: one decrease of everything reverts at the int128 narrowing of the live token1 delta
         vm.expectRevert(SafeCast.SafeCastOverflow.selector);
         positionManager.modifyLiquidities(_decreaseCalldata(tokenId, liquidity), block.timestamp);
 
-        // the oracle no longer certifies the position (the old code valued it at derived0 * price0)
-        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
-        oracle.getValue(tokenId, Currency.unwrap(currency1));
-        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
-        oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), 1);
-        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        // the oracle keeps valuing the position (a snapshot bound here was the V4LE-156 liquidation lockout)
+        (uint256 value,, uint256 price0X96,) = oracle.getValue(tokenId, Currency.unwrap(currency1));
+        assertEq(value, FullMath.mulDiv(price0X96, derived0, Q96), "valued at the derived composition");
         oracle.getPositionBreakdown(tokenId);
+
+        // a full liquidation removes everything in decreases sized by the LIVE payout
+        IV4Oracle.RemovalPlan memory plan = oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), value);
+        (uint128 sized, uint128 chunk) = (plan.liquidity, plan.chunk);
+        assertEq(sized, liquidity, "the whole position is removed");
+        assertLt(chunk, liquidity, "in more than one decrease");
+        (, uint256 chunkLive1) = _liveDeviationAmounts(LIVE_TICK, chunk);
+        assertLt(chunkLive1, V4_SETTLEMENT_BOUND, "each decrease's live payout is below the v4 bound");
+
+        deal(Currency.unwrap(currency1), address(poolManager), type(uint256).max / 2);
+        uint256 remaining = liquidity;
+        while (remaining != 0) {
+            uint256 part = remaining > chunk ? chunk : remaining;
+            positionManager.modifyLiquidities(_decreaseCalldata(tokenId, part), block.timestamp);
+            remaining -= part;
+        }
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "settled whole");
     }
 
     function testV4LE98_LivePrincipalJustBelowSettlementBoundIsValued() public {

@@ -51,7 +51,7 @@ contract RevertHookNetCollateralTest is RevertHookTest {
         _seedLegacyFees(token2Id,uint128(principal0/10),uint128(principal1/10));
         (uint256 value,,uint256 p0,uint256 p1) = oracle.getValue(token2Id,Currency.unwrap(currency1));
         uint256 target = value/5;
-        (uint128 liquidity,,,) = oracle.getLiquidityForValue(token2Id,Currency.unwrap(currency1),target);
+        uint128 liquidity = oracle.getLiquidityForValue(token2Id,Currency.unwrap(currency1),target).liquidity;
         assertGt(liquidity,allLiquidity/5,"fixed fees require more than proportional net principal");
         bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(token2Id,0,type(uint128).max,type(uint128).max,bytes(""));

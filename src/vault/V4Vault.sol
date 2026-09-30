@@ -158,6 +158,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     mapping(address token => uint256) public tokenDebtLimits;
     event SetTokenDebtLimit(address indexed token, uint256 limit);
 
+
     function setTokenDebtLimit(address token, uint256 limit) external onlyOwner {
         tokenDebtLimits[token] = limit;
         emit SetTokenDebtLimit(token, limit);
@@ -848,6 +849,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         (amount0, amount1) = _decreaseLiquidity(
             params.tokenId,
             params.liquidity,
+            0,
+            0,
+            0,
             params.amount0Min,
             params.amount1Min,
             params.deadline,
@@ -894,6 +898,12 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 price0X96;
         uint256 price1X96;
         uint256 quotePriceX96;
+        // removal sized by the oracle, the largest liquidity v4 pays out in one decrease (a larger removal
+        // is split into decreases of at most that size inside one unlock) and the hook's principal charges
+        uint128 liquidity;
+        uint128 chunk;
+        uint256 charge0;
+        uint256 charge1;
     }
 
     /// @notice Liquidates an unhealthy position by repaying debt and receiving collateral
@@ -945,6 +955,20 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         (state.liquidationValue, state.liquidatorCost, state.reserveCost) =
             _calculateLiquidation(state.debt, state.fullValue, state.collateralValue);
+
+        // Size the collateral removal. v4 narrows the principal of every decrease and every take to int128,
+        // so the oracle also reports the largest liquidity one decrease pays out at the live price and the
+        // hook's principal charges; a larger removal is split into decreases (and takes) of that size inside
+        // the one fee-first unlock: a liquidation is always total, whatever the position's payout
+        // (V4LE-98 / V4LE-156).
+        IV4Oracle.RemovalPlan memory plan = oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
+        state.liquidity = plan.liquidity;
+        state.chunk = plan.chunk;
+        state.price0X96 = plan.price0X96;
+        state.price1X96 = plan.price1X96;
+        state.quotePriceX96 = plan.quotePriceX96;
+        state.charge0 = plan.charge0;
+        state.charge1 = plan.charge1;
 
         // calculate reserve (before transfering liquidation money - otherwise calculation is off)
         if (state.reserveCost > 0) {
@@ -1333,15 +1357,22 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         internal
         returns (uint256 amount0, uint256 amount1)
     {
-        // when the uncollected fees alone cover the liquidation value the oracle sizes no liquidity
+        // when the uncollected fees alone cover the liquidation value the oracle sized no liquidity
         // and the collected fees are split between liquidator and owner by value share
-        uint128 liquidity;
-        (liquidity, state.price0X96, state.price1X96, state.quotePriceX96) =
-            oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
+        uint128 liquidity = state.liquidity;
         bool feesOnly = liquidity == 0;
 
         (uint256 received0, uint256 received1) = _decreaseLiquidity(
-            params.tokenId, liquidity, 0, 0, params.deadline, params.decreaseLiquidityHookData, address(this)
+            params.tokenId,
+            liquidity,
+            state.chunk,
+            state.charge0,
+            state.charge1,
+            0,
+            0,
+            params.deadline,
+            params.decreaseLiquidityHookData,
+            address(this)
         );
 
         // The quote (fullValue, feeValue, liquidationValue) is oracle-priced and taken before the removal,
@@ -1409,6 +1440,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     function _decreaseLiquidity(
         uint256 tokenId,
         uint128 liquidityRemove,
+        uint128 chunk,
+        uint256 charge0,
+        uint256 charge1,
         uint256 amount0Min,
         uint256 amount1Min,
         uint256 deadline,
@@ -1417,7 +1451,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     ) internal returns (uint256 amount0, uint256 amount1) {
         (bool ok, bytes memory result) = address(positionActions).delegatecall(abi.encodeCall(
             positionActions.decreaseLiquidity,
-            (tokenId,liquidityRemove,amount0Min,amount1Min,deadline,decreaseLiquidityHookData,recipient)
+            (tokenId,liquidityRemove,chunk,charge0,charge1,amount0Min,amount1Min,deadline,decreaseLiquidityHookData,recipient)
         ));
         if (!ok) {
             assembly ("memory-safe") { revert(add(result,32),mload(result)) }
