@@ -219,20 +219,11 @@ abstract contract RevertHookActionBase is RevertHookLookupBase {
         int24 tickUpper,
         uint256 amount0,
         uint256 amount1
-    ) internal pure returns (bool) {
-        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
-
-        if (sqrtPriceX96 <= sqrtLower) {
-            return false;
-        }
-        if (sqrtPriceX96 >= sqrtUpper) {
-            return true;
-        }
-
-        return FullMath.mulDiv(
-            FullMath.mulDiv(amount0, sqrtPriceX96, FixedPoint96.Q96), sqrtPriceX96 - sqrtLower, FixedPoint96.Q96
-        ) > FullMath.mulDiv(amount1, sqrtUpper - sqrtPriceX96, sqrtUpper);
+    ) internal view returns (bool) {
+        // The planner's own comparison (liquidity each side would fund): this result selects the route
+        // pool before the planner runs, so a copy of the old floored-ratio formula here could pick the
+        // wrong direction's route near the tick bounds (Scan #2 V4LE-145 / V4LE-146).
+        return liquidityCalculator.swapDirection(sqrtPriceX96, tickLower, tickUpper, amount0, amount1);
     }
 
     /// @notice Executes a swap on the pool manager
