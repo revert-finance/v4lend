@@ -8,6 +8,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -830,7 +831,7 @@ contract LiquidityCalculatorTest is Test {
         
         assertEq(amountIn, 0, "Should have no swap input");
         assertEq(amountOut, 0, "Should have no swap output");
-        
+
         // Verify final price is reasonable
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-600);
         uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
@@ -1745,11 +1746,16 @@ contract LiquidityCalculatorTest is Test {
     /// @dev Re-points the harness at a fresh pool (same tokens and tick spacing, different fee)
     ///      initialized at `initTick`, so scenarios can start away from tick 0.
     function _usePoolAtTick(uint24 fee, int24 initTick) internal {
+        _usePool(fee, DEFAULT_TICK_SPACING, initTick);
+    }
+
+    /// @dev Same, with the pool's own tick spacing.
+    function _usePool(uint24 fee, int24 tickSpacing, int24 initTick) internal {
         poolKey = PoolKey({
             currency0: Currency.wrap(address(token0)),
             currency1: Currency.wrap(address(token1)),
             fee: fee,
-            tickSpacing: DEFAULT_TICK_SPACING,
+            tickSpacing: tickSpacing,
             hooks: IHooks(address(0))
         });
         poolId = poolKey.toId();
@@ -1757,8 +1763,19 @@ contract LiquidityCalculatorTest is Test {
         poolCallee = ILiquidityCalculator.V4PoolInfo({
             poolMgr: poolManager,
             poolIdentifier: poolId,
-            tickSpacing: DEFAULT_TICK_SPACING
+            tickSpacing: tickSpacing
         });
+    }
+
+    /// @dev Mints exactly `liquidity` into [lower, upper] of the current pool.
+    function _mintLiquidity(int24 lower, int24 upper, uint128 liquidity) internal {
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory paramsArray = new bytes[](2);
+        paramsArray[0] = abi.encode(
+            poolKey, lower, upper, uint256(liquidity), type(uint128).max, type(uint128).max, address(this), ""
+        );
+        paramsArray[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(positionManager));
+        positionManager.modifyLiquidities(abi.encode(actions, paramsArray), block.timestamp);
     }
 
     /// @dev Predicts the optimal swap for a deposit, executes it and asserts the prediction held.
@@ -1837,5 +1854,30 @@ contract LiquidityCalculatorTest is Test {
         _addLiquidity(-15360, 15360, 10 ether, 10 ether); // words -1 / 1, bit 0
         _addLiquidity(-60, 30660, 10 ether, 10 ether); // words -1 / 1, bit 255
         _assertPredictionMatchesExecution(-46080, 46080, 0, 1400 ether, false, 30660);
+    }
+
+    // ==================== External audit scan #2 (2026-09) ====================
+
+    /// @notice V4LE-140: a route with the maximum tick spacing (32767) and one position over
+    ///         [-32767, 32767]. Once a 1->0 quote crosses +32767 nothing lies ahead; the empty-word
+    ///         walk used to form the far-edge tick in int24, wrap 25599 * 32767 to -58367 (inside
+    ///         the domain) and walk back through the same position, quoting its token0 again. The
+    ///         plan must stop at the route's real depth and its output must be what the pool pays.
+    function testV4LE140_MaxTickSpacingWalkStopsAtTheDomainBound() public {
+        _usePool(3000, TickMath.MAX_TICK_SPACING, 0);
+        _mintLiquidity(-32767, 32767, 1e18);
+        uint256 amount1 = 100 ether;
+        uint256 routeToken0 =
+            SqrtPriceMath.getAmount0Delta(SQRT_PRICE_1_0, TickMath.getSqrtPriceAtTick(32767), 1e18, false);
+
+        (uint256 inputAmount, uint256 outputAmount, bool dir0to1) =
+            helper.getSimpleSwapThroughPool(SQRT_PRICE_1_0, poolCallee, -600, 600, 0, amount1, 0);
+        assertFalse(dir0to1, "token1 is swapped for the token0 the range needs");
+        assertLe(outputAmount, routeToken0, "the route cannot deliver more token0 than it holds");
+        assertLt(inputAmount, amount1, "the plan stops where the route's liquidity ends");
+        BalanceDelta delta = _executeSwap(inputAmount, false);
+        assertApproxEqRel(
+            uint256(int256(delta.amount0())), outputAmount, PREDICTION_TOLERANCE, "executed output deviates from plan"
+        );
     }
 }

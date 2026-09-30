@@ -714,6 +714,9 @@ contract LiquidityCalculator is ILiquidityCalculator {
     ///      MAX_BITMAP_WORDS_PER_SEARCH words are examined per call; if none holds an initialized tick,
     ///      the uninitialized tick at the far edge of the last examined word is returned so the caller
     ///      keeps making progress (crossing it changes no liquidity) and the next call resumes from there.
+    ///      The search ends at the tick domain: once an empty word's far edge lies at or beyond
+    ///      MIN_TICK / MAX_TICK that bound is returned (nothing further can be initialized), so the
+    ///      walk never leaves the domain and never wraps back into it (external audit V4LE-140).
     /// @param params Search parameters including current tick, direction, and cached bitmap word
     /// @return result Next initialized tick and the word it was found in
     function _locateNextTick(NextInitializedTickParams memory params)
@@ -731,7 +734,10 @@ contract LiquidityCalculator is ILiquidityCalculator {
         for (uint256 wordsExamined = 1;; wordsExamined++) {
             (bool initialized, int24 nextTick) =
                 _findTickInWord(tickBitmap, compressedTick, bitPosition, params.tickSpacing, searchLeft);
-            if (initialized || wordsExamined == MAX_BITMAP_WORDS_PER_SEARCH) {
+            if (
+                initialized || wordsExamined == MAX_BITMAP_WORDS_PER_SEARCH
+                    || nextTick == (searchLeft ? TickMath.MIN_TICK : TickMath.MAX_TICK)
+            ) {
                 result.nextTick = nextTick;
                 result.wordPosition = wordPosition;
                 result.tickBitmap = tickBitmap;
@@ -764,41 +770,44 @@ contract LiquidityCalculator is ILiquidityCalculator {
     /// @param tickSpacing The tick spacing
     /// @param searchLeft Whether to search left (true) or right (false)
     /// @return initialized Whether an initialized tick was found in the word
-    /// @return nextTick The next initialized tick, or the far edge of the word if none is set
+    /// @return nextTick The next initialized tick, or the far edge of the word if none is set, clamped
+    ///         to the tick domain
     function _findTickInWord(uint256 word, int24 compressedTick, uint8 bitPosition, int24 tickSpacing, bool searchLeft)
         private
         pure
         returns (bool initialized, int24 nextTick)
     {
+        int256 compressedNext;
         unchecked {
             if (searchLeft) {
                 // Mask all bits at or to the right of current position
                 uint256 bitMask = type(uint256).max >> (uint256(type(uint8).max) - bitPosition);
                 uint256 maskedWord = word & bitMask;
                 initialized = maskedWord != 0;
-                if (initialized) {
-                    // Found initialized tick - find the most significant set bit
-                    uint8 mostSigBit = BitMath.mostSignificantBit(maskedWord);
-                    nextTick = (compressedTick - int24(uint24(bitPosition - mostSigBit))) * tickSpacing;
-                } else {
-                    // No initialized tick in this word
-                    nextTick = (compressedTick - int24(uint24(bitPosition))) * tickSpacing;
-                }
+                // the most significant set bit, or the far (low) edge of the word when none is set
+                uint8 stepBack = initialized ? bitPosition - BitMath.mostSignificantBit(maskedWord) : bitPosition;
+                compressedNext = int256(compressedTick) - int256(uint256(stepBack));
             } else {
                 // Mask all bits at or to the left of current position
                 uint256 bitMask = type(uint256).max << bitPosition;
                 uint256 maskedWord = word & bitMask;
                 initialized = maskedWord != 0;
-                if (initialized) {
-                    // Found initialized tick - find the least significant set bit
-                    uint8 leastSigBit = BitMath.leastSignificantBit(maskedWord);
-                    nextTick = (compressedTick + int24(uint24(leastSigBit - bitPosition))) * tickSpacing;
-                } else {
-                    // No initialized tick in this word
-                    nextTick = (compressedTick + int24(uint24(type(uint8).max - bitPosition))) * tickSpacing;
-                }
+                // the least significant set bit, or the far (high) edge of the word when none is set
+                uint8 stepForward = initialized
+                    ? BitMath.leastSignificantBit(maskedWord) - bitPosition
+                    : type(uint8).max - bitPosition;
+                compressedNext = int256(compressedTick) + int256(uint256(stepForward));
             }
         }
+        // An initialized tick is always inside the domain. An empty word's far edge is not: with
+        // wide spacings the product overflows int24 (25599 * 32767 wrapped to -58367, a tick
+        // inside the domain that made the walk re-enter and re-quote liquidity it had already
+        // passed - external audit V4LE-140), so it is formed in int256 and clamped to the bound
+        // the search is heading for; the callers stop at that bound.
+        int256 tick = compressedNext * int256(tickSpacing);
+        if (tick < TickMath.MIN_TICK) tick = TickMath.MIN_TICK;
+        else if (tick > TickMath.MAX_TICK) tick = TickMath.MAX_TICK;
+        nextTick = int24(tick);
     }
 
     /// @notice Cross ticks during optimal swap calculation
