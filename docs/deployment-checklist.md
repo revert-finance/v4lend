@@ -72,6 +72,11 @@ The full-stack `Deploy{Base,Arbitrum,Mainnet,Unichain}` broadcasts in the repo a
   Existing immutable vaults/oracles cannot receive these fixes through a hook-only upgrade. The
   Base hook-upgrade script checks for the new API generation before broadcasting.
 - Register each hooked pool's trusted fee quoter on the oracle before admitting its collateral.
+- Base hook upgrade (Scan #2 V4LE-129): loans on the old hook stay in the vault, so the script also
+  registers a fee quoter for `OLD_HOOK`. Set `OLD_HOOK_LP_FEE_BPS` to the old fee controller's
+  `lpFeeBps()` (the script deploys a `HookFeeController` bound to the old hook when it exposes
+  `positionStates` / `pendingProtocolFees`), or set `OLD_HOOK_FEE_QUOTER` to a reviewed quoter for an
+  older hook generation. The script refuses to run without one of them.
 - Review and admit only restricted, non-upgradeable executors before enabling bids/leases.
 - Set explicit token debt budgets where the global debt limit times concentration factor exceeds
   the intended exposure. Deposits do not change these governance budgets.

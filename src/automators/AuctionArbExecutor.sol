@@ -2,7 +2,6 @@
 pragma solidity ^0.8.30;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -16,10 +15,14 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 ///         executor of a HookAuctionController epoch. The auction controller recognizes
 ///         the winner as the contract that calls PoolManager.swap directly, so routes
 ///         must be executed through this contract (never through shared routers).
-/// @dev v1 supports ERC20 pool currencies only. Uses two-step ownership so a mistyped
-///      transferOwnership cannot permanently brick this contract - which, as a registered
-///      auction winner, would strand the epoch's paid-for discount.
-contract AuctionArbExecutor is IUnlockCallback, Ownable2Step, ReentrancyGuard {
+/// @dev v1 supports ERC20 pool currencies only. Ownership is fixed at deployment: the
+///      controllers admit an executor by address and runtime code hash and then grant the
+///      auction/lease fee override to every swap this contract sends, so whoever can call
+///      `executeV4Route` is the policy being admitted. A transferable owner would let the
+///      admitted bidder/lessee hand the instance to a public forwarder after admission and
+///      turn the purchased discount into open discounted forwarding (V4LE-93). Deploy a new
+///      instance (and have it admitted) to change the operator.
+contract AuctionArbExecutor is IUnlockCallback, Ownable, ReentrancyGuard {
     IPoolManager public immutable poolManager;
 
     struct V4Route {
@@ -50,9 +53,20 @@ contract AuctionArbExecutor is IUnlockCallback, Ownable2Step, ReentrancyGuard {
     error InsufficientProfit(uint256 actualProfit, uint256 minProfit);
     error RouteEndedBelowInput(uint256 amountReturned, uint256 amountIn);
     error NativeCurrencyUnsupported();
+    error OwnershipNotTransferable();
 
     constructor(IPoolManager _poolManager, address initialOwner) Ownable(initialOwner) {
         poolManager = _poolManager;
+    }
+
+    /// @notice The admitted operator is bound to this instance for its lifetime (see contract docs).
+    function transferOwnership(address) public view override onlyOwner {
+        revert OwnershipNotTransferable();
+    }
+
+    /// @notice Renouncing would strand an admitted epoch's paid-for discount; deploy a new instance instead.
+    function renounceOwnership() public view override onlyOwner {
+        revert OwnershipNotTransferable();
     }
 
     /// @notice Executes a cyclic exact-input route across v4 pools and sends the profit

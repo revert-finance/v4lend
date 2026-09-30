@@ -85,19 +85,21 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     /// @param params LeverageUpParams struct containing borrow amount, swap configs, and slippage limits
     /// @custom:security Must be called through vault transform to have borrow access
     function leverageUp(LeverageUpParams calldata params) external {
-        _validateCaller(positionManager, params.tokenId);
+        _validateVaultCaller(params.tokenId);
 
         // collect fees before
         (uint256 amount0, uint256 amount1) =
             _decreaseLiquidity(params.tokenId, 0, 0, 0, params.deadline, params.decreaseLiquidityHookData);
 
-        IVault(msg.sender).borrow(params.tokenId, params.borrowAmount);
-
-        Currency token = Currency.wrap(IVault(msg.sender).asset());
-
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
+
+        // The pool currency the borrowed lend token is held as: native ETH for a WETH vault in a native
+        // pool, so the borrow joins that leg instead of being swept as a third token (V4LE-110)
+        Currency token = _lendCurrency(IVault(msg.sender).asset(), token0, token1);
+        IVault(msg.sender).borrow(params.tokenId, params.borrowAmount);
+        NativeAssetLib.unwrapIfNative(weth, token, params.borrowAmount);
 
         amount0 += token == token0 ? params.borrowAmount : 0;
         amount1 += token == token1 ? params.borrowAmount : 0;
@@ -224,13 +226,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     /// @param params LeverageDownParams struct containing liquidity to remove, swap configs, and slippage limits
     /// @custom:security Must be called through vault transform
     function leverageDown(LeverageDownParams calldata params) external {
-        _validateCaller(positionManager, params.tokenId);
-
-        Currency token = Currency.wrap(IVault(msg.sender).asset());
+        _validateVaultCaller(params.tokenId);
 
         (PoolKey memory poolKey,) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;
         Currency token1 = poolKey.currency1;
+
+        // native ETH stands for a WETH lend token in a native pool; it is wrapped again for the repayment
+        Currency token = _lendCurrency(IVault(msg.sender).asset(), token0, token1);
 
         // fee-first removal: INCREASE(0) settles the hook's protocol fee, then DECREASE and TAKE_PAIR
         // @custom:accepted-risk AUDIT-ACCEPTED-SLIPPAGE-U128
@@ -271,11 +274,14 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
             amount += amountOut;
         }
 
-        SafeERC20.forceApprove(IERC20(Currency.unwrap(token)), msg.sender, amount);
+        address repayAsset = NativeAssetLib.wrapIfNative(weth, token, amount);
+        SafeERC20.forceApprove(IERC20(repayAsset), msg.sender, amount);
         (uint256 repayedAmount,) = IVault(msg.sender).repay(params.tokenId, amount, false);
+        SafeERC20.forceApprove(IERC20(repayAsset), msg.sender, 0);
 
-        // send leftover tokens
+        // send leftover tokens (a native lend leg is unwrapped again for the recipient)
         if (amount > repayedAmount) {
+            NativeAssetLib.unwrapIfNative(weth, token, amount - repayedAmount);
             token.transfer(params.recipient, amount - repayedAmount);
         }
         if (amount0 > 0 && !(token == token0)) {
@@ -540,7 +546,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     /// @dev Removes dummy position liquidity, borrows, swaps, and mints new position with desired ticks
     /// @param params The parameters for the transform
     function leverageInTransform(LeverageInTransformParams calldata params) external {
-        _validateCaller(positionManager, params.tokenId);
+        _validateVaultCaller(params.tokenId);
 
         Currency lendToken = Currency.wrap(IVault(msg.sender).asset());
 
@@ -555,9 +561,18 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     }
 
     /// @dev A pool currency stands for the vault's lend token when it is that token, or native ETH for a
-    ///      wrapped-native lend token (the alias the vault, the oracle and leverageUp/Down already use).
+    ///      wrapped-native lend token (the alias the vault and the oracle use).
     function _isLendCurrency(Currency lendToken, Currency poolCurrency) internal view returns (bool) {
         return poolCurrency == lendToken || (poolCurrency.isAddressZero() && lendToken == Currency.wrap(address(weth)));
+    }
+
+    /// @dev The pool currency the vault's lend asset is held as inside a (token0, token1) pool, or the raw
+    ///      asset when the pool holds neither it nor its native alias (third-token leverage).
+    function _lendCurrency(address lendAsset, Currency token0, Currency token1) internal view returns (Currency) {
+        Currency lendToken = Currency.wrap(lendAsset);
+        if (_isLendCurrency(lendToken, token0)) return token0;
+        if (_isLendCurrency(lendToken, token1)) return token1;
+        return lendToken;
     }
 
     /// @dev Helper function to remove dummy position, borrow, and swap
@@ -709,6 +724,19 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         if (leftover1 > 0) {
             params.token1.transfer(params.recipient, leftover1);
         }
+    }
+
+    /// @dev Every entry point of this transformer treats `msg.sender` as the vault it borrows from or
+    ///      repays to, so only a registered vault inside its transform of `tokenId` may call them. The
+    ///      generic `_validateCaller` also admits the NFT owner, which for these entries would let any
+    ///      contract holding a PositionManager NFT pose as the vault (a no-op `borrow`, an arbitrary
+    ///      `asset`) and have the transformer drain the NFT plus any balance it holds to a recipient of
+    ///      the caller's choosing (V4LE-117).
+    function _validateVaultCaller(uint256 tokenId) internal view {
+        if (!vaults[msg.sender]) {
+            revert Unauthorized();
+        }
+        _validateCaller(positionManager, tokenId);
     }
 
     /// @notice Callback for receiving ERC721 tokens

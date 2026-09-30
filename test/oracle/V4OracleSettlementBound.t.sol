@@ -13,6 +13,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {Constants as V4Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
@@ -31,6 +32,10 @@ import {MutableChainlinkFeed} from "test/oracle/support/OracleMocks.sol";
 ///         - External audit V4LE-61: `_getAmounts` returned unbounded uint256 principal amounts, so a
 ///           position whose current-side principal grew past 2^127 (the pool price crossed its range) was
 ///           valued and borrowable while v4 rejects the decrease that a liquidation or full withdrawal needs.
+///         - External audit V4LE-98: that bound was checked at the oracle-derived price only, while v4
+///           settles the decrease at the live pool price, which may sit up to maxPoolPriceDifference away.
+///           At a high sqrt price a 1.8% live deviation turns a small derived-side token0 principal into a
+///           live-side token1 principal beyond 2^127; the position was certified and the removal reverted.
 /// @dev Fork-free: real PoolManager / PositionManager from BaseTest, mock tokens, a real V4Oracle with mock
 ///      Chainlink feeds. The oversized fee snapshot and the post-crossing pool price are written straight
 ///      into PoolManager storage.
@@ -50,6 +55,11 @@ contract V4OracleSettlementBoundTest is BaseTest {
     int24 constant PRINCIPAL_TICK_LOWER = 600000;
     int24 constant PRINCIPAL_TICK_UPPER = 600060;
     int24 constant CROSSED_TICK = 600100;
+    // V4LE-98: a range at sqrt price ~2^41 whose live price sits 180 ticks (1.8%, inside the 2% tolerance)
+    // above the oracle price at its lower bound
+    int24 constant LIVE_TICK_LOWER = 568440;
+    int24 constant LIVE_TICK_UPPER = 568800;
+    int24 constant LIVE_TICK = 568620;
     uint8 constant FEED_DECIMALS = 8;
 
     Currency currency0;
@@ -147,6 +157,91 @@ contract V4OracleSettlementBoundTest is BaseTest {
         assertEq(breakdown1, amount1);
     }
 
+    // ---------------------------------------------------------------- V4LE-98: live-price principal
+
+    function testV4LE98_LivePrincipalAtSettlementBoundIsRejectedLikeV4() public {
+        uint128 liquidity = 2 ** 95;
+        (PoolKey memory key, uint256 tokenId) = _mintLiveDeviationPosition(liquidity);
+
+        // scenario: the composition at the oracle price is tiny, the one v4 would settle at is not
+        (uint256 derived0, uint256 derived1) = _liveDeviationAmounts(LIVE_TICK_LOWER, liquidity);
+        (, uint256 live1) = _liveDeviationAmounts(LIVE_TICK, liquidity);
+        assertLt(derived0, V4_SETTLEMENT_BOUND, "scenario: derived-side token0 principal is settleable");
+        assertLt(derived1, V4_SETTLEMENT_BOUND, "scenario: derived-side token1 principal is settleable");
+        assertGe(live1, V4_SETTLEMENT_BOUND, "scenario: live-side token1 principal at or above the v4 bound");
+        assertLe(_priceDeviationBps(key), 200, "scenario: live price inside the deviation tolerance");
+
+        // v4 ground truth: the decrease reverts at the int128 narrowing of the live token1 delta
+        vm.expectRevert(SafeCast.SafeCastOverflow.selector);
+        positionManager.modifyLiquidities(_decreaseCalldata(tokenId, liquidity), block.timestamp);
+
+        // the oracle no longer certifies the position (the old code valued it at derived0 * price0)
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getValue(tokenId, Currency.unwrap(currency1));
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), 1);
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getPositionBreakdown(tokenId);
+    }
+
+    function testV4LE98_LivePrincipalJustBelowSettlementBoundIsValued() public {
+        uint128 liquidity = 2 ** 92;
+        (, uint256 tokenId) = _mintLiveDeviationPosition(liquidity);
+        (uint256 derived0,) = _liveDeviationAmounts(LIVE_TICK_LOWER, liquidity);
+        (, uint256 live1) = _liveDeviationAmounts(LIVE_TICK, liquidity);
+        assertLt(live1, V4_SETTLEMENT_BOUND, "control: live-side token1 principal below the v4 bound");
+        assertGt(live1, V4_SETTLEMENT_BOUND / 8, "control: still a huge position");
+
+        (uint256 value, uint256 feeValue, uint256 price0X96,) = oracle.getValue(tokenId, Currency.unwrap(currency1));
+        assertEq(value, FullMath.mulDiv(price0X96, derived0, Q96), "valued at the derived composition");
+        assertEq(feeValue, 0);
+        (,,,, uint256 breakdown0, uint256 breakdown1,,) = oracle.getPositionBreakdown(tokenId);
+        assertEq(breakdown0, derived0);
+        assertEq(breakdown1, 0);
+    }
+
+    /// @dev A second pool (different fee tier) at LIVE_TICK_LOWER: the position is minted in range at its
+    ///      lower bound (all token0), the currency0 feed is pointed at that price and the live pool is then
+    ///      moved 180 ticks up inside the range (no tick is crossed, so the pool state stays consistent).
+    function _mintLiveDeviationPosition(uint128 liquidity) internal returns (PoolKey memory key, uint256 tokenId) {
+        key = PoolKey(currency0, currency1, 500, TICK_SPACING, IHooks(address(0)));
+        uint160 lowerSqrtPriceX96 = TickMath.getSqrtPriceAtTick(LIVE_TICK_LOWER);
+        poolManager.initialize(key, lowerSqrtPriceX96);
+        uint256 lowerPriceX96 = FullMath.mulDiv(uint256(lowerSqrtPriceX96), uint256(lowerSqrtPriceX96), Q96);
+        feed0.setAnswer(int256(FullMath.mulDiv(lowerPriceX96, 10 ** FEED_DECIMALS, Q96)));
+        (tokenId,) = positionManager.mint(
+            key,
+            LIVE_TICK_LOWER,
+            LIVE_TICK_UPPER,
+            liquidity,
+            type(uint128).max,
+            type(uint128).max,
+            address(this),
+            block.timestamp,
+            ""
+        );
+        _writePoolTick(key.toId(), LIVE_TICK);
+    }
+
+    function _liveDeviationAmounts(int24 tick, uint128 liquidity) internal pure returns (uint256, uint256) {
+        return LiquidityAmounts.getAmountsForLiquidity(
+            TickMath.getSqrtPriceAtTick(tick),
+            TickMath.getSqrtPriceAtTick(LIVE_TICK_LOWER),
+            TickMath.getSqrtPriceAtTick(LIVE_TICK_UPPER),
+            liquidity
+        );
+    }
+
+    /// @dev Live pool price against the currency0 feed price, as the oracle's deviation check measures it.
+    function _priceDeviationBps(PoolKey memory key) internal view returns (uint256) {
+        (uint160 liveSqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
+        uint256 livePriceX96 = FullMath.mulDiv(uint256(liveSqrtPriceX96), uint256(liveSqrtPriceX96), Q96);
+        (, int256 answer,,,) = feed0.latestRoundData();
+        uint256 derivedPriceX96 = FullMath.mulDiv(uint256(answer), Q96, 10 ** FEED_DECIMALS);
+        uint256 difference = livePriceX96 > derivedPriceX96 ? livePriceX96 - derivedPriceX96 : derivedPriceX96 - livePriceX96;
+        return FullMath.mulDiv(difference, 10000, derivedPriceX96);
+    }
+
     function _mintPrincipalPosition(uint128 liquidity) internal returns (uint256 tokenId) {
         (tokenId,) = positionManager.mint(
             poolKey,
@@ -165,18 +260,22 @@ contract V4OracleSettlementBoundTest is BaseTest {
     ///      a crossing on a real pool; writing it directly avoids swapping ~2^127 tokens) and points the
     ///      currency0 feed at the new price so the oracle's pool/feed deviation check passes.
     function _crossAboveRange() internal {
-        uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(CROSSED_TICK);
-        bytes32 stateSlot = StateLibrary._getPoolStateSlot(poolId);
-        uint256 slot0 = uint256(vm.load(address(poolManager), stateSlot));
-        uint256 priceAndTickMask = (uint256(1) << 184) - 1;
-        slot0 = (slot0 & ~priceAndTickMask) | uint256(sqrtPriceX96) | (uint256(uint24(CROSSED_TICK)) << 160);
-        vm.store(address(poolManager), stateSlot, bytes32(slot0));
-        (uint160 liveSqrtPriceX96, int24 liveTick,,) = poolManager.getSlot0(poolId);
-        assertEq(liveSqrtPriceX96, sqrtPriceX96, "pool price written");
-        assertEq(liveTick, CROSSED_TICK, "pool tick written");
-
+        uint160 sqrtPriceX96 = _writePoolTick(poolId, CROSSED_TICK);
         uint256 livePriceX96 = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96);
         feed0.setAnswer(int256(FullMath.mulDiv(livePriceX96, 10 ** FEED_DECIMALS, Q96)));
+    }
+
+    /// @dev Writes the pool's slot0 price and tick directly.
+    function _writePoolTick(PoolId id, int24 tick) internal returns (uint160 sqrtPriceX96) {
+        sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
+        bytes32 stateSlot = StateLibrary._getPoolStateSlot(id);
+        uint256 slot0 = uint256(vm.load(address(poolManager), stateSlot));
+        uint256 priceAndTickMask = (uint256(1) << 184) - 1;
+        slot0 = (slot0 & ~priceAndTickMask) | uint256(sqrtPriceX96) | (uint256(uint24(tick)) << 160);
+        vm.store(address(poolManager), stateSlot, bytes32(slot0));
+        (uint160 liveSqrtPriceX96, int24 liveTick,,) = poolManager.getSlot0(id);
+        assertEq(liveSqrtPriceX96, sqrtPriceX96, "pool price written");
+        assertEq(liveTick, tick, "pool tick written");
     }
 
     /// @dev Token1 principal of a position entirely above its range, as v4 computes it.

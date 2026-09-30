@@ -71,6 +71,10 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 || !_isValidTickConfig(config.autoRangeLowerDelta, tickSpacing, 0)
                 || !_isValidTickConfig(config.autoRangeUpperDelta, tickSpacing, 0)
                 || !_isValidTickConfig(config.autoLendToleranceTick, tickSpacing, 0)
+                // a negative tolerance would arm the AUTO_LEND deposit thresholds inside the LP range,
+                // where the fired side no longer identifies the idle token (V4LE-131); the standalone
+                // AutoLend rejects negative zones the same way
+                || config.autoLendToleranceTick < 0
                 || config.autoLeverageTargetBps >= 10000
         ) {
             revert InvalidConfig();

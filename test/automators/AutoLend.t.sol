@@ -14,6 +14,7 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {AutoLend} from "../../src/automators/AutoLend.sol";
 import {Constants} from "src/shared/Constants.sol";
 import {MockERC4626Vault} from "../utils/MockERC4626Vault.sol";
+import {LimitedRedeemERC4626Vault} from "./utils/LimitedRedeemERC4626Vault.sol";
 import {AutomatorTestBase} from "./AutomatorTestBase.sol";
 import {ProtocolFeeRecipientProbe} from "./utils/ProtocolFeeRecipientProbe.sol";
 
@@ -1074,5 +1075,134 @@ contract AutoLendTest is AutomatorTestBase {
         assertGe(usdc.balanceOf(WHALE_ACCOUNT) - whaleUsdcBefore, principalB);
         assertEq(usdcLendVault.balanceOf(address(lend2)), 0);
         assertEq(lend2.custodiedShares(address(usdcLendVault)), 0);
+    }
+
+    // --- V4LE-115 (AutoLend twin of the AutoRange finding) ---
+
+    /// @notice V4LE-115: the re-entry mint / increase forwards the operator's hookData with AutoLend as the
+    ///         PositionManager locker, so a tagged RevertHook remint claim could name any drained position of
+    ///         any owner who granted AutoLend the blanket approval. A claim may only name this position.
+    function testV4LE115_WithdrawRefusesARemintClaimNamingAnotherToken() public {
+        (uint256 tokenId,,) = _lendWhaleUsdcPosition();
+        bytes4 tag = bytes4(keccak256("RevertHookRemintMigration(uint256)"));
+
+        AutoLend.WithdrawParams memory params = _withdrawParams(tokenId);
+        params.hookData = abi.encodePacked(tag, tokenId + 1);
+        vm.prank(operator);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoLend.withdraw(params);
+
+        // a claim naming this very position is forwarded (this pool has no hook, so it is simply ignored)
+        params.hookData = abi.encodePacked(tag, tokenId);
+        _withdraw(operator, params);
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "withdraw with a self-claim completes");
+    }
+
+    // --- V4LE-96 ---
+
+    /// @dev Lends the whale's USDC position into a vault whose `maxRedeem` can be capped below the balance.
+    function _lendWhaleUsdcPositionIntoLimitedVault()
+        internal
+        returns (uint256 tokenId, uint256 shares, LimitedRedeemERC4626Vault limited)
+    {
+        limited = new LimitedRedeemERC4626Vault(usdc, "Limited USDC", "limUSDC");
+        autoLend.setAutoLendVault(address(usdc), IERC4626(address(limited)));
+        address lendVault;
+        (tokenId, shares, lendVault) = _lendWhaleUsdcPosition();
+        assertEq(lendVault, address(limited), "lent into the limited vault");
+    }
+
+    /// @notice V4LE-96: a compliant ERC4626 vault may cap `maxRedeem` below the recorded balance (withdrawal
+    ///         limit, cooldown, queue) and must then revert a full-balance `redeem`. `withdraw` asked for all
+    ///         recorded shares in one call, so such a vault locked the whole idle principal until the limit
+    ///         cleared. It now redeems what is permitted and keeps the residual recorded and custodied.
+    function testV4LE96_WithdrawRedeemsOnlyPermittedSharesAndKeepsResidualCustody() public {
+        (uint256 tokenId, uint256 shares, LimitedRedeemERC4626Vault limited) = _lendWhaleUsdcPositionIntoLimitedVault();
+        (,, uint256 principal,) = autoLend.lendStates(tokenId);
+        uint256 cap = shares / 3;
+        limited.setRedeemLimit(cap);
+        uint256 nextId = positionManager.nextTokenId();
+
+        _withdraw(operator, _withdrawParams(tokenId));
+
+        (, uint256 sharesLeft, uint256 amountLeft, address vaultLeft) = autoLend.lendStates(tokenId);
+        assertEq(sharesLeft, shares - cap, "residual shares stay recorded");
+        assertEq(amountLeft, principal - principal * cap / shares, "residual principal pro rata");
+        assertEq(vaultLeft, address(limited), "vault reference kept");
+        assertEq(autoLend.custodiedShares(address(limited)), shares - cap, "residual stays custodied");
+        assertEq(limited.balanceOf(address(autoLend)), shares - cap, "residual shares still held");
+        assertEq(autoLend.vaultPositionCount(address(limited)), 1, "position still references the vault");
+        (bool isActive,,,,,) = autoLend.positionConfigs(tokenId);
+        assertTrue(isActive, "config kept so the follow-up withdraw stays permitted");
+        uint256 reentered = positionManager.nextTokenId() > nextId ? positionManager.nextTokenId() - 1 : tokenId;
+        assertGt(positionManager.getPositionLiquidity(reentered), 0, "the permitted part re-entered liquidity");
+
+        // the vault lifts its limit: the rest follows through the normal operator path
+        limited.setRedeemLimit(type(uint256).max);
+        _withdraw(operator, _withdrawParams(tokenId));
+
+        (, sharesLeft,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesLeft, 0, "fully redeemed");
+        assertEq(autoLend.custodiedShares(address(limited)), 0, "custody released");
+        assertEq(autoLend.vaultPositionCount(address(limited)), 0, "vault reference released");
+        assertEq(limited.balanceOf(address(autoLend)), 0, "no shares left");
+    }
+
+    function testV4LE96_WithdrawRevertsWhenNothingIsRedeemable() public {
+        (uint256 tokenId,, LimitedRedeemERC4626Vault limited) = _lendWhaleUsdcPositionIntoLimitedVault();
+        limited.setRedeemLimit(0);
+
+        vm.prank(operator);
+        vm.expectRevert(AutoLend.NoRedeemableShares.selector);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        (, uint256 sharesLeft,,) = autoLend.lendStates(tokenId);
+        assertGt(sharesLeft, 0, "lend state intact");
+    }
+
+    /// @notice V4LE-96: the owner's escape hatch must never be blocked by the vault's limit. What cannot be
+    ///         redeemed right now is handed to the owner as vault shares, so the entitlement follows the owner.
+    function testV4LE96_ForceExitHandsUnredeemableSharesToTheOwner() public {
+        (uint256 tokenId, uint256 shares, LimitedRedeemERC4626Vault limited) = _lendWhaleUsdcPositionIntoLimitedVault();
+        (,, uint256 principal,) = autoLend.lendStates(tokenId);
+        uint256 cap = shares / 2;
+        limited.setRedeemLimit(cap);
+        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+        uint256 ownerSharesBefore = limited.balanceOf(WHALE_ACCOUNT);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(tokenId);
+        _assertNoAutomatorDust(address(autoLend), "AutoLend");
+
+        assertEq(usdc.balanceOf(WHALE_ACCOUNT) - ownerUsdcBefore, limited.convertToAssets(cap), "permitted part redeemed");
+        assertEq(limited.balanceOf(WHALE_ACCOUNT) - ownerSharesBefore, shares - cap, "the rest handed over as shares");
+        assertEq(limited.balanceOf(address(autoLend)), 0, "nothing left custodied");
+        assertEq(autoLend.custodiedShares(address(limited)), 0, "custody released");
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "lend state cleared");
+        assertEq(autoLend.vaultPositionCount(address(limited)), 0, "vault reference released");
+
+        // once the vault allows it the owner redeems the handed-over shares directly
+        limited.setRedeemLimit(type(uint256).max);
+        vm.prank(WHALE_ACCOUNT);
+        limited.redeem(shares - cap, WHALE_ACCOUNT, WHALE_ACCOUNT);
+        assertGe(usdc.balanceOf(WHALE_ACCOUNT) - ownerUsdcBefore, principal, "owner recovered the whole principal");
+    }
+
+    /// @notice With `maxRedeem == 0` forceExit still completes: everything leaves as shares.
+    function testV4LE96_ForceExitWithNothingRedeemableTransfersAllShares() public {
+        (uint256 tokenId, uint256 shares, LimitedRedeemERC4626Vault limited) = _lendWhaleUsdcPositionIntoLimitedVault();
+        limited.setRedeemLimit(0);
+        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+
+        vm.prank(WHALE_ACCOUNT);
+        autoLend.forceExit(tokenId);
+
+        assertEq(usdc.balanceOf(WHALE_ACCOUNT), ownerUsdcBefore, "nothing redeemable");
+        assertEq(limited.balanceOf(WHALE_ACCOUNT), shares, "all shares handed to the owner");
+        assertEq(limited.balanceOf(address(autoLend)), 0, "nothing left custodied");
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "lend state cleared");
     }
 }

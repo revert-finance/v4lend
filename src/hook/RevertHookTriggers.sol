@@ -46,6 +46,20 @@ abstract contract RevertHookTriggers is RevertHookState {
         return tick == sentinel || tick % tickSpacing == 0;
     }
 
+    /// @dev Applies a configured relative offset to a position bound in int256 and saturates at the
+    ///      int24 sentinels. A config that fits its initial range can overflow int24 once it is
+    ///      re-applied to a replacement range clamped at the usable tick bound (an AUTO_RANGE
+    ///      remint); the checked int24 addition then failed the whole arming inside the action, which
+    ///      rolled back the remint after the old triggers had already been consumed (V4LE-130). A
+    ///      threshold past the int24 range lies past every reachable tick, so the saturated value is
+    ///      exactly the disabled sentinel for that side. Dispatch recomputes exit ticks the same way.
+    function _offsetTick(int24 tick, int256 offset) internal pure returns (int24) {
+        int256 result = int256(tick) + offset;
+        if (result > type(int24).max) return type(int24).max;
+        if (result < type(int24).min) return type(int24).min;
+        return int24(result);
+    }
+
     /// @notice Calculates AUTO_RANGE trigger ticks based on position range and limits
     /// @param tickLower Position's lower tick
     /// @param tickUpper Position's upper tick
@@ -59,8 +73,12 @@ abstract contract RevertHookTriggers is RevertHookState {
         int24 autoRangeLowerLimit,
         int24 autoRangeUpperLimit
     ) internal pure returns (int24 rangeLower, int24 rangeUpper) {
-        rangeLower = autoRangeLowerLimit != type(int24).min ? tickLower - autoRangeLowerLimit : type(int24).min;
-        rangeUpper = autoRangeUpperLimit != type(int24).max ? tickUpper + autoRangeUpperLimit : type(int24).max;
+        rangeLower = autoRangeLowerLimit != type(int24).min
+            ? _offsetTick(tickLower, -int256(autoRangeLowerLimit))
+            : type(int24).min;
+        rangeUpper = autoRangeUpperLimit != type(int24).max
+            ? _offsetTick(tickUpper, int256(autoRangeUpperLimit))
+            : type(int24).max;
     }
 
     /// @notice Calculates AUTO_LEVERAGE trigger ticks based on base tick
@@ -564,8 +582,12 @@ abstract contract RevertHookTriggers is RevertHookState {
             int24 exitLower;
             int24 exitUpper;
             if (autoExitIsRelative) {
-                exitLower = autoExitTickLower != type(int24).min ? tickLower - autoExitTickLower : type(int24).min;
-                exitUpper = autoExitTickUpper != type(int24).max ? tickUpper + autoExitTickUpper : type(int24).max;
+                exitLower = autoExitTickLower != type(int24).min
+                    ? _offsetTick(tickLower, -int256(autoExitTickLower))
+                    : type(int24).min;
+                exitUpper = autoExitTickUpper != type(int24).max
+                    ? _offsetTick(tickUpper, int256(autoExitTickUpper))
+                    : type(int24).max;
             } else {
                 exitLower = autoExitTickLower;
                 exitUpper = autoExitTickUpper;
@@ -587,10 +609,21 @@ abstract contract RevertHookTriggers is RevertHookState {
         if (PositionModeFlags.hasAutoLend(modeFlags)) {
             PositionState storage state = _positionStates[tokenId];
             if (state.autoLendShares > 0) {
+                // The withdrawal re-arms while the walk's cursor rests on the bucket the deposit fired
+                // from, and the next search is strictly past the cursor. With a positive (aligned,
+                // so >= spacing) tolerance the withdrawal sits `tolerance` inside the deposit bucket
+                // and is found; with zero tolerance both formulas met on the fired bucket and the
+                // ordinary one-bucket recovery skipped the node until a full recross (V4LE-126).
+                // Zero tolerance therefore rests the withdrawal one spacing toward the range, i.e. on
+                // the first bucket where the position is back in range.
                 if (Currency.unwrap(poolKey.currency0) == state.autoLendToken) {
-                    ticks[2] = tickLower - autoLendToleranceTick - poolKey.tickSpacing;
+                    ticks[2] = autoLendToleranceTick == 0
+                        ? tickLower
+                        : tickLower - autoLendToleranceTick - poolKey.tickSpacing;
                 } else {
-                    ticks[0] = tickUpper + autoLendToleranceTick;
+                    ticks[0] = autoLendToleranceTick == 0
+                        ? tickUpper - poolKey.tickSpacing
+                        : tickUpper + autoLendToleranceTick;
                 }
             } else {
                 ticks[0] = tickLower - autoLendToleranceTick * 2 - poolKey.tickSpacing;

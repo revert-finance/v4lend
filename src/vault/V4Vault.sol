@@ -171,6 +171,14 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     uint256 public dailyLendIncreaseLimitMin;
     uint256 public dailyLendIncreaseLimitLeft;
 
+    /// @notice Net lender inflow (deposits minus withdrawals, floored at zero) since the last daily lend
+    ///         reset. Every supply-relative bound (the per-token debt concentration cap and the daily
+    ///         debt quota) is sized on the lender supply net of the part of this amount that exceeds
+    ///         `dailyLendIncreaseLimitMin`, so beyond the governance bootstrap allowance a deposit only
+    ///         widens those bounds from the next UTC day on. A same-day deposit-borrow-withdraw sequence
+    ///         therefore cannot inflate the supply the bounds are measured against (V4LE-122, V4LE-127).
+    uint256 public dailyLendNetInflow;
+
     // daily debt increase limit handling
     uint256 public dailyDebtIncreaseLimitMin;
     uint256 public dailyDebtIncreaseLimitLeft;
@@ -882,8 +890,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 fullValue;
         uint256 collateralValue;
         uint256 feeValue;
+        // raw oracle prices in reference-token terms, as returned by getLiquidityForValue
         uint256 price0X96;
         uint256 price1X96;
+        uint256 quotePriceX96;
     }
 
     /// @notice Liquidates an unhealthy position by repaying debt and receiving collateral
@@ -927,7 +937,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // @custom:accepted-risk AUDIT-ACCEPTED-ORACLE-LIQUIDATION-LIVENESS
         // Liquidation intentionally depends on live oracle data. Stale or missing
         // feeds revert here until governance refreshes feed configuration.
-        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue, state.price0X96, state.price1X96) =
+        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue,,) =
             _checkLoanIsHealthy(params.tokenId, state.debt);
         if (state.isHealthy) {
             revert NotLiquidatable();
@@ -1186,6 +1196,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         }
 
         dailyLendIncreaseLimitLeft = dailyLendIncreaseLimitLeft - assets;
+        dailyLendNetInflow += assets;
 
         SafeERC20.safeTransferFrom(IERC20(asset), msg.sender, address(this), assets);
 
@@ -1226,6 +1237,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         // when amounts are withdrawn - they may be deposited again
         dailyLendIncreaseLimitLeft = dailyLendIncreaseLimitLeft + assets;
+        // a withdrawal unwinds today's inflow first; supply that was already settled shrinks the bounds at once
+        uint256 inflow = dailyLendNetInflow;
+        dailyLendNetInflow = assets < inflow ? inflow - assets : 0;
 
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
     }
@@ -1321,7 +1335,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     {
         // when the uncollected fees alone cover the liquidation value the oracle sizes no liquidity
         // and the collected fees are split between liquidator and owner by value share
-        uint128 liquidity = oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
+        uint128 liquidity;
+        (liquidity, state.price0X96, state.price1X96, state.quotePriceX96) =
+            oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
         bool feesOnly = liquidity == 0;
 
         (uint256 received0, uint256 received1) = _decreaseLiquidity(
@@ -1337,8 +1353,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // liquidationValue worth at oracle prices. Anything above stays with the loan owner. Receiving less
         // (a hook skim, a pool price below the oracle) is the liquidator's risk, covered by the penalty; the
         // split is applied to what was actually received so a skim is carried proportionally (L-02).
+        // The received amounts are valued with the oracle's raw prices, exactly as the oracle values the
+        // position: a per-leg price first rounded to Q96 in asset terms is zero for a leg worth less than
+        // one asset unit per raw unit, which would drop that leg from the cap and hand all of it to the
+        // liquidator (V4LE-104).
         uint256 base = feesOnly ? state.feeValue : state.liquidationValue;
-        uint256 receivedValue = received0.mulDiv(state.price0X96, Q96) + received1.mulDiv(state.price1X96, Q96);
+        uint256 receivedValue = received0.mulDiv(state.price0X96, state.quotePriceX96)
+            + received1.mulDiv(state.price1X96, state.quotePriceX96);
         if (receivedValue > base) {
             base = receivedValue;
         }
@@ -1584,7 +1605,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
                 tokenConfigs[token0].totalDebtShares += difference;
                 tokenConfigs[token1].totalDebtShares += difference;
 
-                uint256 lentAssets = _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Ceil);
+                uint256 lentAssets = _settledLentAssets(lendExchangeRateX96);
                 _checkTokenDebtLimit(token0, debtExchangeRateX96, lentAssets);
                 _checkTokenDebtLimit(token1, debtExchangeRateX96, lentAssets);
             }
@@ -1604,9 +1625,24 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         }
     }
 
+    /// @dev Lender supply the supply-relative bounds are measured against: the lent assets net of the
+    ///      unsettled inflow, i.e. the net inflow recorded since the last daily lend reset (only while
+    ///      that reset is today's; an older record is stale and ignored) beyond the governance minimum
+    ///      daily lend allowance, which counts at once so a small or new vault can bootstrap. Interest
+    ///      accrual raises it immediately, larger deposits from the next day on, withdrawals of settled
+    ///      supply at once.
+    function _settledLentAssets(uint256 lendExchangeRateX96) internal view returns (uint256) {
+        uint256 lentAssets = _convertToAssets(totalSupply(), lendExchangeRateX96, Math.Rounding.Ceil);
+        uint256 inflow = dailyLendIncreaseLimitLastReset == uint32(block.timestamp / 1 days) ? dailyLendNetInflow : 0;
+        uint256 unsettled = inflow > dailyLendIncreaseLimitMin ? inflow - dailyLendIncreaseLimitMin : 0;
+        return lentAssets > unsettled ? lentAssets - unsettled : 0;
+    }
+
     function _resetDailyLendIncreaseLimit(uint256 newLendExchangeRateX96, bool force) internal {
         uint32 time = uint32(block.timestamp / 1 days);
         if (force || time > dailyLendIncreaseLimitLastReset) {
+            // a new day settles the previous day's inflow into the supply the bounds are sized on
+            dailyLendNetInflow = 0;
             dailyLendIncreaseLimitLeft =
                 _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
             dailyLendIncreaseLimitLastReset = time;
@@ -1627,8 +1663,8 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         view
         returns (uint256)
     {
-        uint256 increaseLimit =
-            _convertToAssets(totalSupply(), newLendExchangeRateX96, Math.Rounding.Ceil) * maxFactorX32 / Q32;
+        // sized on the settled supply: a same-day deposit cannot widen the day's quota (V4LE-127)
+        uint256 increaseLimit = _settledLentAssets(newLendExchangeRateX96) * maxFactorX32 / Q32;
         return limitMin > increaseLimit ? limitMin : increaseLimit;
     }
 

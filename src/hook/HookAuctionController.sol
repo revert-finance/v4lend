@@ -218,7 +218,7 @@ contract HookAuctionController is HookExecutorRegistry, IHookAuctionController, 
         }
         if (memoHit) {
             PoolAuctionState storage memoState = _poolStates[poolId];
-            if (memoState.activeHasBid && sender == memoState.activeExecutor) {
+            if (memoState.activeHasBid && sender == memoState.activeExecutor && !executorDenied[sender]) {
                 return _winnerLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
             }
             return 0;
@@ -228,8 +228,10 @@ contract HookAuctionController is HookExecutorRegistry, IHookAuctionController, 
 
         // Compute the delivered obligation (the winner's fee override) from state alone, BEFORE
         // the best-effort drip. The override must survive a drip/token failure - the winner paid
-        // for it.
-        if (state.activeHasBid && sender == state.activeExecutor) {
+        // for it. The denylist is re-read on the winner's own swaps only (short-circuit): admission
+        // binds address + code hash, which cannot bind a proxy's implementation, so a denial is the
+        // live cut-off for an executor that changed behaviour mid-epoch (V4LE-105).
+        if (state.activeHasBid && sender == state.activeExecutor && !executorDenied[sender]) {
             lpFeeOverride = _winnerLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         }
 
@@ -482,7 +484,10 @@ contract HookAuctionController is HookExecutorRegistry, IHookAuctionController, 
     }
 
     /// @notice Denies (or re-allows) an executor. A denied executor can never be registered via
-    ///         bidNext. Use it to block known shared routers while keeping bidding permissionless.
+    ///         bidNext, and a standing winner's executor loses its fee override at once for the
+    ///         rest of the epoch (the bid is not refunded). Use it to block known shared routers
+    ///         while keeping bidding permissionless, and to cut off an admitted executor whose code
+    ///         changed behind its code hash (e.g. an upgraded proxy, see HookExecutorRegistry).
     function setExecutorDenied(address executor, bool denied) external {
         _checkOwner();
         executorDenied[executor] = denied;

@@ -53,6 +53,9 @@ library AutoLeverageLib {
     ///      The hook performs its own swaps through protocol-managed routes, so a deleverage that
     ///      only partially reaches target cannot have diverted proceeds. Operator-driven execution
     ///      with operator-supplied swap routing must use `landsWithinTolerance` instead.
+    ///      A fully repaid loan is a valid terminal state even when no collateral is left (a
+    ///      deleverage sized above the remaining principal removes everything and repays it all),
+    ///      so `debtAfter == 0` is judged as a zero ratio instead of being rejected (V4LE-149).
     function improvesTowardTarget(
         uint256 debtBefore,
         uint256 collateralBefore,
@@ -61,7 +64,7 @@ library AutoLeverageLib {
         uint256 targetRatioBps,
         uint256 overshootToleranceBps
     ) internal pure returns (bool) {
-        if (collateralBefore == 0 || collateralAfter == 0) return false;
+        if (!_hasDefinedRatios(collateralBefore, debtAfter, collateralAfter)) return false;
         uint256 ratioBefore = currentRatio(debtBefore, collateralBefore);
         uint256 ratioAfter = currentRatio(debtAfter, collateralAfter);
 
@@ -77,7 +80,8 @@ library AutoLeverageLib {
     ///      sized to reach the target, so any execution that lands above the band either did not swap
     ///      the removed tokens or did not deliver the swap output to the automator, and is rejected
     ///      rather than accepted as "some" improvement. Landing below target is allowed: removal is
-    ///      sized on-chain, so a lower landing only reflects favorable fills.
+    ///      sized on-chain, so a lower landing only reflects favorable fills. As above, a landing with
+    ///      no debt left is a zero ratio whether or not collateral remains (V4LE-149).
     function landsWithinTolerance(
         uint256 debtBefore,
         uint256 collateralBefore,
@@ -86,12 +90,22 @@ library AutoLeverageLib {
         uint256 targetRatioBps,
         uint256 toleranceBps
     ) internal pure returns (bool) {
-        if (collateralBefore == 0 || collateralAfter == 0) return false;
+        if (!_hasDefinedRatios(collateralBefore, debtAfter, collateralAfter)) return false;
         uint256 ratioBefore = currentRatio(debtBefore, collateralBefore);
         uint256 ratioAfter = currentRatio(debtAfter, collateralAfter);
 
         bool movedTowardTarget = ratioBefore > targetRatioBps ? ratioAfter < ratioBefore : ratioAfter > ratioBefore;
         return movedTowardTarget && ratioAfter <= targetRatioBps + toleranceBps;
+    }
+
+    /// @dev Both post-conditions need a defined starting ratio (collateral before) and a defined landing:
+    ///      remaining debt against zero collateral is undefined and rejected; zero debt is ratio zero.
+    function _hasDefinedRatios(uint256 collateralBefore, uint256 debtAfter, uint256 collateralAfter)
+        private
+        pure
+        returns (bool)
+    {
+        return collateralBefore != 0 && (collateralAfter != 0 || debtAfter == 0);
     }
 
     function repayAmountToTarget(

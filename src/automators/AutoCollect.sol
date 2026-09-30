@@ -105,6 +105,9 @@ contract AutoCollect is Automator {
     /// @notice Adjust token directly or via vault transform
     function execute(ExecuteParams calldata params) external nonReentrant {
         _validateExecuteCaller(params.tokenId);
+        // the operator's hookData reaches the position's increase; a tagged remint claim may only name
+        // this token (V4LE-115, same binding as AutoRange / AutoLend / AutoLeverage)
+        _checkRemintClaim(params.hookData, params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         Currency token0 = poolKey.currency0;

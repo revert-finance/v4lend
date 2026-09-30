@@ -223,8 +223,14 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
         // paid rent for it. now < paidThrough encodes rent solvency without any math; the
         // comparison is STRICT so a deposit covering k seconds grants exactly [start, start+k) -
         // a zero-duration top-up (sub-second dust that floors to paidThrough == now) activates
-        // nothing, otherwise 1 wei per block would rent the slot.
-        if (state.executor != address(0) && sender == state.executor && block.timestamp < state.paidThrough) {
+        // nothing, otherwise 1 wei per block would rent the slot. The denylist is re-read on the
+        // executor's own swaps only (short-circuit): admission binds address + code hash, which
+        // cannot bind a proxy's implementation, so a denial is the live cut-off for an executor
+        // that changed behaviour mid-lease (V4LE-105).
+        if (
+            state.executor != address(0) && sender == state.executor && block.timestamp < state.paidThrough
+                && !executorDenied[sender]
+        ) {
             lpFeeOverride = _discountedLpFee(config) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         }
 
@@ -589,7 +595,11 @@ contract HookLeaseController is HookExecutorRegistry, IHookAuctionController, IU
     }
 
     /// @notice Denies (or re-allows) an executor. A denied executor can never be registered via
-    ///         startLease/buyout. Use it to block known shared routers.
+    ///         startLease/buyout, and a running lease's executor loses its fee override at once
+    ///         while denied (rent keeps accruing; the lessee exits or re-registers another
+    ///         executor). Use it to block known shared routers, and to cut off an admitted
+    ///         executor whose code changed behind its code hash (e.g. an upgraded proxy, see
+    ///         HookExecutorRegistry).
     function setExecutorDenied(address executor, bool denied) external {
         _checkOwner();
         executorDenied[executor] = denied;

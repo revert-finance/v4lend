@@ -6045,8 +6045,10 @@ contract RevertHookTest is BaseTest {
         (uint32 lowerBeforeFailure, uint32 upperBeforeFailure) = _getTriggerListSizes();
         configurableVault.setFailRedeem(true);
 
+        // zero tolerance re-arms the withdrawal on the first in-range bucket (tickLower), one
+        // spacing past the fired deposit bucket the cursor rests on (V4LE-126)
         vm.recordLogs();
-        _moveTickUpUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        _moveTickUpUntil(tickLower3, 2e16, 160);
 
         (,,, address autoLendTokenAfter, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Failed withdraw must not restore liquidity");
@@ -6094,12 +6096,16 @@ contract RevertHookTest is BaseTest {
     function testAutoLendWithdrawReentryFailure_DisablesZeroLiquidityPosition() public {
         hook.setMaxTicksFromOracle(1000);
         IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
-        hook.setPositionConfig(
-            token3Id,
-            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
-        );
+        // A one-spacing tolerance keeps the re-entry OUT of range (bucket tickLower - 2s), so it
+        // takes the add-to-existing path whose approval the test revokes below. With zero
+        // tolerance the re-entry happens on the first in-range bucket and mints a fresh
+        // one-sided position instead, which needs no approval (V4LE-126).
+        RevertHookState.PositionConfig memory lendConfig =
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max);
+        lendConfig.autoLendToleranceTick = poolKey.tickSpacing;
+        hook.setPositionConfig(token3Id, lendConfig);
 
-        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        _moveTickDownUntil(tickLower3 - 3 * poolKey.tickSpacing, 2e16, 160);
         (,,, address autoLendTokenBefore, uint256 sharesBefore,,,) = hook.positionStates(token3Id);
         assertEq(positionManager.getPositionLiquidity(token3Id), 0, "Successful deposit should remove LP liquidity");
         assertEq(autoLendTokenBefore, Currency.unwrap(currency0), "Lower-side lend should hold token0 in the vault");
@@ -6110,7 +6116,7 @@ contract RevertHookTest is BaseTest {
         (uint32 lowerBeforeFailure, uint32 upperBeforeFailure) = _getTriggerListSizes();
 
         vm.recordLogs();
-        _moveTickUpUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        _moveTickUpUntil(tickLower3 - 2 * poolKey.tickSpacing, 2e16, 160);
 
         assertEq(
             positionManager.nextTokenId(), nextTokenIdBefore, "Failed re-entry should not mint a replacement token"

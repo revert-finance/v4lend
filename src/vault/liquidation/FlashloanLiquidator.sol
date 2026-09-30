@@ -55,7 +55,16 @@ contract FlashloanLiquidator is Swapper, IUniswapV3FlashCallback {
     }
 
     /// @notice Liquidates a loan, using a Uniswap Flashloan
+    /// @dev The vault refuses the loan owner as liquidator and as collateral recipient (the reserve-backed
+    ///      liquidation branch subsidizes an independent liquidator). This helper is the vault's caller and
+    ///      recipient and pays the proceeds to whoever called it, so it has to apply the same refusal to
+    ///      its own caller; otherwise it would be the documented bypass of that policy (V4LE-97). A
+    ///      borrower routing through another intermediary remains possible; that residual is a property of
+    ///      the subsidy design (see docs/audit-deferred-findings.md, V4LE-18 / V4LE-91).
     function liquidate(LiquidateParams calldata params) external {
+        if (params.vault.ownerOf(params.tokenId) == msg.sender) {
+            revert Unauthorized();
+        }
         (,,, uint256 liquidationCost, uint256 liquidationValue) = params.vault.loanInfo(params.tokenId);
         if (liquidationValue == 0) {
             revert NotLiquidatable();

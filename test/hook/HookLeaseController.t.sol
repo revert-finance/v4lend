@@ -604,6 +604,28 @@ contract HookLeaseControllerTest is BaseTest {
         assertGt(outLessee, outOther, "discount restored after refunding rent");
     }
 
+    /// @notice V4LE-105: admission binds address + code hash, which cannot bind a proxy's
+    ///         implementation. The denylist must cut a running lease's discount off at once
+    ///         (also on the same-transaction memo path) and re-allowing restores it.
+    function testV4LE105_DeniedLesseeExecutorLosesDiscountAtOnce() public {
+        _startLease(lesseeA, address(lesseeSwapper), 1e18, 0.2e18);
+        (uint256 outLessee, uint256 outOther) = _swapOutcomes(1e18);
+        assertGt(outLessee, outOther, "discount before denial");
+
+        leaseController.setExecutorDenied(address(lesseeSwapper), true);
+        (outLessee, outOther) = _swapOutcomes(1e18);
+        assertEq(outLessee, outOther, "denied executor pays the baseline fee at once");
+
+        // committed touch at this timestamp -> memo path on the repeat touch
+        otherSwapper.swapExactIn(leasePoolKey, true, 1);
+        (outLessee, outOther) = _swapOutcomes(1e18);
+        assertEq(outLessee, outOther, "memo path applies the denial");
+
+        leaseController.setExecutorDenied(address(lesseeSwapper), false);
+        (outLessee, outOther) = _swapOutcomes(1e18);
+        assertGt(outLessee, outOther, "re-allowing restores the discount");
+    }
+
     /// @notice Codex P1: a zero-duration rent top-up must not activate the discount. On an
     ///         insolvent lease, fundRent with sub-second dust floors rentBalance/rps to zero, so
     ///         paidThrough == now; with an inclusive comparison the lessee could re-arm the

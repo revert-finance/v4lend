@@ -112,7 +112,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint8 tokenDecimals; // Decimals of the token
         uint32 twapSeconds; // Uniswap v3 TWAP period
         IUniswapV3Pool twapPool; // Uniswap v3 reference pool against referenceToken
-        address twapTokenAlias; // Token used in the TWAP pool, e.g. WETH for native ETH
+        address twapTokenAlias; // Token used in the TWAP pool, e.g. WETH for native ETH; carries tokenDecimals
         bool twapTokenIsToken0; // True when twapTokenAlias is token0 in twapPool
         Mode mode; // Source selection and verification mode
         uint16 maxDifference; // Max difference between Chainlink-compatible and TWAP sources x10000
@@ -199,7 +199,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         address quoter = hookFeeQuoters[hook];
         if (quoter == address(0)) revert HookFeeQuoterNotConfigured(hook);
         if (quoter == address(this)) return (0,0);
-        return IPositionFeeQuoter(quoter).quoteProtocolFees(state.tokenId,fees0,fees1);
+        (owed0, owed1) = IPositionFeeQuoter(quoter).quoteProtocolFees(state.tokenId,fees0,fees1);
+        // The hook takes its whole obligation in the fee-first INCREASE(0) of every removal (a remainder
+        // reverts with ProtocolFeesUnsettled) and narrows the take with SafeCast.toInt128, so an obligation
+        // at or beyond 2^127 blocks every decrease of the position. Like fees and principal it is reported
+        // instead of netted, which would have left the other currency counted as collateral (V4LE-113).
+        if (owed0 >= V4_SETTLEMENT_BOUND || owed1 >= V4_SETTLEMENT_BOUND) {
+            revert SettlementBoundExceeded();
+        }
     }
 
     function _netCurrency(uint256 principal, uint128 fees, uint256 owed)
@@ -243,15 +250,22 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     /// @notice Size a fee-first withdrawal, accounting for fixed liabilities consuming principal.
     /// @dev One position-state load (sequencer guard, feed / TWAP reads, quoter calls) serves both the
-    ///      value the target is compared against and the sizing itself.
-    function getLiquidityForValue(uint256 tokenId, address quoteToken, uint256 target) external view returns (uint128) {
+    ///      value the target is compared against and the sizing itself. The raw prices are returned so
+    ///      the caller values the removal's actual proceeds at full precision, see `IV4Oracle` (V4LE-104).
+    function getLiquidityForValue(uint256 tokenId, address quoteToken, uint256 target)
+        external
+        view
+        returns (uint128, uint256 price0X96, uint256 price1X96, uint256 quotePrice)
+    {
         PositionState memory state = _loadPositionState(tokenId);
         (uint256 a0,uint256 a1) = _getAmounts(state);
         (uint128 f0,uint128 f1) = _getFees(state);
         (uint256 owed0,uint256 owed1) = _feeObligation(state,f0,f1);
-        uint256 quotePrice = _quoteTokenPrice(state, quoteToken);
+        quotePrice = _quoteTokenPrice(state, quoteToken);
+        price0X96 = state.price0X96;
+        price1X96 = state.price1X96;
         (uint256 value,uint256 netFeeValue) = _netValues(state,a0,a1,f0,f1,owed0,owed1,quotePrice);
-        if (target >= value) return state.liquidity;
+        if (target >= value) return (state.liquidity, price0X96, price1X96, quotePrice);
         uint256 c0 = owed0 > f0 ? owed0-f0 : 0;
         uint256 c1 = owed1 > f1 ? owed1-f1 : 0;
         uint256 charge = Math.mulDiv(c0,state.price0X96,quotePrice,Math.Rounding.Ceil)
@@ -259,11 +273,18 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint256 principalValue = FullMath.mulDiv(a0,state.price0X96,quotePrice)
             + FullMath.mulDiv(a1,state.price1X96,quotePrice);
         uint256 needed = target + charge > netFeeValue ? target + charge - netFeeValue : 0;
-        uint256 liquidity = needed == 0 ? 0 : Math.mulDiv(needed,state.liquidity,principalValue,Math.Rounding.Ceil);
+        // A principal whose floored quote is zero (each leg worth less than one quote unit, e.g. a sub-Q96
+        // per-unit price with a real amount) cannot be split by value; when more value is still needed the
+        // sizing is all of it rather than a division by zero (V4LE-139).
+        uint256 liquidity = needed == 0
+            ? 0
+            : principalValue == 0
+                ? state.liquidity
+                : Math.mulDiv(needed,state.liquidity,principalValue,Math.Rounding.Ceil);
         // Each charged currency must also be funded: surplus of the other currency cannot settle it.
         if (c0 != 0) liquidity = a0 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c0,state.liquidity,a0,Math.Rounding.Ceil));
         if (c1 != 0) liquidity = a1 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c1,state.liquidity,a1,Math.Rounding.Ceil));
-        return uint128(Math.min(liquidity,state.liquidity));
+        return (uint128(Math.min(liquidity,state.liquidity)), price0X96, price1X96, quotePrice);
     }
 
     // token => config mapping
@@ -440,6 +461,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint8 feedDecimals = feed.decimals();
         uint8 tokenDecimals = address(token) == address(0) ? 18 : IERC20Metadata(token).decimals();
         address effectiveTwapToken = twapTokenAlias == address(0) && token != address(0) ? token : twapTokenAlias;
+        // The TWAP leg is read in the alias's raw unit and applied to the token's, so the alias must carry
+        // the token's decimals; the token itself as its own alias has them by definition (V4LE-147).
+        if (
+            effectiveTwapToken != address(0) && effectiveTwapToken != token
+                && IERC20Metadata(effectiveTwapToken).decimals() != tokenDecimals
+        ) {
+            revert InvalidConfig();
+        }
 
         bool twapTokenIsToken0;
         if (_usesTWAP(mode)) {
@@ -535,22 +564,27 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
 
         uint256 verifyPriceX96;
+        // A single-source read (or a two-source read whose deviation check is disabled) has no independent
+        // price that would expose changed feed or token metadata, so the metadata cached at configuration
+        // is re-checked against the live contracts; a verified two-source read fails closed on its own
+        // (a 10^k mis-scaling always exceeds any representable maxDifference) and pays nothing.
+        bool unverified = !_isTwoSourceMode(mode) || feedConfig.maxDifference == type(uint16).max;
         if (_usesChainlink(mode)) {
-            // A single-source Chainlink read (or a two-source read whose deviation check is disabled) has
-            // no independent price that would expose a changed feed precision, so its cached metadata is
-            // re-checked against the live contracts; a verified two-source read fails closed on its own
-            // (a 10^k mis-scaling always exceeds any representable maxDifference).
-            bool unverified = !_isTwoSourceMode(mode) || feedConfig.maxDifference == type(uint16).max;
             uint256 chainlinkPriceX96 = _getChainlinkPriceX96(token, unverified);
             if (cachedChainlinkReferencePriceX96 == 0) {
                 chainlinkReferencePriceX96 = _getChainlinkPriceX96(referenceToken, unverified);
-                if (unverified) {
-                    _requireTokenDecimals(referenceToken, referenceTokenDecimals);
-                }
             } else {
                 chainlinkReferencePriceX96 = cachedChainlinkReferencePriceX96;
+                // The cached denominator comes from the other leg's read. When that was a verified
+                // two-source read it checked only the ratio of its two feeds, not the reference feed's own
+                // scale (a coordinated precision migration of both feeds passes it), so an unverified read
+                // re-checks the reference feed it divides by, cache or not (V4LE-112).
+                if (unverified) {
+                    _requireReferenceFeedDecimals();
+                }
             }
             if (unverified) {
+                _requireTokenDecimals(referenceToken, referenceTokenDecimals);
                 _requireTokenDecimals(token, feedConfig.tokenDecimals);
             }
             uint256 referencePriceX96 =
@@ -564,6 +598,16 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
 
         if (_usesTWAP(mode)) {
+            // The TWAP leg is read in the alias's raw unit and applied to the token's: an unverified read
+            // re-checks that both still carry the unit bound at configuration (V4LE-147). The token as its
+            // own alias moves with itself and needs no check; in Chainlink-using modes the token was
+            // checked above.
+            if (unverified && feedConfig.twapTokenAlias != token) {
+                if (mode == Mode.TWAP) {
+                    _requireTokenDecimals(token, feedConfig.tokenDecimals);
+                }
+                _requireTokenDecimals(feedConfig.twapTokenAlias, feedConfig.tokenDecimals);
+            }
             uint256 twapPriceX96 = _getTWAPPriceX96(feedConfig);
             if (mode == Mode.CHAINLINK_TWAP_VERIFY) {
                 verifyPriceX96 = twapPriceX96;
@@ -654,6 +698,18 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         return FullMath.mulDiv(SafeCast.toUint256(answer), Q96, 10 ** feedConfig.feedDecimals);
     }
 
+    /// @dev Reference-feed counterpart of the `checkDecimals` re-read in `_getChainlinkPriceX96`, for a read
+    ///      that reuses a cached reference price instead of reading the feed.
+    function _requireReferenceFeedDecimals() internal view {
+        if (referenceToken == chainlinkReferenceToken) {
+            return;
+        }
+        TokenConfig storage referenceConfig = feedConfigs[referenceToken];
+        if (referenceConfig.feed.decimals() != referenceConfig.feedDecimals) {
+            revert FeedDecimalsChanged();
+        }
+    }
+
     /// @dev Rejects a token whose live `decimals()` differs from the exponent cached for it (an upgraded
     ///      token would otherwise have its Chainlink price converted into the wrong raw unit). Native ETH
     ///      has fixed 18 decimals. For a configured token the owner re-runs `setTokenConfig`; the
@@ -676,7 +732,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
                 chainlinkReferencePriceX96
             );
         } else if (referenceTokenDecimals < feedConfig.tokenDecimals) {
-            priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96
+            // 512-bit product: a valid in-domain ratio (a 6-decimal reference against an 18-decimal token
+            // at a raw price of 2^64 has a feed price of ~2^200 in Q96) overflowed the checked
+            // `chainlinkPriceX96 * Q96` although the quotient fits (V4LE-135). Dividing by the reference
+            // price first and by the decimal scale second yields the same floor as one division.
+            priceX96 = FullMath.mulDiv(chainlinkPriceX96, Q96, chainlinkReferencePriceX96)
                 / (10 ** (feedConfig.tokenDecimals - referenceTokenDecimals));
         } else {
             priceX96 = FullMath.mulDiv(chainlinkPriceX96, Q96, chainlinkReferencePriceX96);
@@ -875,6 +935,12 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     ///      operation (the vault's liquidation and full withdrawal), and the oracle does not certify it as
     ///      collateral. The state is reachable without any oracle attack, by the pool price crossing a range
     ///      whose other-side principal is that large.
+    ///      The bound is enforced on the composition at the oracle-derived price (what is valued) and on the
+    ///      composition at the live pool price (what v4 settles a decrease at). The live price may sit up to
+    ///      `maxPoolPriceDifference` from the derived one, and at a high sqrt price that is enough for the
+    ///      live-side principal of a range to be orders of magnitude larger than the derived-side one; a
+    ///      position that passes only the derived check could be borrowed against while every liquidation
+    ///      removal, sized from the derived amounts, reverts at v4's narrowing (V4LE-98).
     /// @param state Complete PositionState struct containing position data and derived price
     /// @return amount0 Calculated amount of token0 based on oracle-derived sqrt price
     /// @return amount1 Calculated amount of token1 based on oracle-derived sqrt price
@@ -892,7 +958,16 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
                 state.sqrtPriceX96Upper, // Upper tick price
                 state.liquidity // Position liquidity
             );
-            if (amount0 >= V4_SETTLEMENT_BOUND || amount1 >= V4_SETTLEMENT_BOUND) {
+            (uint256 liveAmount0, uint256 liveAmount1) = LiquidityAmounts.getAmountsForLiquidity(
+                state.sqrtPriceX96, // Live pool price (what a decrease settles at)
+                state.sqrtPriceX96Lower,
+                state.sqrtPriceX96Upper,
+                state.liquidity
+            );
+            if (
+                amount0 >= V4_SETTLEMENT_BOUND || amount1 >= V4_SETTLEMENT_BOUND
+                    || liveAmount0 >= V4_SETTLEMENT_BOUND || liveAmount1 >= V4_SETTLEMENT_BOUND
+            ) {
                 revert SettlementBoundExceeded();
             }
         }

@@ -4,6 +4,7 @@ pragma solidity ^0.8.0;
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -26,6 +27,8 @@ import {Automator} from "./Automator.sol";
 contract AutoLend is Automator {
     /// @notice A pool currency is a registered lend vault share token; executing on it could sweep custodied shares
     error ShareTokenPool();
+    /// @notice The lend vault currently permits no redemption for this contract (`maxRedeem == 0`); retry later
+    error NoRedeemableShares();
 
     event SetAutoLendVault(address indexed token, IERC4626 vault);
     event AutoLendDeposit(uint256 indexed tokenId, address token, uint256 amount, uint256 shares);
@@ -239,6 +242,8 @@ contract AutoLend is Automator {
         if (!config.isActive) {
             revert NotConfigured();
         }
+        // the re-entry mint / increase forwards this hookData: a hook remint claim may only name this position
+        _checkRemintClaim(params.hookData, params.tokenId);
 
         address posOwner = _requireNonVaultPosition(params.tokenId);
 
@@ -251,11 +256,20 @@ contract AutoLend is Automator {
         bool isToken0Lent =
             _validateWithdrawTrigger(config, poolKey.currency0, state.lentToken, tickLower, tickUpper, currentTick);
 
+        // A compliant ERC4626 vault may cap maxRedeem below the balance (withdrawal limit, cooldown,
+        // queue). Redeem what it permits now and keep the rest custodied for a later withdraw or the
+        // owner's forceExit instead of asking for everything and reverting (V4LE-96).
+        uint256 sharesToRedeem = _redeemableShares(state);
+        if (sharesToRedeem == 0) {
+            revert NoRedeemableShares();
+        }
+        uint256 principalRedeemed = _principalFor(state, sharesToRedeem);
+
         // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
         // Standalone AutoLend withdraw accepts current ERC4626 redeem value without a
         // minimum-assets guard; operator/vault selection is trusted for this path.
-        custodiedShares[state.vault] -= state.shares;
-        uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
+        custodiedShares[state.vault] -= sharesToRedeem;
+        uint256 redeemedAmount = IERC4626(state.vault).redeem(sharesToRedeem, address(this), address(this));
 
         if (params.rewardX64 > config.maxRewardX64) {
             revert ExceedsMaxReward();
@@ -264,7 +278,7 @@ contract AutoLend is Automator {
         Currency lendCurrency = Currency.wrap(state.lentToken);
         uint256 protocolFee;
         {
-            uint256 yieldAmount = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
+            uint256 yieldAmount = redeemedAmount > principalRedeemed ? redeemedAmount - principalRedeemed : 0;
             (redeemedAmount, protocolFee) = _calculateProtocolFee(redeemedAmount, yieldAmount, params.rewardX64);
         }
 
@@ -308,14 +322,25 @@ contract AutoLend is Automator {
             );
         }
 
-        // Clear lend state and release vault reference
-        vaultPositionCount[state.vault]--;
-        delete lendStates[params.tokenId];
+        // Clear the lend state and release the vault reference only once every share is redeemed; a
+        // residual stays recorded (and custodied) on this token so a later withdraw or forceExit can
+        // still reach it.
+        bool fullyRedeemed = sharesToRedeem == state.shares;
+        if (fullyRedeemed) {
+            vaultPositionCount[state.vault]--;
+            delete lendStates[params.tokenId];
+        } else {
+            lendStates[params.tokenId].shares = state.shares - sharesToRedeem;
+            lendStates[params.tokenId].amount = state.amount - principalRedeemed;
+        }
 
         if (newTokenId > 0) {
-            // Configuration must follow the migrated position
+            // Configuration must follow the migrated position. While a residual is outstanding the
+            // original token keeps its config too: the operator's follow-up withdraw is gated on it.
             positionConfigs[newTokenId] = config;
-            delete positionConfigs[params.tokenId];
+            if (fullyRedeemed) {
+                delete positionConfigs[params.tokenId];
+            }
             // transferFrom avoids safeTransfer callback requirements on recipient contracts
             IERC721(address(positionManager)).transferFrom(address(this), posOwner, newTokenId);
         }
@@ -323,7 +348,7 @@ contract AutoLend is Automator {
         _sendProtocolFee(lendCurrency, protocolFee);
         _sendSweepableBalances(posOwner, poolKey.currency0, poolKey.currency1);
 
-        emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, state.shares);
+        emit AutoLendWithdraw(params.tokenId, newTokenId, state.lentToken, redeemedAmount, sharesToRedeem);
     }
 
     /// @notice Position owner force-exits an active lend: redeems all vault shares and sends proceeds to the owner.
@@ -337,6 +362,9 @@ contract AutoLend is Automator {
     /// @dev Deliberately NOT gated by `_requireNoShareTokenPool`: the escape hatch must stay callable for
     /// positions whose pool currency became a registered share token after they were lent (their `withdraw`
     /// is blocked). It never reads the pool key and only sweeps the lent currency net of custodied shares.
+    /// @dev Shares the vault does not let this contract redeem right now (a withdrawal limit or cooldown,
+    /// `maxRedeem` below the recorded balance) are transferred to the owner as vault shares instead, so the
+    /// entitlement is never stranded behind the vault's limit (V4LE-96). No protocol fee is taken on them.
     function forceExit(uint256 tokenId) external nonReentrant {
         LendState memory state = lendStates[tokenId];
         if (state.shares == 0) {
@@ -350,22 +378,28 @@ contract AutoLend is Automator {
 
         Currency lendCurrency = Currency.wrap(state.lentToken);
 
+        uint256 sharesToRedeem = _redeemableShares(state);
+        uint256 residualShares = state.shares - sharesToRedeem;
+
         // @custom:accepted-risk AUDIT-ACCEPTED-AUTOLEND-REDEEM-FLOOR
         // Accepts current ERC4626 redeem value without a minimum-assets guard; the owner
         // explicitly opts into exiting at the vault's current rate.
+        // All custody is released here: the redeemed part becomes assets, the residual leaves as shares.
         custodiedShares[state.vault] -= state.shares;
-        uint256 redeemedAmount = IERC4626(state.vault).redeem(state.shares, address(this), address(this));
+        uint256 redeemedAmount =
+            sharesToRedeem > 0 ? IERC4626(state.vault).redeem(sharesToRedeem, address(this), address(this)) : 0;
 
         uint256 protocolFee;
         {
-            uint256 yieldAmount = redeemedAmount > state.amount ? redeemedAmount - state.amount : 0;
+            uint256 principalRedeemed = _principalFor(state, sharesToRedeem);
+            uint256 yieldAmount = redeemedAmount > principalRedeemed ? redeemedAmount - principalRedeemed : 0;
             (redeemedAmount, protocolFee) =
                 _calculateProtocolFee(redeemedAmount, yieldAmount, positionConfigs[tokenId].maxRewardX64);
         }
 
         // If lent token is native ETH (stored as WETH in vault), unwrap the full redeemed amount so
         // protocol fees and owner proceeds are both handled in native ETH.
-        if (state.lentToken == address(0)) {
+        if (state.lentToken == address(0) && redeemedAmount + protocolFee > 0) {
             weth.withdraw(redeemedAmount + protocolFee);
         }
 
@@ -378,9 +412,23 @@ contract AutoLend is Automator {
         // depending on the position's pool key.
         _sendProtocolFee(lendCurrency, protocolFee);
         _sendSweepableBalance(posOwner, lendCurrency);
+        if (residualShares > 0) {
+            SafeERC20.safeTransfer(IERC20(state.vault), posOwner, residualShares);
+        }
 
-        emit AutoLendForceExit(tokenId, state.lentToken, redeemedAmount, state.shares);
+        emit AutoLendForceExit(tokenId, state.lentToken, redeemedAmount, sharesToRedeem);
         emit PositionConfigured(tokenId, false, 0, 0, 0, 0, 0);
+    }
+
+    /// @dev Shares of a lend position the vault lets this contract redeem right now.
+    function _redeemableShares(LendState memory state) internal view returns (uint256) {
+        uint256 maxRedeem = IERC4626(state.vault).maxRedeem(address(this));
+        return maxRedeem < state.shares ? maxRedeem : state.shares;
+    }
+
+    /// @dev The recorded principal attributable to `shares` of a lend position (the fee base is yield only).
+    function _principalFor(LendState memory state, uint256 shares) internal pure returns (uint256) {
+        return shares == state.shares ? state.amount : Math.mulDiv(state.amount, shares, state.shares);
     }
 
     function _requireNonVaultPosition(uint256 tokenId) internal view returns (address posOwner) {

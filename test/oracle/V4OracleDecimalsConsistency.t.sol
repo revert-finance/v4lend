@@ -19,6 +19,12 @@ import {MutableChainlinkFeed, MutableDecimalsToken} from "test/oracle/support/Or
 ///         The oracle now re-reads the live metadata on unverified Chainlink reads and reverts when it
 ///         differs from the cached value; the owner re-runs `setTokenConfig` to accept the new precision.
 ///         Verified two-source reads keep failing closed through the deviation check and pay nothing.
+///         - External audit V4LE-112: an unverified read that reused the reference price cached by a
+///           verified two-source read of the other pool leg skipped the reference feed's and the
+///           reference token's metadata checks. The verified leg checks only the ratio of its two feeds,
+///           so a coordinated precision migration of the reference feed and that leg's feed passed it and
+///           mispriced the single-source leg by 10^k. Unverified reads now run the reference-side checks
+///           whether or not the reference price was cached.
 /// @dev Fork-free, no pool needed: `getPoolSqrtPriceX96` exercises the whole price path. The reference
 ///      token is a 6-decimal stand-in for USDC and the priced token an 18-decimal one worth 2500 reference.
 contract V4OracleDecimalsConsistencyTest is BaseTest {
@@ -129,6 +135,56 @@ contract V4OracleDecimalsConsistencyTest is BaseTest {
         vm.expectRevert(TOKEN_DECIMALS_CHANGED);
         oracle.getPoolSqrtPriceX96(address(token), address(referenceToken));
         assertEq(oracle.referenceTokenDecimals(), 6);
+    }
+
+    // ---------------------------------------------------------------- V4LE-112: cached reference behind a verified leg
+
+    function testV4LE112_CoordinatedFeedMigrationIsCaughtBehindAVerifiedLeg() public {
+        MutableDecimalsToken other = _configureSingleSourceTwin();
+        _configure(address(token), feed, V4Oracle.Mode.CHAINLINK_TWAP_VERIFY);
+        assertEq(oracle.getPoolSqrtPriceX96(address(token), address(other)), uint160(Q96), "baseline: equal prices");
+
+        // the provider migrates the reference feed and the verified leg's feed together: the ratio the
+        // two-source leg checks is unchanged, the reference denominator it caches is 1e10 too large
+        referenceFeed.setDecimals(18);
+        referenceFeed.setAnswer(1e18);
+        feed.setDecimals(18);
+        feed.setAnswer(2500e18);
+        assertEq(
+            oracle.getPoolSqrtPriceX96(address(token), address(referenceToken)),
+            _expectedSqrtPriceX96(18),
+            "the verified leg still agrees with its TWAP"
+        );
+
+        // the single-source leg divides by that cached denominator: it must re-check the reference feed
+        // (the old code returned sqrt(1e10) * Q96 for two equally priced tokens)
+        vm.expectRevert(FEED_DECIMALS_CHANGED);
+        oracle.getPoolSqrtPriceX96(address(token), address(other));
+
+        // acknowledged by reconfiguring the migrated feeds
+        _configure(address(referenceToken), referenceFeed, V4Oracle.Mode.CHAINLINK);
+        _configure(address(token), feed, V4Oracle.Mode.CHAINLINK_TWAP_VERIFY);
+        assertEq(oracle.getPoolSqrtPriceX96(address(token), address(other)), uint160(Q96));
+    }
+
+    function testV4LE112_ReferenceTokenUnitsChangeIsCaughtBehindAVerifiedLeg() public {
+        MutableDecimalsToken other = _configureSingleSourceTwin();
+        _configure(address(token), feed, V4Oracle.Mode.CHAINLINK_TWAP_VERIFY);
+        assertEq(oracle.getPoolSqrtPriceX96(address(token), address(other)), uint160(Q96), "baseline");
+
+        // nothing in the verified leg reads the reference token's live decimals
+        uint160 verifiedLegBefore = oracle.getPoolSqrtPriceX96(address(token), address(referenceToken));
+        referenceToken.setDecimals(18);
+        assertEq(oracle.getPoolSqrtPriceX96(address(token), address(referenceToken)), verifiedLegBefore);
+
+        vm.expectRevert(TOKEN_DECIMALS_CHANGED);
+        oracle.getPoolSqrtPriceX96(address(token), address(other));
+    }
+
+    /// @dev A second 18-decimal token at the same 2500 reference price, in single-source Chainlink mode.
+    function _configureSingleSourceTwin() internal returns (MutableDecimalsToken other) {
+        other = new MutableDecimalsToken(18);
+        _configure(address(other), new MutableChainlinkFeed(2500e8, 8), V4Oracle.Mode.CHAINLINK);
     }
 
     function testNativeTokenHasFixedDecimals() public {

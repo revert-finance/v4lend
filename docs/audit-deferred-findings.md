@@ -19,9 +19,13 @@ Fee settlement, net valuation, source recovery, and debt admission must be deplo
 
 ## Disputed or accepted policy findings
 
-- **V4LE-18:** an address check cannot prevent a borrower using another address for liquidation.
-  The verified mechanism does not itself prove a profitable attack. Retain or reconsider the subsidy
-  and self-liquidation policy explicitly; do not describe the address check as Sybil resistance.
+- **V4LE-18 / V4LE-91 (Scan #2):** an address check cannot prevent a borrower using another address
+  or an intermediary contract for liquidation. The reserve cost of a reserve-backed liquidation is
+  `debt - liquidatorCost` whoever the liquidator is, so a borrower liquidating their own loan through an
+  intermediary costs reserves exactly what an independent liquidator would; the check only decides who
+  collects the incentive, it is not a solvency boundary. The subsidy stays as designed. The repository's
+  own `FlashloanLiquidator` mirrors the vault's refusal (V4LE-97) so the documented helper is not the
+  bypass; do not describe the address check as Sybil resistance.
 - **V4LE-55:** the reference-token Q96 identity is correct. The tested denominator skew cancels when
   numerator and quote share the same Chainlink denominator; independent TWAP verification rejects it.
   Treat missing fallback coverage as a deployment configuration question, not an identity-price bug.
