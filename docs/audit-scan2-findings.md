@@ -33,12 +33,19 @@ carry the finding id in the commit subject; regression tests are named `testV4LE
 | V4LE-135 | Fixed | `_normalizeChainlinkPrice` forms the 512-bit product with `FullMath.mulDiv`; results are bit-identical where the old checked product did not overflow. |
 | V4LE-113 | Fixed | `_feeObligation` rejects a hook-quoted obligation at or above `2^127` with `SettlementBoundExceeded`; the hook takes the whole obligation in the INCREASE(0) and narrows it with `toInt128`, so such an obligation could never be settled. |
 | V4LE-112 | Fixed | Unverified single-source reads always run the reference-token decimals check and, when the reference price comes from the cache, re-check the reference feed's decimals; verified two-source reads still pay nothing. |
+| V4LE-124 | Fixed | The external-route planner walks the route's ticks from spot exactly like `Pool.swap`: a zero-liquidity gap is crossed for free and the plan is sized against the liquidity that follows, instead of returning no swap. |
+| V4LE-95 | Fixed | The external-route in-range plan is a bisection on the exact tick-walking quote (position price fixed), like the same-pool overload; a one-sided plan is capped at the input the quote actually consumed, so a truncated quote can never oversize the swap. Step bound raised to 64, ticks cached per plan. |
+| V4LE-114 | Fixed | A same-pool bisection whose bracket closes on a step-bound-truncated quote reverts `Quote_Truncated` instead of returning the truncated input as if it were the root; the hook surfaces this as a caught, failed action. |
+| V4LE-145 | Fixed | The floored Q96 required-ratio is gone: range balance is judged by comparing the liquidities the two amounts would fund (`L0` vs `L1`), which has no zero-flooring intermediate and saturates on overflow, so a near-`MIN_TICK` plan no longer divides by zero. |
+| V4LE-146 | Fixed | Same change: the direction check uses the liquidity comparison, so a low-price token0 surplus is no longer truncated to zero and the rebalance is planned in the right direction. |
+| V4LE-150 | Fixed | Both analytic solvers use a cancellation-free root form (`(b + sqrtD) / 2a` for `b >= 0`, `2c / (sqrtD + |b|)` for `b < 0`), which yields the linear root when `a == 0` and fixes the floored-discriminant cancellation for small `a`; roots are clamped to the current price and the range. |
 
 ## Low
 
 | ID | Disposition | Notes |
 |---|---|---|
 | V4LE-100 | Fixed | Same root cause and fix as V4LE-102. |
+| V4LE-140 | Fixed | The bitmap walk forms the empty-word far edge in `int256` and clamps it to the tick domain; `_locateNextTick` stops at the bound, so a max-spacing route can no longer wrap into the domain and quote phantom depth. |
 
 ## Informational
 
@@ -47,3 +54,4 @@ carry the finding id in the commit subject; regression tests are named `testV4LE
 | V4LE-151 | Rejected (operational) | Already tracked as V4LE-73: provider-side revocation of the historical key is an operational action; no repository change can prove it. CI no longer uses any RPC credential (PR #43). |
 | V4LE-110 | Fixed | `leverageUp` resolves the native alias for a WETH-asset vault on a native pool (borrowed WETH unwrapped into the pool side, native leg wrapped for repayment in `leverageDown`) instead of treating the borrow as a third token, mirroring the previous round's `leverageIn` fix. |
 | V4LE-147 | Fixed | `setTokenConfig` requires `twapTokenAlias.decimals() == token.decimals()` when the alias differs from the token (the raw-unit equivalence the TWAP leg assumes), and unverified TWAP reads re-check the alias against the cached exponent. No new config field. |
+| V4LE-128 | Fixed | Same change as V4LE-95: the two-round effective-price refinement is replaced by the bisection on the exact quote, which converges to the balance root (reproduced the finding's numbers: 0.7424e18 vs the exact 0.7628e18 before the fix). |
