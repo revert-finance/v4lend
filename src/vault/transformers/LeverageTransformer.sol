@@ -85,7 +85,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     /// @param params LeverageUpParams struct containing borrow amount, swap configs, and slippage limits
     /// @custom:security Must be called through vault transform to have borrow access
     function leverageUp(LeverageUpParams calldata params) external {
-        _validateCaller(positionManager, params.tokenId);
+        _validateVaultCaller(params.tokenId);
 
         // collect fees before
         (uint256 amount0, uint256 amount1) =
@@ -224,7 +224,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     /// @param params LeverageDownParams struct containing liquidity to remove, swap configs, and slippage limits
     /// @custom:security Must be called through vault transform
     function leverageDown(LeverageDownParams calldata params) external {
-        _validateCaller(positionManager, params.tokenId);
+        _validateVaultCaller(params.tokenId);
 
         Currency token = Currency.wrap(IVault(msg.sender).asset());
 
@@ -540,7 +540,7 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     /// @dev Removes dummy position liquidity, borrows, swaps, and mints new position with desired ticks
     /// @param params The parameters for the transform
     function leverageInTransform(LeverageInTransformParams calldata params) external {
-        _validateCaller(positionManager, params.tokenId);
+        _validateVaultCaller(params.tokenId);
 
         Currency lendToken = Currency.wrap(IVault(msg.sender).asset());
 
@@ -709,6 +709,19 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
         if (leftover1 > 0) {
             params.token1.transfer(params.recipient, leftover1);
         }
+    }
+
+    /// @dev Every entry point of this transformer treats `msg.sender` as the vault it borrows from or
+    ///      repays to, so only a registered vault inside its transform of `tokenId` may call them. The
+    ///      generic `_validateCaller` also admits the NFT owner, which for these entries would let any
+    ///      contract holding a PositionManager NFT pose as the vault (a no-op `borrow`, an arbitrary
+    ///      `asset`) and have the transformer drain the NFT plus any balance it holds to a recipient of
+    ///      the caller's choosing (V4LE-117).
+    function _validateVaultCaller(uint256 tokenId) internal view {
+        if (!vaults[msg.sender]) {
+            revert Unauthorized();
+        }
+        _validateCaller(positionManager, tokenId);
     }
 
     /// @notice Callback for receiving ERC721 tokens
