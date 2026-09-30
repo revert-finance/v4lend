@@ -239,6 +239,8 @@ contract AutoLend is Automator {
         if (!config.isActive) {
             revert NotConfigured();
         }
+        // the re-entry mint / increase forwards this hookData: a hook remint claim may only name this position
+        _checkRemintClaim(params.hookData, params.tokenId);
 
         address posOwner = _requireNonVaultPosition(params.tokenId);
 

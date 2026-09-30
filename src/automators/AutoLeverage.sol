@@ -131,6 +131,7 @@ contract AutoLeverage is Automator {
         if (!config.isActive) {
             revert NotConfigured();
         }
+        _checkRemintClaim(params.increaseLiquidityHookData, params.tokenId);
 
         IVault vault = IVault(msg.sender);
         (uint256 currentDebt, uint256 fullValue, uint256 collateralValue,,) = vault.loanInfo(params.tokenId);

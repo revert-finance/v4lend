@@ -108,6 +108,8 @@ contract AutoRange is Automator {
         if (config.lowerTickDelta == 0 && config.upperTickDelta == 0) {
             revert NotConfigured();
         }
+        // a hook remint claim in the mint hookData may only name the position being replaced
+        _checkRemintClaim(params.mintHookData, params.tokenId);
 
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
 

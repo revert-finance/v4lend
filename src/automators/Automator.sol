@@ -34,6 +34,12 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     /// @notice Protocol fee recipient for automator fees
     address internal _protocolFeeRecipient;
 
+    /// @dev Tag of a RevertHook remint-migration claim carried in mint / increase hookData
+    ///      (`abi.encodePacked(REMINT_MIGRATION_TAG, oldTokenId)`, 36 bytes; RevertHookState.REMINT_MIGRATION_TAG).
+    ///      The hook honours such a claim when the PositionManager locker - an automator - is approved on the
+    ///      old token, so an automator must only forward a claim naming the token it is executing on.
+    bytes4 internal constant REMINT_MIGRATION_TAG = bytes4(keccak256("RevertHookRemintMigration(uint256)"));
+
     constructor(
         IPositionManager _positionManager,
         address _universalRouter,
@@ -177,6 +183,26 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
             }
         }
         return _routerSwap(params);
+    }
+
+    /// @dev Operator-supplied hookData reaches the PositionManager mint / increase with this contract as the
+    ///      locker. Owners grant automators a blanket `setApprovalForAll`, so a tagged remint claim naming any
+    ///      drained position of any such owner would pass the hook's authority check and migrate that
+    ///      position's hook state (config, swap protection, carried fee) onto the token minted for the
+    ///      position actually being executed. A claim is only forwarded when it names `tokenId`, the position
+    ///      this execution drains and replaces (V4LE-115; mirrors V4Utils._checkRemintClaim). Untagged
+    ///      hookData is passed through untouched.
+    function _checkRemintClaim(bytes memory hookData, uint256 tokenId) internal pure {
+        if (hookData.length != 36 || bytes4(hookData) != REMINT_MIGRATION_TAG) {
+            return;
+        }
+        uint256 claimed;
+        assembly ("memory-safe") {
+            claimed := mload(add(hookData, 36))
+        }
+        if (claimed != tokenId) {
+            revert Unauthorized();
+        }
     }
 
     /// @notice Callback for receiving ERC721 tokens

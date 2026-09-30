@@ -1075,4 +1075,26 @@ contract AutoLendTest is AutomatorTestBase {
         assertEq(usdcLendVault.balanceOf(address(lend2)), 0);
         assertEq(lend2.custodiedShares(address(usdcLendVault)), 0);
     }
+
+    // --- V4LE-115 (AutoLend twin of the AutoRange finding) ---
+
+    /// @notice V4LE-115: the re-entry mint / increase forwards the operator's hookData with AutoLend as the
+    ///         PositionManager locker, so a tagged RevertHook remint claim could name any drained position of
+    ///         any owner who granted AutoLend the blanket approval. A claim may only name this position.
+    function testV4LE115_WithdrawRefusesARemintClaimNamingAnotherToken() public {
+        (uint256 tokenId,,) = _lendWhaleUsdcPosition();
+        bytes4 tag = bytes4(keccak256("RevertHookRemintMigration(uint256)"));
+
+        AutoLend.WithdrawParams memory params = _withdrawParams(tokenId);
+        params.hookData = abi.encodePacked(tag, tokenId + 1);
+        vm.prank(operator);
+        vm.expectRevert(Constants.Unauthorized.selector);
+        autoLend.withdraw(params);
+
+        // a claim naming this very position is forwarded (this pool has no hook, so it is simply ignored)
+        params.hookData = abi.encodePacked(tag, tokenId);
+        _withdraw(operator, params);
+        (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
+        assertEq(sharesAfter, 0, "withdraw with a self-claim completes");
+    }
 }
