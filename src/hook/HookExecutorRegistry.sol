@@ -4,7 +4,12 @@ import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
 
 /// @notice Governance admits reviewed executors with restricted caller policies.
 /// @dev Do not admit public routers or upgradeable executors. A code hash cannot attest to
-/// mutable proxy implementations or to the executor's authorization semantics.
+/// mutable proxy implementations or to the executor's authorization semantics: an EIP-1967 proxy
+/// keeps its shell hash across implementation upgrades, so admission is checked once at
+/// registration (bidNext / startLease / buyout) and cannot detect a later upgrade. The live
+/// control for an admitted executor that changes behaviour is the controllers' denylist
+/// (setExecutorDenied), which the discount path re-reads on every one of the executor's swaps
+/// (V4LE-105).
 abstract contract HookExecutorRegistry is HookOwnedControllerBase {
     mapping(address executor => bytes32 codeHash) public admittedExecutorCodeHash;
     event ExecutorAdmissionSet(address indexed executor, bytes32 codeHash);

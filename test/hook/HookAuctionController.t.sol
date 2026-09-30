@@ -724,6 +724,47 @@ contract HookAuctionControllerTest is BaseTest {
         assertApproxEqRel(outExpired, outOther, 1e12, "discount must end with the epoch");
     }
 
+    /// @notice V4LE-105: admission binds address + code hash, which cannot bind a proxy's
+    ///         implementation. The denylist must therefore cut a standing winner's discount off
+    ///         at once, on both the synced and the same-transaction memo path, and re-allowing
+    ///         restores it for the rest of the epoch.
+    function testV4LE105_DeniedWinnerLosesDiscountMidEpoch() public {
+        _bid(bidderA, address(winnerSwapper), 1e18);
+        _warpToEpoch(1);
+        uint256 amountIn = 1e18;
+
+        uint256 snap = vm.snapshotState();
+        uint256 outWinner = winnerSwapper.swapExactIn(auctionPoolKey, true, amountIn);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        uint256 outOther = otherSwapper.swapExactIn(auctionPoolKey, true, amountIn);
+        vm.revertToState(snap);
+        assertGt(outWinner, outOther, "winner discounted before denial");
+
+        auctionController.setExecutorDenied(address(winnerSwapper), true);
+        snap = vm.snapshotState();
+        uint256 outDenied = winnerSwapper.swapExactIn(auctionPoolKey, true, amountIn);
+        vm.revertToState(snap);
+        assertEq(outDenied, outOther, "denied executor pays the baseline fee at once");
+
+        // a committed touch at this timestamp arms the same-transaction memo: the repeat touch
+        // must apply the denial too
+        otherSwapper.swapExactIn(auctionPoolKey, true, 1);
+        snap = vm.snapshotState();
+        uint256 outDeniedMemo = winnerSwapper.swapExactIn(auctionPoolKey, true, amountIn);
+        vm.revertToState(snap);
+        snap = vm.snapshotState();
+        uint256 outOtherMemo = otherSwapper.swapExactIn(auctionPoolKey, true, amountIn);
+        vm.revertToState(snap);
+        assertEq(outDeniedMemo, outOtherMemo, "memo path applies the denial");
+
+        auctionController.setExecutorDenied(address(winnerSwapper), false);
+        snap = vm.snapshotState();
+        uint256 outRestored = winnerSwapper.swapExactIn(auctionPoolKey, true, amountIn);
+        vm.revertToState(snap);
+        assertGt(outRestored, outOtherMemo, "re-allowing restores the discount within the epoch");
+    }
+
     function testPartialDiscount() public {
         // reconfigure with 50% discount before any bids
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
