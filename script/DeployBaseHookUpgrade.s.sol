@@ -224,6 +224,8 @@ contract DeployBaseHookUpgrade is Script {
         vault.setTransformer(address(revertHook), true);
         oracle.setHookFeeQuoter(address(revertHook), address(feeController));
         vault.setHookAllowList(address(revertHook), true);
+        // Loans on the old hook stay in the vault; the oracle must keep pricing them (V4LE-129).
+        address legacyQuoter = _registerLegacyHookQuoter(oracle, oldHook, deployer);
 
         v4Utils =
             new V4Utils(IPositionManager(POSITION_MANAGER), UNIVERSAL_ROUTER, zeroXAllowanceHolder, IPermit2(PERMIT2));
@@ -243,6 +245,7 @@ contract DeployBaseHookUpgrade is Script {
 
         console.log("LiquidityCalculator:", address(liquidityCalculator));
         console.log("HookFeeController:", address(feeController));
+        console.log("Legacy fee quoter for OLD_HOOK:", legacyQuoter);
         console.log("HookRouteController:", address(routeController));
         console.log("RevertHookSwapActions:", address(swapActions));
         console.log("RevertHookPositionActions:", address(positionActions));
@@ -262,6 +265,34 @@ contract DeployBaseHookUpgrade is Script {
                 | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG
                 | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG
         );
+    }
+
+    /// @dev V4LE-129: positions on the old hook keep their loans after the upgrade, and the net-fee oracle
+    ///      refuses to value a hooked position whose hook has no registered fee quoter, which would leave
+    ///      those loans un-priceable and un-liquidatable. Register one for the old hook: a reviewed quoter
+    ///      from OLD_HOOK_FEE_QUOTER when set, otherwise a HookFeeController bound to the old hook with the
+    ///      old hook's LP fee (OLD_HOOK_LP_FEE_BPS, read it from the old fee controller) provided the old
+    ///      hook exposes the fee-state getters that quoter reads (positionStates, pendingProtocolFees).
+    ///      An old hook without them needs a purpose-built quoter; the script refuses to guess.
+    function _registerLegacyHookQuoter(V4Oracle oracle, address oldHook, address deployer)
+        private
+        returns (address quoter)
+    {
+        quoter = vm.envOr("OLD_HOOK_FEE_QUOTER", address(0));
+        if (quoter == address(0)) {
+            (bool okStates, bytes memory states) =
+                oldHook.staticcall(abi.encodeWithSignature("positionStates(uint256)", uint256(0)));
+            (bool okPending, bytes memory pending) =
+                oldHook.staticcall(abi.encodeWithSignature("pendingProtocolFees(uint256)", uint256(0)));
+            require(
+                okStates && states.length == 8 * 32 && okPending && pending.length == 2 * 32,
+                "DeployBaseHookUpgrade: OLD_HOOK lacks the fee-state getters; set OLD_HOOK_FEE_QUOTER"
+            );
+            uint16 oldLpFeeBps = uint16(vm.envUint("OLD_HOOK_LP_FEE_BPS"));
+            quoter = address(new HookFeeController(oldHook, deployer, oldLpFeeBps, 0));
+        }
+        oracle.setHookFeeQuoter(oldHook, quoter);
+        require(oracle.hookFeeQuoters(oldHook) == quoter, "DeployBaseHookUpgrade: legacy quoter not registered");
     }
 
     function _findHookSalt(bytes memory creationCodeWithArgs) private view returns (address hookAddress, bytes32 salt) {
