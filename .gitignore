@@ -13,6 +13,8 @@ docs/*
 !docs/
 !docs/deployment-checklist.md
 !docs/hook-hierarchy.md
+# audit handoff, fix records and findings ledgers are part of the repository
+!docs/audit-*.md
 
 # Dotenv file
 .env
