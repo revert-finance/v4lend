@@ -58,6 +58,7 @@ contract AutoExit is Automator {
 
     struct ExecuteParams {
         uint256 tokenId;
+        // exit-direction swap: sells the triggered side into the other token
         bytes swapData;
         uint256 amountRemoveMin0;
         uint256 amountRemoveMin1;
@@ -65,6 +66,12 @@ contract AutoExit is Automator {
         uint256 deadline;
         bytes hookData;
         uint64 rewardX64;
+        // vault positions only: route from the non-lend leg into the lend token, used before the exit swap
+        // when the lend leg (net proceeds plus its reserved reward) does not cover the debt. Capped to that
+        // leg's gross proceeds; its net proceeds are consumed first, its reserved reward only for the rest.
+        uint256 repayAmountIn;
+        uint256 repayAmountOutMin;
+        bytes repaySwapData;
     }
 
     struct ExecuteState {
@@ -165,7 +172,7 @@ contract AutoExit is Automator {
         state.amount0 = _netBalanceAfterReserved(token0, state.protocolFee0);
         state.amount1 = _netBalanceAfterReserved(token1, state.protocolFee1);
 
-        // Resolve owner; for vault positions, repay debt before swap
+        // Resolve owner; for vault positions, settle the debt before the exit swap
         if (isVaultCall) {
             IVault vault = IVault(msg.sender);
             state.owner = vault.ownerOf(params.tokenId);
@@ -178,13 +185,8 @@ contract AutoExit is Automator {
                 if (debt > 0) {
                     revert InvalidConfig();
                 }
-            }
-
-            // Swap sells (isAbove ? token1 : token0) and buys the other
-            // Repay before swap when lend token is on the sell side (or no swap)
-            bool repayBeforeSwap = !isSwap || (isAbove ? (state.lendToken == token1) : (state.lendToken == token0));
-            if (repayBeforeSwap) {
-                _repayVaultDebt(vault, params.tokenId, token0, token1, state);
+            } else {
+                _settleVaultDebt(params, config, vault, token0, token1, state);
             }
         } else {
             state.owner = IERC721(address(positionManager)).ownerOf(params.tokenId);
@@ -213,7 +215,7 @@ contract AutoExit is Automator {
             }
         }
 
-        // Post-swap repayment: when swap produced the lend token, repay remaining debt
+        // Post-swap repayment: when the exit swap produced the lend token, repay any remaining debt
         if (isVaultCall) {
             bool repayAfterSwap =
                 isSwap && (isAbove ? (state.lendToken == token0) : (state.lendToken == token1));
@@ -239,6 +241,62 @@ contract AutoExit is Automator {
             Currency.unwrap(token0),
             Currency.unwrap(token1)
         );
+    }
+
+    /// @dev Settles the vault debt before the exit-direction swap, with the same seniority as the hook's
+    ///      own auto-exit: the debt comes first, from both legs, ahead of the exit direction and of the
+    ///      reward. When the lend leg (net proceeds plus its reserved reward) cannot cover the debt, the
+    ///      other leg is converted into the lend token through the operator's repay route (V4LE-134: the
+    ///      exit swap runs away from the lend token when it sits on the sold side; V4LE-102/100: the
+    ///      reward reserved in the sold leg was never reachable for a lend-side shortfall). That leg's
+    ///      net proceeds are consumed first and its reserved reward only for the remainder, reducing the
+    ///      reward by exactly what the debt needed. The exit swap then consolidates what is left.
+    function _settleVaultDebt(
+        ExecuteParams calldata params,
+        PositionConfig memory config,
+        IVault vault,
+        Currency token0,
+        Currency token1,
+        ExecuteState memory state
+    ) internal {
+        (uint256 debt,,,,) = vault.loanInfo(params.tokenId);
+        if (debt == 0) {
+            return;
+        }
+        bool lendIsToken0 = state.lendToken == token0;
+        uint256 lendGross = lendIsToken0 ? state.amount0 + state.protocolFee0 : state.amount1 + state.protocolFee1;
+
+        if (lendGross < debt && params.repayAmountIn > 0) {
+            uint256 otherNet = lendIsToken0 ? state.amount1 : state.amount0;
+            uint256 otherReserved = lendIsToken0 ? state.protocolFee1 : state.protocolFee0;
+            uint256 amountIn = params.repayAmountIn;
+            if (amountIn > otherNet + otherReserved) {
+                amountIn = otherNet + otherReserved;
+            }
+            (uint256 amountInDelta, uint256 amountOutDelta) = _routerSwapWithSlippageCheck(
+                RouterSwapParams(
+                    lendIsToken0 ? token1 : token0,
+                    state.lendToken,
+                    amountIn,
+                    params.repayAmountOutMin,
+                    params.repaySwapData
+                ),
+                lendIsToken0 ? config.token1SlippageBps : config.token0SlippageBps
+            );
+            uint256 fromNet = amountInDelta > otherNet ? otherNet : amountInDelta;
+            uint256 fromReward = amountInDelta - fromNet;
+            if (lendIsToken0) {
+                state.amount1 = otherNet - fromNet;
+                state.protocolFee1 = otherReserved - fromReward;
+                state.amount0 += amountOutDelta;
+            } else {
+                state.amount0 = otherNet - fromNet;
+                state.protocolFee0 = otherReserved - fromReward;
+                state.amount1 += amountOutDelta;
+            }
+        }
+
+        _repayVaultDebt(vault, params.tokenId, token0, token1, state);
     }
 
     /// @dev Settles the vault debt from the lend-token proceeds. The debt is senior to the automation

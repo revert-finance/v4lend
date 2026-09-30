@@ -49,7 +49,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         address randomUser = makeAddr("random");
@@ -169,7 +172,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         _execute(operator, params);
@@ -216,7 +222,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         vm.prank(operator);
@@ -255,7 +264,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
         _execute(operator, params);
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "exit executes at the exact lower trigger tick");
@@ -300,7 +312,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         _execute(operator, params);
@@ -345,7 +360,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: maxReward
+            rewardX64: maxReward,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         _execute(operator, params);
@@ -398,7 +416,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         vm.prank(operator);
@@ -446,7 +467,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         uint256 ethBefore = WHALE_ACCOUNT.balance;
@@ -503,7 +527,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: maxReward
+            rewardX64: maxReward,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         probe.configure(address(autoExit), abi.encodeWithSignature("positionConfigs(uint256)", tokenId), 0);
@@ -558,7 +585,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         _executeWithVault(params);
@@ -617,7 +647,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: reward
+            rewardX64: reward,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
         _executeWithVault(params);
 
@@ -668,7 +701,10 @@ contract AutoExitTest is AutomatorTestBase {
                 amountOutMin: 0,
                 deadline: block.timestamp,
                 hookData: bytes(""),
-                rewardX64: 0
+                rewardX64: 0,
+                repayAmountIn: 0,
+                repayAmountOutMin: 0,
+                repaySwapData: bytes("")
             })
         );
         assertEq(positionManager.getPositionLiquidity(tokenId), 0, "zero-debt third-token position exited");
@@ -747,7 +783,10 @@ contract AutoExitTest is AutomatorTestBase {
             amountOutMin: 0,
             deadline: block.timestamp,
             hookData: bytes(""),
-            rewardX64: 0
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
         });
 
         _executeWithVault(params);
@@ -755,5 +794,126 @@ contract AutoExitTest is AutomatorTestBase {
         // Position should have 0 liquidity
         uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
         assertEq(liquidityAfter, 0, "Position should have 0 liquidity after vault exit");
+    }
+
+    // --- V4LE-134 / V4LE-102 / V4LE-100: debt is senior to the exit direction and to the reward ---
+
+    /// @dev An in-range USDC/WETH position (both legs hold value) in the USDC vault, borrowed to 88% of its
+    ///      value: more than either leg alone but well below the combined proceeds.
+    function _inRangeVaultPositionWithHeavyDebt(uint64 maxRewardX64, bool upperTrigger, bool swapOnTrigger)
+        internal
+        returns (uint256 tokenId, uint256 fullValue)
+    {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        tokenId = _createNarrowPosition(poolKey);
+        _depositToVault(50000000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        // the trigger is already reached at the current tick without moving the price, so the position
+        // still holds both tokens when it is removed
+        int24 tick = _getCurrentTick(poolKey);
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: !upperTrigger && swapOnTrigger,
+            token1Swap: upperTrigger && swapOnTrigger,
+            token0TriggerTick: upperTrigger ? tick - 1200 : tick + 600,
+            token1TriggerTick: upperTrigger ? tick - 600 : tick + 1200,
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: maxRewardX64,
+            onlyFees: false
+        });
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoExit), true);
+
+        (, fullValue,,,) = vault.loanInfo(tokenId);
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, fullValue * 88 / 100);
+    }
+
+    function _exitParams(uint256 tokenId, bytes memory swapData, uint64 rewardX64)
+        internal
+        view
+        returns (AutoExit.ExecuteParams memory)
+    {
+        return AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: swapData,
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: rewardX64,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
+        });
+    }
+
+    /// @notice V4LE-134: a lower-trigger stop loss sells the lend token (USDC) into WETH. Settlement only
+    ///         used the USDC leg, and the exit swap then moved away from the lend token, so a debt above the
+    ///         USDC leg could never be settled although the WETH leg covered it. Like the hook's own path,
+    ///         the other leg is converted into the lend token first, the debt repaid, and only the remainder
+    ///         consolidated into the configured exit token.
+    function testV4LE134_LowerTriggerExitRepaysLendSideDebtFromTheOtherLeg() public {
+        (uint256 tokenId,) = _inRangeVaultPositionWithHeavyDebt(0, false, true);
+        AutoExit.ExecuteParams memory params =
+            _exitParams(tokenId, _createSwapDataWithRecipient(USDC_ADDRESS, WETH_ADDRESS, address(autoExit)), 0);
+
+        // without a repay route the USDC leg alone cannot settle the debt: the vault's health check rolls
+        // the emptied, still indebted position back
+        vm.prank(operator);
+        vm.expectRevert(Constants.CollateralFail.selector);
+        autoExit.executeWithVault(params, address(vault));
+
+        params.repayAmountIn = type(uint256).max; // the whole WETH leg, capped on-chain to its proceeds
+        params.repaySwapData = _createSwapDataWithRecipient(WETH_ADDRESS, USDC_ADDRESS, address(autoExit));
+        uint256 ownerWethBefore = weth.balanceOf(WHALE_ACCOUNT);
+        uint256 ownerUsdcBefore = usdc.balanceOf(WHALE_ACCOUNT);
+
+        _executeWithVault(params);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "position exited");
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "debt settled from both legs");
+        assertGt(weth.balanceOf(WHALE_ACCOUNT), ownerWethBefore, "equity consolidated into the exit token");
+        assertEq(usdc.balanceOf(WHALE_ACCOUNT), ownerUsdcBefore, "no lend token left for the owner");
+    }
+
+    /// @notice V4LE-102 / V4LE-100: an upper-trigger stop loss sells WETH into USDC (the lend token). The reward
+    ///         reserved in the sold WETH leg was never available for a USDC-side shortfall, so a debt that the
+    ///         gross proceeds cover could not be settled. The repay route converts the sold leg including its
+    ///         reserved reward, and the reward is reduced by what the debt needed (the V4LE-14 rule for the
+    ///         lend leg now holds for both legs).
+    function testV4LE102_UpperTriggerExitUsesTheSoldLegRewardForTheDebt() public {
+        uint64 reward = uint64(Q64 * 3 / 10); // 30% of the proceeds
+        (uint256 tokenId, uint256 fullValue) = _inRangeVaultPositionWithHeavyDebt(reward, true, true);
+        bytes memory wethToUsdc = _createSwapDataWithRecipient(WETH_ADDRESS, USDC_ADDRESS, address(autoExit));
+        AutoExit.ExecuteParams memory params = _exitParams(tokenId, wethToUsdc, reward);
+
+        // exit swap of the net WETH plus the whole USDC leg is short of the debt by the WETH-side reward
+        vm.prank(operator);
+        vm.expectRevert(Constants.CollateralFail.selector);
+        autoExit.executeWithVault(params, address(vault));
+
+        params.repayAmountIn = type(uint256).max;
+        params.repaySwapData = wethToUsdc;
+        uint256 recipientUsdcBefore = usdc.balanceOf(protocolFeeRecipient);
+        uint256 recipientWethBefore = weth.balanceOf(protocolFeeRecipient);
+
+        _executeWithVault(params);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "position exited");
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "debt settled");
+        uint256 rewardPaid = usdc.balanceOf(protocolFeeRecipient) - recipientUsdcBefore;
+        assertGt(rewardPaid, 0, "the reward is capped to the residual, not dropped");
+        assertLt(rewardPaid, fullValue * 3 / 10, "reward reduced by what the debt needed");
+        assertEq(weth.balanceOf(protocolFeeRecipient), recipientWethBefore, "the sold-leg reward went to the debt");
     }
 }
