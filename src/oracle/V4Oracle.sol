@@ -875,6 +875,12 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     ///      operation (the vault's liquidation and full withdrawal), and the oracle does not certify it as
     ///      collateral. The state is reachable without any oracle attack, by the pool price crossing a range
     ///      whose other-side principal is that large.
+    ///      The bound is enforced on the composition at the oracle-derived price (what is valued) and on the
+    ///      composition at the live pool price (what v4 settles a decrease at). The live price may sit up to
+    ///      `maxPoolPriceDifference` from the derived one, and at a high sqrt price that is enough for the
+    ///      live-side principal of a range to be orders of magnitude larger than the derived-side one; a
+    ///      position that passes only the derived check could be borrowed against while every liquidation
+    ///      removal, sized from the derived amounts, reverts at v4's narrowing (V4LE-98).
     /// @param state Complete PositionState struct containing position data and derived price
     /// @return amount0 Calculated amount of token0 based on oracle-derived sqrt price
     /// @return amount1 Calculated amount of token1 based on oracle-derived sqrt price
@@ -892,7 +898,16 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
                 state.sqrtPriceX96Upper, // Upper tick price
                 state.liquidity // Position liquidity
             );
-            if (amount0 >= V4_SETTLEMENT_BOUND || amount1 >= V4_SETTLEMENT_BOUND) {
+            (uint256 liveAmount0, uint256 liveAmount1) = LiquidityAmounts.getAmountsForLiquidity(
+                state.sqrtPriceX96, // Live pool price (what a decrease settles at)
+                state.sqrtPriceX96Lower,
+                state.sqrtPriceX96Upper,
+                state.liquidity
+            );
+            if (
+                amount0 >= V4_SETTLEMENT_BOUND || amount1 >= V4_SETTLEMENT_BOUND
+                    || liveAmount0 >= V4_SETTLEMENT_BOUND || liveAmount1 >= V4_SETTLEMENT_BOUND
+            ) {
                 revert SettlementBoundExceeded();
             }
         }
