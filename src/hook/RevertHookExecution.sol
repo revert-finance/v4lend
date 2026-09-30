@@ -70,12 +70,16 @@ abstract contract RevertHookExecution is RevertHookConfig {
     ) internal view returns (int24 exitTick) {
         if (autoExitIsRelative) {
             (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+            // same saturating arithmetic as _computeTriggerTicksCore, so the fired node and the exit
+            // tick recomputed here always agree (V4LE-130)
             if (isUpperTrigger) {
-                exitTick =
-                    autoExitTickUpper != type(int24).max ? posInfo.tickUpper() + autoExitTickUpper : type(int24).max;
+                exitTick = autoExitTickUpper != type(int24).max
+                    ? _offsetTick(posInfo.tickUpper(), int256(autoExitTickUpper))
+                    : type(int24).max;
             } else {
-                exitTick =
-                    autoExitTickLower != type(int24).min ? posInfo.tickLower() - autoExitTickLower : type(int24).min;
+                exitTick = autoExitTickLower != type(int24).min
+                    ? _offsetTick(posInfo.tickLower(), -int256(autoExitTickLower))
+                    : type(int24).min;
             }
         } else {
             exitTick = isUpperTrigger ? autoExitTickUpper : autoExitTickLower;
