@@ -11,7 +11,7 @@ carry the finding id in the commit subject; regression tests are named `testV4LE
 |---|---|---|
 | V4LE-97 | Fixed | `FlashloanLiquidator.liquidate` refuses the loan owner as caller, mirroring the vault's refusal of the owner as liquidator and recipient. The helper is the vault's caller and recipient and pays its own caller, so without this it was the documented bypass. Test: `test/vault/FlashloanLiquidatorSelfLiquidation.t.sol`. |
 | V4LE-91 | Rejected | An address check cannot bind the final beneficiary through an arbitrary intermediary; that is accepted policy (V4LE-18). The reserve cost of a reserve-backed liquidation is `debt - liquidatorCost` for any liquidator, so a borrower liquidating through an intermediary costs reserves exactly what an independent liquidator costs. The check decides who collects the incentive; it is not a solvency boundary. Documented in `docs/audit-deferred-findings.md`. |
-| V4LE-98 | see oracle section | |
+| V4LE-98 | Fixed | `_getAmounts` bounds the position's composition at the live pool price as well as at the feed-derived price (one extra `getAmountsForLiquidity`), since v4 settles a DECREASE at live `slot0` with `toInt128`. A position whose live-side amount v4 could not pay out is no longer certified, and the vault's liquidation sizing cannot select a removal v4 rejects. Test reproduces v4's `SafeCastOverflow` at a 1.8% deviation. |
 
 ## Medium
 
@@ -28,6 +28,11 @@ carry the finding id in the commit subject; regression tests are named `testV4LE
 | V4LE-117 | Fixed | Every `LeverageTransformer` entry that treats `msg.sender` as the vault (`leverageUp`, `leverageDown`, `leverageInTransform`) now requires `vaults[msg.sender]` before the generic caller check; an NFT-owning contract can no longer pose as a vault. |
 | V4LE-115 | Fixed | `Automator._checkRemintClaim` (the V4Utils twin) binds a tagged RevertHook remint claim in forwarded hookData to the executed token in `AutoRange` (mint), `AutoLend.withdraw` (re-entry mint/increase) and `AutoLeverage` (increase); a claim naming another owner's drained position reverts. |
 | V4LE-93 | Fixed | `AuctionArbExecutor` ownership is fixed at deployment: `transferOwnership` / `renounceOwnership` revert `OwnershipNotTransferable`, so an admitted instance cannot be handed to a public forwarder; a new operator needs a new admitted instance. The controllers' live denylist re-check is V4LE-105. |
+| V4LE-139 | Fixed | `getLiquidityForValue` sizes the full liquidity when the floored principal value is zero while more value is needed (sub-Q96 leg plus carried obligation, or dust legs with a third-token quote), instead of a division-by-zero panic that blocked the liquidation. |
+| V4LE-104 | Fixed | `getLiquidityForValue` also returns the raw reference-token prices and the quote price; `V4Vault._sendPositionValue` values the received amounts as `mulDiv(received, price, quote)` with no Q96 rounding, so a leg whose normalized price floored to zero no longer escapes the payout cap. `IV4Oracle.getLiquidityForValue` now returns a 4-tuple. |
+| V4LE-135 | Fixed | `_normalizeChainlinkPrice` forms the 512-bit product with `FullMath.mulDiv`; results are bit-identical where the old checked product did not overflow. |
+| V4LE-113 | Fixed | `_feeObligation` rejects a hook-quoted obligation at or above `2^127` with `SettlementBoundExceeded`; the hook takes the whole obligation in the INCREASE(0) and narrows it with `toInt128`, so such an obligation could never be settled. |
+| V4LE-112 | Fixed | Unverified single-source reads always run the reference-token decimals check and, when the reference price comes from the cache, re-check the reference feed's decimals; verified two-source reads still pay nothing. |
 
 ## Low
 
@@ -41,3 +46,4 @@ carry the finding id in the commit subject; regression tests are named `testV4LE
 |---|---|---|
 | V4LE-151 | Rejected (operational) | Already tracked as V4LE-73: provider-side revocation of the historical key is an operational action; no repository change can prove it. CI no longer uses any RPC credential (PR #43). |
 | V4LE-110 | Fixed | `leverageUp` resolves the native alias for a WETH-asset vault on a native pool (borrowed WETH unwrapped into the pool side, native leg wrapped for repayment in `leverageDown`) instead of treating the borrow as a third token, mirroring the previous round's `leverageIn` fix. |
+| V4LE-147 | Fixed | `setTokenConfig` requires `twapTokenAlias.decimals() == token.decimals()` when the alias differs from the token (the raw-unit equivalence the TWAP leg assumes), and unverified TWAP reads re-check the alias against the cached exponent. No new config field. |
