@@ -690,7 +690,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
                 chainlinkReferencePriceX96
             );
         } else if (referenceTokenDecimals < feedConfig.tokenDecimals) {
-            priceX96 = chainlinkPriceX96 * Q96 / chainlinkReferencePriceX96
+            // 512-bit product: a valid in-domain ratio (a 6-decimal reference against an 18-decimal token
+            // at a raw price of 2^64 has a feed price of ~2^200 in Q96) overflowed the checked
+            // `chainlinkPriceX96 * Q96` although the quotient fits (V4LE-135). Dividing by the reference
+            // price first and by the decimal scale second yields the same floor as one division.
+            priceX96 = FullMath.mulDiv(chainlinkPriceX96, Q96, chainlinkReferencePriceX96)
                 / (10 ** (feedConfig.tokenDecimals - referenceTokenDecimals));
         } else {
             priceX96 = FullMath.mulDiv(chainlinkPriceX96, Q96, chainlinkReferencePriceX96);
