@@ -39,6 +39,11 @@ carry the finding id in the commit subject; regression tests are named `testV4LE
 | V4LE-145 | Fixed | The floored Q96 required-ratio is gone: range balance is judged by comparing the liquidities the two amounts would fund (`L0` vs `L1`), which has no zero-flooring intermediate and saturates on overflow, so a near-`MIN_TICK` plan no longer divides by zero. |
 | V4LE-146 | Fixed | Same change: the direction check uses the liquidity comparison, so a low-price token0 surplus is no longer truncated to zero and the rebalance is planned in the right direction. |
 | V4LE-150 | Fixed | Both analytic solvers use a cancellation-free root form (`(b + sqrtD) / 2a` for `b >= 0`, `2c / (sqrtD + |b|)` for `b < 0`), which yields the linear root when `a == 0` and fixes the floored-discriminant cancellation for small `a`; roots are clamped to the current price and the range. |
+| V4LE-99 | Rejected | The pending bucket releases `ceil(pace * min(elapsed, L) / L)` with `pace >= totalDrip` of the parking epoch, while the active path vests `totalDrip * elapsed / L`: for any outage inside one epoch the amount an in-range LP receives at recovery is the same (or larger) through the pending bucket, so routing the post-failure remainder there does not change the described JIT exposure. That exposure is the documented point-in-time tradeoff of donate-based distribution and is identical to an LP entering a throttle window of an untouched pool; cross-epoch remainders already go to pending via `_carryEpoch`. The lease controller is the same. No change. |
+| V4LE-126 | Fixed | With `autoLendToleranceTick == 0` the deposit trigger and the re-armed withdrawal trigger sat on the same bucket and the strictly exclusive cursor search skipped the recovery. Zero tolerance now rests the withdrawal one spacing toward the range (`tickLower` / `tickUpper - spacing`), a one-spacing hysteresis; positive aligned tolerances never collided and are unchanged. |
+| V4LE-105 | Fixed | Both controllers' `beforeSwap` re-check `!executorDenied[executor]` at discount time (after the `sender == executor` short-circuit), so governance can cut a mutated proxy off immediately; codehash admission cannot bind upgradeable code, documented on the registry. One cold SLOAD on the winner's swaps; gas snapshots regenerated. |
+| V4LE-154 | Fixed | `_checkAndExecuteImmediate` requires the live tick inside `oracleTick +- maxTicksFromOracle` before dispatching any immediate action (first registration included), reverting `OutsideOracleWindow()`; refusing rather than skipping avoids arming a satisfied trigger behind the cursor. Oracle-bound helpers are shared with `_afterSwap`. |
+| V4LE-131 | Fixed | `_validateTickAlignedConfig` rejects a negative `autoLendToleranceTick`, matching the standalone AutoLend. |
 
 ## Low
 
@@ -46,6 +51,12 @@ carry the finding id in the commit subject; regression tests are named `testV4LE
 |---|---|---|
 | V4LE-100 | Fixed | Same root cause and fix as V4LE-102. |
 | V4LE-140 | Fixed | The bitmap walk forms the empty-word far edge in `int256` and clamps it to the tick domain; `_locateNextTick` stops at the bound, so a max-spacing route can no longer wrap into the domain and quote phantom depth. |
+| V4LE-130 | Fixed | Range limits and relative exit offsets are applied in `int256` and saturate at the `int24` sentinels (a threshold past every tick is a disabled trigger) in `_computeTriggerTicksCore`, `_calculateRangeTriggerTicks` and `_calculateExitTick`, so a valid large offset no longer overflows on the remint and strips the replacement of its triggers. |
+
+## Hook bytecode
+
+The three hook fixes cost 282 bytes; room was made by moving `setSwapProtectionConfig`'s validation into the
+migration sidecar (same external ABI). RevertHook is at 24,060 bytes (516 under the limit).
 
 ## Informational
 
