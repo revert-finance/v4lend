@@ -260,4 +260,53 @@ contract LeverageTransformerVaultEntriesTest is BaseTest {
         vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
         transformer.leverageDown(_leverageDownParams(tokenId, 1));
     }
+
+    // --- V4LE-110 ---
+
+    /// @notice V4LE-110: leverageUp compared the vault asset (WETH) with the raw pool currencies, so in a
+    ///         native pool the borrowed WETH matched neither leg and was swept to the recipient as a "third
+    ///         token" while the debt stayed with the position. The borrow must join the native leg.
+    function testV4LE110_LeverageUpUnwrapsBorrowIntoNativePool() public {
+        uint256 tokenId = _openNativeOnlyLeveragedPosition(50e18);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
+        uint256 userWethBefore = weth.balanceOf(user);
+        uint256 userEthBefore = user.balance;
+
+        // require nearly the whole borrow to land in the position: a swept borrow would add nothing
+        vm.prank(user);
+        vault.transform(
+            tokenId, address(transformer), abi.encodeCall(transformer.leverageUp, (_leverageUpParams(tokenId, 10e18, 9.9e18)))
+        );
+
+        assertGt(positionManager.getPositionLiquidity(tokenId), liquidityBefore, "borrow added as liquidity");
+        (uint256 debt,,,,) = vault.loanInfo(tokenId);
+        assertEq(debt, 60e18, "debt grew by the borrow");
+        assertEq(weth.balanceOf(user), userWethBefore, "no borrowed WETH swept to the recipient");
+        assertLt(user.balance - userEthBefore, 0.1e18, "at most rounding dust returned");
+        _assertTransformerFlat();
+    }
+
+    /// @notice V4LE-110 (same root cause on the way down): leverageDown found no lend leg in a native pool, so
+    ///         the removed ETH could not repay the WETH debt and was handed to the recipient instead. The native
+    ///         leg is wrapped and repaid; only what exceeds the debt goes back to the recipient as ETH.
+    function testV4LE110_LeverageDownRepaysFromNativeLeg() public {
+        uint256 tokenId = _openNativeOnlyLeveragedPosition(50e18);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        (uint256 debtBefore,,,,) = vault.loanInfo(tokenId);
+        uint256 userEthBefore = user.balance;
+        uint256 vaultWethBefore = weth.balanceOf(address(vault));
+
+        vm.prank(user);
+        vault.transform(
+            tokenId, address(transformer), abi.encodeCall(transformer.leverageDown, (_leverageDownParams(tokenId, liquidity / 2)))
+        );
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        uint256 repaid = debtBefore - debtAfter;
+        assertGt(repaid, 20e18, "removed native leg repaid the WETH debt");
+        assertEq(weth.balanceOf(address(vault)) - vaultWethBefore, repaid, "vault received the wrapped repayment");
+        assertEq(user.balance, userEthBefore, "nothing left over below the debt");
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - liquidity / 2, "half removed");
+        _assertTransformerFlat();
+    }
 }
