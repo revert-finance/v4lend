@@ -89,6 +89,10 @@ abstract contract RevertHookState is RevertHookAccess {
     /// @notice A configured, inactive position was re-activated by an external liquidity add while
     ///         one of its triggers is already satisfied at the live tick (V4LE-70).
     error TriggerAlreadySatisfied();
+    /// @notice An immediate action at configuration time was refused because the pool's live tick
+    ///         is outside oracleTick +- maxTicksFromOracle, the bound the swap-time walk applies to
+    ///         every dispatch (V4LE-154). Retry once the pool is back inside the window.
+    error OutsideOracleWindow();
 
     // ==================== Events ====================
 

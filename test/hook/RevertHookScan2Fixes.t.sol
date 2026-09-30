@@ -149,6 +149,64 @@ contract RevertHookScan2FixesTest is RevertHookTest {
         assertEq(upperHead, maxUsable, "range trigger at the clamped bound");
     }
 
+    // ==================== V4LE-154: immediate action outside the oracle window ====================
+
+    /// @notice The first position configuration in a pool executed a satisfied trigger (or an
+    ///         off-target AUTO_LEVERAGE) immediately with no oracle bound: the walk's window did not
+    ///         apply and the same-pool swap skips _validateSwapPoolPrice. It must refuse while the
+    ///         live tick is outside oracleTick +- maxTicksFromOracle and run once back inside.
+    function testV4LE154_ImmediateAutoExitRefusedOutsideOracleWindow() public {
+        _moveHookedPoolOutsideOracleWindow();
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+        RevertHookState.PositionConfig memory config = _absoluteExitConfig(tickLower3 - poolKey.tickSpacing);
+
+        vm.expectRevert(abi.encodeWithSignature("OutsideOracleWindow()"));
+        hook.setPositionConfig(token3Id, config);
+        assertGt(positionManager.getPositionLiquidity(token3Id), 0, "nothing executed");
+
+        // back inside the window the satisfied trigger executes at once
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), poolKey);
+        hook.setPositionConfig(token3Id, config);
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "immediate exit ran inside the window");
+    }
+
+    function testV4LE154_ImmediateAutoLeverageRefusedOutsideOracleWindow() public {
+        V4Vault lendVault = _deployLendVault(currency0);
+        IERC20(Currency.unwrap(currency0)).approve(address(lendVault), 2e18);
+        lendVault.deposit(2e18, address(this));
+        IERC721(address(positionManager)).approve(address(lendVault), token2Id);
+        lendVault.create(token2Id, address(this));
+        lendVault.approveTransform(token2Id, address(hook), true);
+        (,, uint256 collateralValue,,) = lendVault.loanInfo(token2Id);
+        lendVault.borrow(token2Id, collateralValue / 10); // far below target: an immediate leverage-up is due
+
+        _moveHookedPoolOutsideOracleWindow();
+        vm.expectRevert(abi.encodeWithSignature("OutsideOracleWindow()"));
+        hook.setPositionConfig(token2Id, _leverageConfig());
+        (uint256 debtAfterRefusal,,,,) = lendVault.loanInfo(token2Id);
+        assertEq(debtAfterRefusal, collateralValue / 10, "no debt mutation outside the window");
+
+        // inside the window the immediate leverage action is dispatched
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), poolKey);
+        vm.recordLogs();
+        hook.setPositionConfig(token2Id, _leverageConfig());
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(
+            _sawIndexed(logs, RevertHookState.AutoLeverage.selector, token2Id)
+                || _sawIndexed(logs, RevertHookState.HookActionFailed.selector, token2Id),
+            "immediate leverage dispatched inside the window"
+        );
+    }
+
+    /// @dev The oracle follows the hookless twin pool (still at tick 0) while the hooked pool is
+    ///      swapped well past maxTicksFromOracle. No trigger is registered yet, so the walk does
+    ///      not run and the cursor stays fresh by construction - the exact first-registration path.
+    function _moveHookedPoolOutsideOracleWindow() internal {
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), nonHookedPoolKey);
+        int24 target = -(hook.maxTicksFromOracle() + 3 * poolKey.tickSpacing);
+        _moveTickDownUntil(target, 5e16, 400);
+    }
+
     // ==================== helpers ====================
 
     struct PositionInfoView {

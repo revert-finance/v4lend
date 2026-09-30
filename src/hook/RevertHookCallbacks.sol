@@ -10,8 +10,6 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {TickLinkedList} from "./lib/TickLinkedList.sol";
 import {PositionModeFlags} from "./lib/PositionModeFlags.sol";
@@ -72,40 +70,6 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeOverride);
     }
 
-    /// @dev Isolates the oracle read so a failing oracle aborts trigger processing (never the swap):
-    ///      the price call is tried directly and bounds-checked before the tick conversion, instead
-    ///      of an external self-call wrapper (saves the call overhead and the extra entrypoint).
-    ///      The bounds are exact ticks: `oracleTick +- _maxTicksFromOracle` with no rounding to the
-    ///      pool's tick spacing, and they are compared against the exact live tick
-    ///      (_outsideOracleWindow). Flooring both sides to the spacing let the effective window grow
-    ///      by up to two spacings less two ticks (399 instead of 100 ticks at spacing 200), so
-    ///      same-pool actions could dispatch materially off-oracle. Bucket rounding belongs to the
-    ///      cursor walk only.
-    function _tryOracleTickBounds(PoolKey calldata key)
-        internal
-        view
-        returns (bool ok, int24 lowerBound, int24 upperBound)
-    {
-        try v4Oracle.getPoolSqrtPriceX96(Currency.unwrap(key.currency0), Currency.unwrap(key.currency1)) returns (
-            uint160 oracleSqrtPriceX96
-        ) {
-            if (oracleSqrtPriceX96 < TickMath.MIN_SQRT_PRICE || oracleSqrtPriceX96 >= TickMath.MAX_SQRT_PRICE) {
-                return (false, 0, 0);
-            }
-            int24 oracleTick = TickMath.getTickAtSqrtPrice(oracleSqrtPriceX96);
-            return (true, oracleTick - _maxTicksFromOracle, oracleTick + _maxTicksFromOracle);
-        } catch {
-            return (false, 0, 0);
-        }
-    }
-
-    /// @dev Exact live tick against the exact oracle bounds. Re-reads slot0 instead of reusing the
-    ///      walk's bucket-rounded `liveTick`: the walk is at its stack limit and the slot is warm.
-    function _outsideOracleWindow(PoolId poolId, int24 lowerBound, int24 upperBound) internal view returns (bool) {
-        int24 tick = _getTick(poolId);
-        return tick > upperBound || tick < lowerBound;
-    }
-
     /// @dev Fail-open value gate for the remove callback: an oracle that reverts (stale feed,
     ///      sequencer grace, pool deviation) must not block withdrawing liquidity from an automated
     ///      position or a vault liquidation of it, so the position simply stays activated (L-01).
@@ -153,7 +117,8 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             return (this.afterSwap.selector, 0);
         }
 
-        (bool oracleOk, int24 lowerOracleBound, int24 upperOracleBound) = _tryOracleTickBounds(key);
+        (bool oracleOk, int24 lowerOracleBound, int24 upperOracleBound) =
+            _tryOracleTickBounds(key.currency0, key.currency1);
         if (!oracleOk) {
             return (this.afterSwap.selector, 0);
         }
