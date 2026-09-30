@@ -192,4 +192,26 @@ contract AuctionArbExecutorTest is BaseTest {
         vm.expectRevert(AuctionArbExecutor.DeadlineExpired.selector);
         executor.executeV4Route(route);
     }
+
+    /// @notice V4LE-93: the controllers admit the executor by address and code hash and then apply the
+    ///         purchased fee override to every swap it sends. A transferable owner could hand the admitted
+    ///         instance to a public forwarder after admission; ownership is therefore fixed at deployment.
+    function testV4LE93_OwnershipIsFixedAtDeployment() public {
+        address forwarder = makeAddr("publicForwarder");
+        assertEq(executor.owner(), address(this));
+
+        vm.expectRevert(AuctionArbExecutor.OwnershipNotTransferable.selector);
+        executor.transferOwnership(forwarder);
+        vm.expectRevert(AuctionArbExecutor.OwnershipNotTransferable.selector);
+        executor.renounceOwnership();
+        assertEq(executor.owner(), address(this), "owner unchanged");
+
+        // a non-owner is still rejected by the ownership guard before reaching the revert above
+        vm.prank(forwarder);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, forwarder));
+        executor.transferOwnership(forwarder);
+
+        // the admitted route still executes only for the deployment owner
+        assertGt(executor.executeV4Route(_arbRoute(1e18, 1)), 0, "owner can still run the admitted executor");
+    }
 }
