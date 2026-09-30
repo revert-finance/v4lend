@@ -978,21 +978,12 @@ contract LiquidityCalculator is ILiquidityCalculator {
                 c := shl(1, c)
             }
         }
-        // Solve quadratic: sqrtPriceFinal = (sqrt(b^2 + 4ac) + b) / 2a
-        (bool realRoot, uint256 root) = _sqrtDiscriminant(a, b, c);
-        if (!realRoot) {
-            return uint160(sqrtPrice);
-        }
-        unchecked {
-            uint256 num = root + b;
-            assembly {
-                sqrtPriceFinal := div(shl(96, num), a)
-            }
-        }
-        // Ensure final price doesn't exceed current price
-        assembly {
-            sqrtPriceFinal := xor(sqrtPrice, mul(xor(sqrtPrice, sqrtPriceFinal), lt(sqrtPriceFinal, sqrtPrice)))
-        }
+        // The root lies in [sqrtLower, sqrtPrice]: the direction check that selected this solver
+        // holds token0 in surplus at sqrtPrice and the range wants only token0 at sqrtLower.
+        uint256 root = _positiveQuadraticRoot(a, b, c, sqrtPrice);
+        if (root > sqrtPrice) root = sqrtPrice;
+        if (root < state.sqrtLower) root = state.sqrtLower;
+        sqrtPriceFinal = uint160(root);
     }
 
     /// @notice Analytic solution for optimal swap (token1 -> token0)
@@ -1071,22 +1062,50 @@ contract LiquidityCalculator is ILiquidityCalculator {
                 c := shl(1, c)
             }
         }
-        // Solve quadratic: sqrtPriceFinal = (sqrt(b^2 + 4ac) + b) / 2a
-        (bool realRoot, uint256 root) = _sqrtDiscriminant(a, b, c);
-        if (!realRoot) {
-            return uint160(sqrtPrice);
+        // The root lies in [sqrtPrice, sqrtUpper]: the direction check that selected this solver
+        // holds token1 in surplus at sqrtPrice and the range wants only token1 at sqrtUpper.
+        uint256 root = _positiveQuadraticRoot(a, b, c, sqrtPrice);
+        if (root < sqrtPrice) root = sqrtPrice;
+        if (root > state.sqrtUpper) root = state.sqrtUpper;
+        sqrtPriceFinal = uint160(root);
+    }
+
+    /// @notice The analytic solvers' root of a*p^2 - b*p - c == 0: p = (b + sqrt(b^2 + 4ac)) / (2a)
+    /// @dev The coefficients are two's-complement words (see _sqrtDiscriminant), `a2` and `c2`
+    ///      already doubled. Formed the numerically stable way: with b >= 0 the sum b + sqrt(D)
+    ///      is exact, with b < 0 the same root is 2c / (sqrt(D) - b), whose denominator is again a
+    ///      sum of magnitudes. The textbook form b + sqrt(D) cancels there (sqrt(D) is floored, so
+    ///      for a*c << b^2 the numerator is off by whole units and the division by a small `a`
+    ///      turns that into an arbitrary price), and at a == 0 - a valid fee-bearing state of the
+    ///      1->0 solver, where the balance equation is linear with root c / |b| - it divided by
+    ///      zero and returned the current price, i.e. no swap although token1 was in surplus
+    ///      (external audit V4LE-150). Every case where no positive root exists (no real root,
+    ///      or the sign of a / c puts the root at or below zero) returns `noRoot`, the current
+    ///      price, which the callers treat as no swap; the callers clamp the result to their side
+    ///      of the current price and to the requested range.
+    /// @param noRoot Returned when the equation has no positive root
+    /// @return root The positive root in Q96, or `noRoot`
+    function _positiveQuadraticRoot(uint256 a2, uint256 b, uint256 c2, uint256 noRoot)
+        private
+        pure
+        returns (uint256 root)
+    {
+        (bool realRoot, uint256 sqrtDiscriminant) = _sqrtDiscriminant(a2, b, c2);
+        if (!realRoot) return noRoot;
+        if (int256(b) >= 0) {
+            // (b + sqrt(D)) / (2a): positive only for a > 0 (a == 0 leaves -b*p - c == 0, whose
+            // root is -c/b: at or below zero for c >= 0, and the callers exclude c < 0 with b >= 0
+            // from a swap by the range clamp anyway)
+            if (int256(a2) <= 0) return noRoot;
+            // b <= 2^128 - 1 and sqrt(D) < 2^128 (checked in _sqrtDiscriminant): no overflow
+            root = FullMath.mulDiv(sqrtDiscriminant + b, FixedPoint96.Q96, a2);
+        } else {
+            // 2c / (sqrt(D) + |b|): positive only for c > 0; covers a == 0 (root c / |b|) and
+            // the 1->0 solver's negative `a` (the smaller positive root, as before)
+            if (int256(c2) <= 0) return noRoot;
+            root = FullMath.mulDiv(c2, FixedPoint96.Q96, sqrtDiscriminant + _abs(b));
         }
-        unchecked {
-            uint256 num = root + b;
-            assembly {
-                // Use signed division as result may be negative
-                sqrtPriceFinal := sdiv(shl(96, num), a)
-            }
-        }
-        // Ensure final price is at least current price
-        assembly {
-            sqrtPriceFinal := xor(sqrtPrice, mul(xor(sqrtPrice, sqrtPriceFinal), gt(sqrtPriceFinal, sqrtPrice)))
-        }
+        if (root == 0) return noRoot;
     }
 
     /// @notice Square root of the analytic solvers' quadratic discriminant b*b + a*c

@@ -829,8 +829,10 @@ contract LiquidityCalculatorTest is Test {
                 10 ether
             );
         
-        assertEq(amountIn, 0, "Should have no swap input");
-        assertEq(amountOut, 0, "Should have no swap output");
+        // The balance root of an exactly balanced state is the current price up to the integer
+        // precision of the solver's coefficients (~1e-21 relative), so the plan is dust at most.
+        assertLt(amountIn, 10 ether / 1e12, "Should have no swap input beyond dust");
+        assertLt(amountOut, 10 ether / 1e12, "Should have no swap output beyond dust");
 
         // Verify final price is reasonable
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-600);
@@ -1879,5 +1881,30 @@ contract LiquidityCalculatorTest is Test {
         assertApproxEqRel(
             uint256(int256(delta.amount0())), outputAmount, PREDICTION_TOLERANCE, "executed output deviates from plan"
         );
+    }
+
+    /// @notice V4LE-150: the finding's state. 0.3% pool at tick 0 with liquidity exactly 1e18,
+    ///         replacement range [-60, 60], holdings (4,659,021,152,677 wei token0, 1e15 token1).
+    ///         The 1->0 solver's leading coefficient is exactly zero here, so its balance equation
+    ///         is linear; the quadratic formula divided by zero and planned no swap although most
+    ///         of the token1 is surplus (the balancing swap is ~43% of it: buying token0 lifts the
+    ///         price, which raises the token1 share the range needs). The plan must be that swap.
+    function testV4LE150_SamePoolLinearBalanceEquationPlansTheSwap() public {
+        _mintLiquidity(-600, 600, 1e18);
+        uint256 amount0 = 4_659_021_152_677;
+        uint256 amount1 = 1e15;
+        // precondition: a == amount0 + L / sqrtP - L / ((1 - f) * sqrtU) == 0 in the solver's integer arithmetic
+        uint256 liqX96 = uint256(1e18) << 96;
+        assertEq(
+            amount0 + liqX96 / SQRT_PRICE_1_0,
+            (1e6 * liqX96) / (997_000 * uint256(TickMath.getSqrtPriceAtTick(60))),
+            "precondition: leading coefficient is zero"
+        );
+
+        (uint256 amountIn, uint256 amountOut, bool dir0to1,) =
+            helper.getOptimalSwap(poolCallee, -60, 60, amount0, amount1);
+        assertFalse(dir0to1, "token1 is in surplus");
+        assertGt(amountIn, amount1 / 3, "the linear root is the balancing swap, not no swap");
+        _assertPlanBalancesHoldings(-60, 60, amount0, amount1, amountIn, amountOut, false);
     }
 }
