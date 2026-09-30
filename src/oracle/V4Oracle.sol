@@ -112,7 +112,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint8 tokenDecimals; // Decimals of the token
         uint32 twapSeconds; // Uniswap v3 TWAP period
         IUniswapV3Pool twapPool; // Uniswap v3 reference pool against referenceToken
-        address twapTokenAlias; // Token used in the TWAP pool, e.g. WETH for native ETH
+        address twapTokenAlias; // Token used in the TWAP pool, e.g. WETH for native ETH; carries tokenDecimals
         bool twapTokenIsToken0; // True when twapTokenAlias is token0 in twapPool
         Mode mode; // Source selection and verification mode
         uint16 maxDifference; // Max difference between Chainlink-compatible and TWAP sources x10000
@@ -461,6 +461,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint8 feedDecimals = feed.decimals();
         uint8 tokenDecimals = address(token) == address(0) ? 18 : IERC20Metadata(token).decimals();
         address effectiveTwapToken = twapTokenAlias == address(0) && token != address(0) ? token : twapTokenAlias;
+        // The TWAP leg is read in the alias's raw unit and applied to the token's, so the alias must carry
+        // the token's decimals; the token itself as its own alias has them by definition (V4LE-147).
+        if (
+            effectiveTwapToken != address(0) && effectiveTwapToken != token
+                && IERC20Metadata(effectiveTwapToken).decimals() != tokenDecimals
+        ) {
+            revert InvalidConfig();
+        }
 
         bool twapTokenIsToken0;
         if (_usesTWAP(mode)) {
@@ -556,12 +564,12 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
 
         uint256 verifyPriceX96;
+        // A single-source read (or a two-source read whose deviation check is disabled) has no independent
+        // price that would expose changed feed or token metadata, so the metadata cached at configuration
+        // is re-checked against the live contracts; a verified two-source read fails closed on its own
+        // (a 10^k mis-scaling always exceeds any representable maxDifference) and pays nothing.
+        bool unverified = !_isTwoSourceMode(mode) || feedConfig.maxDifference == type(uint16).max;
         if (_usesChainlink(mode)) {
-            // A single-source Chainlink read (or a two-source read whose deviation check is disabled) has
-            // no independent price that would expose a changed feed precision, so its cached metadata is
-            // re-checked against the live contracts; a verified two-source read fails closed on its own
-            // (a 10^k mis-scaling always exceeds any representable maxDifference).
-            bool unverified = !_isTwoSourceMode(mode) || feedConfig.maxDifference == type(uint16).max;
             uint256 chainlinkPriceX96 = _getChainlinkPriceX96(token, unverified);
             if (cachedChainlinkReferencePriceX96 == 0) {
                 chainlinkReferencePriceX96 = _getChainlinkPriceX96(referenceToken, unverified);
@@ -590,6 +598,16 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
 
         if (_usesTWAP(mode)) {
+            // The TWAP leg is read in the alias's raw unit and applied to the token's: an unverified read
+            // re-checks that both still carry the unit bound at configuration (V4LE-147). The token as its
+            // own alias moves with itself and needs no check; in Chainlink-using modes the token was
+            // checked above.
+            if (unverified && feedConfig.twapTokenAlias != token) {
+                if (mode == Mode.TWAP) {
+                    _requireTokenDecimals(token, feedConfig.tokenDecimals);
+                }
+                _requireTokenDecimals(feedConfig.twapTokenAlias, feedConfig.tokenDecimals);
+            }
             uint256 twapPriceX96 = _getTWAPPriceX96(feedConfig);
             if (mode == Mode.CHAINLINK_TWAP_VERIFY) {
                 verifyPriceX96 = twapPriceX96;
