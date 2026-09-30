@@ -199,7 +199,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         address quoter = hookFeeQuoters[hook];
         if (quoter == address(0)) revert HookFeeQuoterNotConfigured(hook);
         if (quoter == address(this)) return (0,0);
-        return IPositionFeeQuoter(quoter).quoteProtocolFees(state.tokenId,fees0,fees1);
+        (owed0, owed1) = IPositionFeeQuoter(quoter).quoteProtocolFees(state.tokenId,fees0,fees1);
+        // The hook takes its whole obligation in the fee-first INCREASE(0) of every removal (a remainder
+        // reverts with ProtocolFeesUnsettled) and narrows the take with SafeCast.toInt128, so an obligation
+        // at or beyond 2^127 blocks every decrease of the position. Like fees and principal it is reported
+        // instead of netted, which would have left the other currency counted as collateral (V4LE-113).
+        if (owed0 >= V4_SETTLEMENT_BOUND || owed1 >= V4_SETTLEMENT_BOUND) {
+            revert SettlementBoundExceeded();
+        }
     }
 
     function _netCurrency(uint256 principal, uint128 fees, uint256 owed)

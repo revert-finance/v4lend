@@ -27,6 +27,11 @@ import {MutableChainlinkFeed, ObligationQuoterHook} from "test/oracle/support/Or
 ///           leg has real value. With a carried obligation in that leg the fee value made the target
 ///           pass while more value was needed, and the sizing (and with it the vault's liquidation)
 ///           reverted with a division by zero instead of taking the whole liquidity.
+///         - External audit V4LE-113: a quoted obligation was accepted without the 2^127 settlement bound
+///           that fees and principal are held to. The hook takes its whole obligation in the fee-first
+///           INCREASE(0) of every removal and narrows it with `SafeCast.toInt128`, so an obligation at or
+///           beyond the bound blocks every decrease; the oracle netted it to zero and kept counting the
+///           other currency as collateral.
 /// @dev Fork-free: real PoolManager / PositionManager from BaseTest, mock tokens, a real V4Oracle with mock
 ///      Chainlink feeds, and a pool hook that only quotes a configurable obligation. currency1 is the
 ///      reference token, so the derived pool price is currency0's feed price.
@@ -97,6 +102,41 @@ contract V4OracleFeeObligationTest is BaseTest {
         // divided by the zero principal value here
         (uint128 sized,,,) = oracle.getLiquidityForValue(tokenId, quote, 500_000);
         assertEq(sized, liquidity, "the charged currency cannot be funded from principal: all liquidity");
+    }
+
+    // ---------------------------------------------------------------- V4LE-113: obligation bound
+
+    function testV4LE113_ObligationAtSettlementBoundIsRejectedLikeV4() public {
+        (PoolKey memory key,) = _initializeHookedPool(0);
+        uint256 tokenId = _mint(key, -600, 600, 2 ** 64);
+        address quote = Currency.unwrap(currency1);
+
+        hook.setObligation(V4_SETTLEMENT_BOUND, 0);
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getValue(tokenId, quote);
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getLiquidityForValue(tokenId, quote, 1);
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getPositionBreakdown(tokenId);
+
+        hook.setObligation(0, V4_SETTLEMENT_BOUND);
+        vm.expectRevert(SETTLEMENT_BOUND_EXCEEDED);
+        oracle.getValue(tokenId, quote);
+    }
+
+    function testV4LE113_ObligationJustBelowSettlementBoundIsNetted() public {
+        (PoolKey memory key,) = _initializeHookedPool(0);
+        uint256 tokenId = _mint(key, -600, 600, 2 ** 64);
+        address quote = Currency.unwrap(currency1);
+
+        // the largest settleable obligation consumes the token0 principal; token1 remains collateral
+        hook.setObligation(V4_SETTLEMENT_BOUND - 1, 0);
+        (,,,, uint256 amount0, uint256 amount1,,) = oracle.getPositionBreakdown(tokenId);
+        assertEq(amount0, 0, "token0 principal consumed by the obligation");
+        assertGt(amount1, 0, "token1 principal remains");
+        (uint256 value, uint256 feeValue,,) = oracle.getValue(tokenId, quote);
+        assertEq(value, amount1, "valued at the remaining token1 principal (1:1 prices)");
+        assertEq(feeValue, 0);
     }
 
     /// @dev Pool with the obligation hook at `tick`; the currency0 feed is pointed at that price.
