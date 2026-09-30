@@ -33,6 +33,14 @@ interface ILiquidityCalculator {
         int24 tickSpacing;
     }
 
+    /// @notice Which side of a range position is in surplus at a price: true when token0 must be swapped
+    ///         into token1, false the other way. The comparison the planners use, exposed so integrators
+    ///         (the hook's route selection) do not carry a copy of it (Scan #2 V4LE-145 / V4LE-146).
+    function swapDirection(uint160 sqrtPriceX96, int24 tickLower, int24 tickUpper, uint256 amount0, uint256 amount1)
+        external
+        pure
+        returns (bool zeroForOne);
+
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit (external route version)
     /// @dev The swap executes in another v4 pool than the position pool: the position pool's price
     ///      fixes the ratio the range needs, the route pool's price and active liquidity price the
@@ -1225,6 +1233,20 @@ contract LiquidityCalculator is ILiquidityCalculator {
         }
         if (prod1 >= denominator) return type(uint256).max;
         return FullMath.mulDiv(a, b, denominator);
+    }
+
+    /// @inheritdoc ILiquidityCalculator
+    function swapDirection(uint160 sqrtPriceX96, int24 tickLower, int24 tickUpper, uint256 amount0, uint256 amount1)
+        external
+        pure
+        returns (bool zeroForOne)
+    {
+        if (tickLower >= tickUpper || tickLower < TickMath.MIN_TICK || tickUpper > TickMath.MAX_TICK) {
+            revert Invalid_Tick_Range();
+        }
+        return _shouldSwap0to1(
+            amount0, amount1, sqrtPriceX96, TickMath.getSqrtPriceAtTick(tickLower), TickMath.getSqrtPriceAtTick(tickUpper)
+        );
     }
 
     /// @notice Determine optimal swap direction for double-sided deposit
