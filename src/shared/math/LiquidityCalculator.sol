@@ -22,6 +22,9 @@ interface ILiquidityCalculator {
     error Invalid_Tick_Range();
     error Invalid_Fee();
     error Math_Overflow();
+    /// @notice The balancing swap crosses more initialized ticks of the pool than one quote walks
+    ///         (LiquidityCalculator.MAX_ROUTE_QUOTE_CROSSINGS), so no exact plan can be sized
+    error Quote_Truncated();
 
     /// @notice Pool configuration struct containing pool manager, pool ID, and tick spacing
     struct V4PoolInfo {
@@ -66,11 +69,17 @@ interface ILiquidityCalculator {
     ) external pure returns (uint256 inputAmount, uint256 outputAmount, bool swapDir0to1);
 
     /// @notice External-route planner that reads the route pool and walks its ticks
-    /// @dev Starts from the constant-liquidity plan above and, when the planned swap would cross
-    ///      initialized ticks of the route pool, refines it against an exact-input quote that walks
-    ///      those ticks (SwapMath step by step, liquidity updated at every crossing), so the plan is
-    ///      sized against the route's real depth wherever its liquidity thickens or thins beyond the
-    ///      current tick range. The route's fee is read from its slot0 for the planned direction.
+    /// @dev Every candidate input is priced with an exact-input quote that walks the route's
+    ///      initialized ticks (SwapMath step by step, liquidity updated at every crossing), so the
+    ///      plan is sized against the route's real depth wherever its liquidity thickens or thins.
+    ///      In range, the input is found by bisection on that quote (the balance condition is
+    ///      monotone in the input); out of range the whole surplus side is swapped. A plan never
+    ///      exceeds what the quote actually consumed: a route whose ticks or price bound stop the
+    ///      swap early gets the consumed input, and an in-range balancing swap that would cross
+    ///      more ticks than one quote walks (MAX_ROUTE_QUOTE_CROSSINGS) reverts Quote_Truncated
+    ///      instead of returning an under-sized plan as if it balanced. A route with no active
+    ///      liquidity at its price is walked to the first initialized tick ahead, as Pool.swap does.
+    ///      The route's fee is read from its slot0 for the planned direction.
     /// @param positionSqrtPrice Current sqrt price of the position pool
     /// @param swapPool The external route pool
     /// @param lowerTick Lower bound of the position
@@ -178,13 +187,16 @@ contract LiquidityCalculator is ILiquidityCalculator {
     ///      2^-40 of the swappable amount (about 1e-12), which bounds the search at ~41 steps.
     uint256 internal constant ROUTE_SOLVE_PRECISION_SHIFT = 40;
 
-    /// @dev Bound on the initialized ticks one route quote crosses; past it the quote stops and
-    ///      the plan is sized to what was quoted (a conservative bound for a very long walk).
-    uint256 internal constant MAX_ROUTE_QUOTE_CROSSINGS = 32;
-
-    /// @dev Effective-price refinement rounds after the constant-liquidity start: each one quotes
-    ///      the planned input through the route's ticks and re-solves with the quoted price.
-    uint256 internal constant ROUTE_REFINEMENT_ROUNDS = 2;
+    /// @dev Bound on the swap steps (initialized ticks crossed, plus the final partial step) one
+    ///      tick-walking quote takes. A quote that stops here with input left is truncated: the
+    ///      one-sided planners then size the plan to the consumed input, the in-range bisections
+    ///      revert Quote_Truncated when the balance root lies beyond it (external audit V4LE-95,
+    ///      V4LE-114). Gas (measured, see the V4LE-95/114/128 tests): the ticks are read from the
+    ///      pool once per plan and cached (RouteState.ladder); each of the bisection's ~41 quotes
+    ///      then costs ~2k per step in memory. A full-range or one-crossing route plans for
+    ///      150k-520k, a plan crossing ~15 ticks for ~1M, and the worst case - every quote taking
+    ///      all 64 steps before reverting Quote_Truncated - for ~6.1M.
+    uint256 internal constant MAX_ROUTE_QUOTE_CROSSINGS = 64;
 
     /// @inheritdoc ILiquidityCalculator
     function calculateSimple(
@@ -240,137 +252,188 @@ contract LiquidityCalculator is ILiquidityCalculator {
         route.feeRate = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
         if (route.feeRate >= MAX_FEE_PIPS) revert Invalid_Fee();
         route.outputMultiplier = MAX_FEE_PIPS - uint256(outputFeePips);
+        _prepareRoute(route, swapDir0to1);
 
-        // Start from the constant-liquidity plan, exact until the first crossed tick.
-        (inputAmount,,) = _planConstantLiquidity(
-            RouteQuote({
-                sqrtPrice: route.sqrtPrice,
-                liquidity: route.liquidity,
-                inputMultiplier: MAX_FEE_PIPS - uint256(route.feeRate),
-                outputMultiplier: route.outputMultiplier
-            }),
-            positionSqrtPrice,
-            lowerTick,
-            upperTick,
-            amount0,
-            amount1
-        );
-        if (inputAmount == 0) return (0, 0, swapDir0to1);
-        outputAmount = _quoteThroughTicks(route, swapDir0to1, inputAmount);
-        if (outputAmount == 0) return (0, 0, swapDir0to1);
-
-        // One-sided plans swap everything; an in-range plan is refined against the quoted
-        // effective price, which already includes every tick the swap crosses.
-        if (positionSqrtPrice > sqrtLower && positionSqrtPrice < sqrtUpper) {
-            uint256 requiredRatio = _calculateRequiredRatio(positionSqrtPrice, sqrtLower, sqrtUpper);
-            for (uint256 round; round < ROUTE_REFINEMENT_ROUNDS; ++round) {
-                uint256 refined = _solveWithEffectivePrice(
-                    requiredRatio,
-                    amount0,
-                    amount1,
-                    swapDir0to1,
-                    FullMath.mulDiv(outputAmount, FixedPoint96.Q96, inputAmount)
-                );
-                if (refined == 0 || refined == inputAmount) break;
-                inputAmount = refined;
-                outputAmount = _quoteThroughTicks(route, swapDir0to1, inputAmount);
-                if (outputAmount == 0) return (0, 0, swapDir0to1);
-            }
+        if (positionSqrtPrice <= sqrtLower) {
+            // Below range: only token0 is needed, swap all token1
+            inputAmount = amount1;
+        } else if (positionSqrtPrice >= sqrtUpper) {
+            // Above range: only token1 is needed, swap all token0
+            inputAmount = amount0;
+        } else {
+            // In range: the position pool's price fixes the ratio, the route's tick walk prices
+            // every candidate. Replaces the constant-liquidity start with two effective-price
+            // re-solves, which linearized the route and could leave a material deficit whenever
+            // its liquidity changed inside the swap (external audit V4LE-128), and could
+            // over-swap when the quote behind the effective price was truncated (V4LE-95).
+            inputAmount = _solveInputOnQuote(route, amount0, amount1, positionSqrtPrice, sqrtLower, sqrtUpper);
         }
+        if (inputAmount == 0) return (0, 0, swapDir0to1);
+        uint256 unspent;
+        (outputAmount,, unspent,) = _quoteThroughTicksState(route, inputAmount);
+        // The plan is what the quote priced: input the route could not take (its ticks ran out
+        // within the quote's bound, or its price bound was reached) is left out (V4LE-95).
+        inputAmount -= unspent;
+        if (outputAmount == 0) return (0, 0, swapDir0to1);
     }
 
-    /// @notice Route pool state for a tick-walking quote
+    /// @notice One tick ahead of the pool price in the swap direction, as the tick walk found it
+    struct TickStep {
+        uint160 sqrtPrice; // price at the tick
+        int24 tick; // the tick; MIN_TICK / MAX_TICK when nothing further is initialized
+        int128 liquidityNet; // liquidity change on crossing it in the swap direction
+    }
+
+    /// @notice Pool state for tick-walking quotes in one swap direction
+    /// @dev The ticks ahead are discovered once per plan and cached in `ladder` (the walker's
+    ///      resume state in the `walk*` fields), so the bisection's ~41 quotes read the bitmap
+    ///      and tick liquidity from the pool exactly once per tick instead of once per quote: a
+    ///      far next tick (a full-range route: ~57 bitmap words away) costs ~150k gas to locate,
+    ///      which per quote would dominate the plan.
     struct RouteState {
         V4PoolInfo pool;
+        bool zeroForOne;
         uint160 sqrtPrice;
         int24 tick;
         uint128 liquidity;
         uint24 feeRate;
         uint256 outputMultiplier;
+        TickStep[] ladder;
+        uint256 ladderLength;
+        int24 walkTick;
+        int16 walkWordPosition;
+        uint256 walkTickBitmap;
     }
 
-    /// @notice Net output of an exact-input swap through the route pool, crossing its ticks
+    /// @dev Fixes the quote direction and resets the tick ladder to start at the route's tick.
+    function _prepareRoute(RouteState memory route, bool zeroForOne) private pure {
+        route.zeroForOne = zeroForOne;
+        if (route.ladder.length == 0) route.ladder = new TickStep[](MAX_ROUTE_QUOTE_CROSSINGS);
+        route.ladderLength = 0;
+        route.walkTick = route.tick;
+        route.walkWordPosition = type(int16).min;
+        route.walkTickBitmap = 0;
+    }
+
+    /// @dev Appends the next tick ahead of the walker to the ladder (an uninitialized far-edge
+    ///      tick when the bitmap search hit its word bound, with zero liquidity change).
+    function _discoverNextTick(RouteState memory route) private view {
+        NextInitializedTickResult memory next = _locateNextTick(
+            NextInitializedTickParams({
+                pool: route.pool,
+                tickValue: route.walkTick,
+                tickSpacing: route.pool.tickSpacing,
+                swapDir0to1: route.zeroForOne,
+                wordPosition: route.walkWordPosition,
+                tickBitmap: route.walkTickBitmap
+            })
+        );
+        route.walkWordPosition = next.wordPosition;
+        route.walkTickBitmap = next.tickBitmap;
+        int24 nextTick = next.nextTick;
+        (, int128 liquidityNet) = route.pool.poolMgr.getTickLiquidity(route.pool.poolIdentifier, nextTick);
+        if (route.zeroForOne) liquidityNet = -liquidityNet;
+        route.ladder[route.ladderLength++] =
+            TickStep({sqrtPrice: TickMath.getSqrtPriceAtTick(nextTick), tick: nextTick, liquidityNet: liquidityNet});
+        route.walkTick = route.zeroForOne ? nextTick - 1 : nextTick;
+    }
+
+    /// @notice Net output of an exact-input swap through the pool, crossing its ticks
     /// @dev The same step the pool takes (SwapMath.computeSwapStep against the next initialized
     ///      tick, liquidity net applied at every crossing) with the caller's output fee netted out.
-    ///      Bounded by MAX_ROUTE_QUOTE_CROSSINGS steps; a quote that stops early under-reports the
-    ///      output, which only makes the plan swap more conservatively.
-    function _quoteThroughTicks(RouteState memory route, bool zeroForOne, uint256 amountIn)
+    ///      Bounded by MAX_ROUTE_QUOTE_CROSSINGS steps.
+    /// @return amountOut Net output for the consumed input
+    /// @return sqrtPrice Pool price after the consumed input
+    /// @return remaining Input not consumed: the step bound was reached (`truncated`) or the
+    ///         pool's price bound was, where the real swap stops as well
+    /// @return truncated The quote stopped at the step bound with input left
+    function _quoteThroughTicksState(RouteState memory route, uint256 amountIn)
         private
         view
-        returns (uint256 amountOut)
-    {
-        (amountOut,,) = _quoteThroughTicksState(route, zeroForOne, amountIn);
-    }
-
-    function _quoteThroughTicksState(RouteState memory route, bool zeroForOne, uint256 amountIn)
-        private
-        view
-        returns (uint256 amountOut, uint160 sqrtPrice, uint256 remaining)
+        returns (uint256 amountOut, uint160 sqrtPrice, uint256 remaining, bool truncated)
     {
         sqrtPrice = route.sqrtPrice;
         uint128 liquidity = route.liquidity;
-        int24 tick = route.tick;
-        int16 wordPosition = type(int16).min;
-        uint256 tickBitmap;
         remaining = amountIn;
-        for (uint256 crossings; remaining > 0 && crossings < MAX_ROUTE_QUOTE_CROSSINGS; ++crossings) {
-            NextInitializedTickResult memory next = _locateNextTick(
-                NextInitializedTickParams({
-                    pool: route.pool,
-                    tickValue: tick,
-                    tickSpacing: route.pool.tickSpacing,
-                    swapDir0to1: zeroForOne,
-                    wordPosition: wordPosition,
-                    tickBitmap: tickBitmap
-                })
-            );
-            wordPosition = next.wordPosition;
-            tickBitmap = next.tickBitmap;
-            int24 nextTick = next.nextTick;
-            if (nextTick < TickMath.MIN_TICK) nextTick = TickMath.MIN_TICK;
-            if (nextTick > TickMath.MAX_TICK) nextTick = TickMath.MAX_TICK;
-            uint160 sqrtPriceNext = TickMath.getSqrtPriceAtTick(nextTick);
+        for (uint256 steps; remaining > 0; ++steps) {
+            if (steps == MAX_ROUTE_QUOTE_CROSSINGS) {
+                truncated = true;
+                break;
+            }
+            if (steps == route.ladderLength) _discoverNextTick(route);
+            TickStep memory next = route.ladder[steps];
 
             (uint160 sqrtPriceAfter, uint256 stepIn, uint256 stepOut, uint256 stepFee) =
-                SwapMath.computeSwapStep(sqrtPrice, sqrtPriceNext, liquidity, -int256(remaining), route.feeRate);
+                SwapMath.computeSwapStep(sqrtPrice, next.sqrtPrice, liquidity, -int256(remaining), route.feeRate);
             amountOut += stepOut;
             remaining -= stepIn + stepFee;
             sqrtPrice = sqrtPriceAfter;
             // the input ran out inside this tick range, or the pool's price bound was reached
-            if (sqrtPriceAfter != sqrtPriceNext || nextTick == TickMath.MIN_TICK || nextTick == TickMath.MAX_TICK) {
+            if (sqrtPriceAfter != next.sqrtPrice || next.tick == TickMath.MIN_TICK || next.tick == TickMath.MAX_TICK) {
                 break;
             }
-            (, int128 liquidityNet) = route.pool.poolMgr.getTickLiquidity(route.pool.poolIdentifier, nextTick);
-            if (zeroForOne) liquidityNet = -liquidityNet;
-            liquidity = liquidityNet < 0 ? liquidity - uint128(-liquidityNet) : liquidity + uint128(liquidityNet);
-            tick = zeroForOne ? nextTick - 1 : nextTick;
+            liquidity = next.liquidityNet < 0
+                ? liquidity - uint128(-next.liquidityNet)
+                : liquidity + uint128(next.liquidityNet);
         }
         amountOut = FullMath.mulDiv(amountOut, route.outputMultiplier, MAX_FEE_PIPS);
     }
 
-    /// @notice Linear re-solve of the balance condition at a quoted effective price
-    /// @param effectivePriceX96 Net output per unit of input from the last quote (Q96)
-    function _solveWithEffectivePrice(
-        uint256 requiredRatio,
+    /// @notice Largest input that still leaves the input token in surplus, priced by the exact
+    ///         tick-walking quote
+    /// @dev The balance condition is monotone in the input: more input both buys the deficient
+    ///      token and (in the same pool) moves the price and with it the ratio the range needs, so
+    ///      the input token stays in surplus below the root and is in deficit above it, and
+    ///      bisection finds the root to ROUTE_SOLVE_PRECISION_SHIFT. Every candidate is quoted
+    ///      with _quoteThroughTicksState, including initialized tick crossings. A candidate the
+    ///      pool cannot take in full is treated as beyond the root, so the result is always fully
+    ///      quotable: when that is because the pool's price bound was reached, the result is the
+    ///      most the pool can absorb, the same partial swap the pool would execute; when it is
+    ///      because the quote's step bound was reached and the bracket closes on that bound with
+    ///      the input still in surplus, the root lies beyond what can be quoted and the planner
+    ///      reverts Quote_Truncated rather than return a plan that leaves the range unbalanced
+    ///      while reporting success (external audit V4LE-114, V4LE-95).
+    /// @param positionSqrtPrice Price fixing the range's ratio; zero to use the quote's ending
+    ///        price (same-pool swap), nonzero for a route into another pool (position price fixed)
+    function _solveInputOnQuote(
+        RouteState memory route,
         uint256 amount0,
         uint256 amount1,
-        bool swapDir0to1,
-        uint256 effectivePriceX96
-    ) private pure returns (uint256 inputAmount) {
-        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
-        if (swapDir0to1) {
-            if (amount0 <= requiredAmount0) return 0;
-            // amount0 - in == ratio * (amount1 + p * in)
-            uint256 denominator = FixedPoint96.Q96 + FullMath.mulDiv(requiredRatio, effectivePriceX96, FixedPoint96.Q96);
-            inputAmount = FullMath.mulDiv(amount0 - requiredAmount0, FixedPoint96.Q96, denominator);
-            if (inputAmount > amount0) inputAmount = amount0;
-        } else {
-            if (requiredAmount0 <= amount0) return 0;
-            // amount0 + p * in == ratio * (amount1 - in)
-            inputAmount =
-                FullMath.mulDiv(requiredAmount0 - amount0, FixedPoint96.Q96, effectivePriceX96 + requiredRatio);
-            if (inputAmount > amount1) inputAmount = amount1;
+        uint160 positionSqrtPrice,
+        uint160 sqrtLower,
+        uint160 sqrtUpper
+    ) private view returns (uint256 inputAmount) {
+        bool zeroForOne = route.zeroForOne;
+        uint256 low;
+        uint256 high = zeroForOne ? amount0 : amount1;
+        uint256 tolerance = (high >> ROUTE_SOLVE_PRECISION_SHIFT) + 1;
+        // whether `high` was last lowered by a step-bound truncation rather than by the balance
+        // flipping (or the pool's price bound)
+        bool highTruncated;
+        while (high - low > tolerance) {
+            uint256 mid = low + (high - low) / 2;
+            (uint256 out, uint160 price, uint256 unspent, bool truncated) = _quoteThroughTicksState(route, mid);
+            if (unspent != 0) {
+                high = mid;
+                highTruncated = truncated;
+                continue;
+            }
+            bool stillExcess0 = _shouldSwap0to1(
+                zeroForOne ? amount0 - mid : amount0 + out,
+                zeroForOne ? amount1 + out : amount1 - mid,
+                positionSqrtPrice == 0 ? price : positionSqrtPrice,
+                sqrtLower,
+                sqrtUpper
+            );
+            if (stillExcess0 == zeroForOne) {
+                low = mid;
+            } else {
+                high = mid;
+                highTruncated = false;
+            }
         }
+        if (highTruncated) revert Quote_Truncated();
+        inputAmount = low;
     }
 
     /// @dev The constant-liquidity plan shared by both calculateSimple variants (validation of the
@@ -528,31 +591,10 @@ contract LiquidityCalculator is ILiquidityCalculator {
         route.feeRate = protocolFee == 0 ? lpFee : protocolFee.calculateSwapFee(lpFee);
         if (route.feeRate >= MAX_FEE_PIPS) revert Invalid_Fee();
         route.outputMultiplier = MAX_FEE_PIPS - uint256(outputFeePips);
-        uint256 low;
-        uint256 high = zeroForOne ? amount0 : amount1;
-        uint256 tolerance = (high >> ROUTE_SOLVE_PRECISION_SHIFT) + 1;
-        // The balance condition is monotone: more input both buys the deficient token and moves
-        // the pool price and the range ratio. Every candidate uses
-        // the exact tick-walking output and ending price, including initialized tick crossings.
-        while (high - low > tolerance) {
-            uint256 mid = low + (high - low) / 2;
-            (uint256 out, uint160 price, uint256 unspent) = _quoteThroughTicksState(route, zeroForOne, mid);
-            if (unspent != 0) {
-                high = mid;
-                continue;
-            }
-            bool stillExcess0 = _shouldSwap0to1(
-                zeroForOne ? amount0 - mid : amount0 + out,
-                zeroForOne ? amount1 + out : amount1 - mid,
-                price,
-                lower,
-                upper
-            );
-            if (stillExcess0 == zeroForOne) low = mid;
-            else high = mid;
-        }
-        inputAmount = low;
-        (outputAmount, sqrtPrice,) = _quoteThroughTicksState(route, zeroForOne, inputAmount);
+        _prepareRoute(route, zeroForOne);
+        // The ending price of every candidate's quote fixes the ratio the range needs there.
+        inputAmount = _solveInputOnQuote(route, amount0, amount1, 0, lower, upper);
+        (outputAmount, sqrtPrice,,) = _quoteThroughTicksState(route, inputAmount);
         if (outputAmount == 0) inputAmount = 0;
     }
 
