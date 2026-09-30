@@ -609,10 +609,21 @@ abstract contract RevertHookTriggers is RevertHookState {
         if (PositionModeFlags.hasAutoLend(modeFlags)) {
             PositionState storage state = _positionStates[tokenId];
             if (state.autoLendShares > 0) {
+                // The withdrawal re-arms while the walk's cursor rests on the bucket the deposit fired
+                // from, and the next search is strictly past the cursor. With a positive (aligned,
+                // so >= spacing) tolerance the withdrawal sits `tolerance` inside the deposit bucket
+                // and is found; with zero tolerance both formulas met on the fired bucket and the
+                // ordinary one-bucket recovery skipped the node until a full recross (V4LE-126).
+                // Zero tolerance therefore rests the withdrawal one spacing toward the range, i.e. on
+                // the first bucket where the position is back in range.
                 if (Currency.unwrap(poolKey.currency0) == state.autoLendToken) {
-                    ticks[2] = tickLower - autoLendToleranceTick - poolKey.tickSpacing;
+                    ticks[2] = autoLendToleranceTick == 0
+                        ? tickLower
+                        : tickLower - autoLendToleranceTick - poolKey.tickSpacing;
                 } else {
-                    ticks[0] = tickUpper + autoLendToleranceTick;
+                    ticks[0] = autoLendToleranceTick == 0
+                        ? tickUpper - poolKey.tickSpacing
+                        : tickUpper + autoLendToleranceTick;
                 }
             } else {
                 ticks[0] = tickLower - autoLendToleranceTick * 2 - poolKey.tickSpacing;

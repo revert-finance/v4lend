@@ -43,6 +43,50 @@ contract RevertHookScan2FixesTest is RevertHookTest {
         hook.setPositionConfig(token3Id, _autoLendConfig(poolKey.tickSpacing));
     }
 
+    // ==================== V4LE-126: zero tolerance re-arms the withdrawal at the fired bucket ====================
+
+    /// @notice With tolerance 0 the deposit node and the re-armed withdrawal node fell on the same
+    ///         bucket, and the walk's strictly-past-cursor search never found the withdrawal on an
+    ///         ordinary one-bucket recovery. The withdrawal must fire when the price comes back.
+    function testV4LE126_ZeroToleranceAutoLendRecoversAfterToken0Deposit() public {
+        _runZeroToleranceRecovery(false);
+    }
+
+    function testV4LE126_ZeroToleranceAutoLendRecoversAfterToken1Deposit() public {
+        _runZeroToleranceRecovery(true);
+    }
+
+    function _runZeroToleranceRecovery(bool up) internal {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        hook.setPositionConfig(token3Id, _autoLendConfig(0)); // in range: nothing fires yet
+
+        int24 spacing = poolKey.tickSpacing;
+        // fire the deposit in the first out-of-range bucket and STOP inside it: the cursor then rests
+        // exactly on the fired bucket, the state the finding describes
+        int24 depositBucket = up ? tickUpper3 : tickLower3 - spacing;
+        int24 tick = up ? _moveTickUpUntil(tickUpper3, 5e15, 400) : _moveTickDownUntil(tickLower3 - 1, 5e15, 400);
+        assertEq(_getTickLower(tick, spacing), depositBucket, "price stopped inside the fired bucket");
+        (,,, address lendToken, uint256 shares,,,) = hook.positionStates(token3Id);
+        assertGt(shares, 0, "deposit fired");
+        assertEq(lendToken, Currency.unwrap(up ? currency1 : currency0), "idle token lent");
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "liquidity parked");
+        assertEq(hook.tickLowerLasts(poolId), depositBucket, "cursor rests on the fired bucket");
+
+        // ordinary recovery: one bucket back toward the range
+        if (up) {
+            _moveTickDownUntil(tickUpper3 - 1, 5e15, 400);
+        } else {
+            _moveTickUpUntil(tickLower3, 5e15, 400);
+        }
+        uint256 reenteredId = positionManager.nextTokenId() - 1; // the withdrawal remints
+        (,,, lendToken, shares,,,) = hook.positionStates(reenteredId);
+        assertEq(shares, 0, "withdrawal executed on the normal recovery");
+        assertEq(lendToken, address(0), "lend state cleared");
+        assertGt(positionManager.getPositionLiquidity(reenteredId), 0, "liquidity re-entered");
+        assertTrue(reenteredId != token3Id, "re-entry minted the replacement");
+    }
+
     // ==================== V4LE-130: relative exit offset overflows int24 on the remint ====================
 
     /// @notice A valid config whose relative exit offset fits the initial range overflowed int24
