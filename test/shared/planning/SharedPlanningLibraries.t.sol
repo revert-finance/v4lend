@@ -209,9 +209,25 @@ contract SharedPlanningLibrariesTest is Test {
         assertTrue(harness.landsWithinTolerance(1_000, 10_000, 3_050, 10_000, 3_000, 100));
         assertFalse(harness.landsWithinTolerance(1_000, 10_000, 3_101, 10_000, 3_000, 100));
         assertFalse(harness.landsWithinTolerance(1_000, 10_000, 1_000, 10_000, 3_000, 100));
-        // degenerate collateral is never an acceptable landing
-        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 0, 0, 3_000, 100));
+        // debt left against no collateral, or no starting collateral, is never an acceptable landing
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 1, 0, 3_000, 100));
         assertFalse(harness.landsWithinTolerance(7_000, 0, 0, 10_000, 3_000, 100));
+    }
+
+    /// @notice V4LE-149: a deleverage sized above the remaining principal removes all liquidity and repays
+    ///         the whole debt. `debtAfter == 0, collateralAfter == 0` is a fully settled loan, not a
+    ///         degenerate one, and both post-conditions must accept it as a zero-ratio landing.
+    function testV4LE149_FullyRepaidZeroCollateralDeleverageIsAccepted() public view {
+        // operator-driven strict band: 70% -> fully repaid with nothing left passes
+        assertTrue(harness.landsWithinTolerance(7_000, 10_000, 0, 0, 3_000, 100));
+        // hook-driven monotonic variant too
+        assertTrue(harness.improvesTowardTarget(7_000, 10_000, 0, 0, 3_000));
+        // a leverage-up that ends with no debt did not raise the ratio: still rejected
+        assertFalse(harness.landsWithinTolerance(1_000, 10_000, 0, 0, 3_000, 100));
+        assertFalse(harness.improvesTowardTarget(1_000, 10_000, 0, 0, 3_000));
+        // and debt remaining against zero collateral stays undefined / rejected
+        assertFalse(harness.landsWithinTolerance(7_000, 10_000, 1, 0, 3_000, 100));
+        assertFalse(harness.improvesTowardTarget(7_000, 10_000, 1, 0, 3_000));
     }
 
     function testAutoLeverageLibDegenerateInputsReturnZero() public view {
