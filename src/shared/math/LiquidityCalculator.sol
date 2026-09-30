@@ -827,9 +827,8 @@ contract LiquidityCalculator is ILiquidityCalculator {
                 uint256 maskedWord = word & bitMask;
                 initialized = maskedWord != 0;
                 // the least significant set bit, or the far (high) edge of the word when none is set
-                uint8 stepForward = initialized
-                    ? BitMath.leastSignificantBit(maskedWord) - bitPosition
-                    : type(uint8).max - bitPosition;
+                uint8 stepForward =
+                    initialized ? BitMath.leastSignificantBit(maskedWord) - bitPosition : type(uint8).max - bitPosition;
                 compressedNext = int256(compressedTick) + int256(uint256(stepForward));
             }
         }

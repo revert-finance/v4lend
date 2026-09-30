@@ -1897,6 +1897,56 @@ contract LiquidityCalculatorTest is Test {
         }
     }
 
+    /// @notice V4LE-124: a route with no active liquidity at its price but an initialized position
+    ///         [60, 6000] ahead of a 1->0 swap (and [-6000, -60] ahead of a 0->1 swap). Pool.swap
+    ///         crosses the gap for free and buys from that position; the planner returned no swap
+    ///         and the action minted from unbalanced holdings. The plan must be the balancing swap
+    ///         through the gap, and executing it must pay what was planned.
+    function testV4LE124_ZeroActiveLiquidityWithInitializedTicksAheadPlans() public {
+        _addLiquidity(60, 6000, 5000 ether, 0);
+        assertEq(poolManager.getLiquidity(poolId), 0, "precondition: no active liquidity at the price");
+
+        // 1->0 through the gap above the price
+        uint256 amount1 = 100 ether;
+        (uint256 inputAmount, uint256 outputAmount, bool dir0to1) =
+            helper.getSimpleSwapThroughPool(SQRT_PRICE_1_0, poolCallee, -600, 600, 0, amount1, 0);
+        assertFalse(dir0to1);
+        assertGt(inputAmount, 0, "the route's liquidity beyond the gap is planned against");
+        BalanceDelta delta = _executeSwap(inputAmount, false);
+        uint256 actualOut = uint256(int256(delta.amount0()));
+        assertApproxEqRel(actualOut, outputAmount, 1e12, "planned output matches the route's real output");
+        uint128 liquidityFromToken0 =
+            LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_0, TickMath.getSqrtPriceAtTick(600), actualOut);
+        uint128 liquidityFromToken1 = LiquidityAmounts.getLiquidityForAmount1(
+            TickMath.getSqrtPriceAtTick(-600), SQRT_PRICE_1_0, amount1 - inputAmount
+        );
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 10, "post-swap amounts within 0.1%");
+
+        // 0->1 through the gap below the price of a fresh route holding only [-6000, -60]
+        _usePoolAtTick(500, 0);
+        _addLiquidity(-6000, -60, 0, 5000 ether);
+        assertEq(poolManager.getLiquidity(poolId), 0, "precondition: no active liquidity at the price");
+        (inputAmount, outputAmount, dir0to1) =
+            helper.getSimpleSwapThroughPool(SQRT_PRICE_1_0, poolCallee, -600, 600, 100 ether, 0, 0);
+        assertTrue(dir0to1);
+        assertGt(inputAmount, 0);
+        delta = _executeSwap(inputAmount, true);
+        assertApproxEqRel(uint256(int256(delta.amount1())), outputAmount, 1e12, "0->1 output matches");
+    }
+
+    /// @notice V4LE-124: a route whose only initialized liquidity lies behind the swap direction
+    ///         still plans no swap (nothing ahead can be bought).
+    function testV4LE124_ZeroActiveLiquidityWithNothingAheadPlansNoSwap() public view {
+        // the default pool has no positions at all
+        (uint256 inputAmount, uint256 outputAmount,) =
+            helper.getSimpleSwapThroughPool(SQRT_PRICE_1_0, poolCallee, -600, 600, 0, 100 ether, 0);
+        assertEq(inputAmount, 0);
+        assertEq(outputAmount, 0);
+    }
+
     /// @notice V4LE-128: a hookless zero-fee route at 1:1 whose liquidity drops from 10e18 to 1e14 at
     ///         tick -480, position range [-600, 600] holding (1e18, 0). The constant-liquidity start
     ///         plus two effective-price re-solves linearized the route and returned ~0.7424e18
