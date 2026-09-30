@@ -470,12 +470,14 @@ contract LiquidityCalculator is ILiquidityCalculator {
             if (amount0 == 0) return (0, 0, swapDir0to1);
             inputAmount = amount0;
         } else {
-            inputAmount = _solveRouteInputInRange(
-                route, _calculateRequiredRatio(positionSqrtPrice, sqrtLower, sqrtUpper), amount0, amount1, swapDir0to1
-            );
+            inputAmount =
+                _solveRouteInputInRange(route, positionSqrtPrice, sqrtLower, sqrtUpper, amount0, amount1, swapDir0to1);
             if (inputAmount == 0) return (0, 0, swapDir0to1);
         }
         outputAmount = _routeOutput(route, swapDir0to1, inputAmount);
+        // an input that buys nothing (a price at which the whole holding is worth less than one
+        // unit of the other token) is not worth swapping
+        if (outputAmount == 0) return (0, 0, swapDir0to1);
     }
 
     /// @notice Net output of an exact-input swap against the route modelled as constant liquidity
@@ -505,53 +507,43 @@ contract LiquidityCalculator is ILiquidityCalculator {
         outputAmount = FullMath.mulDiv(outputAmount, route.outputMultiplier, MAX_FEE_PIPS);
     }
 
-    /// @notice Largest input that still leaves at least the required ratio on the input side
+    /// @notice Largest input that still leaves the input token in surplus for the range
     /// @dev The route curve is monotone, so the balance condition is solved by bisection: the
     ///      input token stays in surplus below the root and in deficit above it. Returns the
     ///      surplus-side bound, so the leftover after minting is at most the bracket width (dust).
+    ///      The balance is judged by _shouldSwap0to1, i.e. by which token funds less liquidity,
+    ///      instead of a required amount0/amount1 ratio in Q96: that ratio's denominator
+    ///      sqrtUpper * sqrtPrice / Q96 * (sqrtPrice - sqrtLower) / Q96 floored to zero at valid
+    ///      prices near MIN_TICK (sqrt prices ~2^32) and the planner reverted on the division
+    ///      (external audit V4LE-145).
     function _solveRouteInputInRange(
         RouteQuote memory route,
-        uint256 requiredRatio,
+        uint160 positionSqrtPrice,
+        uint160 sqrtLower,
+        uint160 sqrtUpper,
         uint256 amount0,
         uint256 amount1,
         bool swapDir0to1
     ) private pure returns (uint256 inputAmount) {
-        uint256 requiredAmount0 = FullMath.mulDiv(requiredRatio, amount1, FixedPoint96.Q96);
-        if (swapDir0to1 ? amount0 <= requiredAmount0 : requiredAmount0 <= amount0) return 0;
-
         uint256 lo;
         uint256 hi = swapDir0to1 ? amount0 : amount1;
         while (hi - lo > 1 && hi - lo > (hi >> ROUTE_SOLVE_PRECISION_SHIFT)) {
             uint256 mid = (lo + hi) / 2;
             uint256 out = _routeOutput(route, swapDir0to1, mid);
-            bool inputStillInSurplus = swapDir0to1
-                ? amount0 - mid > FullMath.mulDiv(requiredRatio, amount1 + out, FixedPoint96.Q96)
-                : FullMath.mulDiv(requiredRatio, amount1 - mid, FixedPoint96.Q96) > amount0 + out;
-            if (inputStillInSurplus) {
+            bool stillExcess0 = _shouldSwap0to1(
+                swapDir0to1 ? amount0 - mid : amount0 + out,
+                swapDir0to1 ? amount1 + out : amount1 - mid,
+                positionSqrtPrice,
+                sqrtLower,
+                sqrtUpper
+            );
+            if (stillExcess0 == swapDir0to1) {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
         inputAmount = lo;
-    }
-
-    /// @notice Calculate required ratio for perfect liquidity in range
-    /// @dev For price P in range [Pa, Pb]: ratio = (sqrt(Pb) - sqrt(P)) / (sqrt(Pb) * sqrt(P) * (sqrt(P) - sqrt(Pa)))
-    /// @param sqrtPrice Current sqrt price
-    /// @param sqrtLower Lower bound sqrt price
-    /// @param sqrtUpper Upper bound sqrt price
-    /// @return requiredRatio Required ratio scaled by Q96
-    function _calculateRequiredRatio(uint160 sqrtPrice, uint160 sqrtLower, uint160 sqrtUpper)
-        private
-        pure
-        returns (uint256 requiredRatio)
-    {
-        uint256 numerator = sqrtUpper - sqrtPrice;
-        uint256 denominator = FullMath.mulDiv(
-            FullMath.mulDiv(sqrtUpper, sqrtPrice, FixedPoint96.Q96), sqrtPrice - sqrtLower, FixedPoint96.Q96
-        );
-        requiredRatio = FullMath.mulDiv(numerator, FixedPoint96.Q96, denominator);
     }
 
     /// @notice Calculate optimal swap amount for double-sided liquidity deposit
@@ -1190,10 +1182,21 @@ contract LiquidityCalculator is ILiquidityCalculator {
     }
 
     /// @notice Determine swap direction when price is within range
-    /// @dev Compares liquidity requirements for token0 vs token1 at current price
+    /// @dev Token0 is in surplus when it funds more liquidity for the range than token1 does:
+    ///        L0 = amount0 * sqrtPrice * sqrtUpper / (Q96 * (sqrtUpper - sqrtPrice))
+    ///        L1 = amount1 * Q96 / (sqrtPrice - sqrtLower)
+    ///      Both are formed so that no intermediate floors to zero: the price-only factor
+    ///      sqrtPrice * sqrtUpper / (sqrtUpper - sqrtPrice) is at least sqrtPrice (>= 2^32), so
+    ///      it keeps 32 bits of precision, and the amounts are multiplied in before the single
+    ///      division by Q96. The previous form floored amount0 * sqrtPrice / Q96 first, which is
+    ///      zero for any amount0 below Q96 / sqrtPrice (~1.8e19 wei at the sqrt prices near
+    ///      MIN_TICK), so a pure token0 holding compared as an empty one and the planner chose
+    ///      1->0 with nothing to swap (external audit V4LE-146). A product that does not fit
+    ///      256 bits saturates: liquidity that large cannot be minted anyway, and the comparison
+    ///      only needs the ordering.
     /// @param amount0Target Desired amount of token0
     /// @param amount1Target Desired amount of token1
-    /// @param sqrtPrice Current sqrt price
+    /// @param sqrtPrice Current sqrt price, strictly inside (sqrtLower, sqrtUpper)
     /// @param sqrtLower Lower bound sqrt price
     /// @param sqrtUpper Upper bound sqrt price
     /// @return true if should swap token0->token1, false otherwise
@@ -1205,12 +1208,24 @@ contract LiquidityCalculator is ILiquidityCalculator {
         uint256 sqrtUpper
     ) private pure returns (bool) {
         unchecked {
-            // Compare liquidity needed for token0 vs token1
-            // If more token0 needed relative to price movement, swap token0->token1
-            return FullMath.mulDiv(
-                FullMath.mulDiv(amount0Target, sqrtPrice, FixedPoint96.Q96), sqrtPrice - sqrtLower, FixedPoint96.Q96
-            ) > amount1Target.mulDiv(sqrtUpper - sqrtPrice, sqrtUpper);
+            uint256 liquidity0 = _mulDivSaturating(
+                amount0Target, _mulDivSaturating(sqrtPrice, sqrtUpper, sqrtUpper - sqrtPrice), FixedPoint96.Q96
+            );
+            uint256 liquidity1 = _mulDivSaturating(amount1Target, FixedPoint96.Q96, sqrtPrice - sqrtLower);
+            return liquidity0 > liquidity1;
         }
+    }
+
+    /// @dev floor(a * b / denominator), or type(uint256).max when the result does not fit
+    function _mulDivSaturating(uint256 a, uint256 b, uint256 denominator) private pure returns (uint256) {
+        uint256 prod1;
+        assembly ("memory-safe") {
+            let mm := mulmod(a, b, not(0))
+            let prod0 := mul(a, b)
+            prod1 := sub(sub(mm, prod0), lt(mm, prod0))
+        }
+        if (prod1 >= denominator) return type(uint256).max;
+        return FullMath.mulDiv(a, b, denominator);
     }
 
     /// @notice Determine optimal swap direction for double-sided deposit

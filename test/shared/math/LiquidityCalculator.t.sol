@@ -9,6 +9,8 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {LiquidityCalculator, ILiquidityCalculator} from "src/shared/math/LiquidityCalculator.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -2000,6 +2002,70 @@ contract LiquidityCalculatorTest is Test {
             "executed output deviates from prediction"
         );
         assertApproxEqRel(sqrtPriceAfter, predictedSqrtPrice, PREDICTION_TOLERANCE, "final price deviates");
+    }
+
+    /// @notice V4LE-145: the finding's state, external route. Position pool at tick -887100 (a
+    ///         valid price near MIN_TICK, sqrt price ~4.3e9), replacement range [-887160, -887040]
+    ///         with the position's token1 to place. The required-ratio denominator floored to zero
+    ///         here and the plan reverted on the division; the plan must be the balancing swap.
+    function testV4LE145_ExternalRouteInRangeNearMinTickPlans() public view {
+        uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(-887100);
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-887160);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(-887040);
+        uint256 amount1 = 1e18;
+
+        (uint256 inputAmount, uint256 outputAmount, bool dir0to1) =
+            helper.getSimpleSwap(sqrtPrice, -887160, -887040, 0, amount1, DEFAULT_FEE);
+        assertFalse(dir0to1, "token1 is swapped for the token0 the range needs");
+        assertGt(inputAmount, 0, "a real balancing swap is planned");
+        assertLt(inputAmount, amount1, "token1 is retained for the range");
+        // LiquidityAmounts.getLiquidityForAmount0 floors sqrtA * sqrtB / Q96 to zero at these prices,
+        // so the token0 side is measured with the exact product order
+        uint256 liquidityFromToken0 = FullMath.mulDiv(
+            outputAmount, FullMath.mulDiv(sqrtPrice, sqrtUpper, sqrtUpper - sqrtPrice), FixedPoint96.Q96
+        );
+        uint256 liquidityFromToken1 =
+            LiquidityAmounts.getLiquidityForAmount1(sqrtLower, sqrtPrice, amount1 - inputAmount);
+        uint256 liquidityDifference = liquidityFromToken0 > liquidityFromToken1
+            ? liquidityFromToken0 - liquidityFromToken1
+            : liquidityFromToken1 - liquidityFromToken0;
+        assertLe(liquidityDifference * 10_000 / liquidityFromToken1, 10, "post-swap amounts within 0.1%");
+    }
+
+    /// @notice V4LE-146: same price, holding 1e18 token0 and no token1. The direction check
+    ///         floored amount0 * sqrtPrice / Q96 to zero, compared the holding as empty and chose
+    ///         1->0 with nothing to swap. The correct reading is token0 in surplus (0->1); at this
+    ///         price 1e18 token0 is worth less than one unit of token1, so the sensible plan is
+    ///         "no swap" reached through the right direction, not a spurious 1->0.
+    function testV4LE146_DirectionNearMinTickSeesTheToken0Surplus() public {
+        uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(-887100);
+
+        (uint256 inputAmount, uint256 outputAmount, bool dir0to1) =
+            helper.getSimpleSwap(sqrtPrice, -887160, -887040, 1e18, 0, DEFAULT_FEE);
+        assertTrue(dir0to1, "token0 is the surplus side");
+        assertEq(outputAmount, 0, "1e18 token0 buys no token1 at this price");
+        assertEq(inputAmount, 0, "so nothing is swapped");
+
+        // the same-pool path: a pool at that tick with the same holding must not report 1->0
+        _usePoolAtTick(500, -887100);
+        _mintLiquidity(-887160, -887040, 1e6);
+        (,, bool samePoolDir0to1,) = helper.getOptimalSwap(poolCallee, -887160, -887040, 1e18, 0);
+        assertTrue(samePoolDir0to1, "same-pool direction sees the token0 surplus");
+    }
+
+    /// @notice The rewritten comparator agrees with LiquidityAmounts at ordinary prices: the side
+    ///         funding less liquidity is the one the plan buys.
+    function testV4LE146_DirectionMatchesLiquidityComparison() public view {
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(-600);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(600);
+        uint256[4] memory amounts0 = [uint256(1 ether), 100 ether, 1e6, 3e25];
+        uint256[4] memory amounts1 = [uint256(1 ether + 1), 1 ether, 1e6 + 1e3, 3e25 - 1e20];
+        for (uint256 i; i < 4; ++i) {
+            (,, bool dir0to1) = helper.getSimpleSwap(SQRT_PRICE_1_0, -600, 600, amounts0[i], amounts1[i], 0);
+            bool expected = LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_0, sqrtUpper, amounts0[i])
+                > LiquidityAmounts.getLiquidityForAmount1(sqrtLower, SQRT_PRICE_1_0, amounts1[i]);
+            assertEq(dir0to1, expected, "direction differs from the liquidity comparison");
+        }
     }
 
     /// @notice V4LE-150: the finding's state. 0.3% pool at tick 0 with liquidity exactly 1e18,
