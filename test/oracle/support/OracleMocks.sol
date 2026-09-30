@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.26;
 
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+
 /// @dev Chainlink-compatible feed whose every round field and its `decimals()` can be changed by the test.
 ///      Fresh by default: `latestRoundData` reports the current block time unless an explicit
 ///      `updatedAt` was set.
@@ -48,5 +52,36 @@ contract MutableDecimalsToken {
 
     function setDecimals(uint8 decimals_) external {
         decimals = decimals_;
+    }
+}
+
+/// @dev Pool hook stand-in that is also its own `IPositionFeeQuoter`: it reports a configurable carried
+///      obligation for every position and does nothing in its pool callback. Deploy it with `deployCodeTo`
+///      at an address carrying `Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG`, the only callback it implements.
+contract ObligationQuoterHook {
+    uint256 public owed0;
+    uint256 public owed1;
+
+    function setObligation(uint256 _owed0, uint256 _owed1) external {
+        owed0 = _owed0;
+        owed1 = _owed1;
+    }
+
+    function hook() external view returns (address) {
+        return address(this);
+    }
+
+    function quoteProtocolFees(uint256, uint128, uint128) external view returns (uint256, uint256) {
+        return (owed0, owed1);
+    }
+
+    function validateVaultPosition(uint256, address) external pure {}
+
+    function beforeRemoveLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata)
+        external
+        pure
+        returns (bytes4)
+    {
+        return IHooks.beforeRemoveLiquidity.selector;
     }
 }

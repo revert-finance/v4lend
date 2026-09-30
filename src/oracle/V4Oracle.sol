@@ -259,7 +259,14 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         uint256 principalValue = FullMath.mulDiv(a0,state.price0X96,quotePrice)
             + FullMath.mulDiv(a1,state.price1X96,quotePrice);
         uint256 needed = target + charge > netFeeValue ? target + charge - netFeeValue : 0;
-        uint256 liquidity = needed == 0 ? 0 : Math.mulDiv(needed,state.liquidity,principalValue,Math.Rounding.Ceil);
+        // A principal whose floored quote is zero (each leg worth less than one quote unit, e.g. a sub-Q96
+        // per-unit price with a real amount) cannot be split by value; when more value is still needed the
+        // sizing is all of it rather than a division by zero (V4LE-139).
+        uint256 liquidity = needed == 0
+            ? 0
+            : principalValue == 0
+                ? state.liquidity
+                : Math.mulDiv(needed,state.liquidity,principalValue,Math.Rounding.Ceil);
         // Each charged currency must also be funded: surplus of the other currency cannot settle it.
         if (c0 != 0) liquidity = a0 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c0,state.liquidity,a0,Math.Rounding.Ceil));
         if (c1 != 0) liquidity = a1 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c1,state.liquidity,a1,Math.Rounding.Ceil));
