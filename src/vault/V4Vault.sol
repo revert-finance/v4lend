@@ -890,8 +890,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 fullValue;
         uint256 collateralValue;
         uint256 feeValue;
+        // raw oracle prices in reference-token terms, as returned by getLiquidityForValue
         uint256 price0X96;
         uint256 price1X96;
+        uint256 quotePriceX96;
     }
 
     /// @notice Liquidates an unhealthy position by repaying debt and receiving collateral
@@ -935,7 +937,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // @custom:accepted-risk AUDIT-ACCEPTED-ORACLE-LIQUIDATION-LIVENESS
         // Liquidation intentionally depends on live oracle data. Stale or missing
         // feeds revert here until governance refreshes feed configuration.
-        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue, state.price0X96, state.price1X96) =
+        (state.isHealthy, state.fullValue, state.collateralValue, state.feeValue,,) =
             _checkLoanIsHealthy(params.tokenId, state.debt);
         if (state.isHealthy) {
             revert NotLiquidatable();
@@ -1333,7 +1335,9 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
     {
         // when the uncollected fees alone cover the liquidation value the oracle sizes no liquidity
         // and the collected fees are split between liquidator and owner by value share
-        uint128 liquidity = oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
+        uint128 liquidity;
+        (liquidity, state.price0X96, state.price1X96, state.quotePriceX96) =
+            oracle.getLiquidityForValue(params.tokenId, asset, state.liquidationValue);
         bool feesOnly = liquidity == 0;
 
         (uint256 received0, uint256 received1) = _decreaseLiquidity(
@@ -1349,8 +1353,13 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         // liquidationValue worth at oracle prices. Anything above stays with the loan owner. Receiving less
         // (a hook skim, a pool price below the oracle) is the liquidator's risk, covered by the penalty; the
         // split is applied to what was actually received so a skim is carried proportionally (L-02).
+        // The received amounts are valued with the oracle's raw prices, exactly as the oracle values the
+        // position: a per-leg price first rounded to Q96 in asset terms is zero for a leg worth less than
+        // one asset unit per raw unit, which would drop that leg from the cap and hand all of it to the
+        // liquidator (V4LE-104).
         uint256 base = feesOnly ? state.feeValue : state.liquidationValue;
-        uint256 receivedValue = received0.mulDiv(state.price0X96, Q96) + received1.mulDiv(state.price1X96, Q96);
+        uint256 receivedValue = received0.mulDiv(state.price0X96, state.quotePriceX96)
+            + received1.mulDiv(state.price1X96, state.quotePriceX96);
         if (receivedValue > base) {
             base = receivedValue;
         }

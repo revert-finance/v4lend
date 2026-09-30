@@ -243,15 +243,22 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     /// @notice Size a fee-first withdrawal, accounting for fixed liabilities consuming principal.
     /// @dev One position-state load (sequencer guard, feed / TWAP reads, quoter calls) serves both the
-    ///      value the target is compared against and the sizing itself.
-    function getLiquidityForValue(uint256 tokenId, address quoteToken, uint256 target) external view returns (uint128) {
+    ///      value the target is compared against and the sizing itself. The raw prices are returned so
+    ///      the caller values the removal's actual proceeds at full precision, see `IV4Oracle` (V4LE-104).
+    function getLiquidityForValue(uint256 tokenId, address quoteToken, uint256 target)
+        external
+        view
+        returns (uint128, uint256 price0X96, uint256 price1X96, uint256 quotePrice)
+    {
         PositionState memory state = _loadPositionState(tokenId);
         (uint256 a0,uint256 a1) = _getAmounts(state);
         (uint128 f0,uint128 f1) = _getFees(state);
         (uint256 owed0,uint256 owed1) = _feeObligation(state,f0,f1);
-        uint256 quotePrice = _quoteTokenPrice(state, quoteToken);
+        quotePrice = _quoteTokenPrice(state, quoteToken);
+        price0X96 = state.price0X96;
+        price1X96 = state.price1X96;
         (uint256 value,uint256 netFeeValue) = _netValues(state,a0,a1,f0,f1,owed0,owed1,quotePrice);
-        if (target >= value) return state.liquidity;
+        if (target >= value) return (state.liquidity, price0X96, price1X96, quotePrice);
         uint256 c0 = owed0 > f0 ? owed0-f0 : 0;
         uint256 c1 = owed1 > f1 ? owed1-f1 : 0;
         uint256 charge = Math.mulDiv(c0,state.price0X96,quotePrice,Math.Rounding.Ceil)
@@ -270,7 +277,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         // Each charged currency must also be funded: surplus of the other currency cannot settle it.
         if (c0 != 0) liquidity = a0 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c0,state.liquidity,a0,Math.Rounding.Ceil));
         if (c1 != 0) liquidity = a1 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c1,state.liquidity,a1,Math.Rounding.Ceil));
-        return uint128(Math.min(liquidity,state.liquidity));
+        return (uint128(Math.min(liquidity,state.liquidity)), price0X96, price1X96, quotePrice);
     }
 
     // token => config mapping

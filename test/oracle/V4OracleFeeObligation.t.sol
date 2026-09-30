@@ -95,7 +95,7 @@ contract V4OracleFeeObligationTest is BaseTest {
 
         // target below the value, yet the charge means more than the fees is needed: the old code
         // divided by the zero principal value here
-        uint128 sized = oracle.getLiquidityForValue(tokenId, quote, 500_000);
+        (uint128 sized,,,) = oracle.getLiquidityForValue(tokenId, quote, 500_000);
         assertEq(sized, liquidity, "the charged currency cannot be funded from principal: all liquidity");
     }
 

@@ -123,7 +123,7 @@ contract V4OracleExtremeTickValueTest is BaseTest {
         (uint256 value,,,uint256 roundedUnitPrice) = oracle.getValue(id,Currency.unwrap(currency0));
         assertGt(value,0);
         assertEq(roundedUnitPrice,0,"unit price loses precision although the position has value");
-        uint128 removal = oracle.getLiquidityForValue(id,Currency.unwrap(currency0),value/2);
+        (uint128 removal,,,) = oracle.getLiquidityForValue(id,Currency.unwrap(currency0),value/2);
         assertGt(removal,0);
         assertLt(removal,liquidity);
         assertApproxEqRel(uint256(removal),uint256(liquidity)/2,1e14);
