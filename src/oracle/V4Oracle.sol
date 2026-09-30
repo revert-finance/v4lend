@@ -565,13 +565,18 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             uint256 chainlinkPriceX96 = _getChainlinkPriceX96(token, unverified);
             if (cachedChainlinkReferencePriceX96 == 0) {
                 chainlinkReferencePriceX96 = _getChainlinkPriceX96(referenceToken, unverified);
-                if (unverified) {
-                    _requireTokenDecimals(referenceToken, referenceTokenDecimals);
-                }
             } else {
                 chainlinkReferencePriceX96 = cachedChainlinkReferencePriceX96;
+                // The cached denominator comes from the other leg's read. When that was a verified
+                // two-source read it checked only the ratio of its two feeds, not the reference feed's own
+                // scale (a coordinated precision migration of both feeds passes it), so an unverified read
+                // re-checks the reference feed it divides by, cache or not (V4LE-112).
+                if (unverified) {
+                    _requireReferenceFeedDecimals();
+                }
             }
             if (unverified) {
+                _requireTokenDecimals(referenceToken, referenceTokenDecimals);
                 _requireTokenDecimals(token, feedConfig.tokenDecimals);
             }
             uint256 referencePriceX96 =
@@ -673,6 +678,18 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         }
 
         return FullMath.mulDiv(SafeCast.toUint256(answer), Q96, 10 ** feedConfig.feedDecimals);
+    }
+
+    /// @dev Reference-feed counterpart of the `checkDecimals` re-read in `_getChainlinkPriceX96`, for a read
+    ///      that reuses a cached reference price instead of reading the feed.
+    function _requireReferenceFeedDecimals() internal view {
+        if (referenceToken == chainlinkReferenceToken) {
+            return;
+        }
+        TokenConfig storage referenceConfig = feedConfigs[referenceToken];
+        if (referenceConfig.feed.decimals() != referenceConfig.feedDecimals) {
+            revert FeedDecimalsChanged();
+        }
     }
 
     /// @dev Rejects a token whose live `decimals()` differs from the exponent cached for it (an upgraded
