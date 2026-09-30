@@ -83,7 +83,7 @@ graph TD
     S --> SW["RevertHookSwapActions"]
 ```
 
-`RevertHookConfig._setPositionConfig` delegatecalls `RevertHookAutoLendActions.validatePositionConfig` for the tick-alignment, mode-flag and range validation (moved out of the hook for bytecode room; reverts bubble up). The remint-migration cluster (`migrateVaultPosition`, the tagged-mint `afterAddLiquidity` tail, `_migrateMintedPosition`, `_migratePositionState`) lives in `RevertHookMigrationActions`, a sidecar of its own because neither the auto-lend nor the auto-leverage sidecar has the room.
+`RevertHookConfig._setPositionConfig` delegatecalls `RevertHookAutoLendActions.validatePositionConfig` for the tick-alignment, mode-flag and range validation (moved out of the hook for bytecode room; reverts bubble up). `RevertHookConfig.setSwapProtectionConfig` likewise delegatecalls `RevertHookMigrationActions.setSwapProtectionConfig` (owner check, bounds and the sqrt price-multiplier math), which was moved out for the same reason. The remint-migration cluster (`migrateVaultPosition`, the tagged-mint `afterAddLiquidity` tail, `_migrateMintedPosition`, `_migratePositionState`) lives in `RevertHookMigrationActions`, a sidecar of its own because neither the auto-lend nor the auto-leverage sidecar has the room.
 
 `RevertHookSwapActions` is delegatecalled from `RevertHookActionBase._executeSwapResolved` (and so runs with the hook's storage) but inherits only up to `RevertHookState`; it reads `_swapProtectionConfigs`. It declares no storage of its own and must never do so.
 

@@ -8,6 +8,7 @@ import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibr
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {ILiquidityCalculator} from "../shared/math/LiquidityCalculator.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
@@ -38,6 +39,50 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         RevertHookSwapActions _swapActions
     ) RevertHookActionBase(_permit2, _v4Oracle, _liquidityCalculator, _hookRouteController, _swapActions) {
         _selfAddress = address(this);
+    }
+
+    // ==================== Swap protection ====================
+
+    /// @notice Stores a position's swap price-impact protection (RevertHook.setSwapProtectionConfig).
+    ///         Hosted here via delegatecall so the hook stays under the EIP-170 limit; msg.sender
+    ///         is the hook's caller, so the owner check binds the same account as before the move.
+    /// @dev Delegatecall-only: a direct call (own storage, spoofable events) is rejected.
+    function setSwapProtectionConfig(uint256 tokenId, uint32 maxPriceImpactBps0, uint32 maxPriceImpactBps1)
+        external
+    {
+        if (address(this) == _selfAddress) {
+            revert Unauthorized();
+        }
+        if (_getOwner(tokenId, true) != msg.sender) {
+            revert Unauthorized();
+        }
+        if (maxPriceImpactBps0 > 10000 || maxPriceImpactBps1 > 10000) {
+            revert InvalidConfig();
+        }
+
+        SwapProtectionConfig memory swapProtectionConfig = SwapProtectionConfig({
+            sqrtPriceMultiplier0: _calculateSqrtPriceMultiplier(maxPriceImpactBps0, true),
+            sqrtPriceMultiplier1: _calculateSqrtPriceMultiplier(maxPriceImpactBps1, false)
+        });
+
+        _swapProtectionConfigs[tokenId] = swapProtectionConfig;
+        emit SetSwapProtectionConfig(tokenId, swapProtectionConfig);
+    }
+
+    function _calculateSqrtPriceMultiplier(uint32 maxPriceImpactBps, bool zeroForOne)
+        internal
+        pure
+        returns (uint128 multiplier)
+    {
+        if (maxPriceImpactBps == 0) {
+            return 0;
+        }
+
+        uint256 q64Squared = uint256(Q64) * uint256(Q64);
+        uint256 numerator = zeroForOne
+            ? (10000 - maxPriceImpactBps) * q64Squared / 10000
+            : (10000 + maxPriceImpactBps) * q64Squared / 10000;
+        multiplier = uint128(Math.sqrt(numerator));
     }
 
     // ==================== Remint migration ====================

@@ -2,7 +2,6 @@
 pragma solidity ^0.8.30;
 
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
@@ -52,25 +51,18 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         emit SetMinPositionValueNative(newMinPositionValueNative);
     }
 
+    /// @notice Sets a position's swap price-impact protection.
+    /// @dev Owner check, bounds and the sqrt-multiplier math live in the migration sidecar
+    ///      (delegatecall, shared storage) to keep the hook under the EIP-170 limit; msg.sender is
+    ///      preserved by the delegatecall. Reverts bubble up.
     function setSwapProtectionConfig(uint256 tokenId, uint32 maxPriceImpactBps0, uint32 maxPriceImpactBps1)
         external
         payable
     {
-        if (_getOwner(tokenId, true) != msg.sender) {
-            revert Unauthorized();
-        }
-
-        if (maxPriceImpactBps0 > 10000 || maxPriceImpactBps1 > 10000) {
-            revert InvalidConfig();
-        }
-
-        SwapProtectionConfig memory swapProtectionConfig = SwapProtectionConfig({
-            sqrtPriceMultiplier0: _calculateSqrtPriceMultiplier(maxPriceImpactBps0, true),
-            sqrtPriceMultiplier1: _calculateSqrtPriceMultiplier(maxPriceImpactBps1, false)
-        });
-
-        _swapProtectionConfigs[tokenId] = swapProtectionConfig;
-        emit SetSwapProtectionConfig(tokenId, swapProtectionConfig);
+        _delegatecallPassthrough(
+            address(migrationActions),
+            abi.encodeCall(migrationActions.setSwapProtectionConfig, (tokenId, maxPriceImpactBps0, maxPriceImpactBps1))
+        );
     }
 
     function setPositionConfig(uint256 tokenId, PositionConfig calldata positionConfig) external payable {
@@ -98,22 +90,6 @@ abstract contract RevertHookConfig is RevertHookImmediate {
         _delegatecallPassthrough(
             address(migrationActions), abi.encodeCall(migrationActions.migrateVaultPosition, (oldTokenId, newTokenId))
         );
-    }
-
-    function _calculateSqrtPriceMultiplier(uint32 maxPriceImpactBps, bool zeroForOne)
-        internal
-        pure
-        returns (uint128 multiplier)
-    {
-        if (maxPriceImpactBps == 0) {
-            return 0;
-        }
-
-        uint256 q64Squared = uint256(Q64) * uint256(Q64);
-        uint256 numerator = zeroForOne
-            ? (10000 - maxPriceImpactBps) * q64Squared / 10000
-            : (10000 + maxPriceImpactBps) * q64Squared / 10000;
-        multiplier = uint128(Math.sqrt(numerator));
     }
 
     function _setPositionConfig(uint256 tokenId, PositionConfig memory config, bool checkImmediateExecution) internal {
