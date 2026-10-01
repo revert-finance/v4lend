@@ -70,9 +70,12 @@ interface IUniswapV3Pool {
 ///   - Owner is trusted to configure valid feeds, TWAP pools, staleness parameters, and emergency modes
 contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
     uint256 private constant SEQUENCER_GRACE_PERIOD_TIME = 600; // 10mins
-    // Uniswap v4 settles every principal and fee amount of a modifyLiquidity call through
-    // SafeCast.toInt128, which rejects amounts >= 2^127. Amounts at or beyond it can be shown by the
-    // oracle but never collected, so they are not certified as collateral.
+    // Uniswap v4 settles every principal and fee amount of a modifyLiquidity call, and every take, through
+    // SafeCast.toInt128, which rejects amounts >= 2^127. A position cannot pay out more of a currency than
+    // exists, so a token whose total supply is below this bound can never put a removal past it; the
+    // constructor and `setTokenConfig` refuse any other token (`_requireBoundedSupply`, V4LE-61 / V4LE-98 /
+    // V4LE-156). Fees and a hook obligation at or beyond it are reported rather than counted (V4LE-6,
+    // V4LE-113): v4 could never pay them out.
     uint256 private constant V4_SETTLEMENT_BOUND = 1 << 127;
 
     event TokenConfigUpdated(address indexed token, TokenConfig config);
@@ -150,9 +153,32 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         _requireRecoveredToken(quoteToken, restart);
     }
 
+    /// @dev Token amounts the whole position pays out at the LIVE pool price, where v4 settles a decrease
+    ///      (the oracle-derived composition is what is valued, not what is paid). Requires `_getAmounts` to
+    ///      have filled the range sqrt prices.
+    function _liveAmounts(PositionState memory state) internal pure returns (uint256 live0, uint256 live1) {
+        if (state.liquidity == 0) return (0, 0);
+        return LiquidityAmounts.getAmountsForLiquidity(
+            state.sqrtPriceX96, state.sqrtPriceX96Lower, state.sqrtPriceX96Upper, state.liquidity
+        );
+    }
+
     function _validateVaultPosition(uint256 tokenId, address asset) internal view {
         (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
         if (address(key.hooks) != address(0)) IRemintMigrationHook(address(key.hooks)).validateVaultPosition(tokenId, asset);
+    }
+
+    /// @dev A token is accepted only while its total supply is below v4's int128 settlement bound: a
+    ///      position's principal and fees in a currency are bounded by what exists of it, so no decrease and
+    ///      no take of such a token can ever exceed what v4 settles in one call, at any pool price and any
+    ///      liquidity. This is the whole settlement guard; the valuation never bounds principal (a snapshot
+    ///      bound there was a liquidation lockout once the price drifted past it, V4LE-61 / V4LE-98 /
+    ///      V4LE-156). Native ETH is far below the bound. A token minting past it after configuration is a
+    ///      token failure outside the trust model, like any other supply attack on its price.
+    function _requireBoundedSupply(address token) internal view {
+        if (token != address(0) && IERC20Metadata(token).totalSupply() >= V4_SETTLEMENT_BOUND) {
+            revert SettlementBoundExceeded();
+        }
     }
 
     function _requireRecoveredToken(address token, uint256 restart) internal view {
@@ -178,6 +204,9 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     error HookFeeQuoterNotConfigured(address hook);
     error InvalidFeeQuoter();
+    /// @notice The hook's obligation in one currency exceeds what the whole position pays out in that currency
+    ///         at the live pool price, so no removal can settle it in the fee-first unlock.
+    error HookChargeUnfundable();
     /// @notice Nonzero hooks must have an explicit trusted fee quoter. This oracle's address is
     /// the explicit no-fee sentinel, only for hooks reviewed as not charging position fees.
     mapping(address hook => address quoter) public hookFeeQuoters;
@@ -264,10 +293,16 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         quotePrice = _quoteTokenPrice(state, quoteToken);
         price0X96 = state.price0X96;
         price1X96 = state.price1X96;
-        (uint256 value,uint256 netFeeValue) = _netValues(state,a0,a1,f0,f1,owed0,owed1,quotePrice);
-        if (target >= value) return (state.liquidity, price0X96, price1X96, quotePrice);
         uint256 c0 = owed0 > f0 ? owed0-f0 : 0;
         uint256 c1 = owed1 > f1 ? owed1-f1 : 0;
+        // A charge is paid from the principal the removal releases, which v4 pays at the live price, not
+        // from the derived composition that is valued: the funding floors below are sized on the live
+        // payout, and a charge the whole position's live payout cannot cover is reported instead of a
+        // removal whose unlock v4 would reject (Codex, PR #45).
+        (uint256 live0, uint256 live1) = _liveAmounts(state);
+        if (live0 < c0 || live1 < c1) revert HookChargeUnfundable();
+        (uint256 value,uint256 netFeeValue) = _netValues(state,a0,a1,f0,f1,owed0,owed1,quotePrice);
+        if (target >= value) return (state.liquidity, price0X96, price1X96, quotePrice);
         uint256 charge = Math.mulDiv(c0,state.price0X96,quotePrice,Math.Rounding.Ceil)
             + Math.mulDiv(c1,state.price1X96,quotePrice,Math.Rounding.Ceil);
         uint256 principalValue = FullMath.mulDiv(a0,state.price0X96,quotePrice)
@@ -281,9 +316,11 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
             : principalValue == 0
                 ? state.liquidity
                 : Math.mulDiv(needed,state.liquidity,principalValue,Math.Rounding.Ceil);
-        // Each charged currency must also be funded: surplus of the other currency cannot settle it.
-        if (c0 != 0) liquidity = a0 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c0,state.liquidity,a0,Math.Rounding.Ceil));
-        if (c1 != 0) liquidity = a1 == 0 ? state.liquidity : Math.max(liquidity,Math.mulDiv(c1,state.liquidity,a1,Math.Rounding.Ceil));
+        // Each charged currency must also be funded from what v4 pays out of it at the live price: surplus
+        // of the other currency cannot settle it (live_i >= c_i > 0 here, see above).
+        if (c0 != 0) liquidity = Math.max(liquidity, Math.mulDiv(c0, state.liquidity, live0, Math.Rounding.Ceil));
+        if (c1 != 0) liquidity = Math.max(liquidity, Math.mulDiv(c1, state.liquidity, live1, Math.Rounding.Ceil));
+        // forge-lint: disable-next-line(unsafe-typecast)
         return (uint128(Math.min(liquidity,state.liquidity)), price0X96, price1X96, quotePrice);
     }
 
@@ -313,6 +350,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         positionManager = _positionManager;
         referenceToken = _referenceToken;
         referenceTokenDecimals = IERC20Metadata(_referenceToken).decimals();
+        _requireBoundedSupply(_referenceToken);
         chainlinkReferenceToken = _chainlinkReferenceToken;
     }
 
@@ -457,6 +495,7 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
         if (!_isValidMode(mode) || address(feed) == address(0)) {
             revert InvalidConfig();
         }
+        _requireBoundedSupply(token);
 
         uint8 feedDecimals = feed.decimals();
         uint8 tokenDecimals = address(token) == address(0) ? 18 : IERC20Metadata(token).decimals();
@@ -930,17 +969,10 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
 
     /// @notice Calculates token amounts of a position based on oracle-derived price
     /// @dev Internal function that converts liquidity to token amounts using oracle price instead of pool price.
-    ///      An amount >= 2^127 is reported with `SettlementBoundExceeded`: `Pool.modifyLiquidity` narrows the
-    ///      principal delta of a decrease with `toInt128()`, so v4 cannot pay such an amount out in one
-    ///      operation (the vault's liquidation and full withdrawal), and the oracle does not certify it as
-    ///      collateral. The state is reachable without any oracle attack, by the pool price crossing a range
-    ///      whose other-side principal is that large.
-    ///      The bound is enforced on the composition at the oracle-derived price (what is valued) and on the
-    ///      composition at the live pool price (what v4 settles a decrease at). The live price may sit up to
-    ///      `maxPoolPriceDifference` from the derived one, and at a high sqrt price that is enough for the
-    ///      live-side principal of a range to be orders of magnitude larger than the derived-side one; a
-    ///      position that passes only the derived check could be borrowed against while every liquidation
-    ///      removal, sized from the derived amounts, reverts at v4's narrowing (V4LE-98).
+    ///      Not bounded at the v4 settlement limit: a configured token's supply is below it
+    ///      (`_requireBoundedSupply`), so no principal amount of an accepted position can reach it, and a bound
+    ///      in the valuation itself became a liquidation lockout as soon as the price drifted past it
+    ///      (V4LE-61, V4LE-98, V4LE-156).
     /// @param state Complete PositionState struct containing position data and derived price
     /// @return amount0 Calculated amount of token0 based on oracle-derived sqrt price
     /// @return amount1 Calculated amount of token1 based on oracle-derived sqrt price
@@ -958,18 +990,6 @@ contract V4Oracle is IV4Oracle, Ownable2Step, Constants {
                 state.sqrtPriceX96Upper, // Upper tick price
                 state.liquidity // Position liquidity
             );
-            (uint256 liveAmount0, uint256 liveAmount1) = LiquidityAmounts.getAmountsForLiquidity(
-                state.sqrtPriceX96, // Live pool price (what a decrease settles at)
-                state.sqrtPriceX96Lower,
-                state.sqrtPriceX96Upper,
-                state.liquidity
-            );
-            if (
-                amount0 >= V4_SETTLEMENT_BOUND || amount1 >= V4_SETTLEMENT_BOUND
-                    || liveAmount0 >= V4_SETTLEMENT_BOUND || liveAmount1 >= V4_SETTLEMENT_BOUND
-            ) {
-                revert SettlementBoundExceeded();
-            }
         }
     }
 

@@ -42,9 +42,11 @@ contract MutableChainlinkFeed {
 }
 
 /// @dev Token metadata stub whose `decimals()` can be changed after deployment, standing in for an
-///      upgradeable token whose implementation changes its metadata. The oracle only reads `decimals()`.
+///      upgradeable token whose implementation changes its metadata. The oracle reads `decimals()` and, at
+///      configuration, `totalSupply()` (the v4 settlement bound, V4LE-156): no supply is minted here.
 contract MutableDecimalsToken {
     uint8 public decimals;
+    uint256 public constant totalSupply = 0;
 
     constructor(uint8 decimals_) {
         decimals = decimals_;

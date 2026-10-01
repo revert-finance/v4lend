@@ -18,6 +18,7 @@ import {EasyPosm} from "test/utils/libraries/EasyPosm.sol";
 import {BaseTest} from "test/utils/BaseTest.sol";
 import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {MutableChainlinkFeed, ObligationQuoterHook} from "test/oracle/support/OracleMocks.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 
 /// @title V4OracleFeeObligationTest
 /// @notice Valuation and liquidation sizing of a hooked position against the carried protocol-fee
@@ -26,7 +27,8 @@ import {MutableChainlinkFeed, ObligationQuoterHook} from "test/oracle/support/Or
 ///           value, which is zero for a leg whose per-unit quote price is below one Q96 unit although the
 ///           leg has real value. With a carried obligation in that leg the fee value made the target
 ///           pass while more value was needed, and the sizing (and with it the vault's liquidation)
-///           reverted with a division by zero instead of taking the whole liquidity.
+///           reverted with a division by zero instead of taking the whole liquidity. A charge the whole
+///           live payout cannot fund is reported as `HookChargeUnfundable` (Codex, PR #45).
 ///         - External audit V4LE-113: a quoted obligation was accepted without the 2^127 settlement bound
 ///           that fees and principal are held to. The hook takes its whole obligation in the fee-first
 ///           INCREASE(0) of every removal and narrows it with `SafeCast.toInt128`, so an obligation at or
@@ -99,9 +101,17 @@ contract V4OracleFeeObligationTest is BaseTest {
         assertEq(feeValue, 1_000_000);
 
         // target below the value, yet the charge means more than the fees is needed: the old code
-        // divided by the zero principal value here
+        // divided by the zero principal value here. The whole payout cannot fund this charge, which is
+        // reported as such (Codex, PR #45) instead of a removal whose unlock v4 would reject.
+        vm.expectRevert(abi.encodeWithSignature("HookChargeUnfundable()"));
+        oracle.getLiquidityForValue(tokenId, quote, 500_000);
+
+        // a fundable charge in the sub-Q96 currency: the fees cover the target and the charge needs half
+        // the principal, so the sizing is the charge-funding floor (half the liquidity), with no division
+        // by the zero principal value along the way
+        hook.setObligation(0, amount1 / 2);
         (uint128 sized,,,) = oracle.getLiquidityForValue(tokenId, quote, 500_000);
-        assertEq(sized, liquidity, "the charged currency cannot be funded from principal: all liquidity");
+        assertEq(sized, liquidity / 2, "sized to fund the charge from the live payout");
     }
 
     // ---------------------------------------------------------------- V4LE-113: obligation bound
@@ -140,6 +150,66 @@ contract V4OracleFeeObligationTest is BaseTest {
     }
 
     /// @dev Pool with the obligation hook at `tick`; the currency0 feed is pointed at that price.
+    // ---------------------------------------------------------------- Codex (PR #45): live-payout funding
+
+    /// @dev A carried token0 charge with the oracle price at the range's lower tick (all token0 at the
+    ///      derived price) while the live pool sits above the range inside the tolerance (no token0 paid
+    ///      out at all): no removal can fund the charge, and the sizing says so instead of reporting a
+    ///      removal whose unlock v4 would reject.
+    function testCodex_ChargeNoLivePayoutCanFundIsReported() public {
+        (PoolKey memory key,) = _initializeHookedPool(0);
+        uint128 liquidity = 1e18;
+        uint256 tokenId = _mint(key, 0, 60, liquidity);
+        _writePoolTick(key.toId(), 60);
+        (,,,, uint256 derived0,,,) = oracle.getPositionBreakdown(tokenId);
+        assertGt(derived0, 0, "scenario: token0 principal at the derived price");
+        (uint256 live0,) = LiquidityAmounts.getAmountsForLiquidity(
+            TickMath.getSqrtPriceAtTick(60), TickMath.getSqrtPriceAtTick(0), TickMath.getSqrtPriceAtTick(60), liquidity
+        );
+        assertEq(live0, 0, "scenario: no token0 paid out at the live price");
+        hook.setObligation(1e15, 0);
+        // still valued (the charge consumes derived principal), but not sizable
+        oracle.getValue(tokenId, Currency.unwrap(currency1));
+        vm.expectRevert(abi.encodeWithSignature("HookChargeUnfundable()"));
+        oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), 1);
+    }
+
+    /// @dev With the live pool inside the range the token0 payout per liquidity is smaller than at the
+    ///      derived price; the funding floor is sized on the live payout so the removal actually releases
+    ///      the charge (the derived-price floor released too little and the unlock reverted).
+    function testCodex_ChargeFundingFloorUsesLivePayout() public {
+        (PoolKey memory key,) = _initializeHookedPool(0);
+        uint128 liquidity = 1e18;
+        uint256 tokenId = _mint(key, 0, 60, liquidity);
+        (,,,, uint256 derived0,,,) = oracle.getPositionBreakdown(tokenId);
+        _writePoolTick(key.toId(), 30);
+        (uint256 live0,) = LiquidityAmounts.getAmountsForLiquidity(
+            TickMath.getSqrtPriceAtTick(30), TickMath.getSqrtPriceAtTick(0), TickMath.getSqrtPriceAtTick(60), liquidity
+        );
+        assertLt(live0, derived0, "scenario: less token0 paid out at the live price than valued");
+        uint256 charge0 = derived0 * 4 / 10;
+        assertLe(charge0, live0, "scenario: the whole live payout can fund the charge");
+        hook.setObligation(charge0, 0);
+
+        (uint128 sized,,,) = oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), 1);
+        uint256 derivedFloor = FullMath.mulDiv(charge0, liquidity, derived0);
+        assertGt(sized, derivedFloor, "sized beyond the derived-price floor");
+        (uint256 paid0,) = LiquidityAmounts.getAmountsForLiquidity(
+            TickMath.getSqrtPriceAtTick(30), TickMath.getSqrtPriceAtTick(0), TickMath.getSqrtPriceAtTick(60), sized
+        );
+        assertGe(paid0, charge0, "the sized removal's live payout funds the charge");
+    }
+
+    /// @dev Writes the pool's slot0 price and tick directly (inside the deviation tolerance).
+    function _writePoolTick(PoolId id, int24 tick) internal {
+        uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
+        bytes32 stateSlot = StateLibrary._getPoolStateSlot(id);
+        uint256 slot0 = uint256(vm.load(address(poolManager), stateSlot));
+        uint256 priceAndTickMask = (uint256(1) << 184) - 1;
+        slot0 = (slot0 & ~priceAndTickMask) | uint256(sqrtPriceX96) | (uint256(uint24(tick)) << 160);
+        vm.store(address(poolManager), stateSlot, bytes32(slot0));
+    }
+
     function _initializeHookedPool(int24 tick) internal returns (PoolKey memory key, uint256 price0X96) {
         key = PoolKey(currency0, currency1, 500, TICK_SPACING, IHooks(address(hook)));
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
