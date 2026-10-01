@@ -20,24 +20,16 @@ import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 contract MockV4Oracle is IV4Oracle {
     using PoolIdLibrary for PoolKey;
 
-    /// @dev Optional per-decrease settlement cap reported as the fifth output (0: the whole liquidity).
-    uint128 public settlementLiquidityCap;
-
-    function setSettlementLiquidityCap(uint128 cap) external {
-        settlementLiquidityCap = cap;
-    }
-
     /// @dev Prices are zero like getValue's, with a nonzero quote price so consumers never divide by zero.
     function getLiquidityForValue(uint256 tokenId, address, uint256 target)
         external
         view
-        returns (RemovalPlan memory plan)
+        returns (uint128, uint256, uint256, uint256)
     {
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
-        plan.liquidity =
+        uint128 sized =
             target >= mockPositionValue ? liquidity : uint128(FullMath.mulDiv(target,liquidity,mockPositionValue));
-        plan.chunk = settlementLiquidityCap == 0 ? liquidity : settlementLiquidityCap;
-        plan.quotePriceX96 = FixedPoint96.Q96;
+        return (sized, 0, 0, FixedPoint96.Q96);
     }
     function getRiskScore(uint256, address, uint256) external pure returns (uint256) { return 0; }
     function validateRiskChange(uint256 id, address asset, uint256 debt, uint256) external view {

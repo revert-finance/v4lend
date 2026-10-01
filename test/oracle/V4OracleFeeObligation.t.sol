@@ -19,7 +19,6 @@ import {BaseTest} from "test/utils/BaseTest.sol";
 import {V4Oracle, AggregatorV3Interface, IUniswapV3Pool} from "src/oracle/V4Oracle.sol";
 import {MutableChainlinkFeed, ObligationQuoterHook} from "test/oracle/support/OracleMocks.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
-import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 
 /// @title V4OracleFeeObligationTest
 /// @notice Valuation and liquidation sizing of a hooked position against the carried protocol-fee
@@ -111,7 +110,7 @@ contract V4OracleFeeObligationTest is BaseTest {
         // the principal, so the sizing is the charge-funding floor (half the liquidity), with no division
         // by the zero principal value along the way
         hook.setObligation(0, amount1 / 2);
-        uint128 sized = oracle.getLiquidityForValue(tokenId, quote, 500_000).liquidity;
+        (uint128 sized,,,) = oracle.getLiquidityForValue(tokenId, quote, 500_000);
         assertEq(sized, liquidity / 2, "sized to fund the charge from the live payout");
     }
 
@@ -192,12 +191,11 @@ contract V4OracleFeeObligationTest is BaseTest {
         assertLe(charge0, live0, "scenario: the whole live payout can fund the charge");
         hook.setObligation(charge0, 0);
 
-        IV4Oracle.RemovalPlan memory plan = oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), 1);
-        assertEq(plan.charge0, charge0);
+        (uint128 sized,,,) = oracle.getLiquidityForValue(tokenId, Currency.unwrap(currency1), 1);
         uint256 derivedFloor = FullMath.mulDiv(charge0, liquidity, derived0);
-        assertGt(plan.liquidity, derivedFloor, "sized beyond the derived-price floor");
+        assertGt(sized, derivedFloor, "sized beyond the derived-price floor");
         (uint256 paid0,) = LiquidityAmounts.getAmountsForLiquidity(
-            TickMath.getSqrtPriceAtTick(30), TickMath.getSqrtPriceAtTick(0), TickMath.getSqrtPriceAtTick(60), plan.liquidity
+            TickMath.getSqrtPriceAtTick(30), TickMath.getSqrtPriceAtTick(0), TickMath.getSqrtPriceAtTick(60), sized
         );
         assertGe(paid0, charge0, "the sized removal's live payout funds the charge");
     }

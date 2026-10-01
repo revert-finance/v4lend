@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.30;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -16,65 +15,72 @@ import {MockUniswapV3Pool} from "test/utils/MockUniswapV3Pool.sol";
 import {V4VaultOracleLiquidationBase, LiquidationCapFeed} from "test/vault/support/V4VaultOracleLiquidationBase.sol";
 import {V4Oracle, AggregatorV3Interface} from "src/oracle/V4Oracle.sol";
 
-/// @notice V4LE-98 / V4LE-156 end to end with the REAL oracle and vault. The oracle source and the live pool
-///         move above the range after the loan was opened, so the position's payout is several times the v4
-///         int128 bound. One liquidation settles it whole: the vault splits the removal into decreases v4
-///         can settle inside one batch, the loan is closed and the liquidator receives the entire payout.
-contract V4VaultChunkedLiquidationOracleTest is V4VaultOracleLiquidationBase {
+/// @notice V4LE-98 / V4LE-156 end to end with the REAL oracle and vault. The valuation no longer bounds principal
+///         (a bound there was a liquidation lockout once the price drifted past it); v4's int128 settlement limit
+///         is unreachable for a configured token because its supply is below it. A loan whose source and live pool
+///         cross its entire range after opening, so that its payout is a large fraction of that limit, is
+///         liquidated whole in the vault's single fee-first removal.
+contract V4VaultSettlementBoundLiquidationTest is V4VaultOracleLiquidationBase {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
     uint256 internal constant BOUND = 1 << 127;
-    // a range at sqrt price ~2^41: 2^91 liquidity pays ~5 * 2^127 of token1 once the whole range is crossed
+    // a range at sqrt price ~2^41: once the whole range is crossed, 2^88 liquidity pays ~0.4 * 2^127 of token1
     int24 internal constant TICK_LOWER = 568440;
     int24 internal constant TICK_UPPER = 570240;
     int24 internal constant DRIFT_TICK = 570300;
-    uint128 internal constant LIQUIDITY = 2 ** 91;
 
-    function testV4LE156_OverBoundPositionIsLiquidatedWholeInOneTransaction() public {
-        // the oracle prices currency0 at TICK_LOWER (TWAP source); the pool sits there too
+    PoolKey internal key;
+
+    function setUp() public override {
+        super.setUp();
         _pointOracleAt(TICK_LOWER);
-        PoolKey memory key = PoolKey(currency0, currency1, 500, 60, IHooks(address(0)));
+        key = PoolKey(currency0, currency1, 500, 60, IHooks(address(0)));
         poolManager.initialize(key, TickMath.getSqrtPriceAtTick(TICK_LOWER));
         vault.setLimits(0, 1e50, 1e50, 1e50, 1e50);
         deal(asset, address(this), 1e50);
         vault.deposit(1e48, address(this));
         deal(Currency.unwrap(currency0), address(this), type(uint256).max / 2);
+    }
 
-        // minted at its lower tick (all token0, a small amount) and borrowed against
-        uint256 tokenId = _mint(key, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+    function testV4LE156_LoanNearTheSettlementBoundIsLiquidatedWholeAfterDrift() public {
+        uint128 liquidity = 2 ** 88;
+        uint256 maxPayout1 = _maxPayout1(liquidity);
+        assertLt(maxPayout1, BOUND, "scenario: within what v4 settles in one decrease");
+        assertGt(maxPayout1, BOUND / 4, "scenario: yet a large fraction of it");
+
+        uint256 tokenId = _mint(key, TICK_LOWER, TICK_UPPER, liquidity);
         IERC721(address(positionManager)).approve(address(vault), tokenId);
         vault.create(tokenId, borrower);
         (,, uint256 collateralValue,,) = vault.loanInfo(tokenId);
         vm.prank(borrower);
         vault.borrow(tokenId, collateralValue * 70 / 100);
 
-        // source and live pool move above the range: the payout is all token1, several times the bound
+        // source and live pool move above the range: the payout is all token1, close to its maximum
         _pointOracleAt(DRIFT_TICK);
         _writePoolTick(key.toId(), DRIFT_TICK);
-        (, uint256 payout1) = LiquidityAmounts.getAmountsForLiquidity(
-            TickMath.getSqrtPriceAtTick(DRIFT_TICK),
-            TickMath.getSqrtPriceAtTick(TICK_LOWER),
-            TickMath.getSqrtPriceAtTick(TICK_UPPER),
-            LIQUIDITY
-        );
-        assertGt(payout1, 2 * BOUND, "scenario: the payout is several times the v4 bound");
         // the pool must be able to pay that token1 out (the price was written, not swapped to)
         deal(Currency.unwrap(currency1), address(poolManager), type(uint256).max / 2);
         // made unhealthy by policy while its value still covers debt plus the maximum penalty
         _setCollateralFactor(uint32(Q32 * 5 / 10));
-        (uint256 debt,, uint256 collateralNow,, uint256 liquidationValue) = vault.loanInfo(tokenId);
+        (uint256 debt,, uint256 collateralNow,,) = vault.loanInfo(tokenId);
         assertGt(debt, collateralNow, "scenario: unhealthy");
-        assertGt(liquidationValue, BOUND, "scenario: the liquidation pays more than one decrease settles");
 
         (, uint256 amount1) = _liquidateAs(liquidator, tokenId);
-        assertGt(amount1, BOUND, "paid out more than one v4 decrease can settle, in one transaction");
+        assertGt(amount1, BOUND / 8, "paid out in one transaction, one decrease");
         assertEq(vault.loans(tokenId), 0, "loan closed");
         assertEq(vault.debtSharesTotal(), 0);
         // a normal-branch liquidation removes the liquidation share; the rest stays in the NFT for the owner
         uint128 left = positionManager.getPositionLiquidity(tokenId);
-        assertLt(left, LIQUIDITY, "the liquidation share was removed");
+        assertLt(left, liquidity, "the liquidation share was removed");
         assertGt(left, 0, "the owner keeps the remainder");
+    }
+
+    /// @dev Token1 the position pays out with all of its liquidity above its range: its maximum at any price.
+    function _maxPayout1(uint128 liquidity) internal pure returns (uint256) {
+        return LiquidityAmounts.getAmount1ForLiquidity(
+            TickMath.getSqrtPriceAtTick(TICK_LOWER), TickMath.getSqrtPriceAtTick(TICK_UPPER), liquidity
+        );
     }
 
     function _pointOracleAt(int24 tick) internal {
@@ -91,7 +97,7 @@ contract V4VaultChunkedLiquidationOracleTest is V4VaultOracleLiquidationBase {
         );
     }
 
-    /// @dev Writes the pool's slot0 price and tick directly (swapping ~2^130 tokens is not an option).
+    /// @dev Writes the pool's slot0 price and tick directly (swapping ~2^125 tokens is not an option).
     function _writePoolTick(PoolId id, int24 tick) internal {
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
         bytes32 stateSlot = StateLibrary._getPoolStateSlot(id);

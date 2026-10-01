@@ -19,7 +19,6 @@ import {V4Vault} from "src/vault/V4Vault.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
 import {MutableChainlinkFeed} from "test/oracle/support/OracleMocks.sol";
 import {V4VaultOracleLiquidationBase} from "test/vault/support/V4VaultOracleLiquidationBase.sol";
-import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
 
 /// @notice External audit V4LE-23: the liquidation quote (fullValue, feeValue, liquidationValue) is priced
 ///         by the oracle, but the removal settles at the live pool price, which may sit up to
@@ -145,8 +144,7 @@ contract V4VaultLiquidationSubQ96CapTest is V4VaultOracleLiquidationBase {
 
         // the auditor's premise: token1 has value, but its per-leg price in asset terms rounds to zero
         (uint256 valueNow,, uint256 roundedPrice0X96, uint256 roundedPrice1X96) = oracle.getValue(tokenId, asset);
-        IV4Oracle.RemovalPlan memory plan = oracle.getLiquidityForValue(tokenId, asset, 0);
-        (uint256 price0X96, uint256 price1X96, uint256 quotePriceX96) = (plan.price0X96, plan.price1X96, plan.quotePriceX96);
+        (, uint256 price0X96, uint256 price1X96, uint256 quotePriceX96) = oracle.getLiquidityForValue(tokenId, asset, 0);
         assertEq(roundedPrice0X96, Q96, "asset leg");
         assertEq(roundedPrice1X96, 0, "token1's Q96 asset price rounds to zero");
         assertGt(_rawValue(0, 1e35, price0X96, price1X96, quotePriceX96), 0, "yet token1 has value");

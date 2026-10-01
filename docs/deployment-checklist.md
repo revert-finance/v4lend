@@ -4,7 +4,7 @@ This checklist captures deployment gates that should be completed before a produ
 
 ## Oracle
 
-- Configure every lendable or collateralizable token with `V4Oracle.setTokenConfig(...)`.
+- Configure every lendable or collateralizable token with `V4Oracle.setTokenConfig(...)`. It refuses a token whose total supply is at or above 2^127 base units (v4's int128 settlement limit, V4LE-156); do not configure a token that can mint past it.
 - Use `CHAINLINK_TWAP_VERIFY` for normal production tokens.
 - Use `TWAP_CHAINLINK_VERIFY`, `CHAINLINK`, or `TWAP` only as an explicit emergency or non-production decision.
 - Set `twapSeconds = 30 minutes` for production TWAPs. `0` uses v3 pool spot price and should be limited to explicit emergency or non-production use.
