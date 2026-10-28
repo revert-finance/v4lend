@@ -166,6 +166,59 @@ contract SharedPlanningLibrariesTest is Test {
         assertEq(harness.liquidityToRemove(1_000, 10_000, 1), 1_000);
     }
 
+    /// @notice Issue #48: Large removeValue must clamp to currentLiquidity without modulo 2^128 truncation
+    function testAutoLeverageLibLiquidityToRemoveModuloWrapBugFix() public view {
+        // In the old code, full = 1_000 * ((2^128 / 100) + 5) / 10 = 2^128 + 500.
+        // uint128(2^128 + 500) wrapped to 500. 500 <= 1_000, bypassing saturation and returning 500 instead of 1,000.
+        uint256 wrapRemoveValue = (uint256(1) << 128) / 100 + 5;
+        assertEq(harness.liquidityToRemove(1_000, wrapRemoveValue, 10), 1_000);
+    }
+
+    /// @notice Edge cases: boundary saturation, off-by-one, and extreme uint256 multiplication overflow protection
+    function testAutoLeverageLibLiquidityToRemoveBoundariesAndOverflow() public view {
+        uint128 currentLiquidity = 100_000;
+        uint256 totalValue = 100_000;
+
+        // Exact equality: removeValue == totalValue
+        assertEq(harness.liquidityToRemove(currentLiquidity, totalValue, totalValue), currentLiquidity);
+
+        // Off-by-one above: removeValue == totalValue + 1
+        assertEq(harness.liquidityToRemove(currentLiquidity, totalValue + 1, totalValue), currentLiquidity);
+
+        // Off-by-one below: removeValue == totalValue - 1
+        assertEq(harness.liquidityToRemove(currentLiquidity, totalValue - 1, totalValue), currentLiquidity - 1);
+
+        // Extreme values: removeValue = type(uint256).max, currentLiquidity = type(uint128).max, totalValue = 1
+        // In old code, checked arithmetic panicked on 256-bit multiplication.
+        assertEq(
+            harness.liquidityToRemove(type(uint128).max, type(uint256).max, 1),
+            type(uint128).max
+        );
+    }
+
+    /// @notice Invariant: liquidityToRemove must never exceed currentLiquidity across arbitrary fuzz inputs
+    function testFuzz_AutoLeverageLibLiquidityToRemoveInvariant(
+        uint128 currentLiquidity,
+        uint256 removeValue,
+        uint256 totalValue
+    ) public view {
+        vm.assume(totalValue > 0);
+        uint128 toRemove = harness.liquidityToRemove(currentLiquidity, removeValue, totalValue);
+
+        // Invariant 1: Result never exceeds currentLiquidity
+        assertLe(toRemove, currentLiquidity);
+
+        // Invariant 2: Full removal when removeValue >= totalValue
+        if (removeValue >= totalValue) {
+            assertEq(toRemove, currentLiquidity);
+        }
+
+        // Invariant 3: Zero removal when removeValue == 0 or currentLiquidity == 0
+        if (removeValue == 0 || currentLiquidity == 0) {
+            assertEq(toRemove, 0);
+        }
+    }
+
     function testAutoLeverageLibRequiresMonotonicImprovement() public view {
         assertTrue(harness.improvesTowardTarget(2_000, 8_000, 4_000, 9_000, 5_000));
         assertTrue(harness.improvesTowardTarget(6_000, 10_000, 5_000, 10_000, 5_000));

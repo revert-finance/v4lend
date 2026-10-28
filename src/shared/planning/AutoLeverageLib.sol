@@ -133,15 +133,15 @@ library AutoLeverageLib {
         uint128 currentLiquidity,
         uint256 removeValue,
         uint256 totalValue
-    ) internal pure returns (uint128 liquidity) {
+    ) internal pure returns (uint128) {
         if (currentLiquidity == 0 || removeValue == 0 || totalValue == 0) {
             return 0;
         }
 
-        // forge-lint: disable-next-line(unsafe-typecast)
-        liquidity = uint128(uint256(currentLiquidity) * removeValue / totalValue);
-        if (liquidity > currentLiquidity) {
-            liquidity = currentLiquidity;
+        if (removeValue >= totalValue) {
+            return currentLiquidity;
         }
+
+        return uint128(Math.mulDiv(currentLiquidity, removeValue, totalValue));
     }
 }
