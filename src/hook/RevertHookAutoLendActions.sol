@@ -281,15 +281,27 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         uint256 autoLendAmount = state.autoLendAmount;
         if (shares > 0) {
             Currency lendCurrency = Currency.wrap(autoLendToken);
-            uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(shares, address(this), address(this));
+            address autoLendVault = state.autoLendVault;
+            // A compliant ERC4626 vault may cap maxRedeem below the balance (withdrawal limit,
+            // cooldown, epoch queue), and redeem above that cap reverts. Redeeming everything would
+            // make the owner's escape hatch revert exactly when it is needed, so redeem what the
+            // vault permits and hand the residual shares over instead of stranding them behind the
+            // vault's limit (V4LE-96). No protocol fee is taken on the released shares.
+            uint256 toRedeem = _redeemableShares(autoLendVault, shares);
+            uint256 residualShares = shares - toRedeem;
+            uint256 redeemedAmount =
+                toRedeem > 0 ? IERC4626(autoLendVault).redeem(toRedeem, address(this), address(this)) : 0;
             (, uint256 protocolFee) = _processLendingGain(redeemedAmount, autoLendAmount);
             NativeAssetLib.unwrapIfNative(weth, lendCurrency, redeemedAmount);
             _resetAutoLendState(tokenId);
             _disablePosition(tokenId);
             _sendLendingProtocolFee(tokenId, poolKey, lendCurrency, protocolFee);
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
+            if (residualShares > 0) {
+                SafeERC20.safeTransfer(IERC20(autoLendVault), owner, residualShares);
+            }
 
-            emit AutoLendForceExit(tokenId, lendCurrency, redeemedAmount, shares);
+            emit AutoLendForceExit(tokenId, lendCurrency, redeemedAmount, toRedeem);
             return;
         }
 
@@ -377,22 +389,43 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     /// @param shares The number of shares to redeem
     function autoLendWithdraw(PoolKey calldata poolKey, uint256 tokenId, uint256 shares) external {
         PositionState storage state = _positionStates[tokenId];
+        address autoLendVault = state.autoLendVault;
+        // The trigger that brought us here was already popped from the queue, so a reverting
+        // `redeem` would consume it and leave the position with no withdraw trigger at all. A
+        // compliant ERC4626 vault may cap maxRedeem below the balance, so redeem only what it
+        // permits and release the residual shares to the position beneficiary (V4LE-96).
+        uint256 toRedeem = _redeemableShares(autoLendVault, shares);
+        if (toRedeem == 0) {
+            // Nothing redeemable right now: report it like any other failed action and keep the
+            // recorded share balance so the next trigger or the owner's force exit can retry.
+            emit HookAutoLendFailed(
+                autoLendVault, Currency.wrap(state.autoLendToken), abi.encodeWithSignature("NoRedeemableShares()")
+            );
+            emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+            return;
+        }
 
-        try IERC4626(state.autoLendVault).redeem(shares, address(this), address(this)) returns (uint256 amount) {
-            _processLendWithdraw(poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount);
+        try IERC4626(autoLendVault).redeem(toRedeem, address(this), address(this)) returns (uint256 amount) {
+            _processLendWithdraw(
+                poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount, autoLendVault, shares - toRedeem
+            );
         } catch (bytes memory reason) {
-            emit HookAutoLendFailed(state.autoLendVault, Currency.wrap(state.autoLendToken), reason);
+            emit HookAutoLendFailed(autoLendVault, Currency.wrap(state.autoLendToken), reason);
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
         }
     }
 
     /// @notice Processes lending withdrawal and adds liquidity back
+    /// @param autoLendVault The vault the shares came from; residual shares are released from it
+    /// @param residualShares Shares the vault did not let this contract redeem now
     function _processLendWithdraw(
         PoolKey memory poolKey,
         uint256 tokenId,
         address tokenAddress,
         uint256 redeemedAmount,
-        uint256 originalLendAmount
+        uint256 originalLendAmount,
+        address autoLendVault,
+        uint256 residualShares
     ) internal {
         address owner = _getOwner(tokenId, false);
         address beneficiary = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
@@ -455,9 +488,23 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
         }
         _sendLendingProtocolFee(tokenId, poolKey, lendCurrency, protocolFee);
+        if (residualShares > 0) {
+            // Shares the vault would not let this contract redeem leave custody as shares to the
+            // position beneficiary, so the position value is never stranded behind the vault's
+            // withdrawal limit after the state was cleared above (V4LE-96).
+            SafeERC20.safeTransfer(IERC20(autoLendVault), beneficiary, residualShares);
+        }
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, beneficiary);
 
-        emit AutoLendWithdraw(tokenId, lendCurrency, redeemedAmount, shares);
+        emit AutoLendWithdraw(tokenId, lendCurrency, redeemedAmount, shares - residualShares);
+    }
+
+    /// @dev Shares of an auto-lend position the vault lets this contract redeem right now. A
+    /// compliant ERC4626 vault may cap `maxRedeem` below the recorded balance (withdrawal limit,
+    /// cooldown, epoch queue); `redeem` above that cap reverts.
+    function _redeemableShares(address autoLendVault, uint256 shares) internal view returns (uint256) {
+        uint256 maxRedeemable = IERC4626(autoLendVault).maxRedeem(address(this));
+        return maxRedeemable < shares ? maxRedeemable : shares;
     }
 
     /// @notice Processes gain from lending (takes protocol fee on gain)
