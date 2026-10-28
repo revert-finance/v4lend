@@ -276,6 +276,46 @@ contract SharedPlanningLibrariesTest is Test {
         assertEq(newTickUpper, 0);
     }
 
+    function testAutoLendLibPlanOneSidedReentryClampsToUsableUpperTick() public view {
+        // maxUsableTick(60) == 887220; the unclamped plan for this shape is [887160, 887280].
+        (bool addToExisting, int24 newTickLower, int24 newTickUpper) =
+            harness.planOneSidedReentry(887_100, 60, 0, 120, true);
+
+        assertFalse(addToExisting);
+        assertEq(newTickLower, 887_160);
+        assertEq(newTickUpper, 887_220);
+    }
+
+    function testAutoLendLibPlanOneSidedReentryClampsToUsableLowerTick() public view {
+        // minUsableTick(60) == -887220; the unclamped plan for this shape is [-887340, -887100].
+        (bool addToExisting, int24 newTickLower, int24 newTickUpper) =
+            harness.planOneSidedReentry(-887_100, 60, -240, 0, false);
+
+        assertFalse(addToExisting);
+        assertEq(newTickLower, -887_220);
+        assertEq(newTickUpper, -887_100);
+    }
+
+    function testAutoLendLibPlanOneSidedReentryCollapsesAtTopOfTickSpace() public view {
+        (bool addToExisting, int24 newTickLower, int24 newTickUpper) =
+            harness.planOneSidedReentry(887_220, 60, 0, 120, true);
+
+        assertFalse(addToExisting);
+        assertEq(newTickLower, 887_220, "lower clamp leaves the usable range");
+        assertEq(newTickUpper, 887_220, "upper clamp leaves the usable range");
+        assertFalse(newTickLower < newTickUpper, "no room above the tick: the plan collapses");
+    }
+
+    function testAutoLendLibPlanOneSidedReentryCollapsesAtBottomOfTickSpace() public view {
+        (bool addToExisting, int24 newTickLower, int24 newTickUpper) =
+            harness.planOneSidedReentry(-887_220, 60, -120, 0, false);
+
+        assertFalse(addToExisting);
+        assertEq(newTickLower, -887_220, "lower clamp leaves the usable range");
+        assertEq(newTickUpper, -887_220, "upper clamp leaves the usable range");
+        assertFalse(newTickLower < newTickUpper, "no room below the tick: the plan collapses");
+    }
+
     function testAutoRangeAndLendLibFloorTicks() public view {
         assertEq(harness.floorToSpacing(125, 60), 120);
         assertEq(harness.floorToSpacing(-125, 60), -180);

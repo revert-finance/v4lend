@@ -433,7 +433,11 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
                 isToken0Lent ? 0 : uint128(reentryAmount)
             );
             restoredExistingPosition = restored0 > 0 || restored1 > 0;
-        } else {
+        } else if (newTickLower < newTickUpper) {
+            // A re-entry at the edge of the tick space has no room for the one-sided range: the
+            // clamped plan collapses (AutoLendLib.planOneSidedReentry) and minting it would revert
+            // the whole swap on an unmintable range. The retired token is disabled below instead,
+            // and the redeemed capital returns to the beneficiary with the leftovers.
             (newTokenId,,) = _mintPosition(
                 poolKey,
                 newTickLower,
