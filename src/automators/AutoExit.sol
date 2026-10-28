@@ -81,6 +81,9 @@ contract AutoExit is Automator {
         uint256 protocolFee1;
         address owner;
         Currency lendToken;
+        // the pool currency the lend asset is held as: the asset itself, or the pool's native side when a
+        // WETH-asset vault backs a native-ETH pool (the alias the oracle, the vaults and NativeAssetLib use)
+        Currency lendSide;
     }
 
     constructor(
@@ -177,10 +180,12 @@ contract AutoExit is Automator {
             IVault vault = IVault(msg.sender);
             state.owner = vault.ownerOf(params.tokenId);
             state.lendToken = Currency.wrap(vault.asset());
+            (Currency lendSide, bool lendInPool) = _lendSide(token0, token1, state.lendToken);
+            state.lendSide = lendSide;
 
             // The vault asset must be one of the pool tokens only when there is debt to repay: a
             // zero-debt loan in any accepted collateral pair exits with its tokens sent to the owner.
-            if (!(state.lendToken == token0) && !(state.lendToken == token1)) {
+            if (!lendInPool) {
                 (uint256 debt,,,,) = vault.loanInfo(params.tokenId);
                 if (debt > 0) {
                     revert InvalidConfig();
@@ -218,7 +223,7 @@ contract AutoExit is Automator {
         // Post-swap repayment: when the exit swap produced the lend token, repay any remaining debt
         if (isVaultCall) {
             bool repayAfterSwap =
-                isSwap && (isAbove ? (state.lendToken == token0) : (state.lendToken == token1));
+                isSwap && (isAbove ? (state.lendSide == token0) : (state.lendSide == token1));
             if (repayAfterSwap) {
                 _repayVaultDebt(IVault(msg.sender), params.tokenId, token0, token1, state);
             }
@@ -263,7 +268,7 @@ contract AutoExit is Automator {
         if (debt == 0) {
             return;
         }
-        bool lendIsToken0 = state.lendToken == token0;
+        bool lendIsToken0 = state.lendSide == token0;
         uint256 lendGross = lendIsToken0 ? state.amount0 + state.protocolFee0 : state.amount1 + state.protocolFee1;
 
         if (lendGross < debt && params.repayAmountIn > 0) {
@@ -311,8 +316,8 @@ contract AutoExit is Automator {
         Currency token1,
         ExecuteState memory state
     ) internal {
-        bool lendIsToken0 = state.lendToken == token0;
-        if (!lendIsToken0 && !(state.lendToken == token1)) {
+        bool lendIsToken0 = state.lendSide == token0;
+        if (!lendIsToken0 && !(state.lendSide == token1)) {
             return;
         }
         uint256 lendAmount = lendIsToken0 ? state.amount0 : state.amount1;
@@ -330,6 +335,16 @@ contract AutoExit is Automator {
         if (repayAmount == 0) {
             return;
         }
+        if (state.lendSide.isAddressZero()) {
+            // The lend side of the pool is native ETH while the vault asset is WETH: the exit pays out ETH
+            // and the vault pulls WETH, so the repayment is wrapped here, exactly as the hook's
+            // _repayDebtToVault does (V4LE-49). A repay route in the same execution may already have
+            // delivered WETH, and only the shortfall is wrapped.
+            repayAmount = _wrapForRepay(repayAmount);
+            if (repayAmount == 0) {
+                return;
+            }
+        }
 
         SafeERC20.forceApprove(IERC20(Currency.unwrap(state.lendToken)), address(vault), repayAmount);
         (uint256 repaid,) = vault.repay(tokenId, repayAmount, false);
@@ -345,6 +360,43 @@ contract AutoExit is Automator {
         } else {
             state.amount1 = lendAmount - fromNet;
             state.protocolFee1 = reserved - fromReward;
+        }
+    }
+
+    /// @dev Resolves the pool currency a vault's asset is held as inside this pool. The oracle, the
+    ///      vaults and NativeAssetLib treat WETH as the alias of native ETH, so a WETH-asset vault
+    ///      position in a native pool is a supported shape (V4LE-49): the asset is held as the pool's
+    ///      native side and is wrapped at the vault boundary. Native always sorts as currency0, so only
+    ///      currency0 is aliased. `inPool` is false when the asset is neither a pool currency nor that
+    ///      alias; the returned currency is then the raw asset.
+    function _lendSide(Currency token0, Currency token1, Currency lendAsset)
+        internal
+        view
+        returns (Currency lendSide, bool inPool)
+    {
+        if (lendAsset == token0) return (token0, true);
+        if (lendAsset == token1) return (token1, true);
+        if (Currency.unwrap(lendAsset) == address(weth) && token0.isAddressZero()) return (token0, true);
+        return (lendAsset, false);
+    }
+
+    /// @dev Wraps native ETH until this contract holds `amount` WETH, for a repayment the vault pulls in
+    ///      WETH while the position paid out the pool's native side. A repay route in the same execution
+    ///      may already have delivered WETH, so only the shortfall is wrapped and never more than the
+    ///      native balance. Returns the WETH amount that is available for the repayment.
+    function _wrapForRepay(uint256 amount) internal returns (uint256 available) {
+        available = IERC20(address(weth)).balanceOf(address(this));
+        if (available >= amount) {
+            return amount;
+        }
+        uint256 missing = amount - available;
+        uint256 nativeBalance = address(this).balance;
+        if (missing > nativeBalance) {
+            missing = nativeBalance;
+        }
+        if (missing > 0) {
+            weth.deposit{value: missing}();
+            available += missing;
         }
     }
 
