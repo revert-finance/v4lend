@@ -43,6 +43,36 @@ contract RevertHookScan2FixesTest is RevertHookTest {
         hook.setPositionConfig(token3Id, _autoLendConfig(poolKey.tickSpacing));
     }
 
+    // ==================== Issue #49: conflicting AUTO_LEND and AUTO_RANGE ====================
+
+    /// @notice Issue #49: Conflicting MODE_AUTO_LEND and MODE_AUTO_RANGE must be rejected
+    function testIssue49_AutoLendConflictingWithAutoRangeIsRejected() public {
+        int24 spacing = int24(poolKey.tickSpacing);
+
+        // 1. Individually valid AUTO_LEND config
+        RevertHookState.PositionConfig memory lendConfig = _autoLendConfig(0);
+
+        // 2. Individually valid AUTO_RANGE config
+        RevertHookState.PositionConfig memory rangeConfig = _autoLendConfig(0);
+        rangeConfig.modeFlags = PositionModeFlags.MODE_AUTO_RANGE;
+        rangeConfig.autoRangeLowerDelta = -spacing;
+        rangeConfig.autoRangeUpperDelta = spacing;
+
+        // Verify valid individual configs are accepted
+        hook.setPositionConfig(token3Id, lendConfig);
+        hook.setPositionConfig(token3Id, rangeConfig);
+
+        // 3. Combined conflicting config with otherwise valid parameters for both modes
+        RevertHookState.PositionConfig memory conflictingConfig = lendConfig;
+        conflictingConfig.modeFlags = PositionModeFlags.MODE_AUTO_LEND | PositionModeFlags.MODE_AUTO_RANGE;
+        conflictingConfig.autoRangeLowerDelta = -spacing;
+        conflictingConfig.autoRangeUpperDelta = spacing;
+
+        // Must revert specifically due to mode conflict in _validateModeFlags
+        vm.expectRevert(abi.encodeWithSignature("InvalidConfig()"));
+        hook.setPositionConfig(token3Id, conflictingConfig);
+    }
+
     // ==================== V4LE-126: zero tolerance re-arms the withdrawal at the fired bucket ====================
 
     /// @notice With tolerance 0 the deposit node and the re-armed withdrawal node fell on the same

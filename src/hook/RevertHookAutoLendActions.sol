@@ -88,6 +88,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoExit(modeFlags)) {
             revert InvalidConfig();
         }
+        if (PositionModeFlags.hasAutoLend(modeFlags) && PositionModeFlags.hasAutoRange(modeFlags)) {
+            revert InvalidConfig();
+        }
 
         _validateAutoLendMode(tokenId, poolKey, modeFlags);
         _validateAutoLeverageMode(tokenId, poolKey, modeFlags);

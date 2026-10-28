@@ -605,7 +605,7 @@ abstract contract RevertHookTriggers is RevertHookState {
             }
         }
 
-        // AUTO_LEND triggers (mutually exclusive with AUTO_EXIT and AUTO_LEVERAGE per validation)
+        // AUTO_LEND triggers (mutually exclusive with AUTO_EXIT, AUTO_LEVERAGE, and AUTO_RANGE per validation)
         if (PositionModeFlags.hasAutoLend(modeFlags)) {
             PositionState storage state = _positionStates[tokenId];
             if (state.autoLendShares > 0) {
