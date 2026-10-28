@@ -98,6 +98,23 @@ contract AutoCollectTest is AutomatorTestBase {
         autoCollect.setProtocolFeeRecipient(address(0));
     }
 
+    /// @notice External audit V4LE-27 sibling: the automator pays fees straight to the recipient, and
+    ///         the v4 PositionManager's SWEEP action is permissionless - any balance it holds (and
+    ///         the ERC721 receiver it is) belongs to the first caller, so it must be refused. The
+    ///         automator itself has no withdrawal path and must be refused too.
+    function test_RevertWhenProtocolFeeRecipientIsPositionManager() public {
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        autoCollect.setProtocolFeeRecipient(address(positionManager));
+
+        vm.expectRevert(Constants.InvalidConfig.selector);
+        autoCollect.setProtocolFeeRecipient(address(autoCollect));
+
+        // an ordinary recipient is still accepted
+        address newRecipient = makeAddr("newRecipient");
+        autoCollect.setProtocolFeeRecipient(newRecipient);
+        assertEq(autoCollect.protocolFeeRecipient(), newRecipient, "protocol fee recipient should update");
+    }
+
     function test_RevertWhenConstructorProtocolFeeRecipientIsZero() public {
         vm.expectRevert(Constants.InvalidConfig.selector);
         new AutoCollect(positionManager, address(swapRouter), EX0x, permit2, v4Oracle, operator, address(0));

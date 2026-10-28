@@ -15,6 +15,7 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {HookExecutorRegistry} from "./HookExecutorRegistry.sol";
+import {IHookSystemContractGetters} from "./interfaces/IHookSystemContractGetters.sol";
 import {IHookAuctionController} from "./interfaces/IHookAuctionController.sol";
 
 /// @notice Hook entrypoint used to mirror the configured baseline fee into the pool's
@@ -423,6 +424,12 @@ contract HookAuctionController is HookExecutorRegistry, IHookAuctionController, 
                 // the owner's responsibility (a contract must be able to call claimProtocolFees)
                 || config.protocolFeeRecipient == address(this) || config.protocolFeeRecipient == hook
                 || config.protocolFeeRecipient == address(poolManager)
+                // the v4 PositionManager (external audit V4LE-27, the same rule HookFeeController enforces):
+                // its SWEEP action is permissionless, so any balance that lands there belongs to the first
+                // sweeper, and it can never call claimProtocolFees itself - its credit would be stranded.
+                // Read from the hook's getter like the PoolManager above; a hook without the getter skips it.
+                || config.protocolFeeRecipient
+                    == _hookAddressGetter(IHookSystemContractGetters.positionManager.selector)
         ) {
             revert InvalidConfig();
         }

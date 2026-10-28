@@ -5,14 +5,8 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {RevertHookState} from "./RevertHookState.sol";
 import {IHookFeeController} from "./interfaces/IHookFeeController.sol";
+import {IHookSystemContractGetters} from "./interfaces/IHookSystemContractGetters.sol";
 import {HookOwnedControllerBase} from "./HookOwnedControllerBase.sol";
-
-/// @dev The hook's PoolManager getter (BaseHook's public immutable) and PositionManager getter, read
-///      to reject both system contracts as a fee recipient.
-interface IHookSystemContractGetters {
-    function poolManager() external view returns (address);
-    function positionManager() external view returns (address);
-}
 
 interface IHookFeeState {
     function positionStates(uint256 tokenId) external view returns
@@ -187,18 +181,6 @@ contract HookFeeController is HookOwnedControllerBase, IHookFeeController {
         ) {
             revert InvalidConfig();
         }
-    }
-
-    /// @dev Tolerant read of an address-returning, argument-less getter on the hook: address(0)
-    ///      when the hook has no code, lacks the getter or returns anything else (a recipient of
-    ///      address(0) is rejected before these comparisons, so 0 can never match).
-    function _hookAddressGetter(bytes4 selector) internal view returns (address) {
-        (bool ok, bytes memory ret) = hook.staticcall(abi.encodeWithSelector(selector));
-        if (!ok || ret.length != 32) {
-            return address(0);
-        }
-        uint256 word = abi.decode(ret, (uint256));
-        return word <= type(uint160).max ? address(uint160(word)) : address(0);
     }
 
     function _isSupportedSwapMode(uint8 mode) internal pure returns (bool) {

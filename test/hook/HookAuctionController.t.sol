@@ -501,6 +501,24 @@ contract HookAuctionControllerTest is BaseTest {
         auctionController.configurePool(auctionPoolKey, config);
     }
 
+    /// @notice External audit V4LE-27 sibling: the v4 PositionManager's SWEEP action is
+    ///         permissionless and cannot claim here, so it must be refused as a fee recipient,
+    ///         exactly like the PoolManager; an ordinary recipient keeps working.
+    function testConfigureRejectsPositionManagerAsProtocolFeeRecipient() public {
+        assertEq(address(hook.positionManager()), address(positionManager), "the hook exposes the real PositionManager");
+
+        HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
+        config.protocolFeeRecipient = address(positionManager);
+        vm.expectRevert(HookAuctionController.InvalidConfig.selector);
+        auctionController.configurePool(auctionPoolKey, config);
+
+        // any other recipient is still accepted
+        config.protocolFeeRecipient = makeAddr("otherRecipient");
+        auctionController.configurePool(auctionPoolKey, config);
+        (,,, uint24 lpFee) = poolManager.getSlot0(auctionPoolId);
+        assertEq(lpFee, NORMAL_FEE, "configuration went through with an ordinary recipient");
+    }
+
     function testConfigureRejectsZeroReserveOrBump() public {
         HookAuctionController.PoolAuctionConfig memory config = _defaultConfig();
         config.openingBidReserve = 0;

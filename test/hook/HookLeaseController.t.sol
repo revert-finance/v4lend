@@ -389,6 +389,22 @@ contract HookLeaseControllerTest is BaseTest {
         leaseController.configurePool(leasePoolKey, config);
     }
 
+    /// @notice External audit V4LE-27 sibling: the v4 PositionManager's SWEEP action is
+    ///         permissionless and cannot claim here, so it must be refused as a fee recipient,
+    ///         exactly like the PoolManager; an ordinary recipient keeps working.
+    function testConfigureRejectsPositionManagerAsProtocolFeeRecipient() public {
+        assertEq(address(hook.positionManager()), address(positionManager), "the hook exposes the real PositionManager");
+
+        HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
+        config.protocolFeeRecipient = address(positionManager);
+        vm.expectRevert(HookLeaseController.InvalidConfig.selector);
+        leaseController.configurePool(leasePoolKey, config);
+
+        // any other recipient is still accepted
+        config.protocolFeeRecipient = makeAddr("otherRecipient");
+        leaseController.configurePool(leasePoolKey, config);
+    }
+
     function testConfigureValidation() public {
         HookLeaseController.PoolLeaseConfig memory config = _defaultConfig();
 

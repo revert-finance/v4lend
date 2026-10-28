@@ -64,8 +64,17 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     }
 
     /// @notice Owner controlled function to set protocol fee recipient
+    /// @dev Fees are sent straight to the recipient on every execution, so an address that cannot
+    ///      keep them is refused: address(0), this contract (it has no withdrawal path, the fees would
+    ///      be stranded), and the v4 PositionManager (external audit V4LE-27, the same rule
+    ///      HookFeeController already enforces): its SWEEP action is permissionless
+    ///      (`modifyLiquiditiesWithoutUnlock` needs no NFT or approval) and hands its ENTIRE balance
+    ///      of a currency to any caller, so fees sent there belong to the first sweeper.
     function setProtocolFeeRecipient(address newProtocolFeeRecipient) public onlyOwner {
-        if (newProtocolFeeRecipient == address(0)) {
+        if (
+            newProtocolFeeRecipient == address(0) || newProtocolFeeRecipient == address(this)
+                || newProtocolFeeRecipient == address(positionManager)
+        ) {
             revert InvalidConfig();
         }
         emit ProtocolFeeRecipientChanged(newProtocolFeeRecipient);
