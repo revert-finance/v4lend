@@ -166,6 +166,14 @@ contract SharedPlanningLibrariesTest is Test {
         assertEq(harness.liquidityToRemove(1_000, 10_000, 1), 1_000);
     }
 
+    function testAutoLeverageLibLiquidityToRemoveLargeValuesNoModuloWrap() public view {
+        // Issue #48: Test that when currentLiquidity * removeValue exceeds type(uint128).max,
+        // it saturates to currentLiquidity instead of wrapping modulo 2^128.
+        uint128 liq = uint128(1 << 120);
+        assertEq(harness.liquidityToRemove(liq, 1024, 1), liq);
+        assertEq(harness.liquidityToRemove(liq, type(uint256).max, 1), liq);
+    }
+
     function testAutoLeverageLibRequiresMonotonicImprovement() public view {
         assertTrue(harness.improvesTowardTarget(2_000, 8_000, 4_000, 9_000, 5_000));
         assertTrue(harness.improvesTowardTarget(6_000, 10_000, 5_000, 10_000, 5_000));

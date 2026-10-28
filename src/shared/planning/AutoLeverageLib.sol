@@ -138,10 +138,11 @@ library AutoLeverageLib {
             return 0;
         }
 
-        // forge-lint: disable-next-line(unsafe-typecast)
-        liquidity = uint128(uint256(currentLiquidity) * removeValue / totalValue);
-        if (liquidity > currentLiquidity) {
-            liquidity = currentLiquidity;
+        if (removeValue >= totalValue) {
+            return currentLiquidity;
         }
+
+        uint256 toRemove = Math.mulDiv(uint256(currentLiquidity), removeValue, totalValue);
+        liquidity = toRemove > currentLiquidity ? currentLiquidity : uint128(toRemove);
     }
 }
