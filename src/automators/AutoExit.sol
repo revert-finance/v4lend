@@ -180,7 +180,7 @@ contract AutoExit is Automator {
 
             // The vault asset must be one of the pool tokens only when there is debt to repay: a
             // zero-debt loan in any accepted collateral pair exits with its tokens sent to the owner.
-            if (!(state.lendToken == token0) && !(state.lendToken == token1)) {
+            if (!_isLendToken(state.lendToken, token0) && !_isLendToken(state.lendToken, token1)) {
                 (uint256 debt,,,,) = vault.loanInfo(params.tokenId);
                 if (debt > 0) {
                     revert InvalidConfig();
@@ -218,7 +218,7 @@ contract AutoExit is Automator {
         // Post-swap repayment: when the exit swap produced the lend token, repay any remaining debt
         if (isVaultCall) {
             bool repayAfterSwap =
-                isSwap && (isAbove ? (state.lendToken == token0) : (state.lendToken == token1));
+                isSwap && (isAbove ? _isLendToken(state.lendToken, token0) : _isLendToken(state.lendToken, token1));
             if (repayAfterSwap) {
                 _repayVaultDebt(IVault(msg.sender), params.tokenId, token0, token1, state);
             }
@@ -263,7 +263,7 @@ contract AutoExit is Automator {
         if (debt == 0) {
             return;
         }
-        bool lendIsToken0 = state.lendToken == token0;
+        bool lendIsToken0 = _isLendToken(state.lendToken, token0);
         uint256 lendGross = lendIsToken0 ? state.amount0 + state.protocolFee0 : state.amount1 + state.protocolFee1;
 
         if (lendGross < debt && params.repayAmountIn > 0) {
@@ -311,8 +311,8 @@ contract AutoExit is Automator {
         Currency token1,
         ExecuteState memory state
     ) internal {
-        bool lendIsToken0 = state.lendToken == token0;
-        if (!lendIsToken0 && !(state.lendToken == token1)) {
+        bool lendIsToken0 = _isLendToken(state.lendToken, token0);
+        if (!lendIsToken0 && !_isLendToken(state.lendToken, token1)) {
             return;
         }
         uint256 lendAmount = lendIsToken0 ? state.amount0 : state.amount1;
@@ -331,6 +331,17 @@ contract AutoExit is Automator {
             return;
         }
 
+        if (Currency.unwrap(state.lendToken) == address(weth)) {
+            uint256 wethBalance = IERC20(address(weth)).balanceOf(address(this));
+            if (wethBalance < repayAmount) {
+                uint256 needed = repayAmount - wethBalance;
+                uint256 wrapAmount = address(this).balance >= needed ? needed : address(this).balance;
+                if (wrapAmount > 0) {
+                    weth.deposit{value: wrapAmount}();
+                }
+            }
+        }
+
         SafeERC20.forceApprove(IERC20(Currency.unwrap(state.lendToken)), address(vault), repayAmount);
         (uint256 repaid,) = vault.repay(tokenId, repayAmount, false);
         // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
@@ -346,6 +357,12 @@ contract AutoExit is Automator {
             state.amount1 = lendAmount - fromNet;
             state.protocolFee1 = reserved - fromReward;
         }
+    }
+
+    /// @dev Checks if the lend token matches the pool token, taking into account native ETH/WETH compatibility.
+    function _isLendToken(Currency lendToken, Currency token) internal view returns (bool) {
+        return lendToken == token
+            || (Currency.unwrap(lendToken) == address(weth) && Currency.unwrap(token) == address(0));
     }
 
     /// @notice Configure a token for auto-exit

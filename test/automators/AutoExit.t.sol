@@ -597,6 +597,67 @@ contract AutoExitTest is AutomatorTestBase {
         assertEq(liquidityAfter, 0, "Position should have 0 liquidity after ETH vault exit");
     }
 
+    /// @notice Verifies that AutoExit correctly unwinds and repays WETH-denominated vault debt
+    ///         when backed by a native ETH pool position (token0 is native ETH).
+    function test_ExecuteWithVaultETHWithDebt() public {
+        v4Oracle.setMaxPoolPriceDifference(10000);
+
+        PoolKey memory poolKey = _createEthPool();
+        _createFullRangePositionEth(poolKey);
+        uint256 tokenId = _createNarrowPositionEth(poolKey);
+
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Add position to vault
+        _depositToVault(200000000, WHALE_ACCOUNT);
+        _addPositionToVault(tokenId);
+
+        // Borrow WETH debt against the native ETH pool position
+        vm.prank(WHALE_ACCOUNT);
+        vault.borrow(tokenId, 1e16);
+
+        AutoExit.PositionConfig memory config = AutoExit.PositionConfig({
+            isActive: true,
+            token0Swap: false,
+            token1Swap: false,
+            token0TriggerTick: posInfo.tickLower(),
+            token1TriggerTick: posInfo.tickUpper(),
+            token0SlippageBps: 10000,
+            token1SlippageBps: 10000,
+            maxRewardX64: 0,
+            onlyFees: false
+        });
+
+        vm.prank(WHALE_ACCOUNT);
+        autoExit.configToken(tokenId, config);
+        vm.prank(WHALE_ACCOUNT);
+        vault.approveTransform(tokenId, address(autoExit), true);
+
+        // Move price out of range
+        _swapExactInputSingleEth(poolKey, true, 10e18, 0);
+
+        AutoExit.ExecuteParams memory params = AutoExit.ExecuteParams({
+            tokenId: tokenId,
+            swapData: bytes(""),
+            amountRemoveMin0: 0,
+            amountRemoveMin1: 0,
+            amountOutMin: 0,
+            deadline: block.timestamp,
+            hookData: bytes(""),
+            rewardX64: 0,
+            repayAmountIn: 0,
+            repayAmountOutMin: 0,
+            repaySwapData: bytes("")
+        });
+
+        _executeWithVault(params);
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(tokenId);
+        assertEq(liquidityAfter, 0, "Position should have 0 liquidity after ETH vault exit with debt");
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "Vault debt should be fully repaid");
+    }
+
     // --- Vault Exit Test ---
 
     /// @notice V4LE-14: the automation reward was reserved before the vault debt was repaid, so a
