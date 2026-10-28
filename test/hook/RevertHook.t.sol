@@ -3876,6 +3876,58 @@ contract RevertHookTest is BaseTest {
         assertEq(invalidCount, 20, "Expected 20 invalid non-vault mode combinations");
     }
 
+    function testModeMatrix_AutoRangeLendKeepsRangeTriggerTicks() public {
+        hook.setMaxTicksFromOracle(1000);
+
+        int24 spacing = poolKey.tickSpacing;
+        int24 testTickLower = _getTickLower(tickStart, spacing) - spacing;
+        int24 testTickUpper = _getTickLower(tickStart, spacing) + spacing;
+
+        (uint256 rangedLendTokenId,) = positionManager.mint(
+            poolKey,
+            testTickLower,
+            testTickUpper,
+            50e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        // R|L with a non-zero tolerance: the lending buckets (tickLower - 3*spacing and
+        // tickUpper + 2*spacing) are distinguishable from the range triggers (tickLower/tickUpper).
+        hook.setPositionConfig(
+            rangedLendTokenId,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEND,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: spacing,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        (, uint32 lowerSize, int24 lowerHead) = hook.lowerTriggerAfterSwap(poolKey.toId());
+        (, uint32 upperSize, int24 upperHead) = hook.upperTriggerAfterSwap(poolKey.toId());
+
+        // _dispatchAutomationAction runs AUTO_RANGE first and never reaches _handleAutoLend, so the
+        // only triggers a R|L position may register are the range ones: the AUTO_LEND deposit
+        // thresholds must not take over slots [0]/[2] and move the re-centre off the configured range.
+        assertEq(lowerSize, 1, "R|L must register exactly the range lower trigger");
+        assertEq(upperSize, 1, "R|L must register exactly the range upper trigger");
+        assertEq(lowerHead, testTickLower, "range lower trigger must not be the AUTO_LEND deposit threshold");
+        assertEq(upperHead, testTickUpper, "range upper trigger must not be the AUTO_LEND deposit threshold");
+    }
+
     function testSetPositionConfig_AutoRangeInvalidDeltaOrderReverts() public {
         RevertHookState.PositionConfig memory config =
             _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_RANGE, true, false, type(int24).min, type(int24).max);

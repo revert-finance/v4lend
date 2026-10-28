@@ -605,8 +605,11 @@ abstract contract RevertHookTriggers is RevertHookState {
             }
         }
 
-        // AUTO_LEND triggers (mutually exclusive with AUTO_EXIT and AUTO_LEVERAGE per validation)
-        if (PositionModeFlags.hasAutoLend(modeFlags)) {
+        // AUTO_LEND triggers (mutually exclusive with AUTO_EXIT and AUTO_LEVERAGE per validation).
+        // With AUTO_RANGE the dispatcher gives RANGE priority and never reaches _handleAutoLend, so
+        // slots [0]/[2] stay owned by the range triggers: writing the deposit thresholds here would
+        // move the re-centre to the lending buckets instead of the configured range limits.
+        if (PositionModeFlags.hasAutoLend(modeFlags) && !hasAutoRange) {
             PositionState storage state = _positionStates[tokenId];
             if (state.autoLendShares > 0) {
                 // The withdrawal re-arms while the walk's cursor rests on the bucket the deposit fired
