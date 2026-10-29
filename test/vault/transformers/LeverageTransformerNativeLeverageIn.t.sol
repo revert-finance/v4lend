@@ -142,4 +142,43 @@ contract LeverageTransformerNativeLeverageInTest is BaseTest {
         vm.expectRevert(abi.encodeWithSignature("InvalidToken()"));
         transformer.leverageIn(params);
     }
+
+    function testLeverageInRejectsNonZeroMsgValueForERC20() public {
+        vm.deal(user, 1 ether);
+        vm.startPrank(user);
+        token.approve(address(transformer), 100e18);
+        vm.expectRevert(abi.encodeWithSignature("NoEtherToken()"));
+        transformer.leverageIn{value: 1 ether}(_params(100e18, 50e18));
+        vm.stopPrank();
+    }
+
+    function testLeverageInRejectsInsufficientMsgValueForNative() public {
+        // Deploy a vault that lends token (the ERC20 leg), making native ETH the otherToken
+        V4Vault tokenVault = new V4Vault(
+            "Token vault", "rlTKN", address(token), positionManager, new InterestRateModel(0, 0, 0, 0), oracle, IWETH9(address(weth))
+        );
+        tokenVault.setTokenConfig(address(0), uint32(Q32 * 9 / 10), type(uint32).max);
+        tokenVault.setTokenConfig(address(token), uint32(Q32 * 9 / 10), type(uint32).max);
+        tokenVault.setLimits(0, 1e30, 1e30, 1e30, 1e30);
+        tokenVault.setHookAllowList(address(0), true);
+        tokenVault.setTransformer(address(transformer), true);
+        transformer.setVault(address(tokenVault));
+
+        token.approve(address(tokenVault), type(uint256).max);
+        tokenVault.deposit(500e18, address(this));
+
+        LeverageTransformer.LeverageInParams memory params = _params(1 ether, 10e18);
+        params.vault = address(tokenVault);
+
+        // Caller sends insufficient ETH (0.5 ether when 1 ether is required)
+        vm.deal(user, 2 ether);
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSignature("IncorrectNativeBalance()"));
+        transformer.leverageIn{value: 0.5 ether}(params);
+
+        // Caller sends 0 ETH
+        vm.expectRevert(abi.encodeWithSignature("IncorrectNativeBalance()"));
+        transformer.leverageIn{value: 0}(params);
+        vm.stopPrank();
+    }
 }

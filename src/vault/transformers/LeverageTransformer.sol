@@ -405,9 +405,16 @@ contract LeverageTransformer is Transformer, Swapper, IERC721Receiver {
     {
         // Transfer initial token from user (must be the non-lend token)
         if (!otherToken.isAddressZero()) {
+            if (msg.value > 0) {
+                revert NoEtherToken();
+            }
             SafeERC20.safeTransferFrom(
                 IERC20(Currency.unwrap(otherToken)), msg.sender, address(this), params.initialAmount
             );
+        } else {
+            if (msg.value < params.initialAmount) {
+                revert IncorrectNativeBalance();
+            }
         }
 
         // Create pool key
