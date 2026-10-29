@@ -116,4 +116,53 @@ contract V4VaultAuditFixesTest is V4VaultLocalBase {
         _borrow(tokenId, 60e18);
         assertApproxEqRel(vault.dailyDebtIncreaseLimitLeft(), 40e18, 1e12, "quota sized from the funded pool");
     }
+
+    // ==================== Issue #61: clamp dailyDebtIncreaseLimitLeft on repay/liquidate ====================
+
+    function testRepayOfOldDebtDoesNotInflateDailyDebtLimitBeyondCeiling() public {
+        _deposit(lender, 1000e18);
+        // set nominal minimum debt quota: 10% of settled assets (100e18)
+        vault.setLimits(0, 1e30, 1e30, 1e30, 1);
+        oracle.setMockPositionValue(1000e18);
+        uint256 tokenId = _createLoan(10e18);
+        _borrow(tokenId, 50e18);
+
+        // Day starts with 10% daily debt limit = 100e18. Borrowed 50e18, so 50e18 left.
+        // Advance to a new day where the quota resets to a fresh 100e18
+        vm.warp(block.timestamp + 1 days);
+
+        // Repaying 50e18 of old debt must not inflate the quota beyond today's 100e18 ceiling
+        vm.startPrank(borrower);
+        asset.mint(borrower, 50e18);
+        asset.approve(address(vault), 50e18);
+        vault.repay(tokenId, 50e18, false);
+        vm.stopPrank();
+
+        assertApproxEqRel(vault.dailyDebtIncreaseLimitLeft(), 100e18, 1e12, "quota must not exceed daily ceiling");
+    }
+
+    function testLiquidationHaircutClampsDailyDebtLimitToSurvivingPool() public {
+        _deposit(lender, 1000e18);
+        // set nominal minimum debt quota, so the day's debt allowance is 10% of the 1000 lent
+        vault.setLimits(0, 1e30, 1e30, 1e30, 1);
+        oracle.setMockPositionValue(1000e18);
+        uint256 tokenId = _createLoan(10e18);
+        _borrow(tokenId, 80e18);
+
+        // Advance to a new day so that daily quota resets
+        vm.warp(block.timestamp + 1 days);
+
+        // Collateral collapses so liquidation incurs a reserve shortfall and haircuts lenders
+        oracle.setMockPositionValue(10e18);
+        uint256 lendRateBefore = vault.lastLendExchangeRateX96();
+        _liquidateAs(liquidator, tokenId, liquidator);
+        assertLt(vault.lastLendExchangeRateX96(), lendRateBefore, "lenders took the haircut");
+        (, uint256 lent,,,,) = vault.vaultInfo();
+        assertLt(lent, 1000e18, "surviving lender claim reduced");
+
+        // The daily debt allowance must be clamped to 10% of surviving claims, not pre-loss quota
+        uint256 debtAllowance = vault.dailyDebtIncreaseLimitLeft();
+        assertLe(debtAllowance, lent / 10, "debt allowance is measured against surviving claims");
+        assertGt(debtAllowance, (lent / 10) * 99 / 100, "and not below the surviving ceiling");
+    }
 }

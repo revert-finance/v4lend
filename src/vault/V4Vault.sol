@@ -948,7 +948,7 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         // calculate reserve (before transfering liquidation money - otherwise calculation is off)
         if (state.reserveCost > 0) {
-            state.missing = _handleReserveLiquidation(
+            (state.missing, state.newLendExchangeRateX96) = _handleReserveLiquidation(
                 state.reserveCost, state.newDebtExchangeRateX96, state.newLendExchangeRateX96
             );
         }
@@ -962,7 +962,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
 
         debtSharesTotal = debtSharesTotal - debtShares;
 
-        dailyDebtIncreaseLimitLeft = dailyDebtIncreaseLimitLeft + state.debt;
+        // clamp dailyDebtIncreaseLimitLeft to prevent rate limit bypass
+        uint256 maxDebtLimit =
+            _calculateDailyLimit(state.newLendExchangeRateX96, dailyDebtIncreaseLimitMin, MAX_DAILY_DEBT_INCREASE_X32);
+        uint256 newDebtLimitLeft = dailyDebtIncreaseLimitLeft + state.debt;
+        dailyDebtIncreaseLimitLeft = newDebtLimitLeft > maxDebtLimit ? maxDebtLimit : newDebtLimitLeft;
 
         // remove debt from loan before external collateral payout callbacks
         _cleanupLoan(params.tokenId, state.newDebtExchangeRateX96, state.newLendExchangeRateX96);
@@ -1287,8 +1291,11 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         loan.debtShares = loanDebtShares;
         debtSharesTotal = debtSharesTotal - shares;
 
-        // when amounts are repayed - they maybe borrowed again
-        dailyDebtIncreaseLimitLeft = dailyDebtIncreaseLimitLeft + assets;
+        // when amounts are repayed - they maybe borrowed again, capped at single-day limit
+        uint256 maxDebtLimit =
+            _calculateDailyLimit(newLendExchangeRateX96, dailyDebtIncreaseLimitMin, MAX_DAILY_DEBT_INCREASE_X32);
+        uint256 newDebtLimitLeft = dailyDebtIncreaseLimitLeft + assets;
+        dailyDebtIncreaseLimitLeft = newDebtLimitLeft > maxDebtLimit ? maxDebtLimit : newDebtLimitLeft;
 
         _updateAndCheckCollateral(
             tokenId, newDebtExchangeRateX96, newLendExchangeRateX96, loanDebtShares + shares, loanDebtShares
@@ -1496,8 +1503,10 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         uint256 reserveCost,
         uint256 newDebtExchangeRateX96,
         uint256 newLendExchangeRateX96
-    ) internal returns (uint256 missing) {
+    ) internal returns (uint256 missing, uint256 postLendExchangeRateX96) {
         (, uint256 reserves) = _getBalanceAndReserves(newDebtExchangeRateX96, newLendExchangeRateX96);
+
+        postLendExchangeRateX96 = newLendExchangeRateX96;
 
         // if not enough - democratize debt
         if (reserveCost > reserves) {
@@ -1509,18 +1518,18 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
             // If liquidation losses wipe all lender principal, the lender exchange rate
             // collapses to zero and this vault is treated as redeploy-only afterward.
             if (totalLent == 0 || missing >= totalLent) {
-                newLendExchangeRateX96 = 0;
+                postLendExchangeRateX96 = 0;
             } else {
                 // Distribute the missing amount proportionally across all lent assets.
-                newLendExchangeRateX96 = (totalLent - missing) * newLendExchangeRateX96 / totalLent;
+                postLendExchangeRateX96 = (totalLent - missing) * newLendExchangeRateX96 / totalLent;
             }
-            lastLendExchangeRateX96 = newLendExchangeRateX96;
-            emit ExchangeRateUpdate(newDebtExchangeRateX96, newLendExchangeRateX96);
+            lastLendExchangeRateX96 = postLendExchangeRateX96;
+            emit ExchangeRateUpdate(newDebtExchangeRateX96, postLendExchangeRateX96);
 
             // the same-day lend allowance was sized on claims that were just written off: never let a
             // later deposit consume more than a fresh day's allowance on the surviving claims would grant
             uint256 allowance =
-                _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
+                _calculateDailyLimit(postLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
             if (dailyLendIncreaseLimitLeft > allowance) {
                 dailyLendIncreaseLimitLeft = allowance;
             }
