@@ -8,6 +8,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -281,15 +282,26 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         uint256 autoLendAmount = state.autoLendAmount;
         if (shares > 0) {
             Currency lendCurrency = Currency.wrap(autoLendToken);
-            uint256 redeemedAmount = IERC4626(state.autoLendVault).redeem(shares, address(this), address(this));
-            (, uint256 protocolFee) = _processLendingGain(redeemedAmount, autoLendAmount);
+            address autoLendVault = state.autoLendVault;
+            uint256 maxRedeem = IERC4626(autoLendVault).maxRedeem(address(this));
+            uint256 sharesToRedeem = maxRedeem < shares ? maxRedeem : shares;
+            uint256 residualShares = shares - sharesToRedeem;
+            uint256 principalRedeemed =
+                sharesToRedeem == shares ? autoLendAmount : FullMath.mulDiv(autoLendAmount, sharesToRedeem, shares);
+            uint256 redeemedAmount = sharesToRedeem > 0
+                ? IERC4626(autoLendVault).redeem(sharesToRedeem, address(this), address(this))
+                : 0;
+            (, uint256 protocolFee) = _processLendingGain(redeemedAmount, principalRedeemed);
             NativeAssetLib.unwrapIfNative(weth, lendCurrency, redeemedAmount);
             _resetAutoLendState(tokenId);
             _disablePosition(tokenId);
+            if (residualShares > 0) {
+                SafeERC20.safeTransfer(IERC20(autoLendVault), owner, residualShares);
+            }
             _sendLendingProtocolFee(tokenId, poolKey, lendCurrency, protocolFee);
             _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, owner);
 
-            emit AutoLendForceExit(tokenId, lendCurrency, redeemedAmount, shares);
+            emit AutoLendForceExit(tokenId, lendCurrency, redeemedAmount, sharesToRedeem);
             return;
         }
 
@@ -377,11 +389,28 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     /// @param shares The number of shares to redeem
     function autoLendWithdraw(PoolKey calldata poolKey, uint256 tokenId, uint256 shares) external {
         PositionState storage state = _positionStates[tokenId];
+        address autoLendVault = state.autoLendVault;
 
-        try IERC4626(state.autoLendVault).redeem(shares, address(this), address(this)) returns (uint256 amount) {
-            _processLendWithdraw(poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount);
+        try IERC4626(autoLendVault).maxRedeem(address(this)) returns (uint256 maxRedeem) {
+            uint256 sharesToRedeem = maxRedeem < shares ? maxRedeem : shares;
+            if (sharesToRedeem == 0) {
+                emit HookAutoLendFailed(
+                    autoLendVault, Currency.wrap(state.autoLendToken), abi.encodeWithSignature("InvalidConfig()")
+                );
+                emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+                return;
+            }
+
+            try IERC4626(autoLendVault).redeem(sharesToRedeem, address(this), address(this)) returns (uint256 amount) {
+                _processLendWithdraw(
+                    poolKey, tokenId, state.autoLendToken, amount, state.autoLendAmount, sharesToRedeem
+                );
+            } catch (bytes memory reason) {
+                emit HookAutoLendFailed(autoLendVault, Currency.wrap(state.autoLendToken), reason);
+                emit HookActionFailed(tokenId, Mode.AUTO_LEND);
+            }
         } catch (bytes memory reason) {
-            emit HookAutoLendFailed(state.autoLendVault, Currency.wrap(state.autoLendToken), reason);
+            emit HookAutoLendFailed(autoLendVault, Currency.wrap(state.autoLendToken), reason);
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
         }
     }
@@ -392,14 +421,19 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
         uint256 tokenId,
         address tokenAddress,
         uint256 redeemedAmount,
-        uint256 originalLendAmount
+        uint256 originalLendAmount,
+        uint256 sharesToRedeem
     ) internal {
         address owner = _getOwner(tokenId, false);
         address beneficiary = _vaults[owner] ? IVault(owner).ownerOf(tokenId) : owner;
         uint256 shares = _positionStates[tokenId].autoLendShares;
+        address autoLendVault = _positionStates[tokenId].autoLendVault;
+        uint256 residualShares = shares - sharesToRedeem;
+        uint256 principalRedeemed =
+            sharesToRedeem == shares ? originalLendAmount : FullMath.mulDiv(originalLendAmount, sharesToRedeem, shares);
         Currency lendCurrency = Currency.wrap(tokenAddress);
 
-        (uint256 reentryAmount, uint256 protocolFee) = _processLendingGain(redeemedAmount, originalLendAmount);
+        (uint256 reentryAmount, uint256 protocolFee) = _processLendingGain(redeemedAmount, principalRedeemed);
         NativeAssetLib.unwrapIfNative(weth, lendCurrency, redeemedAmount);
 
         (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
@@ -454,10 +488,13 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
             _disablePosition(tokenId);
             emit HookActionFailed(tokenId, Mode.AUTO_LEND);
         }
+        if (residualShares > 0) {
+            SafeERC20.safeTransfer(IERC20(autoLendVault), beneficiary, residualShares);
+        }
         _sendLendingProtocolFee(tokenId, poolKey, lendCurrency, protocolFee);
         _sendLeftoverTokens(tokenId, poolKey.currency0, poolKey.currency1, beneficiary);
 
-        emit AutoLendWithdraw(tokenId, lendCurrency, redeemedAmount, shares);
+        emit AutoLendWithdraw(tokenId, lendCurrency, redeemedAmount, sharesToRedeem);
     }
 
     /// @notice Processes gain from lending (takes protocol fee on gain)
