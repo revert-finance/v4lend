@@ -167,8 +167,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         address lendAsset = vault.asset();
         (Currency lendToken,) = _lendCurrency(poolKey, lendAsset);
         uint128 currentLiquidity = positionManager.getPositionLiquidity(tokenId);
-        (uint256 positionValue,,,) = v4Oracle.getValue(tokenId, lendAsset);
-        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+        (uint256 positionValue, uint256 feeValue,,) = v4Oracle.getValue(tokenId, lendAsset);
 
         // Nothing to remove, or a removal that floors to zero liquidity (the raw liquidity is small
         // next to the position's value, e.g. a fee-heavy or low-decimal position): the loan stays
@@ -177,15 +176,21 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         // permissionless crossing consumed the debt-reduction trigger without reducing debt
         // (V4LE-71). Report a failed action instead: HookActionFailed, the fired node consumed,
         // no re-centring. Removing one liquidity unit instead would credit nothing either.
-        if (positionValue == 0 || currentLiquidity == 0) return false;
+        if (positionValue == 0 || currentLiquidity == 0 || repayAmount == 0) return false;
 
-        // Calculate liquidity to remove based on value ratio
-        uint128 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
-        if (liquidityToRemove == 0) return false;
+        uint256 principalValue = positionValue > feeValue ? positionValue - feeValue : 0;
+        uint128 liquidityToRemove;
+        if (repayAmount > feeValue) {
+            if (principalValue == 0) return false;
+            liquidityToRemove =
+                AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount - feeValue, principalValue);
+        }
+        if (liquidityToRemove == 0 && feeValue == 0) return false;
 
-        // Remove partial liquidity and swap to lend token
-        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) =
-            _decreaseLiquidityPartial(poolKey, tokenId, liquidityToRemove);
+        // Remove partial liquidity (or collect fees only) and swap to lend token
+        (Currency currency0, Currency currency1, uint256 amount0, uint256 amount1) = liquidityToRemove > 0
+            ? _decreaseLiquidityPartial(poolKey, tokenId, liquidityToRemove)
+            : _decreaseLiquidity(poolKey, tokenId, true);
         if (amount0 == 0 && amount1 == 0) {
             // No credit to repay with. If the removal itself failed nothing changed and a soft
             // failure is right. If it succeeded, the position's carried protocol fees (deferred by
@@ -203,13 +208,18 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         uint256 lendAmount =
             _swapToLendToken(tokenId, poolKey, lendToken, currency0, currency1, amount0, amount1, Mode.AUTO_LEVERAGE);
 
-        // Repay debt
-        _repayDebtToVault(tokenId, vault, lendToken, lendAsset, lendAmount, currentDebt);
+        // Repay debt up to the target debt for the post-decrease collateral
+        (,, uint256 postCollateral,,) = vault.loanInfo(tokenId);
+        uint256 targetDebt = postCollateral * targetRatioBps / 10000;
+        uint256 maxRepay = currentDebt > targetDebt ? currentDebt - targetDebt : 0;
+        _repayDebtToVault(tokenId, vault, lendToken, lendAsset, lendAmount, maxRepay);
         (uint256 newDebt,,,,) = vault.loanInfo(tokenId);
         if (newDebt < currentDebt) {
             _sendLeftoverTokens(tokenId, currency0, currency1, vault.ownerOf(tokenId));
             return true;
         }
+
+        (, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
         uint256 balance0 = _sweepableBalance(currency0);
         uint256 balance1 = _sweepableBalance(currency1);

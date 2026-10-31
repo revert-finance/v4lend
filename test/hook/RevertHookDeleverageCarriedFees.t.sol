@@ -5,21 +5,166 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {PositionInfo, PositionInfoLibrary} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {stdStorage, StdStorage} from "forge-std/StdStorage.sol";
 
 import {EasyPosm} from "test/utils/libraries/EasyPosm.sol";
+import {IV4Oracle} from "src/oracle/interfaces/IV4Oracle.sol";
+import {IRemintMigrationHook} from "src/vault/interfaces/IRemintMigrationHook.sol";
 import {RevertHookTest} from "test/hook/RevertHook.t.sol";
 import {RevertHookState} from "src/hook/RevertHookState.sol";
 import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {V4Vault} from "src/vault/V4Vault.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
+
+contract PoolDonator {
+    IPoolManager public immutable poolManager;
+
+    constructor(IPoolManager _pm) {
+        poolManager = _pm;
+    }
+
+    function donate(PoolKey memory key, uint256 amount0, uint256 amount1) external {
+        poolManager.unlock(abi.encode(key, amount0, amount1));
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        (PoolKey memory key, uint256 amount0, uint256 amount1) = abi.decode(data, (PoolKey, uint256, uint256));
+        poolManager.donate(key, amount0, amount1, "");
+        if (amount0 > 0) {
+            poolManager.sync(key.currency0);
+            IERC20(Currency.unwrap(key.currency0)).transfer(address(poolManager), amount0);
+            poolManager.settle();
+        }
+        if (amount1 > 0) {
+            poolManager.sync(key.currency1);
+            IERC20(Currency.unwrap(key.currency1)).transfer(address(poolManager), amount1);
+            poolManager.settle();
+        }
+        return "";
+    }
+}
+
+contract FeeAwareProportionalOracle is IV4Oracle {
+    using PoolIdLibrary for PoolKey;
+    using PositionInfoLibrary for PositionInfo;
+
+    error MockPoolPriceUnavailable();
+
+    IPoolManager public immutable poolManager;
+    IPositionManager public immutable positionManager;
+    uint256 public immutable targetTokenId;
+    uint128 public immutable baseLiquidity;
+    uint256 public immutable baseValue;
+
+    mapping(address => mapping(address => PoolKey)) public poolKeys;
+    uint256 public mockPositionValue = 1 ether;
+    bool public revertPoolPrice;
+
+    constructor(IPositionManager _pm, uint256 _targetTokenId, uint128 _baseLiquidity, uint256 _baseValue) {
+        positionManager = _pm;
+        poolManager = _pm.poolManager();
+        targetTokenId = _targetTokenId;
+        baseLiquidity = _baseLiquidity;
+        baseValue = _baseValue;
+    }
+
+    function getLiquidityForValue(uint256 tokenId, address, uint256 target)
+        external
+        view
+        returns (uint128, uint256, uint256, uint256)
+    {
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        uint128 sized =
+            target >= mockPositionValue ? liquidity : uint128(FullMath.mulDiv(target, liquidity, mockPositionValue));
+        return (sized, 0, 0, FixedPoint96.Q96);
+    }
+
+    function getRiskScore(uint256, address, uint256) external pure returns (uint256) {
+        return 0;
+    }
+
+    function validateRiskChange(uint256 id, address asset, uint256 debt, uint256) external view {
+        if (debt != 0) validateBorrow(id, asset);
+    }
+
+    function validateBorrow(uint256 id, address asset) public view {
+        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(id);
+        if (address(key.hooks) != address(0)) IRemintMigrationHook(address(key.hooks)).validateVaultPosition(id, asset);
+    }
+
+    function setMockPositionValue(uint256 value) external {
+        mockPositionValue = value;
+    }
+
+    function setRevertPoolPrice(bool shouldRevert) external {
+        revertPoolPrice = shouldRevert;
+    }
+
+    function setPoolKey(address token0, address token1, PoolKey memory poolKey) external {
+        poolKeys[token0][token1] = poolKey;
+    }
+
+    function getPoolSqrtPriceX96(address token0, address token1) external view returns (uint160 sqrtPriceX96) {
+        if (revertPoolPrice) {
+            revert MockPoolPriceUnavailable();
+        }
+        if (token0 == token1) {
+            return uint160(FixedPoint96.Q96);
+        }
+        PoolKey memory poolKey = poolKeys[token0][token1];
+        PoolId poolId = poolKey.toId();
+        (sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolId);
+    }
+
+    function getValue(uint256 tokenId, address) external view returns (uint256, uint256, uint256, uint256) {
+        if (tokenId != targetTokenId) {
+            return (mockPositionValue, 0, 0, 0);
+        }
+        (PoolKey memory key, PositionInfo info) = positionManager.getPoolAndPositionInfo(tokenId);
+        PoolId poolId = key.toId();
+        int24 lower = info.tickLower();
+        int24 upper = info.tickUpper();
+        (uint128 liq, uint256 fg0Last, uint256 fg1Last) =
+            StateLibrary.getPositionInfo(poolManager, poolId, address(positionManager), lower, upper, bytes32(tokenId));
+        if (liq == 0) return (0, 0, FixedPoint96.Q96, FixedPoint96.Q96);
+        (uint256 fg0, uint256 fg1) = StateLibrary.getFeeGrowthInside(poolManager, poolId, lower, upper);
+        uint256 fees0;
+        uint256 fees1;
+        unchecked {
+            fees0 = FullMath.mulDiv(fg0 - fg0Last, liq, FixedPoint128.Q128);
+            fees1 = FullMath.mulDiv(fg1 - fg1Last, liq, FixedPoint128.Q128);
+        }
+        uint256 feeValue = fees0 + fees1;
+        uint256 principalValue = FullMath.mulDiv(baseValue, liq, baseLiquidity);
+        return (principalValue + feeValue, feeValue, FixedPoint96.Q96, FixedPoint96.Q96);
+    }
+
+    function getPositionBreakdown(uint256)
+        external
+        pure
+        returns (Currency, Currency, uint24, uint128, uint256, uint256, uint128, uint128)
+    {
+        return (Currency.wrap(address(0)), Currency.wrap(address(0)), 0, 0, 0, 0, 0, 0);
+    }
+
+    function getLiquidityAndFees(uint256) external pure returns (uint128, uint128, uint128) {
+        return (0, 0, 0);
+    }
+}
 
 /// @notice External audit: a hook-driven deleverage removes liquidity first and only then learns
 ///         what it can repay. When the position carries deferred protocol fees (from earlier
@@ -129,6 +274,144 @@ contract RevertHookDeleverageCarriedFeesTest is RevertHookTest {
         (pending0, pending1) = hook.pendingProtocolFees(leveredTokenId);
         assertEq(pending0, carried, "carried fee still owed, not settled from removed collateral");
         assertEq(pending1, carried);
+    }
+
+    function testDeleverageWithAccruedFeesPartialPrincipalRemovalDoesNotOvershoot() public {
+        (PoolKey memory key, V4Vault lendVault, uint256 leveredTokenId, address alice) =
+            _setupFeeAwareLeveredPosition(30e18, 20e18);
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(leveredTokenId);
+        (uint256 debtBefore,,,,) = lendVault.loanInfo(leveredTokenId);
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 60e18,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: key,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_sawActionFailed(logs, leveredTokenId), "deleverage with accrued fees must not fail");
+        assertTrue(_sawAutoLeverageExecuted(logs, leveredTokenId), "deleverage must execute");
+        assertFalse(hook.autoLeverageNeedsAttention(leveredTokenId), "position must not need attention");
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(leveredTokenId);
+        assertLt(liquidityAfter, liquidityBefore, "partial principal removed for remaining repay need");
+        assertGt(liquidityAfter, 0, "position not fully drained");
+
+        (uint256 debtAfter,, uint256 collateralAfter,,) = lendVault.loanInfo(leveredTokenId);
+        assertLt(debtAfter, debtBefore, "debt reduced");
+        uint256 ratioAfterBps = debtAfter * 10000 / collateralAfter;
+        assertGe(ratioAfterBps, 4700, "post-repay ratio must not overshoot below target - tolerance");
+        assertLe(ratioAfterBps, 5000, "post-repay ratio must not exceed target");
+        assertEq(alice.balance, 0);
+    }
+
+    function testDeleverageWithAccruedFeesExceedingRepayAmountCollectsFeesOnlyAndCapsRepay() public {
+        (PoolKey memory key, V4Vault lendVault, uint256 leveredTokenId, address alice) =
+            _setupFeeAwareLeveredPosition(25e18, 35e18);
+
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(leveredTokenId);
+        (uint256 debtBefore,,,,) = lendVault.loanInfo(leveredTokenId);
+        uint256 aliceToken1Before = IERC20(Currency.unwrap(currency1)).balanceOf(alice);
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 60e18,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: key,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_sawActionFailed(logs, leveredTokenId), "fee-only deleverage must not fail");
+        assertTrue(_sawAutoLeverageExecuted(logs, leveredTokenId), "deleverage must execute");
+        assertFalse(hook.autoLeverageNeedsAttention(leveredTokenId), "position must not need attention");
+
+        uint128 liquidityAfter = positionManager.getPositionLiquidity(leveredTokenId);
+        assertEq(liquidityAfter, liquidityBefore, "zero principal removed when accrued fees cover repayAmount");
+
+        (uint256 debtAfter,, uint256 collateralAfter,,) = lendVault.loanInfo(leveredTokenId);
+        assertLt(debtAfter, debtBefore, "debt reduced by capped fee repayment");
+        uint256 ratioAfterBps = debtAfter * 10000 / collateralAfter;
+        assertApproxEqAbs(ratioAfterBps, 5000, 1, "capped repayment lands at target ratio");
+
+        uint256 aliceToken1After = IERC20(Currency.unwrap(currency1)).balanceOf(alice);
+        assertGt(aliceToken1After, aliceToken1Before, "excess collected fees sent to position owner");
+    }
+
+    function _setupFeeAwareLeveredPosition(uint256 extraBorrow, uint256 donatedFees1)
+        internal
+        returns (PoolKey memory key, V4Vault lendVault, uint256 leveredTokenId, address alice)
+    {
+        alice = makeAddr("alice");
+        key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 500, tickSpacing: 10, hooks: IHooks(address(hook))
+        });
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), key);
+
+        positionManager.mint(
+            key,
+            TickMath.minUsableTick(key.tickSpacing),
+            TickMath.maxUsableTick(key.tickSpacing),
+            40e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        uint128 posLiquidity = 18000e18;
+        (leveredTokenId,) = positionManager.mint(
+            key,
+            -6 * key.tickSpacing,
+            6 * key.tickSpacing,
+            posLiquidity,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        (, uint256 baseValue) = LiquidityAmounts.getAmountsForLiquidity(
+            TickMath.getSqrtPriceAtTick(6 * key.tickSpacing),
+            TickMath.getSqrtPriceAtTick(-6 * key.tickSpacing),
+            TickMath.getSqrtPriceAtTick(6 * key.tickSpacing),
+            posLiquidity
+        );
+        FeeAwareProportionalOracle impl =
+            new FeeAwareProportionalOracle(positionManager, leveredTokenId, posLiquidity, baseValue);
+        vm.etch(address(v4Oracle), address(impl).code);
+
+        lendVault = _deployLendVault(currency1);
+        lendVault.setLimits(0, 1000e18, 1000e18, 1000e18, 1000e18);
+        IERC20(Currency.unwrap(currency1)).approve(address(lendVault), 500e18);
+        lendVault.deposit(500e18, address(this));
+
+        IERC721(address(positionManager)).approve(address(lendVault), leveredTokenId);
+        lendVault.create(leveredTokenId, alice);
+
+        vm.startPrank(alice);
+        lendVault.approveTransform(leveredTokenId, address(hook), true);
+        (,, uint256 collateralValue,,) = lendVault.loanInfo(leveredTokenId);
+        lendVault.borrow(leveredTokenId, collateralValue * 5000 / 10000);
+        hook.setPositionConfig(leveredTokenId, _autoLeverageConfig(5000));
+        lendVault.borrow(leveredTokenId, extraBorrow);
+        vm.stopPrank();
+
+        PoolDonator donator = new PoolDonator(poolManager);
+        IERC20(Currency.unwrap(currency1)).transfer(address(donator), donatedFees1);
+        donator.donate(key, 0, donatedFees1);
     }
 
     function _deployLendVault(Currency lendCurrency) internal returns (V4Vault lendVault) {
