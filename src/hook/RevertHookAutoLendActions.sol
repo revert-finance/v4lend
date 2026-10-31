@@ -56,6 +56,9 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ///         to keep the hook's own bytecode under the EIP-170 limit. Pure validation: no state
     ///         is written, so a direct call is harmless.
     function validatePositionConfig(uint256 tokenId, PositionConfig calldata config) external view {
+        if (_positionStates[tokenId].autoLendShares != 0) {
+            revert SharesOutstanding();
+        }
         (PoolKey memory poolKey, PositionInfo positionInfo) = positionManager.getPoolAndPositionInfo(tokenId);
         _validateTickAlignedConfig(config, poolKey.tickSpacing);
         _validateModeFlags(config.modeFlags, tokenId, poolKey);

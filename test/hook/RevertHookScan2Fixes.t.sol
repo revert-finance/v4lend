@@ -198,6 +198,69 @@ contract RevertHookScan2FixesTest is RevertHookTest {
         );
     }
 
+    // ==================== Issue #70: AUTO_LEND lent-state lifecycle guards ====================
+
+    /// @notice Reconfiguring or clearing a position config while autoLendShares > 0 must revert
+    ///         with SharesOutstanding() rather than deleting the withdraw trigger and stranding shares.
+    function testAutoLend_SetPositionConfigWhileLentRevertsSharesOutstanding() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        hook.setPositionConfig(token3Id, _autoLendConfig(0));
+
+        _moveTickDownUntil(tickLower3 - 1, 5e15, 400);
+        (,,,, uint256 shares,,,) = hook.positionStates(token3Id);
+        assertGt(shares, 0, "deposit fired");
+
+        RevertHookState.PositionConfig memory emptyConfig;
+        vm.expectRevert(abi.encodeWithSignature("SharesOutstanding()"));
+        hook.setPositionConfig(token3Id, emptyConfig);
+
+        vm.expectRevert(abi.encodeWithSignature("SharesOutstanding()"));
+        hook.setPositionConfig(token3Id, _autoLendConfig(poolKey.tickSpacing));
+    }
+
+    /// @notice Adding and removing LP liquidity while a position is parked in an AUTO_LEND vault
+    ///         must not activate and then strip the active autoLendWithdraw trigger on removal.
+    function testAutoLend_AddAndRemoveLiquidityWhileLentPreservesWithdrawTrigger() public {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+        hook.setPositionConfig(token3Id, _autoLendConfig(0));
+
+        _moveTickDownUntil(tickLower3 - 1, 5e15, 400);
+        (,, uint32 lastActivated,, uint256 shares,,,) = hook.positionStates(token3Id);
+        assertGt(shares, 0, "deposit fired");
+        assertEq(lastActivated, 0, "lent position is not marked LP-activated");
+        (, uint32 upperSizeBefore,) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperSizeBefore, 1, "withdraw trigger armed");
+
+        positionManager.increaseLiquidity(
+            token3Id,
+            1e18,
+            Constants.MAX_UINT128,
+            Constants.MAX_UINT128,
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        (,, lastActivated,,,,,) = hook.positionStates(token3Id);
+        assertGt(lastActivated, 0, "manually added LP activates fee accounting without duplicating withdraw trigger");
+
+        uint128 liq = positionManager.getPositionLiquidity(token3Id);
+        positionManager.decreaseLiquidity(
+            token3Id,
+            liq,
+            0,
+            0,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+
+        (,, lastActivated,,,,,) = hook.positionStates(token3Id);
+        assertEq(lastActivated, 0, "position deactivated after removing added LP");
+        (, uint32 upperSizeAfter,) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperSizeAfter, 1, "withdraw trigger preserved after removing added LP liquidity");
+    }
+
     /// @dev The oracle follows the hookless twin pool (still at tick 0) while the hooked pool is
     ///      swapped well past maxTicksFromOracle. No trigger is registered yet, so the walk does
     ///      not run and the cursor stays fresh by construction - the exact first-registration path.
