@@ -25,6 +25,7 @@ import {RevertHook} from "src/RevertHook.sol";
 import {RevertHookState} from "src/hook/RevertHookState.sol";
 import {PositionModeFlags} from "src/hook/lib/PositionModeFlags.sol";
 import {RevertHookTest} from "test/hook/RevertHook.t.sol";
+import {LimitedRedeemERC4626Vault} from "test/automators/utils/LimitedRedeemERC4626Vault.sol";
 import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
 import {V4Vault} from "src/vault/V4Vault.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
@@ -1244,5 +1245,128 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(positionManager.getPositionLiquidity(token2Id), liquidity - liquidity / 2, "withdrawal went through");
         (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "automation stays configured");
+    }
+
+    // ==================== V4LE-96 (hook twin): ERC4626 maxRedeem cap ====================
+
+    function _lendToken3IntoLimitedVault()
+        internal
+        returns (LimitedRedeemERC4626Vault limited, uint256 shares, uint256 principal)
+    {
+        hook.setMaxTicksFromOracle(1000);
+        IERC721(address(positionManager)).setApprovalForAll(address(hook), true);
+
+        limited = new LimitedRedeemERC4626Vault(IERC20(Currency.unwrap(currency0)), "Limited Token0", "limT0");
+        hook.setAutoLendVault(Currency.unwrap(currency0), limited);
+        hook.setPositionConfig(
+            token3Id,
+            _buildNonVaultModeConfig(PositionModeFlags.MODE_AUTO_LEND, false, false, type(int24).min, type(int24).max)
+        );
+
+        _moveTickDownUntil(tickLower3 - poolKey.tickSpacing, 2e16, 160);
+        (,,, address autoLendToken, uint256 lentShares, uint256 lentAmount,,) = hook.positionStates(token3Id);
+        assertEq(positionManager.getPositionLiquidity(token3Id), 0, "deposit removed LP liquidity");
+        assertEq(autoLendToken, Currency.unwrap(currency0), "token0 lent into limited vault");
+        assertGt(lentShares, 0, "shares minted");
+        return (limited, lentShares, lentAmount);
+    }
+
+    function testAutoLendForceExit_HandsUnredeemableSharesToTheOwner() public {
+        (LimitedRedeemERC4626Vault limited, uint256 shares, uint256 principal) = _lendToken3IntoLimitedVault();
+
+        // Simulate 10% positive yield on the vault and fund the extra underlying
+        MockERC20(Currency.unwrap(currency0)).mint(address(limited), principal);
+        limited.simulatePositiveYield(1000);
+
+        uint256 cap = shares / 2;
+        limited.setRedeemLimit(cap);
+
+        IERC20 token0 = IERC20(Currency.unwrap(currency0));
+        uint256 ownerToken0Before = token0.balanceOf(address(this));
+        uint256 ownerSharesBefore = limited.balanceOf(address(this));
+        uint256 expectedGross = limited.previewRedeem(cap);
+        uint256 principalRedeemed = principal * cap / shares;
+        uint256 expectedFee = (expectedGross - principalRedeemed) * feeController.autoLendFeeBps() / 10000;
+
+        hook.autoLendForceExit(token3Id);
+
+        assertEq(
+            token0.balanceOf(address(this)) - ownerToken0Before,
+            expectedGross - expectedFee,
+            "permitted part redeemed net of pro-rata yield fee"
+        );
+        assertEq(
+            limited.balanceOf(address(this)) - ownerSharesBefore,
+            shares - cap,
+            "unredeemable shares handed to owner"
+        );
+        assertEq(limited.balanceOf(address(hook)), 0, "no shares left in hook");
+        (,,,, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
+        assertEq(sharesAfter, 0, "autoLend state cleared");
+
+        limited.setRedeemLimit(type(uint256).max);
+        limited.redeem(shares - cap, address(this), address(this));
+        assertGt(token0.balanceOf(address(this)) - ownerToken0Before, principal, "owner recovered full principal + yield");
+    }
+
+    function testAutoLendForceExit_WithNothingRedeemableTransfersAllShares() public {
+        (LimitedRedeemERC4626Vault limited, uint256 shares,) = _lendToken3IntoLimitedVault();
+        limited.setRedeemLimit(0);
+
+        IERC20 token0 = IERC20(Currency.unwrap(currency0));
+        uint256 ownerToken0Before = token0.balanceOf(address(this));
+
+        hook.autoLendForceExit(token3Id);
+
+        assertEq(token0.balanceOf(address(this)), ownerToken0Before, "no underlying redeemed when maxRedeem == 0");
+        assertEq(limited.balanceOf(address(this)), shares, "all shares transferred to owner");
+        assertEq(limited.balanceOf(address(hook)), 0, "no shares left in hook");
+        (,,,, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
+        assertEq(sharesAfter, 0, "autoLend state cleared");
+    }
+
+    function testAutoLendWithdraw_RedeemsPermittedSharesAndTransfersResidualShares() public {
+        (LimitedRedeemERC4626Vault limited, uint256 shares, uint256 principal) = _lendToken3IntoLimitedVault();
+
+        MockERC20(Currency.unwrap(currency0)).mint(address(limited), principal);
+        limited.simulatePositiveYield(1000);
+
+        uint256 cap = shares / 2;
+        limited.setRedeemLimit(cap);
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        _moveTickUpUntil(tickLower3, 2e16, 160);
+
+        (,,,, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
+        assertEq(sharesAfter, 0, "autoLend state cleared after partial withdraw");
+        assertEq(limited.balanceOf(address(hook)), 0, "no shares left in hook");
+        assertEq(limited.balanceOf(address(this)), shares - cap, "residual shares transferred to beneficiary");
+
+        uint256 reenteredTokenId =
+            positionManager.nextTokenId() > nextTokenIdBefore ? positionManager.nextTokenId() - 1 : token3Id;
+        assertGt(
+            positionManager.getPositionLiquidity(reenteredTokenId), 0, "redeemed portion re-entered LP liquidity"
+        );
+    }
+
+    function testAutoLendWithdraw_WithNothingRedeemableKeepsSharesForForceExit() public {
+        (LimitedRedeemERC4626Vault limited, uint256 shares,) = _lendToken3IntoLimitedVault();
+        limited.setRedeemLimit(0);
+
+        vm.recordLogs();
+        _moveTickUpUntil(tickLower3, 2e16, 160);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertTrue(
+            _sawHookActionFailed(logs, token3Id, RevertHookState.Mode.AUTO_LEND),
+            "zero maxRedeem withdraw should emit HookActionFailed"
+        );
+        (,,,, uint256 sharesAfter,,,) = hook.positionStates(token3Id);
+        assertEq(sharesAfter, shares, "shares remain recorded when maxRedeem == 0");
+        assertEq(limited.balanceOf(address(hook)), shares, "shares remain custodied in hook");
+
+        hook.autoLendForceExit(token3Id);
+        assertEq(limited.balanceOf(address(this)), shares, "owner recovers all shares via autoLendForceExit");
+        assertEq(limited.balanceOf(address(hook)), 0, "no shares left in hook");
     }
 }
