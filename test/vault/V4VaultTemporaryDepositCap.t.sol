@@ -97,4 +97,47 @@ contract V4VaultTemporaryDepositCapTest is V4VaultLocalBase {
         vault.borrow(id, 101e18);
         _borrow(id, 100e18);
     }
+
+    function testSettledWithdrawalClampsDailyLendLimitToSurvivingSupply() public {
+        // Settled lender withdraws half of the 1000e18 settled supply on Day 2
+        vm.prank(lender);
+        vault.withdraw(500e18, lender, lender);
+        assertEq(vault.dailyLendNetInflow(), 0);
+
+        // Surviving settled supply is 500e18, so the daily lend allowance is ~50e18 (not 100e18 + 500e18 = 600e18)
+        uint256 limitLeft = vault.dailyLendIncreaseLimitLeft();
+        assertLe(limitLeft, 50e18, "daily lend allowance must clamp to surviving settled supply");
+        assertGt(limitLeft, 49e18, "allowance matches 10% of surviving 500e18 supply");
+
+        vm.startPrank(lender);
+        asset.approve(address(vault), 51e18);
+        vm.expectRevert(abi.encodeWithSignature("DailyLendIncreaseLimit()"));
+        vault.deposit(51e18, lender);
+        vault.deposit(limitLeft, lender);
+        vm.stopPrank();
+    }
+
+    function testSettledWithdrawAndRedepositCannotCorruptSettledLentAssetsOrDoSBorrowing() public {
+        uint256 id = _createLoan(10e18);
+
+        // Settled lender withdraws 800e18 of settled supply and tries to immediately re-deposit 800e18
+        // to convert settled supply into unsettled dailyLendNetInflow
+        vm.startPrank(lender);
+        vault.withdraw(800e18, lender, lender);
+        asset.approve(address(vault), 800e18);
+        vm.expectRevert(abi.encodeWithSignature("DailyLendIncreaseLimit()"));
+        vault.deposit(800e18, lender);
+
+        // Depositing the maximum allowed on the surviving 200e18 settled supply (~20e18) preserves
+        // _settledLentAssets >= 200e18 (210e18 with the 10e18 bootstrap allowance)
+        uint256 allowedRedeposit = vault.dailyLendIncreaseLimitLeft();
+        assertLe(allowedRedeposit, 20e18);
+        vault.deposit(allowedRedeposit, lender);
+        vm.stopPrank();
+
+        // Borrowing against the surviving 210e18 settled supply (~42e18 at 20% concentration cap) succeeds
+        _borrow(id, 41e18);
+        (uint256 debt,,,,) = vault.loanInfo(id);
+        assertEq(debt, 41e18);
+    }
 }
