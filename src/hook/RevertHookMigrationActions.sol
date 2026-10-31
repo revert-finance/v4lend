@@ -167,7 +167,10 @@ contract RevertHookMigrationActions is RevertHookActionBase {
         // the oracle on every add of an active position would make plain deposits depend on feed
         // freshness.
         PositionConfig storage config = _positionConfigs[tokenId];
-        if (!PositionModeFlags.isNone(config.modeFlags) && !_isActivated(tokenId)) {
+        if (
+            !PositionModeFlags.isNone(config.modeFlags) && !_isActivated(tokenId)
+                && _positionStates[tokenId].autoLendShares == 0
+        ) {
             (uint256 positionValueNative,,,) = v4Oracle.getValue(tokenId, address(0));
             if (positionValueNative >= _minPositionValueNative) {
                 // A third party arming a configured position while the trigger cursor lags the live
