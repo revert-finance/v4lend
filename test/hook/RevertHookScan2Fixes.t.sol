@@ -242,7 +242,7 @@ contract RevertHookScan2FixesTest is RevertHookTest {
             Constants.ZERO_BYTES
         );
         (,, lastActivated,,,,,) = hook.positionStates(token3Id);
-        assertEq(lastActivated, 0, "lent position stays unactivated across manual LP add");
+        assertGt(lastActivated, 0, "manually added LP activates fee accounting without duplicating withdraw trigger");
 
         uint128 liq = positionManager.getPositionLiquidity(token3Id);
         positionManager.decreaseLiquidity(
@@ -255,6 +255,8 @@ contract RevertHookScan2FixesTest is RevertHookTest {
             Constants.ZERO_BYTES
         );
 
+        (,, lastActivated,,,,,) = hook.positionStates(token3Id);
+        assertEq(lastActivated, 0, "position deactivated after removing added LP");
         (, uint32 upperSizeAfter,) = hook.upperTriggerAfterSwap(poolId);
         assertEq(upperSizeAfter, 1, "withdraw trigger preserved after removing added LP liquidity");
     }

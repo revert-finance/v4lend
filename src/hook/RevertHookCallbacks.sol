@@ -328,7 +328,9 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
         if (_isActivated(tokenId)) {
             uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
             if (liquidity == 0 || _isBelowMinimumValue(tokenId)) {
-                _removePositionTriggers(tokenId, key);
+                if (_positionStates[tokenId].autoLendShares == 0) {
+                    _removePositionTriggers(tokenId, key);
+                }
                 _deactivatePosition(tokenId);
             }
         }
