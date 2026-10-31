@@ -1235,11 +1235,15 @@ contract V4Vault is ERC20, Multicall, Ownable2Step, IVault, IERC721Receiver, Con
         _burn(owner, shares);
         SafeERC20.safeTransfer(IERC20(asset), receiver, assets);
 
-        // when amounts are withdrawn - they may be deposited again
-        dailyLendIncreaseLimitLeft = dailyLendIncreaseLimitLeft + assets;
         // a withdrawal unwinds today's inflow first; supply that was already settled shrinks the bounds at once
         uint256 inflow = dailyLendNetInflow;
         dailyLendNetInflow = assets < inflow ? inflow - assets : 0;
+
+        // when amounts are withdrawn - they may be deposited again, bounded by a fresh day's allowance on the surviving supply
+        uint256 allowance =
+            _calculateDailyLimit(newLendExchangeRateX96, dailyLendIncreaseLimitMin, MAX_DAILY_LEND_INCREASE_X32);
+        uint256 newLimitLeft = dailyLendIncreaseLimitLeft + assets;
+        dailyLendIncreaseLimitLeft = newLimitLeft > allowance ? allowance : newLimitLeft;
 
         emit Withdraw(msg.sender, receiver, owner, assets, shares);
     }
