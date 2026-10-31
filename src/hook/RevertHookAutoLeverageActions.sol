@@ -58,7 +58,7 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
         }
 
         if (!success) {
-            autoLeverageNeedsAttention[tokenId] = true;
+            _markAutoLeverageFailed(tokenId, poolKey);
             emit HookActionFailed(tokenId, Mode.AUTO_LEVERAGE);
             return;
         }
@@ -77,10 +77,9 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
                 )
         ) revert NoImprovement();
 
-        delete autoLeverageNeedsAttention[tokenId];
-
         // Update triggers for new base tick
         _removePositionTriggers(tokenId, poolKey);
+        delete autoLeverageNeedsAttention[tokenId];
         int24 newBaseTick = _getTickLower(_getCurrentTick(poolKey.toId()), poolKey.tickSpacing);
         _positionStates[tokenId].autoLeverageBaseTick = newBaseTick;
         // The liquidity callback may deactivate a position that fell below the

@@ -101,8 +101,21 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _disablePosition(uint256 tokenId) internal {
         PositionConfig memory emptyConfig = _getEmptyPositionConfig();
         _positionConfigs[tokenId] = emptyConfig;
+        delete autoLeverageNeedsAttention[tokenId];
         _deactivatePosition(tokenId);
         emit SetPositionConfig(tokenId, emptyConfig);
+    }
+
+    /// @notice Marks an auto-leverage attempt as failed and rearms range triggers when combined with AUTO_RANGE
+    function _markAutoLeverageFailed(uint256 tokenId, PoolKey memory poolKey) internal {
+        bool hasAutoRange = PositionModeFlags.hasAutoRange(_positionConfigs[tokenId].modeFlags);
+        if (hasAutoRange) {
+            _removePositionTriggers(tokenId, poolKey);
+        }
+        autoLeverageNeedsAttention[tokenId] = true;
+        if (hasAutoRange && _isActivated(tokenId)) {
+            _addPositionTriggers(tokenId, poolKey);
+        }
     }
 
     /// @notice Returns an empty position config with default/sentinel values
@@ -543,7 +556,8 @@ abstract contract RevertHookTriggers is RevertHookState {
         }
 
         bool hasAutoRange = PositionModeFlags.hasAutoRange(modeFlags);
-        bool hasAutoLeverage = PositionModeFlags.hasAutoLeverage(modeFlags);
+        bool hasAutoLeverage =
+            PositionModeFlags.hasAutoLeverage(modeFlags) && !(hasAutoRange && autoLeverageNeedsAttention[tokenId]);
 
         // Compute AUTO_RANGE trigger ticks
         int24 rangeLower = type(int24).min;

@@ -157,12 +157,16 @@ abstract contract RevertHookExecution is RevertHookConfig {
 
         if (!_transformViaVault(owner, tokenId, abi.encodeCall(this.autoLeverage, (poolKey, tokenId, isUpperTrigger))))
         {
-            autoLeverageNeedsAttention[tokenId] = true;
+            _markAutoLeverageFailed(tokenId, poolKey);
             _emitActionFailed(tokenId, Mode.AUTO_LEVERAGE);
         }
     }
 
     function _handleAutoRangeOrLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal {
+        if (autoLeverageNeedsAttention[tokenId]) {
+            _handleAutoRange(poolKey, tokenId);
+            return;
+        }
         PositionConfig storage config = _positionConfigs[tokenId];
         (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
 
