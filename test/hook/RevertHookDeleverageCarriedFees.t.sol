@@ -131,6 +131,163 @@ contract RevertHookDeleverageCarriedFeesTest is RevertHookTest {
         assertEq(pending1, carried);
     }
 
+    function testCombinedRangeAndLeverageFallsBackToAutoRangeAfterFailedLeverageTrigger() public {
+        PoolKey memory key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 500, tickSpacing: 10, hooks: IHooks(address(hook))
+        });
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), key);
+        hook.setMaxTicksFromOracle(1000);
+        positionManager.mint(
+            key,
+            TickMath.minUsableTick(key.tickSpacing),
+            TickMath.maxUsableTick(key.tickSpacing),
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        (uint256 levId,) = positionManager.mint(
+            key, -150, 150, 100, type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        V4Vault lendVault = _deployLendVault(currency0);
+        IERC20(Currency.unwrap(currency0)).approve(address(lendVault), 2e18);
+        lendVault.deposit(2e18, address(this));
+        IERC721(address(positionManager)).approve(address(lendVault), levId);
+        lendVault.create(levId, address(this));
+        lendVault.approveTransform(levId, address(hook), true);
+        (,, uint256 collateralValue,,) = lendVault.loanInfo(levId);
+        lendVault.borrow(levId, collateralValue * 5000 / 10000);
+
+        RevertHookState.PositionConfig memory config = _autoLeverageConfig(5000);
+        config.modeFlags = PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEVERAGE;
+        config.autoRangeLowerDelta = -100;
+        config.autoRangeUpperDelta = 100;
+        hook.setPositionConfig(levId, config);
+
+        // Push loan slightly above target so the tiny-liquidity deleverage soft-fails at +100
+        lendVault.borrow(levId, collateralValue / 1000);
+
+        // Step 1: cross upper leverage trigger (+100) without crossing upper range trigger (+150)
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 6e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: key,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs1 = vm.getRecordedLogs();
+        assertTrue(_sawActionFailed(logs1, levId), "leverage failed at +100");
+        assertTrue(hook.autoLeverageNeedsAttention(levId), "attention flag set");
+
+        vm.prank(address(lendVault));
+        IERC721(address(positionManager)).approve(address(this), levId);
+        positionManager.increaseLiquidity(
+            levId, 1e18, type(uint256).max, type(uint256).max, block.timestamp, Constants.ZERO_BYTES
+        );
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        // Step 2: cross upper range trigger (+150); AUTO_RANGE must fire and remint
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 6e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: key,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs2 = vm.getRecordedLogs();
+        assertTrue(_sawAutoRangeExecuted(logs2, levId), "autoRange executed at +150");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "replacement position minted");
+        assertGt(positionManager.getPositionLiquidity(nextTokenIdBefore), 0, "replacement has liquidity");
+        assertFalse(hook.autoLeverageNeedsAttention(nextTokenIdBefore), "replacement starts with clean attention state");
+    }
+
+    function testCombinedRangeAndLeverageSingleSwapCrossingBothTriggersFallsBackToAutoRange() public {
+        PoolKey memory key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 500, tickSpacing: 10, hooks: IHooks(address(hook))
+        });
+        poolManager.initialize(key, Constants.SQRT_PRICE_1_1);
+        v4Oracle.setPoolKey(Currency.unwrap(currency0), Currency.unwrap(currency1), key);
+        hook.setMaxTicksFromOracle(1000);
+        positionManager.mint(
+            key,
+            TickMath.minUsableTick(key.tickSpacing),
+            TickMath.maxUsableTick(key.tickSpacing),
+            100e18,
+            type(uint256).max,
+            type(uint256).max,
+            address(this),
+            block.timestamp,
+            Constants.ZERO_BYTES
+        );
+        (uint256 levId,) = positionManager.mint(
+            key, -150, 150, 1e18, type(uint256).max, type(uint256).max, address(this), block.timestamp, Constants.ZERO_BYTES
+        );
+
+        V4Vault lendVault = _deployLendVault(currency0);
+        uint256 initialDeposit = 1e18;
+        IERC20(Currency.unwrap(currency0)).approve(address(lendVault), initialDeposit);
+        lendVault.deposit(initialDeposit, address(this));
+        IERC721(address(positionManager)).approve(address(lendVault), levId);
+        lendVault.create(levId, address(this));
+        lendVault.approveTransform(levId, address(hook), true);
+        (,, uint256 collateralValue,,) = lendVault.loanInfo(levId);
+        uint256 initialBorrow = collateralValue * 5000 / 10000;
+        lendVault.borrow(levId, initialBorrow);
+
+        RevertHookState.PositionConfig memory config = _autoLeverageConfig(5000);
+        config.modeFlags = PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEVERAGE;
+        config.autoRangeLowerDelta = -100;
+        config.autoRangeUpperDelta = 100;
+        hook.setPositionConfig(levId, config);
+
+        // Drain remaining vault cash and lower debt below target so _increaseLeverage reverts in vault.borrow
+        IERC20(Currency.unwrap(currency0)).approve(address(lendVault), type(uint256).max);
+        lendVault.repay(levId, initialBorrow / 5, false);
+        uint256 maxWithdrawable = lendVault.maxWithdraw(address(this));
+        if (maxWithdrawable > 0) {
+            lendVault.withdraw(maxWithdrawable, address(this), address(this));
+        }
+
+        uint256 nextTokenIdBefore = positionManager.nextTokenId();
+
+        // Single swap crosses both leverageUpper (+100) and rangeUpper (+150)
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 18e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: key,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertTrue(_sawActionFailed(logs, levId), "leverage failed at +100");
+        assertTrue(_sawAutoRangeExecuted(logs, levId), "autoRange executed at +150");
+        assertEq(positionManager.nextTokenId(), nextTokenIdBefore + 1, "replacement position minted");
+        assertGt(positionManager.getPositionLiquidity(nextTokenIdBefore), 0, "replacement has liquidity");
+    }
+
+    function _sawAutoRangeExecuted(Vm.Log[] memory logs, uint256 forTokenId) internal pure returns (bool) {
+        bytes32 topic = RevertHookState.AutoRange.selector;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 1 && logs[i].topics[0] == topic && uint256(logs[i].topics[1]) == forTokenId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function _deployLendVault(Currency lendCurrency) internal returns (V4Vault lendVault) {
         InterestRateModel interestRateModel = new InterestRateModel(0, 0, 0, 0);
         lendVault = new V4Vault(
