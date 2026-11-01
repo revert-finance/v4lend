@@ -19,17 +19,20 @@ library AutoRangeLib {
         int24 lowerTickLimit,
         int24 upperTickLimit
     ) internal pure returns (bool) {
+        int256 current = int256(currentTick);
+        int256 lowerTrigger = int256(tickLower) - int256(lowerTickLimit);
+        int256 upperTrigger = int256(tickUpper) + int256(upperTickLimit);
         if (
-            (lowerTickLimit == 0 || currentTick >= tickLower - lowerTickLimit)
-                && (upperTickLimit == 0 || currentTick <= tickUpper + upperTickLimit)
+            (lowerTickLimit == 0 || current >= lowerTrigger)
+                && (upperTickLimit == 0 || current <= upperTrigger)
         ) {
             if (lowerTickLimit >= 0 && upperTickLimit >= 0) {
                 return false;
             }
-            if (lowerTickLimit < 0 && currentTick < tickLower - lowerTickLimit) {
+            if (lowerTickLimit < 0 && current < lowerTrigger) {
                 return true;
             }
-            return upperTickLimit < 0 && currentTick > tickUpper + upperTickLimit;
+            return upperTickLimit < 0 && current > upperTrigger;
         }
 
         return true;
@@ -46,13 +49,17 @@ library AutoRangeLib {
         int24 lowerTickDelta,
         int24 upperTickDelta
     ) internal pure returns (int24 newTickLower, int24 newTickUpper) {
-        int24 baseTick = floorToSpacing(currentTick, tickSpacing);
-        newTickLower = baseTick + lowerTickDelta;
-        newTickUpper = baseTick + upperTickDelta;
-        int24 minTick = TickMath.minUsableTick(tickSpacing);
-        int24 maxTick = TickMath.maxUsableTick(tickSpacing);
-        if (newTickLower < minTick) newTickLower = minTick;
-        if (newTickUpper > maxTick) newTickUpper = maxTick;
+        int256 baseTick = int256(floorToSpacing(currentTick, tickSpacing));
+        int256 plannedLower = baseTick + int256(lowerTickDelta);
+        int256 plannedUpper = baseTick + int256(upperTickDelta);
+        int256 minTick = int256(TickMath.minUsableTick(tickSpacing));
+        int256 maxTick = int256(TickMath.maxUsableTick(tickSpacing));
+        if (plannedLower < minTick) plannedLower = minTick;
+        if (plannedLower > maxTick) plannedLower = maxTick;
+        if (plannedUpper > maxTick) plannedUpper = maxTick;
+        if (plannedUpper < minTick) plannedUpper = minTick;
+        newTickLower = int24(plannedLower);
+        newTickUpper = int24(plannedUpper);
     }
 
     function isValidRange(int24 tickLower, int24 tickUpper) internal pure returns (bool) {

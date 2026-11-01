@@ -149,6 +149,79 @@ contract RevertHookScan2FixesTest is RevertHookTest {
         assertEq(upperHead, maxUsable, "range trigger at the clamped bound");
     }
 
+    function testV4LE130_AutoRangeExtremeDeltaAndAutoLendToleranceSaturateWithoutOverflow() public {
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+        int24 maxUsable = TickMath.maxUsableTick(poolKey.tickSpacing);
+        int24 extremeDelta = 8_388_600; // aligned; extremeDelta * 2 and baseTick (>0) + extremeDelta exceed type(int24).max
+
+        // 1. AUTO_LEND with extreme toleranceTick (tolerance * 2 > type(int24).max) saturates to sentinels instead of panicking
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_LEND,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: 0,
+                autoRangeUpperDelta: 0,
+                autoLendToleranceTick: extremeDelta,
+                autoLeverageTargetBps: 0
+            })
+        );
+        (, uint32 lowerSize,) = hook.lowerTriggerAfterSwap(poolId);
+        (, uint32 upperSize,) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(lowerSize, 0, "saturated lower auto-lend deposit trigger skipped");
+        assertEq(upperSize, 0, "saturated upper auto-lend deposit trigger skipped");
+
+        // 2. AUTO_RANGE with extreme upperDelta (baseTick + extremeDelta > type(int24).max) clamps in AutoRangeLib.plan
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: true,
+                autoExitSwapOnUpperTrigger: true,
+                autoRangeLowerLimit: type(int24).min,
+                autoRangeUpperLimit: 0,
+                autoRangeLowerDelta: -60,
+                autoRangeUpperDelta: extremeDelta,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        (, upperSize,) = hook.upperTriggerAfterSwap(poolId);
+        assertEq(upperSize, 1, "upper range trigger armed");
+        uint256 replacementId = positionManager.nextTokenId();
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(
+            _sawIndexed(logs, RevertHookState.HookActionFailed.selector, token3Id),
+            "remint at positive baseTick with extreme delta must not overflow int24"
+        );
+        assertGt(positionManager.getPositionLiquidity(replacementId), 0, "replacement minted");
+        (, PositionInfoView memory info) = _positionInfo(replacementId);
+        assertEq(info.tickUpper, maxUsable, "replacement clamped at maxUsableTick");
+    }
+
     // ==================== V4LE-154: immediate action outside the oracle window ====================
 
     /// @notice The first position configuration in a pool executed a satisfied trigger (or an

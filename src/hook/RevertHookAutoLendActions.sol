@@ -552,11 +552,16 @@ contract RevertHookAutoLendActions is RevertHookActionBase {
     ) internal {
         int24 tolerance = _positionConfigs[tokenId].autoLendToleranceTick;
         if (removeUpperTrigger) {
-            _upperTriggerAfterSwap[poolKey.toId()].remove(positionInfo.tickUpper() + tolerance * 2, tokenId);
+            int24 upperTick = _offsetTick(positionInfo.tickUpper(), int256(tolerance) * 2);
+            if (upperTick != type(int24).max) {
+                _upperTriggerAfterSwap[poolKey.toId()].remove(upperTick, tokenId);
+            }
         } else {
-            _lowerTriggerAfterSwap[poolKey.toId()].remove(
-                positionInfo.tickLower() - tolerance * 2 - poolKey.tickSpacing, tokenId
-            );
+            int24 lowerTick =
+                _offsetTick(positionInfo.tickLower(), -int256(tolerance) * 2 - int256(poolKey.tickSpacing));
+            if (lowerTick != type(int24).min) {
+                _lowerTriggerAfterSwap[poolKey.toId()].remove(lowerTick, tokenId);
+            }
         }
     }
 }
