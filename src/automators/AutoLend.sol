@@ -149,9 +149,6 @@ contract AutoLend is Automator {
         if (!config.isActive) {
             revert NotConfigured();
         }
-        if (lendStates[params.tokenId].shares > 0) {
-            revert InvalidConfig();
-        }
 
         address posOwner = _requireNonVaultPosition(params.tokenId);
 
@@ -200,6 +197,13 @@ contract AutoLend is Automator {
         address idleTokenAddr = Currency.unwrap(idleToken);
         IERC4626 lendVault = _resolveAutoLendVault(idleToken);
 
+        LendState storage existingState = lendStates[params.tokenId];
+        if (existingState.shares > 0) {
+            if (existingState.lentToken != idleTokenAddr || existingState.vault != address(lendVault)) {
+                revert InvalidConfig();
+            }
+        }
+
         // Deposit into ERC4626 vault (wrap native ETH to WETH first if needed)
         address depositTokenAddr = idleTokenAddr;
         if (idleToken.isAddressZero()) {
@@ -213,9 +217,14 @@ contract AutoLend is Automator {
             revert InvalidConfig();
         }
 
-        lendStates[params.tokenId] =
-            LendState({lentToken: idleTokenAddr, shares: shares, amount: idleAmount, vault: address(lendVault)});
-        vaultPositionCount[address(lendVault)]++;
+        if (existingState.shares == 0) {
+            lendStates[params.tokenId] =
+                LendState({lentToken: idleTokenAddr, shares: shares, amount: idleAmount, vault: address(lendVault)});
+            vaultPositionCount[address(lendVault)]++;
+        } else {
+            existingState.shares += shares;
+            existingState.amount += idleAmount;
+        }
         custodiedShares[address(lendVault)] += shares;
 
         _sendProtocolFees(poolKey.currency0, poolKey.currency1, protocolFee0, protocolFee1);

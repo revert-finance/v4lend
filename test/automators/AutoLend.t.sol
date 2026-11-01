@@ -1205,4 +1205,74 @@ contract AutoLendTest is AutomatorTestBase {
         (, uint256 sharesAfter,,) = autoLend.lendStates(tokenId);
         assertEq(sharesAfter, 0, "lend state cleared");
     }
+
+    function testV4LE96_PartialWithdrawAddToExistingAllowsRedepositWhenPriceMovesBackOutOfRange() public {
+        LimitedRedeemERC4626Vault limited = new LimitedRedeemERC4626Vault(usdc, "Limited USDC", "limUSDC");
+        autoLend.setAutoLendVault(address(usdc), IERC4626(address(limited)));
+
+        PoolKey memory poolKey = _createPool();
+        _createFullRangePosition(poolKey);
+        uint256 tokenId = _createNarrowPosition(poolKey);
+        (, PositionInfo posInfo) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        // Configure deposit zone 200 ticks below range and withdraw zone 100 ticks below range
+        AutoLend.PositionConfig memory config = AutoLend.PositionConfig({
+            isActive: true,
+            lowerTickZone: 200,
+            upperTickZone: 200,
+            lowerTickZoneWithdraw: 100,
+            upperTickZoneWithdraw: 100,
+            maxRewardX64: 0
+        });
+        _configureAndApprove(tokenId, config);
+
+        // 1. Move below deposit threshold (< tickLower - 200) and deposit full liquidity
+        _pushTickBelow(poolKey, posInfo.tickLower() - 200);
+        _deposit(operator, _depositParams(tokenId));
+
+        (, uint256 initialShares, uint256 initialPrincipal,) = autoLend.lendStates(tokenId);
+        assertGt(initialShares, 0, "initial deposit minted shares");
+
+        // 2. Move into withdraw window [tickLower - 100, tickLower) so addToExisting == true, with capped maxRedeem
+        _pushTickToOrAbove(poolKey, posInfo.tickLower() - 100);
+        assertLt(_getCurrentTick(poolKey), posInfo.tickLower(), "still below range so addToExisting is true");
+
+        uint256 cap = initialShares / 3;
+        limited.setRedeemLimit(cap);
+        _withdraw(operator, _withdrawParams(tokenId));
+
+        (, uint256 residualShares, uint256 residualAmount,) = autoLend.lendStates(tokenId);
+        assertEq(residualShares, initialShares - cap, "residual shares remain");
+        assertGt(positionManager.getPositionLiquidity(tokenId), 0, "partial liquidity restored to existing tokenId");
+        assertEq(autoLend.vaultPositionCount(address(limited)), 1, "single vault reference maintained");
+
+        // 3. Price drops back below deposit threshold (< tickLower - 200) before vault limit recovers:
+        //    withdraw is NotReady(), so deposit must be able to re-lend the restored LP liquidity and accumulate
+        _pushTickBelow(poolKey, posInfo.tickLower() - 200);
+        vm.prank(operator);
+        vm.expectRevert(Constants.NotReady.selector);
+        autoLend.withdraw(_withdrawParams(tokenId));
+
+        _deposit(operator, _depositParams(tokenId));
+
+        (, uint256 accumulatedShares, uint256 accumulatedAmount, address vaultAfter) = autoLend.lendStates(tokenId);
+        assertGt(accumulatedShares, residualShares, "redeposit accumulated onto residual shares");
+        assertGt(accumulatedAmount, residualAmount, "redeposit accumulated onto residual principal");
+        assertEq(vaultAfter, address(limited), "vault unchanged");
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "restored LP liquidity re-deposited");
+        assertEq(autoLend.custodiedShares(address(limited)), accumulatedShares, "custodied shares match accumulated");
+        assertEq(autoLend.vaultPositionCount(address(limited)), 1, "vaultPositionCount not double-incremented");
+
+        // 4. Once the vault lifts its limit and price returns to the withdraw window, full withdraw clears state
+        _pushTickToOrAbove(poolKey, posInfo.tickLower() - 100);
+        limited.setRedeemLimit(type(uint256).max);
+        _withdraw(operator, _withdrawParams(tokenId));
+
+        (, uint256 finalShares,,) = autoLend.lendStates(tokenId);
+        assertEq(finalShares, 0, "all shares redeemed");
+        assertEq(autoLend.custodiedShares(address(limited)), 0, "custody cleared");
+        assertEq(autoLend.vaultPositionCount(address(limited)), 0, "vaultPositionCount decremented to zero");
+        assertGt(positionManager.getPositionLiquidity(tokenId), 0, "full liquidity back in position");
+        assertGe(initialPrincipal, accumulatedAmount - 10, "principal accounting consistent");
+    }
 }
