@@ -7104,6 +7104,67 @@ contract RevertHookTest is BaseTest {
         assertEq(accumulatedAfterSecondCollect, 0, "Second inactive collection must not reuse consumed active time");
         assertEq(lastActivatedAfterSecondCollect, 0, "Second inactive collection should keep position inactive");
     }
+
+    function testAutoRangeRemintFailurePreservesSurvivingAutoExitAndAutoCollect() public {
+        hook.setMaxTicksFromOracle(1000);
+        // Configure a non-existent routed pool so swap-to-ratio fails and remint has no usable token1.
+        _setBidirectionalRoute(
+            PoolKey({
+                currency0: poolKey.currency0,
+                currency1: poolKey.currency1,
+                fee: 500,
+                tickSpacing: 60,
+                hooks: IHooks(address(0))
+            })
+        );
+        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
+
+        int24 exitLowerTick = tickLower3 - poolKey.tickSpacing * 4;
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_EXIT
+                    | PositionModeFlags.MODE_AUTO_COLLECT,
+                autoCollectMode: RevertHookState.AutoCollectMode.HARVEST_TOKENS,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerTick,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: false,
+                autoExitSwapOnUpperTrigger: false,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -poolKey.tickSpacing * 2,
+                autoRangeUpperDelta: -poolKey.tickSpacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+        (uint32 lowerConfigured, uint32 upperConfigured) = _getTriggerListSizes();
+        assertEq(lowerConfigured, lowerInitial + 2, "Should register both AUTO_RANGE and AUTO_EXIT lower triggers");
+        assertEq(upperConfigured, upperInitial, "Upper triggers remain disabled");
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        assertGt(positionManager.getPositionLiquidity(token3Id), 0, "Original position liquidity should be restored");
+        (uint32 lowerAfterRangeFail, uint32 upperAfterRangeFail) = _getTriggerListSizes();
+        assertEq(
+            lowerAfterRangeFail,
+            lowerInitial + 1,
+            "Failed AUTO_RANGE remint must preserve surviving AUTO_EXIT lower trigger"
+        );
+        assertEq(upperAfterRangeFail, upperInitial, "Upper triggers remain unchanged");
+        (,, uint32 lastActivatedAfterRangeFail,,,,,) = hook.positionStates(token3Id);
+        assertGt(lastActivatedAfterRangeFail, 0, "Position with surviving AUTO_EXIT/AUTO_COLLECT must stay activated");
+    }
 }
 
 contract RevertingERC4626Vault is MockERC4626Vault {

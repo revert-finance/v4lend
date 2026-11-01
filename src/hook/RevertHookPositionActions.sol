@@ -223,7 +223,16 @@ contract RevertHookPositionActions is RevertHookActionBase {
             _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
             if (restored0 > 0 || restored1 > 0) {
                 _removePositionTriggers(tokenId, poolKey);
-                _deactivatePosition(tokenId);
+                PositionConfig memory survivingConfig = _positionConfigs[tokenId];
+                survivingConfig.modeFlags &= ~PositionModeFlags.MODE_AUTO_RANGE;
+                if (PositionModeFlags.hasTriggers(survivingConfig.modeFlags)) {
+                    int24[4] memory survivingTicks = _computeTriggerTicksMemory(
+                        tokenId, poolKey, survivingConfig, oldPositionInfo.tickLower(), oldPositionInfo.tickUpper()
+                    );
+                    _insertTriggerTicks(poolKey.toId(), tokenId, survivingTicks);
+                } else if (survivingConfig.autoCollectMode == AutoCollectMode.NONE) {
+                    _deactivatePosition(tokenId);
+                }
             } else {
                 _disablePosition(tokenId);
             }
