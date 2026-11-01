@@ -12,6 +12,7 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 
 import {Swapper} from "../shared/swap/Swapper.sol";
+import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {Transformer} from "../vault/transformers/Transformer.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 
@@ -155,6 +156,17 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
         }
     }
 
+    /// @dev The pool currency the vault's lend asset is held as inside a (token0, token1) pool, or the raw
+    ///      asset when the pool holds neither it nor its native alias (third-token leverage).
+    function _lendCurrency(address lendAsset, Currency token0, Currency token1) internal view returns (Currency) {
+        Currency lendToken = Currency.wrap(lendAsset);
+        if (token0 == lendToken) return token0;
+        if (token1 == lendToken) return token1;
+        if (token0.isAddressZero() && lendAsset == address(weth)) return token0;
+        if (token1.isAddressZero() && lendAsset == address(weth)) return token1;
+        return lendToken;
+    }
+
     /// @notice Executes router swap and enforces oracle-based slippage floor when enabled.
     /// @dev The effective minimum output is max(user amountOutMin, oracle floor).
     ///      maxSwapSlippageBps == 10000 disables the oracle slippage check entirely: the position owner then
@@ -169,7 +181,10 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
             if (maxSwapSlippageBps > 10000) {
                 revert InvalidConfig();
             }
-            if (maxSwapSlippageBps == 10000) {
+            if (
+                maxSwapSlippageBps == 10000
+                    || NativeAssetLib.isDirectWrappedNativeSwap(weth, params.tokenIn, params.tokenOut)
+            ) {
                 return _routerSwap(params);
             }
             uint160 oracleSqrtPriceX96 =
