@@ -211,7 +211,11 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
                 previousLiveTick = liveTick;
             }
 
-            if (directionReversed || tickDrained) {
+            bool stopAfterTick = !directionReversed && !tickDrained;
+            if (tickDrained && list.tokenIds[tick].length != 0) {
+                tickDrained = false;
+            }
+            if (directionReversed || !stopAfterTick) {
                 cursor = tick;
                 // A reversal that leaves entries at `tick` (put back above, or never popped under
                 // the per-swap cap) must keep them reachable. The next search in this direction is
@@ -227,7 +231,7 @@ abstract contract RevertHookCallbacks is RevertHookExecution {
             if (increasing ? liveTick < cursor : liveTick > cursor) {
                 cursor = liveTick;
             }
-            if (!directionReversed && !tickDrained) {
+            if (stopAfterTick) {
                 break;
             }
         }

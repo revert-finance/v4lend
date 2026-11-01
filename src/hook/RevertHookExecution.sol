@@ -28,6 +28,7 @@ abstract contract RevertHookExecution is RevertHookConfig {
         int24 autoExitTickLower,
         int24 autoExitTickUpper
     ) internal override {
+        modeFlags = _effectiveModeFlags(tokenId, modeFlags);
         if (PositionModeFlags.hasAutoExit(modeFlags)) {
             int24 exitTick = _calculateExitTick(
                 tokenId, isUpperTrigger, autoExitIsRelative, autoExitTickLower, autoExitTickUpper

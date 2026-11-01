@@ -33,7 +33,8 @@ abstract contract RevertHookImmediate is RevertHookViews {
     function _handleAutoLeverage(PoolKey memory poolKey, uint256 tokenId, bool isUpperTrigger) internal virtual;
 
     function _checkAndExecuteImmediate(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config) internal {
-        if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
+        uint8 effectiveFlags = _effectiveModeFlags(tokenId, config.modeFlags);
+        if (!PositionModeFlags.hasTriggers(effectiveFlags)) {
             return;
         }
 
@@ -44,7 +45,7 @@ abstract contract RevertHookImmediate is RevertHookViews {
         bool leverageDue;
         if (!shouldExecute) {
             (leverageDue, isUpperTrigger) =
-                _immediateAutoLeverageDue(tokenId, config.modeFlags, config.autoLeverageTargetBps);
+                _immediateAutoLeverageDue(tokenId, effectiveFlags, config.autoLeverageTargetBps);
             if (!leverageDue) {
                 return;
             }
@@ -61,7 +62,11 @@ abstract contract RevertHookImmediate is RevertHookViews {
         if (leverageDue) {
             _executeImmediateAutoLeverage(tokenId, isUpperTrigger);
         } else {
+            bool wasDisarmed = _isAutoRangeDisarmed(tokenId);
             _executeImmediateAction(tokenId, isUpperTrigger, triggeredTick);
+            if (!wasDisarmed && _isAutoRangeDisarmed(tokenId) && _isActivated(tokenId)) {
+                _checkAndExecuteImmediate(tokenId, poolKey, config);
+            }
         }
     }
 
