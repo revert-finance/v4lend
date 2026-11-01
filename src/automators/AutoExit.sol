@@ -13,6 +13,7 @@ import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit
 
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
+import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoExit
@@ -176,7 +177,7 @@ contract AutoExit is Automator {
         if (isVaultCall) {
             IVault vault = IVault(msg.sender);
             state.owner = vault.ownerOf(params.tokenId);
-            state.lendToken = Currency.wrap(vault.asset());
+            state.lendToken = _lendCurrency(vault.asset(), token0, token1);
 
             // The vault asset must be one of the pool tokens only when there is debt to repay: a
             // zero-debt loan in any accepted collateral pair exits with its tokens sent to the owner.
@@ -331,10 +332,14 @@ contract AutoExit is Automator {
             return;
         }
 
-        SafeERC20.forceApprove(IERC20(Currency.unwrap(state.lendToken)), address(vault), repayAmount);
+        address repayAsset = NativeAssetLib.wrapIfNative(weth, state.lendToken, repayAmount);
+        SafeERC20.forceApprove(IERC20(repayAsset), address(vault), repayAmount);
         (uint256 repaid,) = vault.repay(tokenId, repayAmount, false);
         // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
-        SafeERC20.forceApprove(IERC20(Currency.unwrap(state.lendToken)), address(vault), 0);
+        SafeERC20.forceApprove(IERC20(repayAsset), address(vault), 0);
+        if (repayAmount > repaid) {
+            NativeAssetLib.unwrapIfNative(weth, state.lendToken, repayAmount - repaid);
+        }
 
         // the net proceeds pay first, the reserved reward covers the rest
         uint256 fromNet = repaid > lendAmount ? lendAmount : repaid;

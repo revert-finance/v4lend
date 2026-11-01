@@ -15,6 +15,7 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {IVault} from "../vault/interfaces/IVault.sol";
 import {IV4Oracle} from "../oracle/interfaces/IV4Oracle.sol";
 import {AutoLeverageLib} from "../shared/planning/AutoLeverageLib.sol";
+import {NativeAssetLib} from "../shared/NativeAssetLib.sol";
 import {Automator} from "./Automator.sol";
 
 /// @title AutoLeverage
@@ -157,7 +158,7 @@ contract AutoLeverage is Automator {
         (ctx.poolKey, ctx.positionInfo) = positionManager.getPoolAndPositionInfo(params.tokenId);
         ctx.token0 = ctx.poolKey.currency0;
         ctx.token1 = ctx.poolKey.currency1;
-        ctx.lendToken = Currency.wrap(vault.asset());
+        ctx.lendToken = _lendCurrency(vault.asset(), ctx.token0, ctx.token1);
         ctx.currentDebt = currentDebt;
         ctx.fullValue = fullValue;
         ctx.collateralValue = collateralValue;
@@ -231,6 +232,7 @@ contract AutoLeverage is Automator {
 
             // Borrow from vault
             vault.borrow(params.tokenId, borrowAmount);
+            NativeAssetLib.unwrapIfNative(weth, ctx.lendToken, borrowAmount);
 
             amount0 = _netBalanceAfterReserved(ctx.token0, state.protocolFee0);
             amount1 = _netBalanceAfterReserved(ctx.token1, state.protocolFee1);
@@ -315,7 +317,7 @@ contract AutoLeverage is Automator {
                 // the oracle's undiscounted position value here. Dividing by
                 // collateralValue would remove too much liquidity whenever
                 // the vault applies a collateral-factor haircut.
-                (uint256 positionValue,,,) = v4Oracle.getValue(params.tokenId, Currency.unwrap(ctx.lendToken));
+                (uint256 positionValue,,,) = v4Oracle.getValue(params.tokenId, vault.asset());
                 liquidityToRemove = AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount, positionValue);
             }
             if (liquidityToRemove == 0 && netFeeLendValue == 0) revert NotReady();
@@ -359,10 +361,14 @@ contract AutoLeverage is Automator {
         // Repay debt
         if (lendAmount > 0) {
             if (lendAmount > ctx.currentDebt) lendAmount = ctx.currentDebt;
-            SafeERC20.forceApprove(IERC20(Currency.unwrap(ctx.lendToken)), address(vault), lendAmount);
-            vault.repay(params.tokenId, lendAmount, false);
+            address repayAsset = NativeAssetLib.wrapIfNative(weth, ctx.lendToken, lendAmount);
+            SafeERC20.forceApprove(IERC20(repayAsset), address(vault), lendAmount);
+            (uint256 repaid,) = vault.repay(params.tokenId, lendAmount, false);
             // reset any residual allowance (repay caps to outstanding debt, so a remainder can linger)
-            SafeERC20.forceApprove(IERC20(Currency.unwrap(ctx.lendToken)), address(vault), 0);
+            SafeERC20.forceApprove(IERC20(repayAsset), address(vault), 0);
+            if (lendAmount > repaid) {
+                NativeAssetLib.unwrapIfNative(weth, ctx.lendToken, lendAmount - repaid);
+            }
         }
 
     }
@@ -376,7 +382,7 @@ contract AutoLeverage is Automator {
         if (amountIn == 0) {
             return 0;
         }
-        if (tokenIn == lendToken) {
+        if (tokenIn == lendToken || NativeAssetLib.isDirectWrappedNativeSwap(weth, tokenIn, lendToken)) {
             return amountIn;
         }
 
