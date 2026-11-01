@@ -160,8 +160,10 @@ abstract contract Automator is Transformer, Swapper, IERC721Receiver, Reentrancy
     ///      asset when the pool holds neither it nor its native alias (third-token leverage).
     function _lendCurrency(address lendAsset, Currency token0, Currency token1) internal view returns (Currency) {
         Currency lendToken = Currency.wrap(lendAsset);
-        if (token0 == lendToken || (token0.isAddressZero() && lendAsset == address(weth))) return token0;
-        if (token1 == lendToken || (token1.isAddressZero() && lendAsset == address(weth))) return token1;
+        if (token0 == lendToken) return token0;
+        if (token1 == lendToken) return token1;
+        if (token0.isAddressZero() && lendAsset == address(weth)) return token0;
+        if (token1.isAddressZero() && lendAsset == address(weth)) return token1;
         return lendToken;
     }
 

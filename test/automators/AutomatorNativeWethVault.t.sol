@@ -468,4 +468,79 @@ contract AutomatorNativeWethVaultTest is BaseTest {
         assertEq(outUnwrap, 2 ether, "received 2 ETH");
         assertEq(address(harness).balance, 2 ether);
     }
+
+    /// @notice In an `(ETH, WETH)` pool with a WETH-asset vault, `_lendCurrency` prefers the exact `token1 == WETH`
+    ///         match over the `token0 == address(0)` native alias so a WETH-only position repays debt directly from
+    ///         its WETH leg without requiring a swap.
+    function testAutoExit_EthWethPoolPrefersExactWethToken1MatchOverNativeAlias() public {
+        PoolKey memory ethWethPool =
+            PoolKey(CurrencyLibrary.ADDRESS_ZERO, Currency.wrap(address(weth)), 3000, 60, IHooks(address(0)));
+        poolManager.initialize(ethWethPool, V4Constants.SQRT_PRICE_1_1);
+        vault.setTokenConfig(address(weth), uint32(Q32 * 9 / 10), type(uint32).max);
+
+        weth.deposit{value: 200 ether}();
+        weth.approve(address(permit2), type(uint256).max);
+        permit2.approve(address(weth), address(positionManager), type(uint160).max, type(uint48).max);
+
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmount1(
+            TickMath.getSqrtPriceAtTick(-1200), TickMath.getSqrtPriceAtTick(-600), 100 ether
+        );
+        bytes memory actions =
+            abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(
+            ethWethPool, int24(-1200), int24(-600), liquidity, type(uint256).max, type(uint256).max, user, bytes("")
+        );
+        params[1] = abi.encode(ethWethPool.currency0, ethWethPool.currency1, address(this));
+        params[2] = abi.encode(address(0), address(this));
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+        uint256 tokenId = positionManager.nextTokenId() - 1;
+
+        uint256 userWethBefore = weth.balanceOf(user);
+        vm.startPrank(user);
+        IERC721(address(positionManager)).approve(address(vault), tokenId);
+        vault.create(tokenId, user);
+        vault.borrow(tokenId, 60 ether);
+        vault.approveTransform(tokenId, address(autoExit), true);
+        autoExit.configToken(
+            tokenId,
+            AutoExit.PositionConfig({
+                isActive: true,
+                token0Swap: false,
+                token1Swap: false,
+                token0TriggerTick: 600,
+                token1TriggerTick: 1200,
+                token0SlippageBps: 500,
+                token1SlippageBps: 500,
+                maxRewardX64: 0,
+                onlyFees: false
+            })
+        );
+        vm.stopPrank();
+
+        uint256 vaultWethBefore = weth.balanceOf(address(vault));
+        vm.prank(operator);
+        autoExit.executeWithVault(
+            AutoExit.ExecuteParams({
+                tokenId: tokenId,
+                swapData: "",
+                amountRemoveMin0: 0,
+                amountRemoveMin1: 0,
+                amountOutMin: 0,
+                deadline: block.timestamp,
+                hookData: "",
+                rewardX64: 0,
+                repayAmountIn: 0,
+                repayAmountOutMin: 0,
+                repaySwapData: ""
+            }),
+            address(vault)
+        );
+
+        (uint256 debtAfter,,,,) = vault.loanInfo(tokenId);
+        assertEq(debtAfter, 0, "WETH debt repaid directly from token1 WETH leg");
+        assertEq(weth.balanceOf(address(vault)) - vaultWethBefore, 60 ether, "vault received 60 WETH");
+        assertGt(weth.balanceOf(user), userWethBefore + 60 ether, "owner received remaining WETH equity");
+        _assertAutomatorFlat(address(autoExit));
+    }
 }
