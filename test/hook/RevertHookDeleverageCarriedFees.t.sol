@@ -347,7 +347,60 @@ contract RevertHookDeleverageCarriedFeesTest is RevertHookTest {
         assertGt(aliceToken1After, aliceToken1Before, "excess collected fees sent to position owner");
     }
 
+    function testDeleverageWithMinLoanSizeAboveTargetDebtClampsPartialRepaymentToMinLoanSize() public {
+        (PoolKey memory key, V4Vault lendVault, uint256 leveredTokenId,) = _setupFeeAwareLeveredPosition(25e18, 35e18);
+        uint256 minLoan = 52e18;
+        lendVault.setLimits(minLoan, 1000e18, 1000e18, 1000e18, 1000e18);
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 60e18,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: key,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_sawActionFailed(logs, leveredTokenId), "deleverage must not revert on MinLoanSize");
+        assertTrue(_sawAutoLeverageExecuted(logs, leveredTokenId), "deleverage must execute");
+        (uint256 debtAfter,,,,) = lendVault.loanInfo(leveredTokenId);
+        assertEq(debtAfter, minLoan, "remaining debt clamped to minLoanSize when proceeds cannot clear full debt");
+    }
+
+    function testDeleverageWithMinLoanSizeAboveTargetDebtAllowsFullRepaymentWhenProceedsCoverDebt() public {
+        (PoolKey memory key, V4Vault lendVault, uint256 leveredTokenId,) =
+            _setupFeeAwareLeveredPositionWithTarget(2000, 11e18, 35e18);
+        lendVault.setLimits(25e18, 1000e18, 1000e18, 1000e18, 1000e18);
+
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 60e18,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: key,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_sawActionFailed(logs, leveredTokenId), "full repayment must not be blocked by minLoanSize");
+        assertTrue(_sawAutoLeverageExecuted(logs, leveredTokenId), "deleverage must execute");
+        (uint256 debtAfter,,,,) = lendVault.loanInfo(leveredTokenId);
+        assertEq(debtAfter, 0, "full debt repaid when proceeds cover currentDebt and targetDebt < minLoanSize");
+    }
+
     function _setupFeeAwareLeveredPosition(uint256 extraBorrow, uint256 donatedFees1)
+        internal
+        returns (PoolKey memory key, V4Vault lendVault, uint256 leveredTokenId, address alice)
+    {
+        return _setupFeeAwareLeveredPositionWithTarget(5000, extraBorrow, donatedFees1);
+    }
+
+    function _setupFeeAwareLeveredPositionWithTarget(uint16 targetBps, uint256 extraBorrow, uint256 donatedFees1)
         internal
         returns (PoolKey memory key, V4Vault lendVault, uint256 leveredTokenId, address alice)
     {
@@ -404,8 +457,8 @@ contract RevertHookDeleverageCarriedFeesTest is RevertHookTest {
         vm.startPrank(alice);
         lendVault.approveTransform(leveredTokenId, address(hook), true);
         (,, uint256 collateralValue,,) = lendVault.loanInfo(leveredTokenId);
-        lendVault.borrow(leveredTokenId, collateralValue * 5000 / 10000);
-        hook.setPositionConfig(leveredTokenId, _autoLeverageConfig(5000));
+        lendVault.borrow(leveredTokenId, collateralValue * targetBps / 10000);
+        hook.setPositionConfig(leveredTokenId, _autoLeverageConfig(targetBps));
         lendVault.borrow(leveredTokenId, extraBorrow);
         vm.stopPrank();
 
