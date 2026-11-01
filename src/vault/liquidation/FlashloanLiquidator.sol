@@ -101,6 +101,11 @@ contract FlashloanLiquidator is Swapper, IUniswapV3FlashCallback {
 
         FlashCallbackData memory data = abi.decode(callbackData, (FlashCallbackData));
 
+        address loanOwner = data.vault.ownerOf(data.tokenId);
+        if (loanOwner == data.liquidator || loanOwner == msg.sender) {
+            revert Unauthorized();
+        }
+
         // liquidate the loan
         SafeERC20.forceApprove(IERC20(Currency.unwrap(data.asset)), address(data.vault), data.liquidationCost);
         data.vault
