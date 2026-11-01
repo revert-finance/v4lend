@@ -260,8 +260,8 @@ contract RevertHookAutoLeverageActions is RevertHookActionBase {
             if (principalValue == 0) return (false, 0);
             liquidityToRemove =
                 AutoLeverageLib.liquidityToRemove(currentLiquidity, repayAmount - feeValue, principalValue);
+            if (liquidityToRemove == 0) return (false, 0);
         }
-        if (liquidityToRemove == 0 && feeValue == 0) return (false, 0);
         return (true, liquidityToRemove);
     }
 
