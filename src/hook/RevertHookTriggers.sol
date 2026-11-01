@@ -263,7 +263,9 @@ abstract contract RevertHookTriggers is RevertHookState {
         int256 minTick = int256(TickMath.minUsableTick(tickSpacing));
         int256 maxTick = int256(TickMath.maxUsableTick(tickSpacing));
         if (plannedLower < minTick) plannedLower = minTick;
+        if (plannedLower > maxTick) plannedLower = maxTick;
         if (plannedUpper > maxTick) plannedUpper = maxTick;
+        if (plannedUpper < minTick) plannedUpper = minTick;
         return plannedLower == int256(currentTickLower) && plannedUpper == int256(currentTickUpper);
     }
 
@@ -619,15 +621,15 @@ abstract contract RevertHookTriggers is RevertHookState {
                 if (Currency.unwrap(poolKey.currency0) == state.autoLendToken) {
                     ticks[2] = autoLendToleranceTick == 0
                         ? tickLower
-                        : tickLower - autoLendToleranceTick - poolKey.tickSpacing;
+                        : _offsetTick(tickLower, -int256(autoLendToleranceTick) - int256(poolKey.tickSpacing));
                 } else {
                     ticks[0] = autoLendToleranceTick == 0
-                        ? tickUpper - poolKey.tickSpacing
-                        : tickUpper + autoLendToleranceTick;
+                        ? _offsetTick(tickUpper, -int256(poolKey.tickSpacing))
+                        : _offsetTick(tickUpper, int256(autoLendToleranceTick));
                 }
             } else {
-                ticks[0] = tickLower - autoLendToleranceTick * 2 - poolKey.tickSpacing;
-                ticks[2] = tickUpper + autoLendToleranceTick * 2;
+                ticks[0] = _offsetTick(tickLower, -int256(autoLendToleranceTick) * 2 - int256(poolKey.tickSpacing));
+                ticks[2] = _offsetTick(tickUpper, int256(autoLendToleranceTick) * 2);
             }
         }
     }

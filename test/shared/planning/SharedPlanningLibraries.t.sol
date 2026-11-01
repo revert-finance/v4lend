@@ -321,6 +321,31 @@ contract SharedPlanningLibrariesTest is Test {
         assertTrue(harness.isValidRange(newTickLower, newTickUpper));
     }
 
+    function testAutoRangeLibPlanAndIsReadyDoNotOverflowInt24AtExtremeDeltasOrLimits() public view {
+        int24 maxUsable = TickMath.maxUsableTick(60); // 887220
+        int24 minUsable = TickMath.minUsableTick(60); // -887220
+        int24 extremePosDelta = 8_388_600; // aligned to 60; baseTick + extremePosDelta > type(int24).max
+        int24 extremeNegDelta = -8_388_600; // aligned to 60; baseTick + extremeNegDelta < type(int24).min
+
+        (int24 newTickLower, int24 newTickUpper) = harness.planRange(500_000, 60, -60, extremePosDelta);
+        assertEq(newTickLower, 499_920);
+        assertEq(newTickUpper, maxUsable, "extreme positive delta saturates to maxUsableTick without int24 overflow");
+
+        (newTickLower, newTickUpper) = harness.planRange(-500_000, 60, extremeNegDelta, 60);
+        assertEq(newTickLower, minUsable, "extreme negative delta saturates to minUsableTick without int24 underflow");
+        assertEq(newTickUpper, -499_980);
+
+        // Both deltas extreme on the same side collapse cleanly to [maxUsable, maxUsable] / [minUsable, minUsable]
+        (newTickLower, newTickUpper) = harness.planRange(500_000, 60, extremePosDelta - 60, extremePosDelta);
+        assertEq(newTickLower, maxUsable);
+        assertEq(newTickUpper, maxUsable);
+        assertFalse(harness.isValidRange(newTickLower, newTickUpper));
+
+        // isReady with extreme limits that would overflow int24 in `tickLower - lowerTickLimit` / `tickUpper + upperTickLimit`
+        assertFalse(harness.isRangeReady(0, minUsable, maxUsable, extremePosDelta, extremePosDelta));
+        assertTrue(harness.isRangeReady(0, minUsable, maxUsable, extremeNegDelta, extremeNegDelta));
+    }
+
     function testAutoRangeLibValidityAndSameRangeHelpers() public view {
         assertTrue(harness.isValidRange(-120, 120));
         assertFalse(harness.isValidRange(120, 120));
