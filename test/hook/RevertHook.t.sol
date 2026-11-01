@@ -7107,16 +7107,16 @@ contract RevertHookTest is BaseTest {
 
     function testAutoRangeRemintFailurePreservesSurvivingAutoExitAndAutoCollect() public {
         hook.setMaxTicksFromOracle(1000);
-        // Configure a non-existent routed pool so swap-to-ratio fails and remint has no usable token1.
-        _setBidirectionalRoute(
-            PoolKey({
-                currency0: poolKey.currency0,
-                currency1: poolKey.currency1,
-                fee: 500,
-                tickSpacing: 60,
-                hooks: IHooks(address(0))
-            })
-        );
+        // Configure an initialized empty routed pool so swap-to-ratio yields zero token1 and remint returns newTokenId == 0.
+        PoolKey memory routedPool = PoolKey({
+            currency0: poolKey.currency0,
+            currency1: poolKey.currency1,
+            fee: 500,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(routedPool, Constants.SQRT_PRICE_1_1);
+        _setBidirectionalRoute(routedPool);
         (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
 
         int24 exitLowerTick = tickLower3 - poolKey.tickSpacing * 4;
@@ -7164,6 +7164,241 @@ contract RevertHookTest is BaseTest {
         assertEq(upperAfterRangeFail, upperInitial, "Upper triggers remain unchanged");
         (,, uint32 lastActivatedAfterRangeFail,,,,,) = hook.positionStates(token3Id);
         assertGt(lastActivatedAfterRangeFail, 0, "Position with surviving AUTO_EXIT/AUTO_COLLECT must stay activated");
+    }
+
+    function testAutoRangeRemintFailureDispatchesSurvivingAutoLeverageOnLaterSwap() public {
+        hook.setMaxTicksFromOracle(1000);
+        PoolKey memory routedPool = PoolKey({
+            currency0: poolKey.currency0,
+            currency1: poolKey.currency1,
+            fee: 500,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(routedPool, Constants.SQRT_PRICE_1_1);
+        _setBidirectionalRoute(routedPool);
+
+        MockAutoRangeFallbackVault vault = new MockAutoRangeFallbackVault(address(this), Currency.unwrap(currency0));
+        hook.setVault(address(vault));
+        IERC721(address(positionManager)).transferFrom(address(this), address(vault), token3Id);
+        vm.prank(address(vault));
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_LEVERAGE,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: type(int24).min,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: false,
+                autoExitSwapOnUpperTrigger: false,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -poolKey.tickSpacing * 2,
+                autoRangeUpperDelta: -poolKey.tickSpacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 5000
+            })
+        );
+
+        // First downward swap crosses rangeLower (tickLower3 = -120) before leverageLower (-600); remint fails.
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory firstLogs = vm.getRecordedLogs();
+        assertTrue(
+            _sawHookActionFailed(firstLogs, token3Id, RevertHookState.Mode.AUTO_RANGE),
+            "First crossing should fail AUTO_RANGE"
+        );
+
+        // Second downward swap crosses surviving leverageLower (-600); must dispatch AUTO_LEVERAGE, not AUTO_RANGE.
+        vault.setRevertAutoLeverage(true);
+        vm.recordLogs();
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 30e18,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        Vm.Log[] memory secondLogs = vm.getRecordedLogs();
+        assertTrue(
+            _sawHookActionFailed(secondLogs, token3Id, RevertHookState.Mode.AUTO_LEVERAGE),
+            "Surviving trigger must dispatch AUTO_LEVERAGE"
+        );
+        assertFalse(
+            _sawHookActionFailed(secondLogs, token3Id, RevertHookState.Mode.AUTO_RANGE),
+            "Disarmed AUTO_RANGE must not be dispatched again"
+        );
+    }
+
+    function testImmediateAutoRangeRemintFailureExecutesAlreadySatisfiedSurvivingAutoExit() public {
+        hook.setMaxTicksFromOracle(1000);
+        // Move pool below both tickLower3 (-120) and exitLowerTick (-180) before configuring.
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 12e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+        int24 exitLowerTick = tickLower3 - poolKey.tickSpacing;
+        assertLe(
+            _getTickLower(currentTick, poolKey.tickSpacing),
+            exitLowerTick,
+            "Both rangeLower and exitLower must already be satisfied"
+        );
+
+        // Route swaps to an initialized empty pool so immediate AUTO_RANGE remint fails, while non-swap AUTO_EXIT succeeds.
+        PoolKey memory routedPool = PoolKey({
+            currency0: poolKey.currency0,
+            currency1: poolKey.currency1,
+            fee: 500,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(routedPool, Constants.SQRT_PRICE_1_1);
+        _setBidirectionalRoute(routedPool);
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_EXIT,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerTick,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: false,
+                autoExitSwapOnUpperTrigger: false,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -poolKey.tickSpacing * 2,
+                autoRangeUpperDelta: -poolKey.tickSpacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+
+        assertEq(
+            positionManager.getPositionLiquidity(token3Id),
+            0,
+            "Already-satisfied surviving AUTO_EXIT must execute immediately after AUTO_RANGE fallback"
+        );
+        (uint8 modeAfter,,,,,,,,,,,,) = hook.positionConfigs(token3Id);
+        assertEq(modeAfter, PositionModeFlags.MODE_NONE, "Completed fallback AUTO_EXIT should disable position");
+    }
+
+    function testAutoRangeRemintFailureRespectsMinimumValueDeactivation() public {
+        hook.setMaxTicksFromOracle(1000);
+        PoolKey memory routedPool = PoolKey({
+            currency0: poolKey.currency0,
+            currency1: poolKey.currency1,
+            fee: 500,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(routedPool, Constants.SQRT_PRICE_1_1);
+        _setBidirectionalRoute(routedPool);
+        (uint32 lowerInitial, uint32 upperInitial) = _getTriggerListSizes();
+
+        int24 exitLowerTick = tickLower3 - poolKey.tickSpacing * 4;
+        hook.setPositionConfig(
+            token3Id,
+            RevertHookState.PositionConfig({
+                modeFlags: PositionModeFlags.MODE_AUTO_RANGE | PositionModeFlags.MODE_AUTO_EXIT,
+                autoCollectMode: RevertHookState.AutoCollectMode.NONE,
+                autoExitIsRelative: false,
+                autoExitTickLower: exitLowerTick,
+                autoExitTickUpper: type(int24).max,
+                autoExitSwapOnLowerTrigger: false,
+                autoExitSwapOnUpperTrigger: false,
+                autoRangeLowerLimit: 0,
+                autoRangeUpperLimit: type(int24).max,
+                autoRangeLowerDelta: -poolKey.tickSpacing * 2,
+                autoRangeUpperDelta: -poolKey.tickSpacing,
+                autoLendToleranceTick: 0,
+                autoLeverageTargetBps: 0
+            })
+        );
+        IERC721(address(positionManager)).approve(address(hook), token3Id);
+
+        // Raise minimum position value above token3Id's value so restoration leaves it deactivated.
+        hook.setMinPositionValueNative(1000 ether);
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 7e17,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        assertGt(positionManager.getPositionLiquidity(token3Id), 0, "Original position liquidity should be restored");
+        (,, uint32 lastActivatedAfterRangeFail,,,,,) = hook.positionStates(token3Id);
+        assertEq(lastActivatedAfterRangeFail, 0, "Below-minimum restored position must remain deactivated");
+        (uint32 lowerAfterRangeFail, uint32 upperAfterRangeFail) = _getTriggerListSizes();
+        assertEq(lowerAfterRangeFail, lowerInitial, "Below-minimum restored position must not insert fallback triggers");
+        assertEq(upperAfterRangeFail, upperInitial, "Upper triggers remain unchanged");
+    }
+}
+
+contract MockAutoRangeFallbackVault {
+    address public loanOwner;
+    address public asset;
+    uint256 public transformedTokenId;
+    bool public revertAutoLeverage;
+
+    constructor(address loanOwner_, address asset_) {
+        loanOwner = loanOwner_;
+        asset = asset_;
+    }
+
+    function setRevertAutoLeverage(bool value) external {
+        revertAutoLeverage = value;
+    }
+
+    function ownerOf(uint256) external view returns (address) {
+        return loanOwner;
+    }
+
+    function loanInfo(uint256) external pure returns (uint256, uint256, uint256, uint256, uint256) {
+        return (5e17, 5e17, 1e18, 9e17, 0);
+    }
+
+    function loans(uint256) external pure returns (uint256) {
+        return 5e17;
+    }
+
+    function transform(uint256 tokenId, address transformer, bytes calldata data) external returns (uint256) {
+        if (revertAutoLeverage && bytes4(data) == bytes4(keccak256("autoLeverage((address,address,uint24,int24,address),uint256,bool)"))) {
+            revert("autoLeverage invoked");
+        }
+        transformedTokenId = tokenId;
+        (bool ok, bytes memory ret) = transformer.call(data);
+        if (!ok) {
+            assembly ("memory-safe") {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+        transformedTokenId = 0;
+        return tokenId;
     }
 }
 

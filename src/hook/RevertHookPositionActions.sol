@@ -222,15 +222,18 @@ contract RevertHookPositionActions is RevertHookActionBase {
             ) = _increaseLiquidity(tokenId, poolKey, oldPositionInfo, uint128(amount0), uint128(amount1));
             _sendLeftoverTokens(tokenId, currency0, currency1, beneficiary);
             if (restored0 > 0 || restored1 > 0) {
-                _removePositionTriggers(tokenId, poolKey);
-                PositionConfig memory survivingConfig = _positionConfigs[tokenId];
-                survivingConfig.modeFlags &= ~PositionModeFlags.MODE_AUTO_RANGE;
-                if (PositionModeFlags.hasTriggers(survivingConfig.modeFlags)) {
-                    int24[4] memory survivingTicks = _computeTriggerTicksMemory(
-                        tokenId, poolKey, survivingConfig, oldPositionInfo.tickLower(), oldPositionInfo.tickUpper()
-                    );
-                    _insertTriggerTicks(poolKey.toId(), tokenId, survivingTicks);
-                } else if (survivingConfig.autoCollectMode == AutoCollectMode.NONE) {
+                bool remainedActivated = _isActivated(tokenId);
+                if (remainedActivated) {
+                    _removePositionTriggers(tokenId, poolKey);
+                }
+                _setAutoRangeDisarmed(tokenId, true);
+                PositionConfig storage config = _positionConfigs[tokenId];
+                uint8 survivingFlags = config.modeFlags & ~PositionModeFlags.MODE_AUTO_RANGE;
+                if (PositionModeFlags.hasTriggers(survivingFlags)) {
+                    if (remainedActivated) {
+                        _addPositionTriggers(tokenId, poolKey);
+                    }
+                } else if (config.autoCollectMode == AutoCollectMode.NONE) {
                     _deactivatePosition(tokenId);
                 }
             } else {

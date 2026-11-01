@@ -97,10 +97,34 @@ abstract contract RevertHookTriggers is RevertHookState {
 
     // ==================== Position Config Helpers ====================
 
+    // keccak256("RevertHook.autoRangeDisarmed")
+    bytes32 private constant _AUTO_RANGE_DISARMED_SLOT =
+        0x6a9f6f8a0d54c868e49e4425c9142c5c635f81987444b18e87809128d18a9322;
+
+    function _setAutoRangeDisarmed(uint256 tokenId, bool disarmed) internal {
+        bytes32 slot = keccak256(abi.encode(tokenId, _AUTO_RANGE_DISARMED_SLOT));
+        uint256 value = disarmed ? 1 : 0;
+        assembly ("memory-safe") {
+            sstore(slot, value)
+        }
+    }
+
+    function _isAutoRangeDisarmed(uint256 tokenId) internal view returns (bool disarmed) {
+        bytes32 slot = keccak256(abi.encode(tokenId, _AUTO_RANGE_DISARMED_SLOT));
+        assembly ("memory-safe") {
+            disarmed := iszero(iszero(sload(slot)))
+        }
+    }
+
+    function _effectiveModeFlags(uint256 tokenId, uint8 modeFlags) internal view returns (uint8) {
+        return _isAutoRangeDisarmed(tokenId) ? (modeFlags & ~PositionModeFlags.MODE_AUTO_RANGE) : modeFlags;
+    }
+
     /// @notice Disables a position by setting its config to NONE
     function _disablePosition(uint256 tokenId) internal {
         PositionConfig memory emptyConfig = _getEmptyPositionConfig();
         _positionConfigs[tokenId] = emptyConfig;
+        _setAutoRangeDisarmed(tokenId, false);
         _deactivatePosition(tokenId);
         emit SetPositionConfig(tokenId, emptyConfig);
     }
@@ -317,7 +341,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _addPositionTriggers(uint256 tokenId, PoolKey memory poolKey) internal {
         PositionConfig storage config = _positionConfigs[tokenId];
 
-        if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
+        if (!PositionModeFlags.hasTriggers(_effectiveModeFlags(tokenId, config.modeFlags))) {
             return;
         }
 
@@ -384,7 +408,7 @@ abstract contract RevertHookTriggers is RevertHookState {
     function _removePositionTriggersWithConfig(uint256 tokenId, PoolKey memory poolKey, PositionConfig memory config)
         internal
     {
-        if (!PositionModeFlags.hasTriggers(config.modeFlags)) {
+        if (!PositionModeFlags.hasTriggers(_effectiveModeFlags(tokenId, config.modeFlags))) {
             return;
         }
 
@@ -538,6 +562,7 @@ abstract contract RevertHookTriggers is RevertHookState {
         ticks[2] = type(int24).max;
         ticks[3] = type(int24).max;
 
+        modeFlags = _effectiveModeFlags(tokenId, modeFlags);
         if (!PositionModeFlags.hasTriggers(modeFlags)) {
             return ticks;
         }
