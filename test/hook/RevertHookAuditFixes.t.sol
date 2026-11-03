@@ -28,6 +28,7 @@ import {RevertHookTest} from "test/hook/RevertHook.t.sol";
 import {NativeWrapper} from "@uniswap/v4-periphery/src/base/NativeWrapper.sol";
 import {V4Vault} from "src/vault/V4Vault.sol";
 import {InterestRateModel} from "src/vault/InterestRateModel.sol";
+import {LimitedRedeemERC4626Vault} from "test/automators/utils/LimitedRedeemERC4626Vault.sol";
 
 /// @dev Stand-in for a registered lending vault. `transform` forwards borrower-chosen calldata
 ///      exactly like V4Vault.transform does (the C-01 entry point); with `spoof` set it ignores
@@ -1244,5 +1245,134 @@ contract RevertHookAuditFixesTest is RevertHookTest {
         assertEq(positionManager.getPositionLiquidity(token2Id), liquidity - liquidity / 2, "withdrawal went through");
         (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(token2Id);
         assertEq(modeFlags, PositionModeFlags.MODE_AUTO_EXIT, "automation stays configured");
+    }
+
+    // ==================== H-05: RevertHookAutoLendActions respects ERC4626 maxRedeem ====================
+
+    /// @notice H-05: When maxRedeem < shares during autoLendForceExit, redeem permitted shares and
+    ///         transfer unredeemable residual shares to the owner without reverting.
+    function testAutoLendForceExit_HandsUnredeemableSharesToTheOwner() public {
+        LimitedRedeemERC4626Vault limited = new LimitedRedeemERC4626Vault(
+            IERC20(Currency.unwrap(currency0)), "Limited Token0", "limT0"
+        );
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(limited)));
+
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+        (,,, address autoLendToken, uint256 shares, uint256 autoLendAmount,,) = hook.positionStates(autolendTokenId);
+        assertEq(autoLendToken, Currency.unwrap(currency0));
+        assertGt(shares, 0);
+
+        uint256 cap = shares / 2;
+        limited.setRedeemLimit(cap);
+
+        uint256 ownerUnderlyingBefore = currency0.balanceOf(address(this));
+        uint256 ownerSharesBefore = limited.balanceOf(address(this));
+
+        hook.autoLendForceExit(autolendTokenId);
+
+        // State must be cleared
+        (uint8 modeFlags,,,,,,,,,,,,) = hook.positionConfigs(autolendTokenId);
+        (,,, address tokenAfter, uint256 sharesAfter,,,) = hook.positionStates(autolendTokenId);
+        assertEq(modeFlags, PositionModeFlags.MODE_NONE, "Force exit should disable position");
+        assertEq(tokenAfter, address(0), "Auto-lend token should be cleared");
+        assertEq(sharesAfter, 0, "Auto-lend shares should be cleared");
+
+        // Owner receives the permitted redemption assets + residual vault shares
+        uint256 ownerSharesReceived = limited.balanceOf(address(this)) - ownerSharesBefore;
+        assertEq(ownerSharesReceived, shares - cap, "Owner must receive residual shares");
+        assertGt(currency0.balanceOf(address(this)) - ownerUnderlyingBefore, 0, "Owner receives redeemed assets");
+        assertEq(limited.balanceOf(address(hook)), 0, "Hook retains zero shares");
+    }
+
+    /// @notice H-05: With maxRedeem == 0 during forceExit, all shares are handed directly to the owner.
+    function testAutoLendForceExit_WithNothingRedeemableTransfersAllShares() public {
+        LimitedRedeemERC4626Vault limited = new LimitedRedeemERC4626Vault(
+            IERC20(Currency.unwrap(currency0)), "Limited Token0", "limT0"
+        );
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(limited)));
+
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+        (,,, , uint256 shares,,,) = hook.positionStates(autolendTokenId);
+        assertGt(shares, 0);
+
+        limited.setRedeemLimit(0);
+
+        uint256 ownerSharesBefore = limited.balanceOf(address(this));
+        hook.autoLendForceExit(autolendTokenId);
+
+        (,,, , uint256 sharesAfter,,,) = hook.positionStates(autolendTokenId);
+        assertEq(sharesAfter, 0, "State cleared");
+        assertEq(limited.balanceOf(address(this)) - ownerSharesBefore, shares, "Owner receives all shares");
+        assertEq(limited.balanceOf(address(hook)), 0, "Hook holds zero shares");
+    }
+
+    /// @notice H-05: When maxRedeem < shares during automated withdraw, permitted shares are redeemed
+    ///         and re-entered, and residual shares are sent to the beneficiary.
+    function testAutoLendWithdraw_RedeemsPermittedSharesAndTransfersResidualShares() public {
+        LimitedRedeemERC4626Vault limited = new LimitedRedeemERC4626Vault(
+            IERC20(Currency.unwrap(currency0)), "Limited Token0", "limT0"
+        );
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(limited)));
+
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+        (,,, , uint256 shares,,,) = hook.positionStates(autolendTokenId);
+        assertGt(shares, 0);
+
+        uint256 cap = shares / 3;
+        limited.setRedeemLimit(cap);
+
+        uint256 ownerSharesBefore = limited.balanceOf(address(this));
+
+        // Swap to trigger withdraw in-range
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 20e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        uint256 ownerSharesReceived = limited.balanceOf(address(this)) - ownerSharesBefore;
+        assertEq(ownerSharesReceived, shares - cap, "Residual shares transferred to beneficiary");
+        assertEq(limited.balanceOf(address(hook)), 0, "Hook retains zero shares");
+    }
+
+    /// @notice H-05: When maxRedeem == 0 during automated withdraw, autoLendShares remain intact
+    ///         in storage so position owner can still exit via forceExit.
+    function testAutoLendWithdraw_WithNothingRedeemableKeepsSharesForForceExit() public {
+        LimitedRedeemERC4626Vault limited = new LimitedRedeemERC4626Vault(
+            IERC20(Currency.unwrap(currency0)), "Limited Token0", "limT0"
+        );
+        hook.setAutoLendVault(Currency.unwrap(currency0), IERC4626(address(limited)));
+
+        uint256 autolendTokenId = _createActiveAutoLendPosition();
+        (,,, , uint256 shares,,,) = hook.positionStates(autolendTokenId);
+        assertGt(shares, 0);
+
+        limited.setRedeemLimit(0);
+
+        // Swap to trigger withdraw attempt
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 20e17,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp
+        });
+
+        // Auto-lend shares must remain intact
+        (,,, , uint256 sharesStillIntact,,,) = hook.positionStates(autolendTokenId);
+        assertEq(sharesStillIntact, shares, "Shares remain intact when maxRedeem is 0");
+
+        // The owner can still escape via forceExit
+        uint256 ownerSharesBefore = limited.balanceOf(address(this));
+        hook.autoLendForceExit(autolendTokenId);
+
+        uint256 ownerSharesReceived = limited.balanceOf(address(this)) - ownerSharesBefore;
+        assertEq(ownerSharesReceived, shares, "Owner can escape via forceExit");
     }
 }
