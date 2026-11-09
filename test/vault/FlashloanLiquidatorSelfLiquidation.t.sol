@@ -48,4 +48,53 @@ contract FlashloanLiquidatorSelfLiquidationTest is V4VaultLocalBase {
         vm.expectRevert(abi.encodeWithSignature("NotLiquidatable()"));
         helper.liquidate(_params(id));
     }
+    function _callbackData(uint256 tokenId, address recipient) internal view returns (bytes memory) {
+        return abi.encode(
+            FlashloanLiquidator.FlashCallbackData({
+                tokenId: tokenId,
+                liquidationCost: 0,
+                vault: IVault(address(vault)),
+                asset: Currency.wrap(address(token0)),
+                swap0: FlashloanLiquidator.RouterSwapParams(
+                    Currency.wrap(address(0)),
+                    Currency.wrap(address(0)),
+                    0,
+                    0,
+                    ""
+                ),
+                swap1: FlashloanLiquidator.RouterSwapParams(
+                    Currency.wrap(address(0)),
+                    Currency.wrap(address(0)),
+                    0,
+                    0,
+                    ""
+                ),
+                liquidator: recipient,
+                minReward: 0,
+                deadline: block.timestamp,
+                decreaseLiquidityHookData: ""
+            })
+        );
+    }
+
+    function testV4LE97_CallbackRefusesLoanOwnerAsLiquidatorRecipient() public {
+        uint256 id = _createLoan(10e18);
+        _borrow(id, 500e18);
+
+        bytes memory callbackData = _callbackData(id, borrower);
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        helper.uniswapV3FlashCallback(0, 0, callbackData);
+    }
+
+    function testV4LE97_CallbackRefusesLoanOwnerAsDirectCaller() public {
+        uint256 id = _createLoan(10e18);
+        _borrow(id, 500e18);
+
+        bytes memory callbackData = _callbackData(id, liquidator);
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+        helper.uniswapV3FlashCallback(0, 0, callbackData);
+    }
 }
+
